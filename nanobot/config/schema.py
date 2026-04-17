@@ -59,6 +59,15 @@ class DreamConfig(Base):
         return f"every {hours}h"
 
 
+class VectorMemoryConfig(Base):
+    """Configuration for sqlite-vec semantic memory (Moeka extension)."""
+
+    enabled: bool = False
+    model_name: str = "all-MiniLM-L6-v2"  # sentence-transformers model
+    top_k: int = 5  # default number of results returned
+    chunk_size: int = 512  # max chars per MEMORY.md chunk
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -85,6 +94,7 @@ class AgentDefaults(Base):
         serialization_alias="idleCompactAfterMinutes",
     )  # Auto-compact idle threshold in minutes (0 = disabled)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    vector_memory: VectorMemoryConfig = Field(default_factory=VectorMemoryConfig)
 
 
 class AgentsConfig(Base):

@@ -1877,6 +1877,35 @@ time.
 
 If you want the full design, see [docs/MEMORY.md](docs/MEMORY.md).
 
+### Semantic Memory (Moeka Extension)
+
+Moeka adds a vector search layer on top of the base memory system using
+[sqlite-vec](https://github.com/asg017/sqlite-vec) and local embeddings via
+[sentence-transformers](https://www.sbert.net/). This is a Moeka-only feature
+not present in upstream nanobot.
+
+When enabled, the agent gains a `memory_search` tool for fuzzy, concept-based
+recall over its long-term memory, conversation history, and skill descriptions.
+It complements `grep` (exact-text) with semantic similarity search.
+
+**Install:**
+```bash
+pip install "moeka[vec]"
+```
+
+**Enable in `~/.nanobot/config.json`:**
+```json
+{
+  "agents": {
+    "defaults": {
+      "vectorMemory": { "enabled": true }
+    }
+  }
+}
+```
+
+See [docs/MEMORY.md](docs/MEMORY.md) for full configuration and architecture details.
+
 ## 💻 CLI Reference
 
 | Command | Description |
