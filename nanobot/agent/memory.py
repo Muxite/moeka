@@ -20,6 +20,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.utils.gitstore import GitStore
 
 if TYPE_CHECKING:
+    from nanobot.agent.memory_vec import VectorMemoryStore
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
 
@@ -41,6 +42,7 @@ class MemoryStore:
     def __init__(self, workspace: Path, max_history_entries: int = _DEFAULT_MAX_HISTORY):
         self.workspace = workspace
         self.max_history_entries = max_history_entries
+        self._vec_store: VectorMemoryStore | None = None
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "history.jsonl"
@@ -220,6 +222,10 @@ class MemoryStore:
 
     # -- history.jsonl — append-only, JSONL format ---------------------------
 
+    def attach_vec_store(self, vec_store: VectorMemoryStore) -> None:
+        """Attach a :class:`VectorMemoryStore` that is updated on every history append."""
+        self._vec_store = vec_store
+
     def append_history(self, entry: str) -> int:
         """Append *entry* to history.jsonl and return its auto-incrementing cursor."""
         cursor = self._next_cursor()
@@ -228,6 +234,11 @@ class MemoryStore:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._cursor_file.write_text(str(cursor), encoding="utf-8")
+        if self._vec_store is not None:
+            try:
+                self._vec_store.incremental_index()
+            except Exception:
+                pass  # vector indexing must never break history writes
         return cursor
 
     def _next_cursor(self) -> int:
@@ -762,5 +773,12 @@ class Dream:
             sha = self.store.git.auto_commit(f"dream: {ts}, {len(changelog)} change(s)")
             if sha:
                 logger.info("Dream commit: {}", sha)
+
+        # Re-index vector memory after Dream may have edited MEMORY.md
+        if self.store._vec_store is not None:
+            try:
+                self.store._vec_store.full_reindex()
+            except Exception:
+                logger.exception("Dream: vector re-index failed (non-fatal)")
 
         return True

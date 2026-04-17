@@ -32,7 +32,7 @@ from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
-from nanobot.config.schema import AgentDefaults
+from nanobot.config.schema import AgentDefaults, VectorMemoryConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.document import extract_documents
@@ -156,6 +156,7 @@ class AgentLoop:
         hooks: list[AgentHook] | None = None,
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
+        vector_memory_config: VectorMemoryConfig | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -188,9 +189,35 @@ class AgentLoop:
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
-        self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
+        vec_cfg = vector_memory_config or VectorMemoryConfig()
+        self.context = ContextBuilder(
+            workspace,
+            timezone=timezone,
+            disabled_skills=disabled_skills,
+            vec_memory_enabled=vec_cfg.enabled,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+        # Set up vector memory if enabled (Moeka extension)
+        self._vec_cfg = vec_cfg
+        self._vec_store = None
+        if vec_cfg.enabled:
+            try:
+                from nanobot.agent.memory_vec import VectorMemoryStore
+                self._vec_store = VectorMemoryStore(
+                    self.context.memory,
+                    model_name=vec_cfg.model_name,
+                    top_k=vec_cfg.top_k,
+                    chunk_size=vec_cfg.chunk_size,
+                )
+                self.context.memory.attach_vec_store(self._vec_store)
+                self._vec_store.incremental_index()
+            except ImportError:
+                logger.warning(
+                    "vector_memory.enabled=true but sqlite-vec/sentence-transformers not installed. "
+                    "Install with: pip install 'moeka[vec]'"
+                )
+                self._vec_store = None
         self.runner = AgentRunner(provider)
         self.subagents = SubagentManager(
             provider=provider,
@@ -283,6 +310,9 @@ class AgentLoop:
             self.tools.register(
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
             )
+        if self._vec_store is not None:
+            from nanobot.agent.tools.memory_search import MemorySearchTool
+            self.tools.register(MemorySearchTool(vec_store=self._vec_store))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""

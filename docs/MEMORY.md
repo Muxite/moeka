@@ -178,6 +178,106 @@ Legacy note:
 - Older source-based configs may still contain `dream.cron`. nanobot continues to honor it for backward compatibility, but new configs should use `intervalH`.
 - Older source-based configs may still contain `dream.model`. nanobot continues to honor it for backward compatibility, but new configs should use `modelOverride`.
 
+## Vector Memory (Moeka Extension)
+
+Moeka extends the base memory system with a semantic search layer powered by
+[sqlite-vec](https://github.com/asg017/sqlite-vec) and
+[sentence-transformers](https://www.sbert.net/).  This is a Moeka-only feature
+and is not present in upstream nanobot.
+
+### What it does
+
+When enabled, Moeka maintains a local SQLite database (`memory/vec.db`) that
+stores 384-dimensional embeddings for three sources:
+
+| Index | Content | When updated |
+|-------|---------|--------------|
+| `memory` | Chunks of `MEMORY.md`, split on `## ` headings | After every Dream run |
+| `history` | Each `history.jsonl` entry | On every history append |
+| `skills` | Skill name + first-line description from `SKILL.md` | On startup if count changes |
+
+The embedding model is loaded lazily — only when `memory_search` is first called.
+
+### The `memory_search` tool
+
+When vector memory is enabled, a new tool becomes available to the agent:
+
+```
+memory_search(query, k=5, scope="all")
+```
+
+| Parameter | Meaning |
+|-----------|---------|
+| `query` | Natural-language description of what to recall |
+| `k` | Number of results to return (1–20, default 5) |
+| `scope` | `"all"`, `"memory"`, `"history"`, or `"skills"` |
+
+The tool returns results ranked by cosine similarity.  Use it for fuzzy recall
+("what did we decide about the database schema?").  Use `grep` for
+exact-text searches.
+
+### Setup
+
+Install the optional dependency group:
+
+```bash
+pip install "moeka[vec]"
+# or: pip install sqlite-vec sentence-transformers
+```
+
+Enable in your config (`~/.nanobot/config.json`):
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "vectorMemory": {
+        "enabled": true,
+        "modelName": "all-MiniLM-L6-v2",
+        "topK": 5,
+        "chunkSize": 512
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| `enabled` | Turn vector memory on/off | `false` |
+| `modelName` | sentence-transformers model to use | `"all-MiniLM-L6-v2"` |
+| `topK` | Default number of results from `memory_search` | `5` |
+| `chunkSize` | Max chars per `MEMORY.md` chunk | `512` |
+
+The first run downloads the model (~90 MB) from Hugging Face.  All subsequent
+runs load it from the local sentence-transformers cache.
+
+### Architecture
+
+```
+MemoryStore (file I/O)          VectorMemoryStore
+  MEMORY.md  ──── chunks ──────>  memory_chunks_vec
+  history.jsonl ── entries ─────>  history_entries_vec
+  skills/*/SKILL.md ─ descs ───>  skills_vec
+                                       │
+                                  MemorySearchTool
+                                       │
+                                  Agent tool calls
+```
+
+### Comparison: grep vs. memory_search
+
+| | `grep` | `memory_search` |
+|-|--------|-----------------|
+| Match type | Exact regex | Semantic / fuzzy |
+| Best for | Known keywords, code, IDs | Concepts, paraphrased facts |
+| Index | Filesystem | SQLite vec0 table |
+| Speed | Fast | ~100–500 ms (model inference) |
+
+Both are always available when vector memory is enabled.
+
+---
+
 ## In Practice
 
 What this means in daily use is simple:

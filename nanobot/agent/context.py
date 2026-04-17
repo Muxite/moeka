@@ -21,11 +21,18 @@ class ContextBuilder:
     _MAX_RECENT_HISTORY = 50
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
-    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        timezone: str | None = None,
+        disabled_skills: list[str] | None = None,
+        vec_memory_enabled: bool = False,
+    ):
         self.workspace = workspace
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
+        self._vec_memory_enabled = vec_memory_enabled
 
     def build_system_prompt(
         self,
@@ -59,6 +66,19 @@ class ContextBuilder:
             parts.append("# Recent History\n\n" + "\n".join(
                 f"- [{e['timestamp']}] {e['content']}" for e in capped
             ))
+
+        if self._vec_memory_enabled:
+            parts.append(
+                "# Semantic Memory Search\n\n"
+                "You have a `memory_search` tool that performs embedding-based similarity search over:\n"
+                "- Your long-term memory (`memory` scope — MEMORY.md chunks)\n"
+                "- Past conversation entries (`history` scope)\n"
+                "- Available skill descriptions (`skills` scope)\n\n"
+                "Use `memory_search` when you need to recall past context, find related memories, or "
+                "discover skills by natural-language description.  "
+                "It complements `grep`/`glob` — prefer `memory_search` for fuzzy/conceptual recall "
+                "and `grep` for exact-text searches."
+            )
 
         return "\n\n---\n\n".join(parts)
 
