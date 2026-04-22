@@ -1,18 +1,25 @@
 # Moeka container topology.
 #
 # Two service profiles: `gateway` (default, chat channels) and `api` (HTTP API).
-# Both share the same image and bind-mounted state directory so Moeka's memory,
-# history, and skills are identical regardless of how it was launched.
+# Both share the same image and bind-mount two distinct host directories so
+# everything Moeka cares about persists across `docker compose down`:
+#
+#   ${MOEKA_STATE}     -> /home/nanobot/.nanobot    (config, history, media, cron)
+#   ${MOEKA_WORKSPACE} -> /home/nanobot/workspace   (agent files, git-friendly)
+#
+# Default values come from the sibling `.env` file (see `.env.example`). You
+# may override per-shell by exporting MOEKA_STATE / MOEKA_WORKSPACE.
 #
 # The gateway uses `network_mode: host` + `pid: host` so it can:
 #   * reach the LAN (e.g. local services) without docker-proxy
 #   * see host processes for inspection
 #   * run `nsenter` via the host-bridge exec tool (MOEKA_EXEC_ON_HOST=1)
 #
-# Secrets live in ./keys.env (gitignored). Place per-host overrides in ./.env.
+# Secrets live in ./keys.env (gitignored). Non-secret runtime config lives in ./.env.
 
 x-common-env: &common-env
   MOEKA_STATE: /home/nanobot/.nanobot
+  MOEKA_WORKSPACE: /home/nanobot/workspace
   MOEKA_EXEC_ON_HOST: "1"
 
 x-common-config: &common-config
@@ -27,12 +34,20 @@ x-common-config: &common-config
   environment:
     <<: *common-env
   volumes:
-    # Shared instance state: config, workspace, history, media, etc.
-    - ${MOEKA_STATE:-~/.nanobot}:/home/nanobot/.nanobot
+    # Moeka state: config.json, history, memory, media, cron
+    - ${MOEKA_STATE:-${HOME}/.nanobot}:/home/nanobot/.nanobot
+    # Agent workspace: scratch/IO/notes — standardized path, safe for `git init`
+    - ${MOEKA_WORKSPACE:-${HOME}/moeka-workspace}:/home/nanobot/workspace
+  # Host-bridge exec (MOEKA_EXEC_ON_HOST=1) wraps shell commands in
+  # `nsenter -t 1 -m -u -n -i -p --`. The three caps below are exactly what
+  # setns(CLONE_NEWNS) needs; they are also baked into /usr/bin/nsenter as
+  # file capabilities so the non-root `nanobot` user can use them.
   cap_drop:
     - ALL
   cap_add:
-    - SYS_ADMIN   # required for nsenter into host namespaces
+    - SYS_ADMIN     # setns(CLONE_NEWNS/NEWUTS/NEWNET/NEWIPC/NEWPID)
+    - SYS_PTRACE    # open /proc/1/ns/* of the host's pid 1
+    - SYS_CHROOT    # mount-namespace change during setns
   security_opt:
     - apparmor=unconfined
     - seccomp=unconfined
@@ -59,8 +74,9 @@ services:
   moeka-api:
     container_name: moeka-api
     <<: *common-config
+    # The HTTP API serves the agent workspace as its document root.
     command:
-      ["serve", "--host", "0.0.0.0", "-w", "/home/nanobot/.nanobot/api-workspace"]
+      ["serve", "--host", "0.0.0.0", "-w", "/home/nanobot/workspace"]
     restart: unless-stopped
     ports:
       - 127.0.0.1:8900:8900

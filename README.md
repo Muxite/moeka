@@ -3,9 +3,11 @@
 **Moeka** is a packaged, containerized, systemd-ready personal agent built on top of [nanobot](https://github.com/HKUDS/nanobot). Where vanilla nanobot is a Python library you install and configure by hand, Moeka is an opinionated deployment:
 
 - one script to run it (`./moeka.sh`)
-- one file for secrets (`keys.env`)
+- one file for secrets (`keys.env`), one for non-secret paths (`.env`)
 - one systemd unit (`moeka.service`) for start-on-boot
 - Docker **and** direct-host modes share the same config, workspace, memory, and skills
+- workspace lives at its own standardized path (`MOEKA_WORKSPACE`) so you can `git init` it as a portable agent identity, separate from the instance state
+- all mutable state is bind-mounted on the host, so `docker compose down` destroys the containers but keeps memory, history, config, and workspace intact
 - inside Docker, shell commands transparently break out to the host so `lsblk`, `docker ps`, `systemctl` — everything — still works
 
 Everything else — the agent loop, channels, providers, tools, skills, MCP support — comes from upstream nanobot and stays pluggable.
@@ -19,6 +21,7 @@ Everything else — the agent loop, channels, providers, tools, skills, MCP supp
 | Entrypoint | `nanobot gateway …` (remember your flags) | `./moeka.sh start` (single verb, any mode) |
 | Secrets | Plaintext in `~/.nanobot/config.json` | Env vars in `keys.env`, resolved into `${VAR}` placeholders |
 | State directory | Hardcoded `~/.nanobot` | `MOEKA_STATE` env var, default `~/.nanobot` — many agents on one box |
+| Workspace | Nested inside `~/.nanobot/workspace` | `MOEKA_WORKSPACE` env var, default `~/moeka-workspace` — standalone git repo |
 | Host access from Docker | None | `MOEKA_EXEC_ON_HOST=1` routes `exec()` through `nsenter` into PID 1's namespaces |
 | Docker networking | Bridge + port forwards | `network_mode: host` + `pid: host` — sees the LAN & host processes directly |
 | Boot / lifecycle | Manual `pip install`, ad-hoc scripts | `./moeka.sh install` + `bash install-service.sh` = done |
@@ -90,26 +93,33 @@ live Config
 
 See `keys.env.example` for the full list of supported variables.
 
-### 3. `MOEKA_STATE` — many agents on one box
+### 3. `MOEKA_STATE` and `MOEKA_WORKSPACE` — split state from workspace
 
-Every state path derives from `MOEKA_STATE` (default `~/.nanobot`). Change that, and you get a fresh agent with its own config, workspace, history, and memory:
+Moeka separates two concerns that upstream nanobot conflates:
+
+| Var | Default | Contents | Version-control story |
+|---|---|---|---|
+| `MOEKA_STATE` | `~/.nanobot` | `config.json`, history, media, cron, per-host caches | Commit `config.json` only; the rest is host-specific runtime data |
+| `MOEKA_WORKSPACE` | `~/moeka-workspace` | agent identity docs, skills, memory, notes, scratch files | Initialize as its own git repo and carry between machines |
+
+Both paths flow through `${VAR}` placeholders in `config.json`, so the config is portable across hosts. Multi-agent is just two env vars:
 
 ```sh
-MOEKA_STATE=~/agents/alice ./moeka.sh start
-MOEKA_STATE=~/agents/bob   ./moeka.sh start    # in another terminal
+MOEKA_STATE=~/agents/alice/state MOEKA_WORKSPACE=~/agents/alice/workspace ./moeka.sh start
+MOEKA_STATE=~/agents/bob/state   MOEKA_WORKSPACE=~/agents/bob/workspace   ./moeka.sh start
 ```
 
-Each state directory can itself be a git repo — check in `config.json` + `workspace/` + `skills/`, gitignore `keys.env` + `history/` + `media/`. You can now deploy a roster of agents by cloning repos.
+The sibling `.env` file (copied from `.env.example`) is the right place to pin these paths for a given host.
 
 ### 4. Host bridge — Docker that feels like the host
 
-When running in Docker, `docker-compose.yml` sets `MOEKA_EXEC_ON_HOST=1`. Moeka's shell tool sees that and prefixes every command with `nsenter -t 1 -m -u -n -i -p --` before handing it to `bash -l -c`. Combined with `pid: host`, `network_mode: host`, and `CAP_SYS_ADMIN`, the agent sees:
+When running in Docker, `docker-compose.yml` sets `MOEKA_EXEC_ON_HOST=1`. Moeka's shell tool sees that and prefixes every command with `nsenter -t 1 -m -u -n -i -p --` before handing it to `bash -l -c`. Combined with `pid: host`, `network_mode: host`, and a tight set of capabilities (`SYS_ADMIN`, `SYS_PTRACE`, `SYS_CHROOT`, file-capped onto `/usr/bin/nsenter` so the non-root `nanobot` user can use them), the agent sees:
 
 - the host's processes (`ps`, `systemctl --user`, `docker ps`)
 - the host's block devices (`lsblk`, `/dev/*`)
 - the host's network (LAN services, localhost bindings)
 
-This is a deliberate trade-off: Docker here provides reproducible packaging, **not** a security boundary. If you want strict isolation, leave `MOEKA_EXEC_ON_HOST` unset.
+This is a deliberate trade-off: Docker here provides reproducible packaging, **not** a security boundary. If you want strict isolation, leave `MOEKA_EXEC_ON_HOST` unset and drop the three caps from `docker-compose.yml`.
 
 ---
 
@@ -124,8 +134,10 @@ This is a deliberate trade-off: Docker here provides reproducible packaging, **n
 │
 ├── keys.env.example      # every supported secret, with comments
 ├── keys.env              # real secrets — gitignored
+├── .env.example          # non-secret runtime paths (MOEKA_STATE, MOEKA_WORKSPACE)
+├── .env                  # per-host copy of the above — gitignored
 │
-├── Dockerfile            # python:3.12-slim + uv + node bridge + util-linux
+├── Dockerfile            # python:3.12-slim + uv + node bridge + util-linux + jq
 ├── docker-compose.yml    # gateway (host net+pid) and API services
 ├── entrypoint.sh         # container PID 1
 │
@@ -138,16 +150,27 @@ This is a deliberate trade-off: Docker here provides reproducible packaging, **n
 └── docs/                 # deeper-dive technical docs
 ```
 
-State (outside the repo, at `$MOEKA_STATE` — default `~/.nanobot`):
+Runtime state (outside this repo):
 
 ```
-~/.nanobot/
-├── config.json           # tracked placeholders like "${OPENROUTER_API_KEY}"
-├── workspace/            # agent's projects, notes, skills
-├── history/              # per-channel conversation log
+$MOEKA_STATE/            # default ~/.nanobot — per-host runtime
+├── config.json          # tracked placeholders like "${OPENROUTER_API_KEY}"
+├── history/             # per-channel conversation log
 ├── media/                # attachments, exports
-└── cron/                 # scheduled tasks
+└── cron/                # scheduled tasks
+
+$MOEKA_WORKSPACE/        # default ~/moeka-workspace — standalone git repo
+├── AGENTS.md            # agent identity + behavior contracts
+├── SOUL.md              # personality/voice
+├── HEARTBEAT.md         # scheduled self-reflection prompts
+├── TOOLS.md             # tool usage notes for the agent
+├── skills/              # user-authored skills
+├── memory/              # vector memory store
+├── sessions/            # per-conversation state
+└── cron/                # workspace-scoped job records
 ```
+
+Both paths are bind-mounted into the container at `/home/nanobot/.nanobot` and `/home/nanobot/workspace` respectively, so `docker compose down` tears down containers but every file survives on the host.
 
 ---
 
