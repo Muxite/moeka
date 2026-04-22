@@ -38,9 +38,13 @@ def _default_workspace() -> Path:
     """
     Resolve the default workspace path for this Moeka instance.
 
-    :returns: ``<state_home>/workspace`` where ``state_home`` honors ``MOEKA_STATE``.
+    State and workspace are unified into one directory — this just returns
+    the state home. Kept as a function so call sites stay readable and so
+    the ``is_default_workspace`` comparison has a single source of truth.
+
+    :returns: ``get_state_home()`` — the unified Moeka instance directory.
     """
-    return get_state_home() / "workspace"
+    return get_state_home()
 
 
 def get_workspace_path(workspace: str | None = None) -> Path:

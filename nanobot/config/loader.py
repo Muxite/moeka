@@ -20,18 +20,40 @@ def set_config_path(path: Path) -> None:
     _current_config_path = path
 
 
+_DEPRECATED_MOEKA_STATE_WARNED = False
+
+
 def get_state_home() -> Path:
     """
-    Return the root directory for instance state (config, workspace, media, …).
+    Return the unified Moeka instance directory.
+
+    As of v0.1.5 the former split between a "state" dir and a separate
+    "workspace" dir is gone — both now live at the same path. The default
+    is ``~/.nanobot`` for upstream-nanobot compatibility; ``MOEKA_WORKSPACE``
+    overrides it. Legacy names are accepted for back-compat.
 
     Resolution order:
-      1. ``MOEKA_STATE`` env var (preferred, new).
-      2. ``NANOBOT_HOME`` env var (kept for forward compatibility).
-      3. Default: ``~/.nanobot``.
+      1. ``MOEKA_WORKSPACE`` env var (preferred).
+      2. ``MOEKA_STATE`` env var (deprecated — warns once).
+      3. ``NANOBOT_HOME`` env var (forward-compat).
+      4. Default: ``~/.nanobot``.
 
     :returns: Expanded absolute path (directory not guaranteed to exist).
     """
-    override = os.environ.get("MOEKA_STATE") or os.environ.get("NANOBOT_HOME")
+    global _DEPRECATED_MOEKA_STATE_WARNED
+    override = os.environ.get("MOEKA_WORKSPACE")
+    if not override:
+        legacy = os.environ.get("MOEKA_STATE")
+        if legacy:
+            if not _DEPRECATED_MOEKA_STATE_WARNED:
+                logger.warning(
+                    "MOEKA_STATE is deprecated; rename to MOEKA_WORKSPACE "
+                    "(state and workspace are one directory now)."
+                )
+                _DEPRECATED_MOEKA_STATE_WARNED = True
+            override = legacy
+    if not override:
+        override = os.environ.get("NANOBOT_HOME")
     if override:
         return Path(override).expanduser()
     return Path.home() / ".nanobot"

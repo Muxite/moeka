@@ -41,12 +41,13 @@ The script targets `moeka.service` when available and falls back to the legacy
 
 `moeka.sh` accepts flags before the command:
 
-| Flag              | Effect                                                    |
-|-------------------|-----------------------------------------------------------|
-| `--docker`        | Force docker-compose mode                                 |
-| `--direct`        | Force host-venv mode                                      |
-| `--config PATH`   | Override the config.json path                             |
-| `--state PATH`    | Override `MOEKA_STATE` (state dir, default `~/.nanobot`)  |
+| Flag               | Effect                                                       |
+|--------------------|--------------------------------------------------------------|
+| `--docker`         | Force docker-compose mode                                    |
+| `--direct`         | Force host-venv mode                                         |
+| `--config PATH`    | Override the config.json path                                |
+| `--workspace PATH` | Override `MOEKA_WORKSPACE` (instance dir, default `~/.nanobot`) |
+| `--state PATH`     | Deprecated alias of `--workspace`                            |
 
 Example — switching the systemd unit to docker mode:
 

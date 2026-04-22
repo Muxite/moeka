@@ -21,7 +21,8 @@
 #   --docker            force docker mode
 #   --direct            force direct mode
 #   --config PATH       override the config file path
-#   --state PATH        override MOEKA_STATE (state dir, default ~/.nanobot)
+#   --workspace PATH    override MOEKA_WORKSPACE (instance dir, default ~/.nanobot)
+#   --state PATH        deprecated alias of --workspace
 
 set -euo pipefail
 
@@ -49,7 +50,7 @@ err()  { printf '%s[moeka]%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; }
 # ---------- argv parsing ----------------------------------------------------
 FORCE_MODE=""                 # empty | direct | docker
 CONFIG_OVERRIDE=""
-STATE_OVERRIDE=""
+WORKSPACE_OVERRIDE=""
 POSITIONAL=()
 
 while (( $# > 0 )); do
@@ -59,9 +60,10 @@ while (( $# > 0 )); do
         --config)
             [[ $# -lt 2 ]] && { err "--config requires a path"; exit 2; }
             CONFIG_OVERRIDE="$2"; shift 2 ;;
-        --state)
-            [[ $# -lt 2 ]] && { err "--state requires a path"; exit 2; }
-            STATE_OVERRIDE="$2"; shift 2 ;;
+        --workspace|--state)
+            [[ $# -lt 2 ]] && { err "$1 requires a path"; exit 2; }
+            [[ "$1" == "--state" ]] && warn "--state is deprecated; use --workspace"
+            WORKSPACE_OVERRIDE="$2"; shift 2 ;;
         --) shift; POSITIONAL+=("$@"); break ;;
         *) POSITIONAL+=("$1"); shift ;;
     esac
@@ -72,7 +74,7 @@ CMD="${1:-help}"
 
 # ---------- env loading -----------------------------------------------------
 # Source .env and keys.env (in that order, so keys.env wins on conflicts)
-# from both the repo root and the state dir. Existing env vars always win.
+# from both the repo root and the workspace. Existing env vars always win.
 #
 # Usage:
 #   _load_env_file <path>
@@ -86,17 +88,21 @@ _load_env_file() {
     set +a
 }
 
-if [[ -n "$STATE_OVERRIDE" ]]; then
-    export MOEKA_STATE="$STATE_OVERRIDE"
+if [[ -n "$WORKSPACE_OVERRIDE" ]]; then
+    export MOEKA_WORKSPACE="$WORKSPACE_OVERRIDE"
+elif [[ -n "${MOEKA_STATE:-}" && -z "${MOEKA_WORKSPACE:-}" ]]; then
+    # Accept the deprecated env var from older setups.
+    warn "MOEKA_STATE is deprecated; please rename to MOEKA_WORKSPACE"
+    export MOEKA_WORKSPACE="$MOEKA_STATE"
 fi
-: "${MOEKA_STATE:=$HOME/.nanobot}"
-export MOEKA_STATE
-MOEKA_STATE_EXPANDED="${MOEKA_STATE/#\~/$HOME}"
+: "${MOEKA_WORKSPACE:=$HOME/.nanobot}"
+export MOEKA_WORKSPACE
+MOEKA_WORKSPACE_EXPANDED="${MOEKA_WORKSPACE/#\~/$HOME}"
 
 _load_env_file "${SCRIPT_DIR}/.env"
 _load_env_file "${SCRIPT_DIR}/keys.env"
-_load_env_file "${MOEKA_STATE_EXPANDED}/.env"
-_load_env_file "${MOEKA_STATE_EXPANDED}/keys.env"
+_load_env_file "${MOEKA_WORKSPACE_EXPANDED}/.env"
+_load_env_file "${MOEKA_WORKSPACE_EXPANDED}/keys.env"
 
 if [[ -n "$CONFIG_OVERRIDE" ]]; then
     export MOEKA_CONFIG="$CONFIG_OVERRIDE"
@@ -154,7 +160,7 @@ _nanobot_bin() {
 }
 
 _direct_args() {
-    local cfg="${MOEKA_CONFIG:-${MOEKA_STATE_EXPANDED}/config.json}"
+    local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
     printf -- '--config\0%s\0' "$cfg"
 }
 
@@ -178,7 +184,7 @@ cmd_start() {
     else
         _ensure_venv
         local bin; bin="$(_nanobot_bin)"
-        local cfg="${MOEKA_CONFIG:-${MOEKA_STATE_EXPANDED}/config.json}"
+        local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
         info "starting gateway: $bin gateway --config $cfg"
         exec "$bin" gateway --config "$cfg" "$@"
     fi
@@ -208,8 +214,8 @@ cmd_restart() {
 cmd_status() {
     local mode; mode="$(_detect_mode)"
     printf 'mode         : %s\n' "$mode"
-    printf 'state dir    : %s\n' "$MOEKA_STATE_EXPANDED"
-    printf 'config file  : %s\n' "${MOEKA_CONFIG:-${MOEKA_STATE_EXPANDED}/config.json}"
+    printf 'workspace    : %s\n' "$MOEKA_WORKSPACE_EXPANDED"
+    printf 'config file  : %s\n' "${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
     if [[ "$mode" == "docker" ]]; then
         _compose ps
     else
@@ -274,8 +280,8 @@ cmd_doctor() {
     [[ -x "$VENV_DIR/bin/nanobot" ]] \
         && printf 'venv nanobot  : %s\n' "$VENV_DIR/bin/nanobot" \
         || printf 'venv nanobot  : not built\n'
-    printf 'state dir     : %s\n' "$MOEKA_STATE_EXPANDED"
-    [[ -f "${MOEKA_STATE_EXPANDED}/config.json" ]] \
+    printf 'workspace     : %s\n' "$MOEKA_WORKSPACE_EXPANDED"
+    [[ -f "${MOEKA_WORKSPACE_EXPANDED}/config.json" ]] \
         && printf 'config.json   : present\n' \
         || printf 'config.json   : %smissing%s\n' "$_C_YELLOW" "$_C_RESET"
     [[ -f "${SCRIPT_DIR}/keys.env" ]] \
