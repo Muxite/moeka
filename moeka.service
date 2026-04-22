@@ -1,0 +1,22 @@
+[Unit]
+Description=Moeka (nanobot) agent gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/moeka
+ExecStart=%h/projects/moeka/moeka.sh start
+ExecStop=%h/projects/moeka/moeka.sh stop
+ExecReload=%h/projects/moeka/moeka.sh restart
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# moeka.sh sources ./.env and ./keys.env itself; these lines are belt-and-braces
+# for cases where the script is invoked without them (e.g. `systemctl edit`).
+EnvironmentFile=-%h/projects/moeka/.env
+EnvironmentFile=-%h/projects/moeka/keys.env
+
+[Install]
+WantedBy=default.target

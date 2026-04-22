@@ -20,11 +20,28 @@ def set_config_path(path: Path) -> None:
     _current_config_path = path
 
 
+def get_state_home() -> Path:
+    """
+    Return the root directory for instance state (config, workspace, media, …).
+
+    Resolution order:
+      1. ``MOEKA_STATE`` env var (preferred, new).
+      2. ``NANOBOT_HOME`` env var (kept for forward compatibility).
+      3. Default: ``~/.nanobot``.
+
+    :returns: Expanded absolute path (directory not guaranteed to exist).
+    """
+    override = os.environ.get("MOEKA_STATE") or os.environ.get("NANOBOT_HOME")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".nanobot"
+
+
 def get_config_path() -> Path:
     """Get the configuration file path."""
     if _current_config_path:
         return _current_config_path
-    return Path.home() / ".nanobot" / "config.json"
+    return get_state_home() / "config.json"
 
 
 def load_config(config_path: Path | None = None) -> Config:

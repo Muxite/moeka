@@ -1,25 +1,52 @@
+# Moeka container topology.
+#
+# Two service profiles: `gateway` (default, chat channels) and `api` (HTTP API).
+# Both share the same image and bind-mounted state directory so Moeka's memory,
+# history, and skills are identical regardless of how it was launched.
+#
+# The gateway uses `network_mode: host` + `pid: host` so it can:
+#   * reach the LAN (e.g. local services) without docker-proxy
+#   * see host processes for inspection
+#   * run `nsenter` via the host-bridge exec tool (MOEKA_EXEC_ON_HOST=1)
+#
+# Secrets live in ./keys.env (gitignored). Place per-host overrides in ./.env.
+
+x-common-env: &common-env
+  MOEKA_STATE: /home/nanobot/.nanobot
+  MOEKA_EXEC_ON_HOST: "1"
+
 x-common-config: &common-config
   build:
     context: .
     dockerfile: Dockerfile
+  env_file:
+    - path: ./.env
+      required: false
+    - path: ./keys.env
+      required: false
+  environment:
+    <<: *common-env
   volumes:
-    - ~/.nanobot:/home/nanobot/.nanobot
+    # Shared instance state: config, workspace, history, media, etc.
+    - ${MOEKA_STATE:-~/.nanobot}:/home/nanobot/.nanobot
   cap_drop:
     - ALL
   cap_add:
-    - SYS_ADMIN
+    - SYS_ADMIN   # required for nsenter into host namespaces
   security_opt:
     - apparmor=unconfined
     - seccomp=unconfined
 
 services:
-  nanobot-gateway:
-    container_name: nanobot-gateway
+  moeka-gateway:
+    container_name: moeka-gateway
     <<: *common-config
     command: ["gateway"]
     restart: unless-stopped
-    ports:
-      - 18790:18790
+    # pid+network host: lets the host-bridge exec tool (`nsenter -t 1 ...`)
+    # reach the host's processes and see the host's network/LAN.
+    pid: host
+    network_mode: host
     deploy:
       resources:
         limits:
@@ -29,8 +56,8 @@ services:
           cpus: "0.25"
           memory: 256M
 
-  nanobot-api:
-    container_name: nanobot-api
+  moeka-api:
+    container_name: moeka-api
     <<: *common-config
     command:
       ["serve", "--host", "0.0.0.0", "-w", "/home/nanobot/.nanobot/api-workspace"]
@@ -46,7 +73,7 @@ services:
           cpus: "0.25"
           memory: 256M
 
-  nanobot-cli:
+  moeka-cli:
     <<: *common-config
     profiles:
       - cli

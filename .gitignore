@@ -78,6 +78,12 @@ nano.*.save
 # Environment & secrets (keep examples tracked if needed)
 .env.*
 !.env.example
+keys.env
+!keys.env.example
+
+# Runtime / local state
+.dockerized
+.moeka-local.env
 
 # Logs & temp
 *.log

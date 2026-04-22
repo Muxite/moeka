@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# Moeka universal entrypoint.
+#
+# One command, two modes:
+#   * direct mode — python venv on the host (default when Docker is absent)
+#   * docker mode — docker compose (when `.dockerized` exists, `--docker`
+#     is passed, or $MOEKA_MODE=docker)
+#
+# Usage:
+#   ./moeka.sh start            # run the gateway in the chosen mode
+#   ./moeka.sh stop             # stop the running instance
+#   ./moeka.sh restart          # stop + start
+#   ./moeka.sh status           # show service status
+#   ./moeka.sh logs [-f]        # tail logs
+#   ./moeka.sh shell            # drop into a shell inside the moeka env
+#   ./moeka.sh exec -- CMD ...  # run a command inside the moeka env
+#   ./moeka.sh install          # install Python deps / build image
+#   ./moeka.sh doctor           # sanity check the environment
+#
+# Flags (anywhere on the command line):
+#   --docker            force docker mode
+#   --direct            force direct mode
+#   --config PATH       override the config file path
+#   --state PATH        override MOEKA_STATE (state dir, default ~/.nanobot)
+
+set -euo pipefail
+
+# ---------- paths & constants -----------------------------------------------
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+cd "$SCRIPT_DIR"
+
+VENV_DIR="${SCRIPT_DIR}/.venv"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
+DOCKERIZED_FLAG="${SCRIPT_DIR}/.dockerized"
+
+# ---------- tiny logging helpers --------------------------------------------
+_is_tty() { [ -t 1 ]; }
+if _is_tty; then
+    _C_BLUE=$'\033[34m'; _C_GREEN=$'\033[32m'; _C_YELLOW=$'\033[33m'
+    _C_RED=$'\033[31m'; _C_DIM=$'\033[2m'; _C_RESET=$'\033[0m'
+else
+    _C_BLUE=""; _C_GREEN=""; _C_YELLOW=""; _C_RED=""; _C_DIM=""; _C_RESET=""
+fi
+info() { printf '%s[moeka]%s %s\n' "$_C_BLUE" "$_C_RESET" "$*"; }
+ok()   { printf '%s[moeka]%s %s\n' "$_C_GREEN" "$_C_RESET" "$*"; }
+warn() { printf '%s[moeka]%s %s\n' "$_C_YELLOW" "$_C_RESET" "$*" >&2; }
+err()  { printf '%s[moeka]%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; }
+
+# ---------- argv parsing ----------------------------------------------------
+FORCE_MODE=""                 # empty | direct | docker
+CONFIG_OVERRIDE=""
+STATE_OVERRIDE=""
+POSITIONAL=()
+
+while (( $# > 0 )); do
+    case "$1" in
+        --docker) FORCE_MODE="docker"; shift ;;
+        --direct) FORCE_MODE="direct"; shift ;;
+        --config)
+            [[ $# -lt 2 ]] && { err "--config requires a path"; exit 2; }
+            CONFIG_OVERRIDE="$2"; shift 2 ;;
+        --state)
+            [[ $# -lt 2 ]] && { err "--state requires a path"; exit 2; }
+            STATE_OVERRIDE="$2"; shift 2 ;;
+        --) shift; POSITIONAL+=("$@"); break ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
+set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
+CMD="${1:-help}"
+[[ $# -gt 0 ]] && shift || true
+
+# ---------- env loading -----------------------------------------------------
+# Source .env and keys.env (in that order, so keys.env wins on conflicts)
+# from both the repo root and the state dir. Existing env vars always win.
+#
+# Usage:
+#   _load_env_file <path>
+_load_env_file() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    info "loading env: $f"
+    set -a
+    # shellcheck disable=SC1090
+    . "$f"
+    set +a
+}
+
+if [[ -n "$STATE_OVERRIDE" ]]; then
+    export MOEKA_STATE="$STATE_OVERRIDE"
+fi
+: "${MOEKA_STATE:=$HOME/.nanobot}"
+export MOEKA_STATE
+MOEKA_STATE_EXPANDED="${MOEKA_STATE/#\~/$HOME}"
+
+_load_env_file "${SCRIPT_DIR}/.env"
+_load_env_file "${SCRIPT_DIR}/keys.env"
+_load_env_file "${MOEKA_STATE_EXPANDED}/.env"
+_load_env_file "${MOEKA_STATE_EXPANDED}/keys.env"
+
+if [[ -n "$CONFIG_OVERRIDE" ]]; then
+    export MOEKA_CONFIG="$CONFIG_OVERRIDE"
+fi
+
+# ---------- mode detection --------------------------------------------------
+_detect_mode() {
+    if [[ -n "$FORCE_MODE" ]]; then echo "$FORCE_MODE"; return; fi
+    if [[ -n "${MOEKA_MODE:-}" && "$MOEKA_MODE" != "auto" ]]; then
+        echo "$MOEKA_MODE"; return
+    fi
+    if [[ -f "$DOCKERIZED_FLAG" ]] && command -v docker >/dev/null 2>&1; then
+        echo "docker"; return
+    fi
+    echo "direct"
+}
+
+_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose -f "$COMPOSE_FILE" "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose -f "$COMPOSE_FILE" "$@"
+    else
+        err "docker compose not found"; exit 1
+    fi
+}
+
+# ---------- direct-mode plumbing --------------------------------------------
+_ensure_venv() {
+    if [[ -x "$VENV_DIR/bin/nanobot" ]]; then return 0; fi
+    info "creating venv at $VENV_DIR"
+    if command -v uv >/dev/null 2>&1; then
+        uv venv "$VENV_DIR" >/dev/null
+        "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
+        info "installing nanobot (uv pip install -e .)"
+        uv pip install --python "$VENV_DIR/bin/python" -e . >/dev/null
+    else
+        python3 -m venv "$VENV_DIR"
+        "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
+        info "installing nanobot (pip install -e .)"
+        "$VENV_DIR/bin/pip" install --quiet -e .
+    fi
+    ok "venv ready"
+}
+
+_nanobot_bin() {
+    if [[ -x "$VENV_DIR/bin/nanobot" ]]; then
+        echo "$VENV_DIR/bin/nanobot"
+    elif command -v nanobot >/dev/null 2>&1; then
+        command -v nanobot
+    else
+        err "nanobot binary not found; run ./moeka.sh install"
+        exit 1
+    fi
+}
+
+_direct_args() {
+    local cfg="${MOEKA_CONFIG:-${MOEKA_STATE_EXPANDED}/config.json}"
+    printf -- '--config\0%s\0' "$cfg"
+}
+
+# ---------- commands --------------------------------------------------------
+cmd_install() {
+    local mode; mode="$(_detect_mode)"
+    if [[ "$mode" == "docker" ]]; then
+        info "building docker image"
+        _compose build
+    else
+        _ensure_venv
+    fi
+}
+
+cmd_start() {
+    local mode; mode="$(_detect_mode)"
+    info "mode = $mode"
+    if [[ "$mode" == "docker" ]]; then
+        _compose up -d
+        ok "moeka (docker) started"
+    else
+        _ensure_venv
+        local bin; bin="$(_nanobot_bin)"
+        local cfg="${MOEKA_CONFIG:-${MOEKA_STATE_EXPANDED}/config.json}"
+        info "starting gateway: $bin gateway --config $cfg"
+        exec "$bin" gateway --config "$cfg" "$@"
+    fi
+}
+
+cmd_stop() {
+    local mode; mode="$(_detect_mode)"
+    if [[ "$mode" == "docker" ]]; then
+        _compose down
+    else
+        # Best-effort: graceful via systemd, then pkill fallback.
+        if systemctl --user is-active --quiet moeka 2>/dev/null; then
+            systemctl --user stop moeka
+        elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
+            systemctl --user stop nanobot
+        else
+            pkill -f "nanobot gateway" 2>/dev/null || warn "no running gateway found"
+        fi
+    fi
+}
+
+cmd_restart() {
+    cmd_stop || true
+    cmd_start "$@"
+}
+
+cmd_status() {
+    local mode; mode="$(_detect_mode)"
+    printf 'mode         : %s\n' "$mode"
+    printf 'state dir    : %s\n' "$MOEKA_STATE_EXPANDED"
+    printf 'config file  : %s\n' "${MOEKA_CONFIG:-${MOEKA_STATE_EXPANDED}/config.json}"
+    if [[ "$mode" == "docker" ]]; then
+        _compose ps
+    else
+        if systemctl --user is-active --quiet moeka 2>/dev/null; then
+            systemctl --user status moeka --no-pager || true
+        elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
+            systemctl --user status nanobot --no-pager || true
+        else
+            pgrep -af "nanobot gateway" || echo "no gateway process running"
+        fi
+    fi
+}
+
+cmd_logs() {
+    local mode; mode="$(_detect_mode)"
+    if [[ "$mode" == "docker" ]]; then
+        _compose logs "$@"
+    else
+        if systemctl --user is-active --quiet moeka 2>/dev/null; then
+            journalctl --user -u moeka "$@"
+        elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
+            journalctl --user -u nanobot "$@"
+        else
+            warn "no systemd unit active; no log source"
+        fi
+    fi
+}
+
+cmd_shell() {
+    local mode; mode="$(_detect_mode)"
+    if [[ "$mode" == "docker" ]]; then
+        _compose run --rm nanobot-cli bash
+    else
+        _ensure_venv
+        info "entering moeka venv shell"
+        exec "$SHELL" --rcfile <(echo "source $VENV_DIR/bin/activate; PS1='(moeka) \$ '")
+    fi
+}
+
+cmd_exec() {
+    local mode; mode="$(_detect_mode)"
+    if [[ "$mode" == "docker" ]]; then
+        _compose run --rm nanobot-cli "$@"
+    else
+        _ensure_venv
+        exec "$VENV_DIR/bin/nanobot" "$@"
+    fi
+}
+
+cmd_doctor() {
+    local mode; mode="$(_detect_mode)"
+    printf 'detected mode : %s\n' "$mode"
+    command -v docker >/dev/null 2>&1 \
+        && printf 'docker        : %s\n' "$(docker --version)" \
+        || printf 'docker        : not installed\n'
+    command -v python3 >/dev/null 2>&1 \
+        && printf 'python3       : %s\n' "$(python3 --version)" \
+        || printf 'python3       : not installed\n'
+    command -v uv >/dev/null 2>&1 \
+        && printf 'uv            : %s\n' "$(uv --version)" \
+        || printf 'uv            : not installed\n'
+    [[ -x "$VENV_DIR/bin/nanobot" ]] \
+        && printf 'venv nanobot  : %s\n' "$VENV_DIR/bin/nanobot" \
+        || printf 'venv nanobot  : not built\n'
+    printf 'state dir     : %s\n' "$MOEKA_STATE_EXPANDED"
+    [[ -f "${MOEKA_STATE_EXPANDED}/config.json" ]] \
+        && printf 'config.json   : present\n' \
+        || printf 'config.json   : %smissing%s\n' "$_C_YELLOW" "$_C_RESET"
+    [[ -f "${SCRIPT_DIR}/keys.env" ]] \
+        && printf 'keys.env      : present (repo)\n' \
+        || printf 'keys.env      : missing (see keys.env.example)\n'
+}
+
+cmd_help() {
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "$CMD" in
+    start)   cmd_start "$@" ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart "$@" ;;
+    status)  cmd_status ;;
+    logs)    cmd_logs "$@" ;;
+    shell)   cmd_shell ;;
+    exec)    cmd_exec "$@" ;;
+    install) cmd_install ;;
+    doctor)  cmd_doctor ;;
+    help|-h|--help) cmd_help ;;
+    *)
+        err "unknown command: $CMD"
+        cmd_help
+        exit 2 ;;
+esac

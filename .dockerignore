@@ -6,7 +6,20 @@ __pycache__
 dist/
 build/
 .git
+.github
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets & local overrides — loaded via env_file at runtime, never baked in.
 .env
+.env.*
+!.env.example
+keys.env
+.dockerized
+.moeka-local.env
+
 .assets
 node_modules/
 bridge/dist/

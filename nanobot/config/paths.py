@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from nanobot.config.loader import get_config_path
+from nanobot.config.loader import get_config_path, get_state_home
 from nanobot.utils.helpers import ensure_dir
 
 
@@ -34,29 +34,38 @@ def get_logs_dir() -> Path:
     return get_runtime_subdir("logs")
 
 
+def _default_workspace() -> Path:
+    """
+    Resolve the default workspace path for this Moeka instance.
+
+    :returns: ``<state_home>/workspace`` where ``state_home`` honors ``MOEKA_STATE``.
+    """
+    return get_state_home() / "workspace"
+
+
 def get_workspace_path(workspace: str | None = None) -> Path:
     """Resolve and ensure the agent workspace path."""
-    path = Path(workspace).expanduser() if workspace else Path.home() / ".nanobot" / "workspace"
+    path = Path(workspace).expanduser() if workspace else _default_workspace()
     return ensure_dir(path)
 
 
 def is_default_workspace(workspace: str | Path | None) -> bool:
     """Return whether a workspace resolves to nanobot's default workspace path."""
-    current = Path(workspace).expanduser() if workspace is not None else Path.home() / ".nanobot" / "workspace"
-    default = Path.home() / ".nanobot" / "workspace"
+    current = Path(workspace).expanduser() if workspace is not None else _default_workspace()
+    default = _default_workspace()
     return current.resolve(strict=False) == default.resolve(strict=False)
 
 
 def get_cli_history_path() -> Path:
     """Return the shared CLI history file path."""
-    return Path.home() / ".nanobot" / "history" / "cli_history"
+    return get_state_home() / "history" / "cli_history"
 
 
 def get_bridge_install_dir() -> Path:
     """Return the shared WhatsApp bridge installation directory."""
-    return Path.home() / ".nanobot" / "bridge"
+    return get_state_home() / "bridge"
 
 
 def get_legacy_sessions_dir() -> Path:
     """Return the legacy global session directory used for migration fallback."""
-    return Path.home() / ".nanobot" / "sessions"
+    return get_state_home() / "sessions"
