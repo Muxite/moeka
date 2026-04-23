@@ -99,6 +99,51 @@ agent runs is prepended with `nsenter -t 1 -m -u -n -i -p --`, so commands like
 `lsblk`, `docker ps`, and `systemctl --user` behave the same way inside the
 container as on the host. Requires `pid: host` and `cap_add: SYS_ADMIN`.
 
+In addition to exec, the host filesystem is bind-mounted at matching paths
+(`/home:/home`, `/etc:/etc`, `/var:/var`, `/opt:/opt`, `/tmp:/tmp`, etc.) so
+that file tools (`read_file`, `write_file`, `glob`, `grep`) access host files
+directly — no path translation needed. The container user (uid 1000) maps to
+the host user, so file permissions behave identically to a native install.
+
+## Permissions: non-sudo and sudo
+
+Moeka has two permission tiers. Both work identically in direct and docker mode.
+
+### Non-sudo (always on)
+
+No restrictions beyond what the host user (uid 1000) can do:
+
+- File tools: unrestricted (`restrict_to_workspace: false`, no `allowed_dir`)
+- Exec: runs on the host via nsenter bridge, as the host user
+- Network: host network mode, full LAN visibility
+
+This is the same capability as running `nanobot gateway` natively.
+
+### Sudo (opt-in)
+
+Two things must be in place:
+
+1. **Config**: `tools.exec.allowSudo: true` in `config.json`
+2. **Sudoers**: passwordless sudo for the host user
+
+```sh
+# One-time host setup:
+./moeka.sh setup-sudo          # interactive
+./moeka.sh setup-sudo --yes    # non-interactive (writes /etc/sudoers.d/moeka-sudo)
+```
+
+When enabled, moeka cannot run sudo commands blindly. The exec tool detects
+`sudo` in commands and returns a `SUDO_REQUIRED` prompt — moeka must re-call
+with `SUDO_JUSTIFIED:<reasoning> | <command>`, articulating why the action is
+safe. The justification is logged at WARNING level before execution.
+
+Check status with `./moeka.sh doctor`:
+
+```
+sudo rule     : installed (/etc/sudoers.d/moeka-sudo)
+allow_sudo    : enabled in config
+```
+
 ## systemd
 
 See [SYSTEMD.md](./SYSTEMD.md). `bash install-service.sh` enables

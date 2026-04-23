@@ -192,6 +192,7 @@ class ExecToolConfig(Base):
     path_append: str = ""
     sandbox: str = ""  # sandbox backend: "" (none) or "bwrap"
     allowed_env_keys: list[str] = Field(default_factory=list)  # Env var names to pass through to subprocess (e.g. ["GOPATH", "JAVA_HOME"])
+    allow_sudo: bool = False  # DANGEROUS: allow sudo commands. When enabled, sudo commands require an inline safety justification before execution.
 
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""

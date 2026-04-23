@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # keys — harmless if no such deps exist.
 RUN useradd -m -u 1000 -s /bin/bash nanobot && \
     mkdir -p /home/nanobot/.nanobot && \
-    setcap cap_sys_admin,cap_sys_ptrace,cap_sys_chroot+ep /usr/bin/nsenter && \
+    setcap cap_sys_admin,cap_sys_ptrace,cap_sys_chroot,cap_setuid,cap_setgid,cap_dac_override,cap_fowner,cap_audit_write+ep /usr/bin/nsenter && \
     git config --system --add url."https://github.com/".insteadOf ssh://git@github.com/ && \
     git config --system --add url."https://github.com/".insteadOf git@github.com:
 

@@ -36,16 +36,39 @@ x-common-config: &common-config
     # One directory holds config.json, history, media, cron, skills, memory,
     # sessions, and the agent-identity docs (SOUL/AGENTS/HEARTBEAT/TOOLS/USER).
     - ${MOEKA_WORKSPACE:-${HOME}/.nanobot}:/home/nanobot/.nanobot
+    # Host filesystem passthrough — same paths inside the container as on the
+    # host, so file tools (read_file/write_file/glob/grep) see the full host
+    # tree without path translation.  Combined with the nsenter exec bridge,
+    # this makes moeka behave as if it were running natively on the host.
+    # (sudo capability is a separate, opt-in config — see tools.exec.allow_sudo)
+    - /home:/home
+    - /etc:/etc
+    - /opt:/opt
+    - /var:/var
+    - /srv:/srv
+    - /mnt:/mnt
+    - /media:/media
+    - /root:/root
+    - /tmp:/tmp
   # Host-bridge exec (MOEKA_EXEC_ON_HOST=1) wraps shell commands in
-  # `nsenter -t 1 -m -u -n -i -p --`. The three caps below are exactly what
-  # setns(CLONE_NEWNS) needs; they are also baked into /usr/bin/nsenter as
-  # file capabilities so the non-root `nanobot` user can use them.
+  # `nsenter -t 1 -m -u -n -i -p --`. Caps needed:
+  #   SYS_ADMIN/SYS_PTRACE/SYS_CHROOT — nsenter into host namespaces
+  #   SETUID/SETGID — sudo can change uid/gid after entering host namespace
+  #   DAC_OVERRIDE — read files owned by other users on the host (non-sudo)
+  #   FOWNER — file operations across uid boundaries
+  # All caps are baked into /usr/bin/nsenter as file capabilities so the
+  # non-root nanobot user can use them only through nsenter.
   cap_drop:
     - ALL
   cap_add:
     - SYS_ADMIN     # setns(CLONE_NEWNS/NEWUTS/NEWNET/NEWIPC/NEWPID)
     - SYS_PTRACE    # open /proc/1/ns/* of the host's pid 1
     - SYS_CHROOT    # mount-namespace change during setns
+    - SETUID        # sudo: setuid(0) after nsenter
+    - SETGID        # sudo: setgid(0) after nsenter
+    - DAC_OVERRIDE  # read/write files regardless of permission bits
+    - FOWNER        # bypass ownership checks on host files
+    - AUDIT_WRITE   # sudo audit logging (suppresses warning)
   security_opt:
     - apparmor=unconfined
     - seccomp=unconfined

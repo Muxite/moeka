@@ -70,6 +70,7 @@ Auto-detects the right mode for this host:
 ./moeka.sh shell           # drop into the venv / container
 ./moeka.sh exec -- …       # run any nanobot subcommand
 ./moeka.sh doctor          # sanity check
+./moeka.sh setup-sudo      # install passwordless sudo for moeka (DANGEROUS)
 ```
 
 Flags (may appear before the command): `--docker`, `--direct`, `--config PATH`, `--state PATH`.
@@ -121,6 +122,27 @@ When running in Docker, `docker-compose.yml` sets `MOEKA_EXEC_ON_HOST=1`. Moeka'
 - the host's network (LAN services, localhost bindings)
 
 This is a deliberate trade-off: Docker here provides reproducible packaging, **not** a security boundary. If you want strict isolation, leave `MOEKA_EXEC_ON_HOST` unset and drop the three caps from `docker-compose.yml`.
+
+### 5. Two-tier permissions — non-sudo and sudo
+
+Moeka in Docker has the same capabilities as nanobot running natively on the host. The container is not a jail:
+
+**Non-sudo (default):** The host filesystem is bind-mounted into the container at matching paths (`/home:/home`, `/etc:/etc`, `/var:/var`, `/opt:/opt`, `/tmp:/tmp`, etc.), so file tools (`read_file`, `write_file`, `glob`, `grep`) see the full host tree without path translation. Shell commands run on the host via the nsenter bridge. Together this means moeka can read, write, and execute anything the host user (uid 1000) can — no `restrict_to_workspace`, no sandboxing, no artificial limits.
+
+**Sudo (opt-in):** Enabled by two things:
+
+1. **Config flag** — set `tools.exec.allowSudo: true` in `config.json`. When a command contains `sudo`, the exec tool pauses and returns a `SUDO_REQUIRED` prompt. Moeka must re-call with `SUDO_JUSTIFIED:<safety reasoning> | <original command>`, forcing it to articulate why the action is safe before execution proceeds. The justification is logged at WARNING level.
+
+2. **Host sudoers rule** — the container user maps to the host's uid 1000. For `sudo` to work on the host, that user needs a NOPASSWD entry:
+
+```sh
+./moeka.sh setup-sudo          # interactive — prompts before writing
+./moeka.sh setup-sudo --yes    # non-interactive
+```
+
+This writes `/etc/sudoers.d/moeka-sudo` granting `<user> ALL=(ALL) NOPASSWD: ALL`. Requires running with sudo access on the host (one-time setup).
+
+`./moeka.sh doctor` reports whether both the config flag and the sudoers rule are in place.
 
 ---
 

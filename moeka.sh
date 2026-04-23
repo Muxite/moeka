@@ -16,6 +16,7 @@
 #   ./moeka.sh exec -- CMD ...  # run a command inside the moeka env
 #   ./moeka.sh install          # install Python deps / build image
 #   ./moeka.sh doctor           # sanity check the environment
+#   ./moeka.sh setup-sudo [-y]  # DANGEROUS: install passwordless sudo rule for moeka on the host
 #
 # Flags (anywhere on the command line):
 #   --docker            force docker mode
@@ -164,10 +165,27 @@ _direct_args() {
     printf -- '--config\0%s\0' "$cfg"
 }
 
+# ---------- host prep for docker mode ---------------------------------------
+_ensure_host_dirs() {
+    # The /home:/home bind mount shadows the container's /home/nanobot.
+    # Ensure the host has a /home/nanobot owned by uid 1000 so the container
+    # user can write dotfiles, caches, etc. in its home directory.
+    local nh="/home/nanobot"
+    if [[ ! -d "$nh" ]]; then
+        info "creating $nh on the host"
+        sudo mkdir -p "$nh" 2>/dev/null || mkdir -p "$nh" 2>/dev/null || true
+    fi
+    if [[ -d "$nh" ]] && [[ "$(stat -c %u "$nh" 2>/dev/null)" != "1000" ]]; then
+        info "fixing ownership of $nh to uid 1000"
+        sudo chown 1000:1000 "$nh" 2>/dev/null || true
+    fi
+}
+
 # ---------- commands --------------------------------------------------------
 cmd_install() {
     local mode; mode="$(_detect_mode)"
     if [[ "$mode" == "docker" ]]; then
+        _ensure_host_dirs
         info "building docker image"
         _compose build
     else
@@ -179,6 +197,7 @@ cmd_start() {
     local mode; mode="$(_detect_mode)"
     info "mode = $mode"
     if [[ "$mode" == "docker" ]]; then
+        _ensure_host_dirs
         _compose up -d
         ok "moeka (docker) started"
     else
@@ -265,6 +284,54 @@ cmd_exec() {
     fi
 }
 
+cmd_setup_sudo() {
+    # Install a host-side sudoers rule so that the user moeka runs as
+    # (the current $USER, uid $(id -u)) can execute sudo without a password.
+    #
+    # DANGEROUS: this grants full passwordless sudo to $USER on the host.
+    # Only call this if you understand the implications and have enabled
+    # tools.exec.allow_sudo in your config.json.
+    #
+    # When running in docker mode with MOEKA_EXEC_ON_HOST=1, moeka's exec tool
+    # wraps commands in `nsenter -t 1 ...` which enters host namespaces but
+    # still runs as the calling user (nanobot uid=1000, which maps to $USER on
+    # the host).  Passwordless sudo lets moeka escalate on the host when
+    # a command requires it.
+
+    local sudoers_file="/etc/sudoers.d/moeka-sudo"
+    local user
+    user="$(id -un)"
+    local uid
+    uid="$(id -u)"
+
+    warn "⚠️  DANGEROUS: about to grant passwordless sudo to user '${user}' (uid ${uid})"
+    warn "   This allows any process running as ${user} to run any command as root."
+    warn "   Only proceed if moeka's allow_sudo config is intentional."
+    warn ""
+    warn "   Sudoers file: ${sudoers_file}"
+    warn "   Rule: ${user} ALL=(ALL) NOPASSWD: ALL"
+    warn ""
+
+    # Ask for confirmation unless --yes flag is given.
+    local yes_flag=0
+    for arg in "$@"; do [[ "$arg" == "--yes" || "$arg" == "-y" ]] && yes_flag=1; done
+    if [[ "$yes_flag" -eq 0 ]]; then
+        printf 'Continue? [y/N] '
+        read -r reply
+        [[ "$reply" =~ ^[Yy]$ ]] || { info "Aborted."; return 0; }
+    fi
+
+    local rule="${user} ALL=(ALL) NOPASSWD: ALL"
+    if echo "$rule" | sudo tee "$sudoers_file" > /dev/null; then
+        sudo chmod 0440 "$sudoers_file"
+        ok "Sudoers rule installed: ${sudoers_file}"
+        ok "Moeka (running as ${user}) can now use passwordless sudo on the host."
+    else
+        err "Failed to write ${sudoers_file} — run with sudo or as root."
+        exit 1
+    fi
+}
+
 cmd_doctor() {
     local mode; mode="$(_detect_mode)"
     printf 'detected mode : %s\n' "$mode"
@@ -287,6 +354,21 @@ cmd_doctor() {
     [[ -f "${SCRIPT_DIR}/keys.env" ]] \
         && printf 'keys.env      : present (repo)\n' \
         || printf 'keys.env      : missing (see keys.env.example)\n'
+
+    # Sudo capability check
+    if [[ -f /etc/sudoers.d/moeka-sudo ]]; then
+        printf 'sudo rule     : %sinstalled%s (/etc/sudoers.d/moeka-sudo)\n' "$_C_GREEN" "$_C_RESET"
+    else
+        printf 'sudo rule     : not installed (run ./moeka.sh setup-sudo to enable)\n'
+    fi
+    # Check config.json for allow_sudo
+    if [[ -f "${MOEKA_WORKSPACE_EXPANDED}/config.json" ]]; then
+        if grep -q '"allowSudo"\s*:\s*true' "${MOEKA_WORKSPACE_EXPANDED}/config.json" 2>/dev/null; then
+            printf 'allow_sudo    : %senabled%s in config\n' "$_C_GREEN" "$_C_RESET"
+        else
+            printf 'allow_sudo    : disabled in config\n'
+        fi
+    fi
 }
 
 cmd_help() {
@@ -294,15 +376,16 @@ cmd_help() {
 }
 
 case "$CMD" in
-    start)   cmd_start "$@" ;;
-    stop)    cmd_stop ;;
-    restart) cmd_restart "$@" ;;
-    status)  cmd_status ;;
-    logs)    cmd_logs "$@" ;;
-    shell)   cmd_shell ;;
-    exec)    cmd_exec "$@" ;;
-    install) cmd_install ;;
-    doctor)  cmd_doctor ;;
+    start)       cmd_start "$@" ;;
+    stop)        cmd_stop ;;
+    restart)     cmd_restart "$@" ;;
+    status)      cmd_status ;;
+    logs)        cmd_logs "$@" ;;
+    shell)       cmd_shell ;;
+    exec)        cmd_exec "$@" ;;
+    install)     cmd_install ;;
+    doctor)      cmd_doctor ;;
+    setup-sudo)  cmd_setup_sudo "$@" ;;
     help|-h|--help) cmd_help ;;
     *)
         err "unknown command: $CMD"
