@@ -105,11 +105,27 @@ that file tools (`read_file`, `write_file`, `glob`, `grep`) access host files
 directly — no path translation needed. The container user (uid 1000) maps to
 the host user, so file permissions behave identically to a native install.
 
-## Permissions: non-sudo and sudo
+## Permissions: contained, non-sudo, and sudo
 
-Moeka has two permission tiers. Both work identically in direct and docker mode.
+Moeka has three permission tiers.
 
-### Non-sudo (always on)
+### Contained (safe mode)
+
+```sh
+./moeka.sh --contained start
+```
+
+The agent is fully jailed inside the container:
+
+- File tools: restricted to `$MOEKA_WORKSPACE` only (`restrict_to_workspace: true`)
+- Exec: runs inside the container with bwrap sandbox — no nsenter, no host access
+- Network: bridge mode (container-local), no host LAN visibility
+- Capabilities: none (all dropped)
+
+Use this for untrusted workloads or experimentation. To upgrade, stop the
+contained service and start the regular gateway (`./moeka.sh start`).
+
+### Non-sudo (default)
 
 No restrictions beyond what the host user (uid 1000) can do:
 

@@ -73,7 +73,7 @@ Auto-detects the right mode for this host:
 ./moeka.sh setup-sudo      # install passwordless sudo for moeka (DANGEROUS)
 ```
 
-Flags (may appear before the command): `--docker`, `--direct`, `--config PATH`, `--state PATH`.
+Flags (may appear before the command): `--docker`, `--direct`, `--contained`, `--config PATH`, `--state PATH`.
 
 ### 2. `keys.env` — one file for every secret
 
@@ -123,9 +123,17 @@ When running in Docker, `docker-compose.yml` sets `MOEKA_EXEC_ON_HOST=1`. Moeka'
 
 This is a deliberate trade-off: Docker here provides reproducible packaging, **not** a security boundary. If you want strict isolation, leave `MOEKA_EXEC_ON_HOST` unset and drop the three caps from `docker-compose.yml`.
 
-### 5. Two-tier permissions — non-sudo and sudo
+### 5. Three-tier permissions — contained, non-sudo, and sudo
 
-Moeka in Docker has the same capabilities as nanobot running natively on the host. The container is not a jail:
+Moeka has three permission tiers. Pick the one that matches your trust level:
+
+| Tier | Host access | File tools | Exec | Sudo | Start with |
+|---|---|---|---|---|---|
+| **Contained** | None | Workspace only (bwrap sandbox) | Inside container only | No | `./moeka.sh --contained start` |
+| **Non-sudo** (default) | Full | Full host filesystem | Host via nsenter | No | `./moeka.sh start` |
+| **Sudo** | Full | Full host filesystem | Host via nsenter + sudo | Yes | Enable config + sudoers, then `./moeka.sh start` |
+
+**Contained (safe mode):** The agent runs entirely inside the container with no host escape. File tools are restricted to the workspace directory (`$MOEKA_WORKSPACE`), exec runs inside the container with a bwrap sandbox, and no capabilities are granted. This is the "safe" version — suitable for untrusted workloads or experimentation. To upgrade from contained to non-sudo/sudo, stop the contained service and start the regular gateway.
 
 **Non-sudo (default):** The host filesystem is bind-mounted into the container at matching paths (`/home:/home`, `/etc:/etc`, `/var:/var`, `/opt:/opt`, `/tmp:/tmp`, etc.), so file tools (`read_file`, `write_file`, `glob`, `grep`) see the full host tree without path translation. Shell commands run on the host via the nsenter bridge. Together this means moeka can read, write, and execute anything the host user (uid 1000) can — no `restrict_to_workspace`, no sandboxing, no artificial limits.
 

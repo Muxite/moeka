@@ -90,6 +90,7 @@ def load_config(config_path: Path | None = None) -> Config:
             logger.warning("Using default configuration.")
 
     _apply_ssrf_whitelist(config)
+    _apply_contained_mode(config)
     return config
 
 
@@ -98,6 +99,16 @@ def _apply_ssrf_whitelist(config: Config) -> None:
     from nanobot.security.network import configure_ssrf_whitelist
 
     configure_ssrf_whitelist(config.tools.ssrf_whitelist)
+
+
+def _apply_contained_mode(config: Config) -> None:
+    """When MOEKA_CONTAINED=1, lock down to workspace-only + bwrap sandbox."""
+    if os.environ.get("MOEKA_CONTAINED", "").lower() not in ("1", "true", "yes", "on"):
+        return
+    logger.info("Contained mode active — restricting to workspace + bwrap sandbox")
+    config.tools.restrict_to_workspace = True
+    config.tools.exec.sandbox = "bwrap"
+    config.tools.exec.allow_sudo = False
 
 
 def save_config(config: Config, config_path: Path | None = None) -> None:

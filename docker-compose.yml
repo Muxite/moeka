@@ -1,7 +1,7 @@
 # Moeka container topology.
 #
-# Two service profiles: `gateway` (default, chat channels) and `api` (HTTP API).
-# Both share the same image and bind-mount ONE host directory so everything
+# Three services: `gateway` (default, host-bridge), `api` (HTTP API), and
+# `contained` (safe, no host access).  All share the same image and bind-mount
 # Moeka cares about persists across `docker compose down`:
 #
 #   ${MOEKA_WORKSPACE} -> /home/nanobot/.nanobot   (config + agent files + runtime state)
@@ -19,9 +19,9 @@
 
 x-common-env: &common-env
   MOEKA_WORKSPACE: /home/nanobot/.nanobot
-  MOEKA_EXEC_ON_HOST: "1"
 
-x-common-config: &common-config
+# Shared build + env_file block (both host-bridge and contained use these).
+x-base-config: &base-config
   build:
     context: .
     dockerfile: Dockerfile
@@ -30,8 +30,13 @@ x-common-config: &common-config
       required: false
     - path: ./keys.env
       required: false
+
+# Host-bridge config — full host transparency (non-sudo and sudo tiers).
+x-common-config: &common-config
+  <<: *base-config
   environment:
     <<: *common-env
+    MOEKA_EXEC_ON_HOST: "1"
   volumes:
     # One directory holds config.json, history, media, cron, skills, memory,
     # sessions, and the agent-identity docs (SOUL/AGENTS/HEARTBEAT/TOOLS/USER).
@@ -73,6 +78,20 @@ x-common-config: &common-config
     - apparmor=unconfined
     - seccomp=unconfined
 
+# Contained config — no host escape, no extra caps, workspace-only filesystem.
+x-contained-config: &contained-config
+  <<: *base-config
+  environment:
+    <<: *common-env
+    MOEKA_EXEC_ON_HOST: "0"
+    # Force workspace restriction + bwrap sandbox so the agent cannot leave
+    # the container or access files outside its instance directory.
+    MOEKA_CONTAINED: "1"
+  volumes:
+    - ${MOEKA_WORKSPACE:-${HOME}/.nanobot}:/home/nanobot/.nanobot
+  cap_drop:
+    - ALL
+
 services:
   moeka-gateway:
     container_name: moeka-gateway
@@ -101,6 +120,20 @@ services:
     restart: unless-stopped
     ports:
       - 127.0.0.1:8900:8900
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  moeka-contained:
+    container_name: moeka-contained
+    <<: *contained-config
+    command: ["gateway"]
+    restart: unless-stopped
     deploy:
       resources:
         limits:

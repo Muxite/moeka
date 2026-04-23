@@ -21,6 +21,7 @@
 # Flags (anywhere on the command line):
 #   --docker            force docker mode
 #   --direct            force direct mode
+#   --contained         start in contained mode (docker, no host access)
 #   --config PATH       override the config file path
 #   --workspace PATH    override MOEKA_WORKSPACE (instance dir, default ~/.nanobot)
 #   --state PATH        deprecated alias of --workspace
@@ -50,6 +51,7 @@ err()  { printf '%s[moeka]%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; }
 
 # ---------- argv parsing ----------------------------------------------------
 FORCE_MODE=""                 # empty | direct | docker
+CONTAINED_MODE=0             # 1 when --contained is passed
 CONFIG_OVERRIDE=""
 WORKSPACE_OVERRIDE=""
 POSITIONAL=()
@@ -58,6 +60,7 @@ while (( $# > 0 )); do
     case "$1" in
         --docker) FORCE_MODE="docker"; shift ;;
         --direct) FORCE_MODE="direct"; shift ;;
+        --contained) CONTAINED_MODE=1; FORCE_MODE="docker"; shift ;;
         --config)
             [[ $# -lt 2 ]] && { err "--config requires a path"; exit 2; }
             CONFIG_OVERRIDE="$2"; shift 2 ;;
@@ -197,9 +200,15 @@ cmd_start() {
     local mode; mode="$(_detect_mode)"
     info "mode = $mode"
     if [[ "$mode" == "docker" ]]; then
-        _ensure_host_dirs
-        _compose up -d
-        ok "moeka (docker) started"
+        if [[ "$CONTAINED_MODE" -eq 1 ]]; then
+            info "starting in contained mode (no host access)"
+            _compose up -d moeka-contained
+            ok "moeka (contained) started"
+        else
+            _ensure_host_dirs
+            _compose up -d
+            ok "moeka (docker) started"
+        fi
     else
         _ensure_venv
         local bin; bin="$(_nanobot_bin)"
