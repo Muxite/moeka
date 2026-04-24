@@ -18,19 +18,6 @@ from nanobot.config.paths import get_media_dir
 _IS_WINDOWS = sys.platform == "win32"
 
 
-def _host_bridge_enabled() -> bool:
-    """
-    Whether shell commands should be re-entered into the host's namespaces.
-
-    Set ``MOEKA_EXEC_ON_HOST=1`` inside a container (with ``pid: host`` and
-    ``CAP_SYS_ADMIN``) to make ``exec`` behave as if it ran on the host:
-    ``lsblk``, ``systemctl``, ``docker ps``, etc. all see the host view.
-
-    :returns: True when the env var resolves to a truthy value.
-    """
-    return os.environ.get("MOEKA_EXEC_ON_HOST", "").lower() in ("1", "true", "yes", "on")
-
-
 @tool_parameters(
     tool_parameters_schema(
         command=StringSchema("The shell command to execute"),
@@ -250,18 +237,6 @@ class ExecTool(Tool):
                 env=env,
             )
         bash = shutil.which("bash") or "/bin/bash"
-        if _host_bridge_enabled():
-            nsenter = shutil.which("nsenter") or "/usr/bin/nsenter"
-            # -t 1 -m -u -n -i -p: switch into PID 1's mount/UTS/net/IPC/pid namespaces.
-            # The host's bash (and its PATH via `-l`) runs the command as if on the host.
-            return await asyncio.create_subprocess_exec(
-                nsenter, "-t", "1", "-m", "-u", "-n", "-i", "-p", "--",
-                "/bin/bash", "-l", "-c", command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            )
         return await asyncio.create_subprocess_exec(
             bash, "-l", "-c", command,
             stdout=asyncio.subprocess.PIPE,

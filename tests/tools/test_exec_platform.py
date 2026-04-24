@@ -108,36 +108,6 @@ class TestSpawnUnix:
         assert "-c" in args
         assert "echo hi" in args
 
-    @pytest.mark.asyncio
-    async def test_host_bridge_wraps_with_nsenter(self, monkeypatch):
-        """When MOEKA_EXEC_ON_HOST=1, commands are wrapped in `nsenter`."""
-        monkeypatch.setenv("MOEKA_EXEC_ON_HOST", "1")
-        with (
-            patch("nanobot.agent.tools.shell._IS_WINDOWS", False),
-            patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
-        ):
-            mock_exec.return_value = AsyncMock()
-            await ExecTool._spawn("lsblk", "/tmp", {"HOME": "/tmp"})
-
-        args = mock_exec.call_args[0]
-        assert "nsenter" in args[0]
-        assert "-t" in args and "1" in args
-        assert "-m" in args and "-u" in args and "-n" in args and "-i" in args
-        assert "lsblk" in args
-
-    @pytest.mark.asyncio
-    async def test_host_bridge_off_by_default(self):
-        """Without the env var, nsenter is not invoked."""
-        with (
-            patch("nanobot.agent.tools.shell._IS_WINDOWS", False),
-            patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
-        ):
-            mock_exec.return_value = AsyncMock()
-            await ExecTool._spawn("echo hi", "/tmp", {"HOME": "/tmp"})
-
-        args = mock_exec.call_args[0]
-        assert "nsenter" not in args[0]
-
 
 class TestSpawnWindows:
 

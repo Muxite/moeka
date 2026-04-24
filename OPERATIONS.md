@@ -1,12 +1,6 @@
 # Moeka operations guide
 
-Moeka (a nanobot flavor) runs in one of two modes, controlled by a single
-entrypoint: `./moeka.sh`.
-
-| Mode     | When it's used                                               | Command                    |
-|----------|--------------------------------------------------------------|----------------------------|
-| direct   | default on hosts without Docker, or when `.dockerized` absent| `./moeka.sh start`         |
-| docker   | `.dockerized` present **or** `--docker` / `MOEKA_MODE=docker`| `./moeka.sh --docker start`|
+Moeka runs natively on the host via a Python venv managed by UV.
 
 ## First-time setup
 
@@ -15,7 +9,7 @@ entrypoint: `./moeka.sh`.
 cp keys.env.example keys.env
 $EDITOR keys.env          # DO NOT commit keys.env
 
-# 2. Install dependencies (creates ./.venv OR builds the docker image)
+# 2. Install dependencies (creates ./.venv)
 ./moeka.sh install
 
 # 3. Verify
@@ -25,13 +19,23 @@ $EDITOR keys.env          # DO NOT commit keys.env
 ## Day-to-day
 
 ```sh
-./moeka.sh start          # bring it up
-./moeka.sh status         # where is it, what mode, is it alive?
+./moeka.sh start          # run the gateway
+./moeka.sh status         # workspace, config, running PID
 ./moeka.sh logs -f        # tail output
 ./moeka.sh restart
 ./moeka.sh stop
-./moeka.sh shell          # drop into the venv / container
+./moeka.sh shell          # drop into the venv
 ./moeka.sh exec -- <cmd>  # run a nanobot subcommand
+```
+
+## Boot setup
+
+```sh
+./moeka.sh enable         # install + enable systemd user service
+./moeka.sh disable        # stop + disable service
+
+# For headless servers (keep service running after logout):
+loginctl enable-linger "$USER"
 ```
 
 ## Directory layout
@@ -53,114 +57,63 @@ state, and media all live under `$MOEKA_WORKSPACE` (default `~/.nanobot`).
 | `./.env`                      | Non-secret per-host overrides (also gitignored)               |
 | `./moeka.sh`                  | Universal entrypoint                                          |
 | `./moeka.service`             | systemd user unit                                             |
-| `./docker-compose.yml`        | Container topology (host network + pid, one bind-mount)       |
 
-## Multiple agents (version-controlled)
+## Multiple agents
 
 Each agent is a single directory. Name two paths and you get two agents:
 
 ```sh
-# alice lives here:
 MOEKA_WORKSPACE=~/agents/alice ./moeka.sh start
-
-# bob in a different terminal:
-MOEKA_WORKSPACE=~/agents/bob   ./moeka.sh start
+MOEKA_WORKSPACE=~/agents/bob   ./moeka.sh start   # different terminal
 ```
 
 The directory may itself be a git repo. Typical allowlist: `config.json`,
 `SOUL.md`, `AGENTS.md`, `HEARTBEAT.md`, `TOOLS.md`, `USER.md`, `skills/`,
 `memory/MEMORY.md`. Typical gitignore: `keys.env`, `history/`, `media/`,
-`sessions/`, `tool-results/`, `config.json.bak.*`. Because secrets live only
-in `keys.env` at the repo root (not the instance dir), the instance tree is
-safe to push to a private git remote.
+`sessions/`, `tool-results/`, `config.json.bak.*`.
 
 ## Secrets flow
 
 ```
 keys.env   (gitignored)
-  │
-  │  sourced by moeka.sh (direct) or env_file (docker)
-  ▼
+  |  sourced by moeka.sh
+  v
 process env
-  │
-  │  read by nanobot config loader
-  ▼
+  |  read by nanobot config loader
+  v
 config.json (tracked placeholders like "${OPENROUTER_API_KEY}")
-  │
-  │  resolve_config_env_vars()
-  ▼
+  |  resolve_config_env_vars()
+  v
 live Config object
 ```
 
-## Host bridge (docker mode)
-
-With `MOEKA_EXEC_ON_HOST=1` (set by `docker-compose.yml`), every `exec()` the
-agent runs is prepended with `nsenter -t 1 -m -u -n -i -p --`, so commands like
-`lsblk`, `docker ps`, and `systemctl --user` behave the same way inside the
-container as on the host. Requires `pid: host` and `cap_add: SYS_ADMIN`.
-
-In addition to exec, the host filesystem is bind-mounted at matching paths
-(`/home:/home`, `/etc:/etc`, `/var:/var`, `/opt:/opt`, `/tmp:/tmp`, etc.) so
-that file tools (`read_file`, `write_file`, `glob`, `grep`) access host files
-directly — no path translation needed. The container user (uid 1000) maps to
-the host user, so file permissions behave identically to a native install.
-
-## Permissions: contained, non-sudo, and sudo
-
-Moeka has three permission tiers.
-
-### Contained (safe mode)
-
-```sh
-./moeka.sh --contained start
-```
-
-The agent is fully jailed inside the container:
-
-- File tools: restricted to `$MOEKA_WORKSPACE` only (`restrict_to_workspace: true`)
-- Exec: runs inside the container with bwrap sandbox — no nsenter, no host access
-- Network: bridge mode (container-local), no host LAN visibility
-- Capabilities: none (all dropped)
-
-Use this for untrusted workloads or experimentation. To upgrade, stop the
-contained service and start the regular gateway (`./moeka.sh start`).
+## Permissions: non-sudo and sudo
 
 ### Non-sudo (default)
 
-No restrictions beyond what the host user (uid 1000) can do:
-
-- File tools: unrestricted (`restrict_to_workspace: false`, no `allowed_dir`)
-- Exec: runs on the host via nsenter bridge, as the host user
-- Network: host network mode, full LAN visibility
-
-This is the same capability as running `nanobot gateway` natively.
+Moeka runs as the current user with no elevated privileges. It can read,
+write, and execute anything the user can.
 
 ### Sudo (opt-in)
 
 Two things must be in place:
 
 1. **Config**: `tools.exec.allowSudo: true` in `config.json`
-2. **Sudoers**: passwordless sudo for the host user
+2. **Sudoers**: passwordless sudo for the user
 
 ```sh
-# One-time host setup:
 ./moeka.sh setup-sudo          # interactive
 ./moeka.sh setup-sudo --yes    # non-interactive (writes /etc/sudoers.d/moeka-sudo)
 ```
 
 When enabled, moeka cannot run sudo commands blindly. The exec tool detects
-`sudo` in commands and returns a `SUDO_REQUIRED` prompt — moeka must re-call
-with `SUDO_JUSTIFIED:<reasoning> | <command>`, articulating why the action is
+`sudo` and returns a `SUDO_REQUIRED` prompt — moeka must re-call with
+`SUDO_JUSTIFIED:<reasoning> | <command>`, articulating why the action is
 safe. The justification is logged at WARNING level before execution.
 
-Check status with `./moeka.sh doctor`:
-
-```
-sudo rule     : installed (/etc/sudoers.d/moeka-sudo)
-allow_sudo    : enabled in config
-```
+Check status with `./moeka.sh doctor`.
 
 ## systemd
 
-See [SYSTEMD.md](./SYSTEMD.md). `bash install-service.sh` enables
-`moeka.service` and disables the legacy `nanobot.service`.
+See [SYSTEMD.md](./SYSTEMD.md). `./moeka.sh enable` installs and starts
+the service. `./moeka.sh disable` stops and disables it.

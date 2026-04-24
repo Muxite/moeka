@@ -1,33 +1,14 @@
 # Moeka
 
-**Moeka** is a packaged, containerized, systemd-ready personal agent built on top of [nanobot](https://github.com/HKUDS/nanobot). Where vanilla nanobot is a Python library you install and configure by hand, Moeka is an opinionated deployment:
+**Moeka** is a nanobot for server management — a native agent built on [nanobot](https://github.com/HKUDS/nanobot) for managing homelabs, Docker infrastructure, and Linux servers. It runs directly on the host via UV and a Python venv, so it has natural access to everything it manages.
 
 - one script to run it (`./moeka.sh`)
 - one file for secrets (`keys.env`), one for non-secret paths (`.env`)
-- one systemd unit (`moeka.service`) for start-on-boot
-- one directory for the whole agent — `MOEKA_WORKSPACE` (default `~/.nanobot`) holds config, identity, skills, memory, sessions, media, everything — `git init` it to carry an agent between machines
-- Docker **and** direct-host modes share the same instance directory, so switching modes doesn't lose memory or history
-- all mutable state is bind-mounted on the host, so `docker compose down` destroys containers but keeps everything else intact
-- inside Docker, shell commands transparently break out to the host so `lsblk`, `docker ps`, `systemctl` — everything — still works
+- one command for boot setup (`./moeka.sh enable`)
+- one directory for the whole agent — `MOEKA_WORKSPACE` (default `~/.nanobot`) holds config, identity, skills, memory, sessions, media, everything
+- configurable sudo (disabled by default, opt-in with justification gate)
 
 Everything else — the agent loop, channels, providers, tools, skills, MCP support — comes from upstream nanobot and stays pluggable.
-
----
-
-## What makes Moeka different from nanobot
-
-| Area | Upstream nanobot | Moeka |
-|---|---|---|
-| Entrypoint | `nanobot gateway …` (remember your flags) | `./moeka.sh start` (single verb, any mode) |
-| Secrets | Plaintext in `~/.nanobot/config.json` | Env vars in `keys.env`, resolved into `${VAR}` placeholders |
-| Instance directory | Hardcoded `~/.nanobot` with a nested `workspace/` subdir | `MOEKA_WORKSPACE` env var, default `~/.nanobot` (upstream-compatible). Workspace and state are one tree — one path to back up, `git init`, or duplicate |
-| Host access from Docker | None | `MOEKA_EXEC_ON_HOST=1` routes `exec()` through `nsenter` into PID 1's namespaces |
-| Docker networking | Bridge + port forwards | `network_mode: host` + `pid: host` — sees the LAN & host processes directly |
-| Boot / lifecycle | Manual `pip install`, ad-hoc scripts | `./moeka.sh install` + `bash install-service.sh` = done |
-| Version control | Workspace and config intermixed with secrets | Config + workspace are safe to commit; secrets stay in gitignored `keys.env` |
-| Image rebuilds | Single slow layer — any code change re-downloads every dep | Layered so source edits skip the Python + Node dep layers; BuildKit cache mounts keep apt/uv/npm downloads warm |
-
-Under the hood, Moeka is just nanobot with a few surgical additions to `nanobot/config/loader.py`, `nanobot/config/paths.py`, and `nanobot/agent/tools/shell.py`. Remove the wrapper files and it's still a valid nanobot checkout.
 
 ---
 
@@ -38,151 +19,86 @@ Under the hood, Moeka is just nanobot with a few surgical additions to `nanobot/
 cp keys.env.example keys.env
 $EDITOR keys.env
 
-# 2. Install — creates ./.venv in direct mode, or builds the image in docker mode
+# 2. Install — creates .venv with all dependencies
 ./moeka.sh install
 
 # 3. Run
 ./moeka.sh start
 
 # 4. Auto-start on boot (optional)
-bash install-service.sh
+./moeka.sh enable
 ```
 
-That's it. `./moeka.sh doctor` will tell you what mode it picked, whether `config.json` and `keys.env` are in place, and what Python/Docker it sees.
+`./moeka.sh doctor` will tell you whether Python, UV, config, keys, sudo, and systemd are in place.
 
 ---
 
-## The four pieces
-
-### 1. `moeka.sh` — universal entrypoint
-
-Auto-detects the right mode for this host:
-
-- **direct mode** (default) — creates `.venv`, `pip install -e .`, `exec nanobot gateway`
-- **docker mode** — `docker compose up -d` (triggered by a `.dockerized` flag in the repo, `--docker`, or `MOEKA_MODE=docker`)
+## Commands
 
 ```sh
-./moeka.sh start           # bring it up
-./moeka.sh status          # mode, state dir, running PID
-./moeka.sh logs -f         # tail
-./moeka.sh restart
-./moeka.sh stop
-./moeka.sh shell           # drop into the venv / container
-./moeka.sh exec -- …       # run any nanobot subcommand
-./moeka.sh doctor          # sanity check
-./moeka.sh setup-sudo      # install passwordless sudo for moeka (DANGEROUS)
+./moeka.sh start           # run the nanobot gateway
+./moeka.sh stop            # stop the running instance
+./moeka.sh restart         # stop + start
+./moeka.sh status          # workspace, config, running PID
+./moeka.sh logs -f         # tail output (via journalctl)
+./moeka.sh shell           # drop into the venv
+./moeka.sh exec -- ...     # run any nanobot subcommand
+./moeka.sh install         # create .venv and install deps
+./moeka.sh doctor          # sanity check everything
+./moeka.sh enable          # install + enable systemd user service
+./moeka.sh disable         # stop + disable systemd user service
+./moeka.sh setup-sudo      # install passwordless sudo rule (DANGEROUS)
 ```
 
-Flags (may appear before the command): `--docker`, `--direct`, `--contained`, `--config PATH`, `--state PATH`.
+Flags: `--config PATH`, `--workspace PATH`.
 
-### 2. `keys.env` — one file for every secret
+---
 
-`keys.env` is sourced by `moeka.sh` (direct mode) and loaded via `env_file:` (docker mode). Any `${VAR}` placeholder in `config.json` is then resolved at startup by nanobot's existing env-interpolation.
+## How it works
+
+### `keys.env` — one file for every secret
+
+`keys.env` is sourced by `moeka.sh`. Any `${VAR}` placeholder in `config.json` is resolved at startup.
 
 ```
 keys.env   (gitignored)
-  │  sourced by moeka.sh / env_file
-  ▼
+  |  sourced by moeka.sh
+  v
 process env
-  │  read by nanobot config loader
-  ▼
+  |  read by nanobot config loader
+  v
 config.json   (tracked — holds "${OPENROUTER_API_KEY}" etc.)
-  │  resolve_config_env_vars()
-  ▼
+  |  resolve_config_env_vars()
+  v
 live Config
 ```
 
 See `keys.env.example` for the full list of supported variables.
 
-### 3. `MOEKA_WORKSPACE` — the one-directory instance
+### `MOEKA_WORKSPACE` — the one-directory instance
 
-Upstream nanobot already uses `~/.nanobot` for its state. Moeka keeps that default and just promotes the whole tree to "the agent" — config, identity docs, skills, memory, sessions, history, media all sit side-by-side in one directory. One env var points at it:
+Default `~/.nanobot`. Holds config, identity docs, skills, memory, sessions, media, cron, history — everything. `git init` it to carry an agent between machines.
 
-| Var | Default | Contents |
-|---|---|---|
-| `MOEKA_WORKSPACE` | `~/.nanobot` | `config.json`, `SOUL.md` / `AGENTS.md` / `HEARTBEAT.md` / `TOOLS.md` / `USER.md`, `skills/`, `memory/`, `sessions/`, `media/`, `cron/`, `history/`, `tool-results/` |
-
-`${MOEKA_WORKSPACE}` is a placeholder inside `config.json`, so the config is portable across hosts. Multi-agent is one env var:
+Multi-agent is one env var:
 
 ```sh
 MOEKA_WORKSPACE=~/agents/alice ./moeka.sh start
 MOEKA_WORKSPACE=~/agents/bob   ./moeka.sh start   # different terminal
 ```
 
-Pin the default for a given host via the sibling `.env` file (copied from `.env.example`). `git init` the directory to carry an agent identity between machines; a `.gitignore` inside it typically allow-lists `config.json`, `*.md`, `skills/`, and `memory/MEMORY.md`, and excludes ephemeral trees like `history/`, `media/`, `sessions/`, and `tool-results/`.
+### Two permission tiers
 
-The previous split of `MOEKA_STATE` + `MOEKA_WORKSPACE` is gone. `MOEKA_STATE` is still accepted as a deprecated alias (with a warning) so old `.env` files keep working.
+| Tier | Exec | Sudo | How to enable |
+|---|---|---|---|
+| **Non-sudo** (default) | Runs as current user | No | Default |
+| **Sudo** (opt-in) | Runs as current user + sudo | Yes, with justification gate | Config flag + `./moeka.sh setup-sudo` |
 
-### 4. Host bridge — Docker that feels like the host
-
-When running in Docker, `docker-compose.yml` sets `MOEKA_EXEC_ON_HOST=1`. Moeka's shell tool sees that and prefixes every command with `nsenter -t 1 -m -u -n -i -p --` before handing it to `bash -l -c`. Combined with `pid: host`, `network_mode: host`, and a tight set of capabilities (`SYS_ADMIN`, `SYS_PTRACE`, `SYS_CHROOT`, file-capped onto `/usr/bin/nsenter` so the non-root `nanobot` user can use them), the agent sees:
-
-- the host's processes (`ps`, `systemctl --user`, `docker ps`)
-- the host's block devices (`lsblk`, `/dev/*`)
-- the host's network (LAN services, localhost bindings)
-
-This is a deliberate trade-off: Docker here provides reproducible packaging, **not** a security boundary. If you want strict isolation, leave `MOEKA_EXEC_ON_HOST` unset and drop the three caps from `docker-compose.yml`.
-
-### 5. Three-tier permissions — contained, non-sudo, and sudo
-
-Moeka has three permission tiers. Pick the one that matches your trust level:
-
-| Tier | Host access | File tools | Exec | Sudo | Start with |
-|---|---|---|---|---|---|
-| **Contained** | None | Workspace only (bwrap sandbox) | Inside container only | No | `./moeka.sh --contained start` |
-| **Non-sudo** (default) | Full | Full host filesystem | Host via nsenter | No | `./moeka.sh start` |
-| **Sudo** | Full | Full host filesystem | Host via nsenter + sudo | Yes | Enable config + sudoers, then `./moeka.sh start` |
-
-**Contained (safe mode):** The agent runs entirely inside the container with no host escape. File tools are restricted to the workspace directory (`$MOEKA_WORKSPACE`), exec runs inside the container with a bwrap sandbox, and no capabilities are granted. This is the "safe" version — suitable for untrusted workloads or experimentation. To upgrade from contained to non-sudo/sudo, stop the contained service and start the regular gateway.
-
-**Non-sudo (default):** The host filesystem is bind-mounted into the container at matching paths (`/home:/home`, `/etc:/etc`, `/var:/var`, `/opt:/opt`, `/tmp:/tmp`, etc.), so file tools (`read_file`, `write_file`, `glob`, `grep`) see the full host tree without path translation. Shell commands run on the host via the nsenter bridge. Together this means moeka can read, write, and execute anything the host user (uid 1000) can — no `restrict_to_workspace`, no sandboxing, no artificial limits.
-
-**Sudo (opt-in):** Enabled by two things:
-
-1. **Config flag** — set `tools.exec.allowSudo: true` in `config.json`. When a command contains `sudo`, the exec tool pauses and returns a `SUDO_REQUIRED` prompt. Moeka must re-call with `SUDO_JUSTIFIED:<safety reasoning> | <original command>`, forcing it to articulate why the action is safe before execution proceeds. The justification is logged at WARNING level.
-
-2. **Host sudoers rule** — the container user maps to the host's uid 1000. For `sudo` to work on the host, that user needs a NOPASSWD entry:
+**Sudo opt-in:** Requires both `tools.exec.allowSudo: true` in `config.json` and a host sudoers rule. When enabled, the exec tool detects `sudo` and requires inline justification (`SUDO_JUSTIFIED:<reasoning> | <command>`) before proceeding. The justification is logged at WARNING level.
 
 ```sh
-./moeka.sh setup-sudo          # interactive — prompts before writing
+./moeka.sh setup-sudo          # interactive
 ./moeka.sh setup-sudo --yes    # non-interactive
 ```
-
-This writes `/etc/sudoers.d/moeka-sudo` granting `<user> ALL=(ALL) NOPASSWD: ALL`. Requires running with sudo access on the host (one-time setup).
-
-`./moeka.sh doctor` reports whether both the config flag and the sudoers rule are in place.
-
----
-
-## Image build & caching
-
-The `Dockerfile` is ordered coldest-to-hottest so everyday edits skip the slow layers:
-
-```
-1. FROM uv:python3.12-slim              (changes ~once per uv release)
-2. apt install (curl, node, nsenter…)    (changes ~rare)
-3. useradd + setcap nsenter              (never)
-4. uv pip install .[discord,api]         (on pyproject.toml edits)
-5. npm install bridge                    (on bridge/package.json edits)
-6. COPY nanobot/ + bridge/ + README.md   (every commit)
-7. uv reinstall --no-deps + tsc          (fast — no network)
-```
-
-Two tricks keep it tight:
-
-- `pyproject.toml` is copied alone, then stub `nanobot/__init__.py` and `bridge/.stub` files are created so hatchling's wheel builder is satisfied. Real source is copied in layer 6 and overlays the stubs. Result: a one-line `.py` change no longer invalidates `uv pip install`.
-- BuildKit cache mounts on `/var/cache/apt`, `/root/.cache/uv`, and `/root/.npm` keep downloaded wheels and tarballs warm across rebuilds. `/etc/apt/apt.conf.d/docker-clean` is removed so apt doesn't wipe its own cache on every `install`.
-
-Measured rebuild times on this box:
-
-| Change | Time |
-|---|---|
-| Cold build (no cache) | ~60 s |
-| Single `.py` edit | ~20 s (most of that is image export, not work) |
-| `README.md` edit | ~14 s |
-| `touch` without content change | <1 s (all layers cached) |
-
-To prove it, `DOCKER_BUILDKIT=1 docker compose build` twice — the second run finishes almost instantly.
 
 ---
 
@@ -190,38 +106,35 @@ To prove it, `DOCKER_BUILDKIT=1 docker compose build` twice — the second run f
 
 ```
 .
-├── moeka.sh              # universal entrypoint — what you actually run
-├── moeka.service         # systemd user unit (calls moeka.sh)
+├── moeka.sh              # universal entrypoint
+├── moeka.service         # systemd user unit
 ├── install-service.sh    # enable moeka.service, disable legacy nanobot.service
-├── restart-nanobot.sh    # legacy-named restart helper (safe from inside the agent)
+├── restart-nanobot.sh    # restart helper (safe from inside the agent)
 │
 ├── keys.env.example      # every supported secret, with comments
 ├── keys.env              # real secrets — gitignored
 ├── .env.example          # non-secret runtime paths (MOEKA_WORKSPACE)
-├── .env                  # per-host copy of the above — gitignored
+├── .env                  # per-host copy — gitignored
 │
-├── Dockerfile            # cache-layered: system deps → uv deps → npm deps → source
-├── docker-compose.yml    # gateway (host net+pid) and API services
-├── entrypoint.sh         # container PID 1
-│
+├── pyproject.toml        # Python package (installed via uv)
 ├── OPERATIONS.md         # day-to-day guide
 ├── SYSTEMD.md            # boot service details
 │
-├── nanobot/              # upstream source (with Moeka's surgical edits)
+├── nanobot/              # upstream source (with moeka's surgical edits)
 ├── bridge/               # WhatsApp bridge (Node)
 ├── tests/                # pytest suite
 └── docs/                 # deeper-dive technical docs
 ```
 
-The Moeka instance directory (outside this repo):
+The instance directory (outside this repo):
 
 ```
-$MOEKA_WORKSPACE/           # default ~/.nanobot — optionally its own git repo
-├── config.json             # "${OPENROUTER_API_KEY}" etc. — no secrets in-file
+$MOEKA_WORKSPACE/           # default ~/.nanobot
+├── config.json             # "${OPENROUTER_API_KEY}" etc.
 ├── SOUL.md                 # personality / voice
-├── AGENTS.md               # agent identity + behavior contracts
-├── HEARTBEAT.md            # scheduled self-reflection prompts
-├── TOOLS.md                # tool usage notes for the agent
+├── AGENTS.md               # agent identity + behavior
+├── HEARTBEAT.md            # periodic tasks
+├── TOOLS.md                # tool usage notes
 ├── USER.md                 # user-authored context
 ├── skills/                 # user-authored skills
 ├── memory/                 # vector memory + dream history
@@ -229,31 +142,25 @@ $MOEKA_WORKSPACE/           # default ~/.nanobot — optionally its own git repo
 ├── media/                  # attachments, exports
 ├── cron/                   # scheduled job registry
 ├── history/                # CLI + shared history
-└── tool-results/           # persisted overflow from big tool outputs
+└── tool-results/           # persisted overflow
 ```
-
-This one path is bind-mounted into the container at `/home/nanobot/.nanobot`, so `docker compose down` tears down containers but every file survives on the host.
 
 ---
 
 ## Further reading
 
-- [`OPERATIONS.md`](./OPERATIONS.md) — first-time setup, day-to-day commands, multi-agent patterns, host-bridge details
-- [`SYSTEMD.md`](./SYSTEMD.md) — how the user service is wired
-- [`docs/PYTHON_SDK.md`](./docs/PYTHON_SDK.md) — using nanobot from Python
-- [`docs/CHANNEL_PLUGIN_GUIDE.md`](./docs/CHANNEL_PLUGIN_GUIDE.md) — writing a new channel
-- [`docs/MEMORY.md`](./docs/MEMORY.md) — how the Dream memory pipeline works
-- [`docs/MY_TOOL.md`](./docs/MY_TOOL.md) — the agent's self-modification tool
-- [`docs/WEBSOCKET.md`](./docs/WEBSOCKET.md) — WebSocket channel protocol
+- [OPERATIONS.md](./OPERATIONS.md) — first-time setup, day-to-day commands, multi-agent patterns
+- [SYSTEMD.md](./SYSTEMD.md) — how the user service is wired
+- [docs/PYTHON_SDK.md](./docs/PYTHON_SDK.md) — using nanobot from Python
+- [docs/CHANNEL_PLUGIN_GUIDE.md](./docs/CHANNEL_PLUGIN_GUIDE.md) — writing a new channel
+- [docs/MEMORY.md](./docs/MEMORY.md) — how the Dream memory pipeline works
+- [docs/MY_TOOL.md](./docs/MY_TOOL.md) — the agent's self-modification tool
+- [docs/WEBSOCKET.md](./docs/WEBSOCKET.md) — WebSocket channel protocol
 
 ---
 
 ## Credits
 
-Moeka is a deployment layer on top of **nanobot** by HKUDS. All of the core agent
-design — the Dream memory pipeline, the Lua-style skill system, the channel
-plugin architecture, the provider abstractions, MCP support — is their work.
-See [upstream nanobot](https://github.com/HKUDS/nanobot) for design discussion,
-release notes, and community.
+Moeka is a deployment layer on top of **nanobot** by HKUDS. All of the core agent design — the Dream memory pipeline, the Lua-style skill system, the channel plugin architecture, the provider abstractions, MCP support — is their work. See [upstream nanobot](https://github.com/HKUDS/nanobot) for design discussion, release notes, and community.
 
-License: MIT (see [`LICENSE`](./LICENSE)), inherited from upstream.
+License: MIT (see [LICENSE](./LICENSE)), inherited from upstream.
