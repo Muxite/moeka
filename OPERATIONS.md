@@ -99,17 +99,12 @@ write, and execute anything the user can.
 Two things must be in place:
 
 1. **Config**: `tools.exec.allowSudo: true` in `config.json`
-2. **Sudoers**: passwordless sudo for the user
+2. **Host policy**: sudo must allow the Moeka process to run the intended elevated commands
 
-```sh
-./moeka.sh setup-sudo          # interactive
-./moeka.sh setup-sudo --yes    # non-interactive (writes /etc/sudoers.d/moeka-sudo)
-```
-
-When enabled, moeka cannot run sudo commands blindly. The exec tool detects
-`sudo` and returns a `SUDO_REQUIRED` prompt — moeka must re-call with
-`SUDO_JUSTIFIED:<reasoning> | <command>`, articulating why the action is
-safe. The justification is logged at WARNING level before execution.
+When disabled, the exec tool blocks commands containing `sudo` with one clear
+error. When enabled, sudo commands run directly through the normal exec safety
+guards: dangerous command patterns, workspace restrictions, sandbox wrapping,
+internal URL blocking, timeouts, and output limits.
 
 Check status with `./moeka.sh doctor`.
 

@@ -13,7 +13,6 @@
 #   ./moeka.sh doctor           # sanity check the environment
 #   ./moeka.sh enable           # install + enable systemd user service
 #   ./moeka.sh disable          # stop + disable systemd user service
-#   ./moeka.sh setup-sudo [-y]  # install passwordless sudo rule (DANGEROUS)
 #
 # Flags (anywhere on the command line):
 #   --config PATH       override the config file path
@@ -189,38 +188,6 @@ cmd_disable() {
     ok "moeka service disabled"
 }
 
-cmd_setup_sudo() {
-    local sudoers_file="/etc/sudoers.d/moeka-sudo"
-    local user; user="$(id -un)"
-    local uid; uid="$(id -u)"
-
-    warn "DANGEROUS: about to grant passwordless sudo to user '${user}' (uid ${uid})"
-    warn "   This allows any process running as ${user} to run any command as root."
-    warn "   Only proceed if moeka's allow_sudo config is intentional."
-    warn ""
-    warn "   Sudoers file: ${sudoers_file}"
-    warn "   Rule: ${user} ALL=(ALL) NOPASSWD: ALL"
-    warn ""
-
-    local yes_flag=0
-    for arg in "$@"; do [[ "$arg" == "--yes" || "$arg" == "-y" ]] && yes_flag=1; done
-    if [[ "$yes_flag" -eq 0 ]]; then
-        printf 'Continue? [y/N] '
-        read -r reply
-        [[ "$reply" =~ ^[Yy]$ ]] || { info "Aborted."; return 0; }
-    fi
-
-    local rule="${user} ALL=(ALL) NOPASSWD: ALL"
-    if echo "$rule" | sudo tee "$sudoers_file" > /dev/null; then
-        sudo chmod 0440 "$sudoers_file"
-        ok "Sudoers rule installed: ${sudoers_file}"
-        ok "Moeka (running as ${user}) can now use passwordless sudo."
-    else
-        err "Failed to write ${sudoers_file} — run with sudo or as root."
-        exit 1
-    fi
-}
-
 cmd_doctor() {
     command -v python3 >/dev/null 2>&1 \
         && printf 'python3       : %s\n' "$(python3 --version)" \
@@ -239,15 +206,9 @@ cmd_doctor() {
         && printf 'keys.env      : present (repo)\n' \
         || printf 'keys.env      : missing (see keys.env.example)\n'
 
-    # Sudo status
-    if [[ -f /etc/sudoers.d/moeka-sudo ]]; then
-        printf 'sudo rule     : %sinstalled%s (/etc/sudoers.d/moeka-sudo)\n' "$_C_GREEN" "$_C_RESET"
-    else
-        printf 'sudo rule     : not installed (run ./moeka.sh setup-sudo to enable)\n'
-    fi
     if [[ -f "${MOEKA_WORKSPACE_EXPANDED}/config.json" ]]; then
         if grep -q '"allowSudo"\s*:\s*true' "${MOEKA_WORKSPACE_EXPANDED}/config.json" 2>/dev/null; then
-            printf 'allow_sudo    : %senabled%s in config\n' "$_C_GREEN" "$_C_RESET"
+            printf 'allow_sudo    : %senabled%s in config (host sudo policy is managed outside moeka.sh)\n' "$_C_GREEN" "$_C_RESET"
         else
             printf 'allow_sudo    : disabled in config\n'
         fi
@@ -277,7 +238,6 @@ case "$CMD" in
     doctor)      cmd_doctor ;;
     enable)      cmd_enable ;;
     disable)     cmd_disable ;;
-    setup-sudo)  cmd_setup_sudo "$@" ;;
     help|-h|--help) cmd_help ;;
     *)
         err "unknown command: $CMD"

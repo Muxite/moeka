@@ -6,7 +6,7 @@
 - one file for secrets (`keys.env`), one for non-secret paths (`.env`)
 - one command for boot setup (`./moeka.sh enable`)
 - one directory for the whole agent — `MOEKA_WORKSPACE` (default `~/.nanobot`) holds config, identity, skills, memory, sessions, media, everything
-- configurable sudo (disabled by default, opt-in with justification gate)
+- configurable sudo (disabled by default, opt-in through config and host policy)
 
 Everything else — the agent loop, channels, providers, tools, skills, MCP support — comes from upstream nanobot and stays pluggable.
 
@@ -29,7 +29,7 @@ $EDITOR keys.env
 ./moeka.sh enable
 ```
 
-`./moeka.sh doctor` will tell you whether Python, UV, config, keys, sudo, and systemd are in place.
+`./moeka.sh doctor` will tell you whether Python, UV, config, keys, and systemd are in place.
 
 ---
 
@@ -47,7 +47,6 @@ $EDITOR keys.env
 ./moeka.sh doctor          # sanity check everything
 ./moeka.sh enable          # install + enable systemd user service
 ./moeka.sh disable         # stop + disable systemd user service
-./moeka.sh setup-sudo      # install passwordless sudo rule (DANGEROUS)
 ```
 
 Flags: `--config PATH`, `--workspace PATH`.
@@ -91,14 +90,9 @@ MOEKA_WORKSPACE=~/agents/bob   ./moeka.sh start   # different terminal
 | Tier | Exec | Sudo | How to enable |
 |---|---|---|---|
 | **Non-sudo** (default) | Runs as current user | No | Default |
-| **Sudo** (opt-in) | Runs as current user + sudo | Yes, with justification gate | Config flag + `./moeka.sh setup-sudo` |
+| **Sudo** (opt-in) | Runs as current user + sudo | Yes, through normal exec guards | `tools.exec.allowSudo: true` plus host sudo policy |
 
-**Sudo opt-in:** Requires both `tools.exec.allowSudo: true` in `config.json` and a host sudoers rule. When enabled, the exec tool detects `sudo` and requires inline justification (`SUDO_JUSTIFIED:<reasoning> | <command>`) before proceeding. The justification is logged at WARNING level.
-
-```sh
-./moeka.sh setup-sudo          # interactive
-./moeka.sh setup-sudo --yes    # non-interactive
-```
+**Sudo opt-in:** Requires `tools.exec.allowSudo: true` in `config.json` and a host sudo policy that lets the Moeka process run the intended elevated commands. When disabled, the exec tool blocks commands containing `sudo` with one clear error. When enabled, sudo commands run through the same safety guards as any other command.
 
 ---
 

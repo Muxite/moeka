@@ -37,7 +37,6 @@ _IS_WINDOWS = sys.platform == "win32"
 class ExecTool(Tool):
     """Tool to execute shell commands."""
 
-    _SUDO_JUSTIFY_PREFIX = "SUDO_JUSTIFIED:"
     _SUDO_PATTERN = re.compile(r"(?:^|\s|[;&|`(\n])\s*sudo\b", re.MULTILINE)
 
     def __init__(
@@ -121,38 +120,11 @@ class ExecTool(Tool):
             if requested != workspace_root and workspace_root not in requested.parents:
                 return "Error: working_dir is outside the configured workspace"
 
-        # Handle sudo gate: require inline justification before running sudo commands.
         if self._SUDO_PATTERN.search(command):
             if not self.allow_sudo:
                 return (
-                    "Error: Command blocked — sudo is not enabled. "
+                    "Error: Command blocked - sudo is not enabled. "
                     "Set tools.exec.allow_sudo = true in config to permit elevated commands."
-                )
-            if command.startswith(self._SUDO_JUSTIFY_PREFIX):
-                # Strip justification header and extract the real command.
-                rest = command[len(self._SUDO_JUSTIFY_PREFIX):]
-                sep = rest.find("|")
-                if sep == -1:
-                    return (
-                        "Error: Malformed sudo justification. "
-                        f"Format: {self._SUDO_JUSTIFY_PREFIX}<safety reasoning> | <command>"
-                    )
-                justification = rest[:sep].strip()
-                command = rest[sep + 1:].strip()
-                logger.warning(
-                    "Executing sudo command with justification: {} | cmd={}",
-                    justification, command,
-                )
-            else:
-                return (
-                    "SUDO_REQUIRED: This command uses sudo (elevated privileges). "
-                    "Before it can run, you MUST justify that it is safe. "
-                    "Re-call exec with:\n\n"
-                    f"  {self._SUDO_JUSTIFY_PREFIX}<your safety reasoning> | <original command>\n\n"
-                    "Example:\n"
-                    f"  {self._SUDO_JUSTIFY_PREFIX}Installing a standard apt package, no destructive side effects "
-                    "| sudo apt-get install -y curl\n\n"
-                    "Only proceed if you are certain the action is safe and necessary."
                 )
 
         guard_error = self._guard_command(command, cwd)

@@ -26,7 +26,7 @@ Remove from code:
 - `start` -> `exec .venv/bin/nanobot gateway --config <path>`
 - `stop` / `restart` / `status` / `logs` -> systemd or pkill
 - `shell` -> activate the venv
-- `doctor` -> check uv, python, venv, config, keys, sudo status
+- `doctor` -> check uv, python, venv, config, keys, and systemd status
 
 ### 3. pyproject.toml
 
@@ -35,10 +35,11 @@ Remove from code:
 
 ### 4. Configurable sudo (default disabled)
 
-Already implemented via `SUDO_JUSTIFIED:` pattern in shell.py. Changes:
-- Controlled by `MOEKA_SUDO_ENABLED` env var (default `0`) **or** `tools.exec.allowSudo` in config.json
-- `./moeka.sh setup-sudo` installs the sudoers rule (unchanged)
-- `./moeka.sh doctor` reports sudo status (unchanged)
+Implemented as a direct Nanobot-style exec policy:
+- Controlled by `tools.exec.allowSudo` in config.json
+- Disabled by default; commands containing `sudo` return one concise policy error
+- When enabled, sudo commands run directly through the normal exec safety guards
+- Host sudo policy is managed outside `moeka.sh`
 
 ### 5. Easy boot setup
 
@@ -69,7 +70,7 @@ Boot setup:
 
 Permissions:
   Non-sudo (default)          # runs as current user, no sudo
-  Sudo (opt-in)               # ./moeka.sh setup-sudo + config flag
+  Sudo (opt-in)               # config flag + host sudo policy
 ```
 
 ## Rollback

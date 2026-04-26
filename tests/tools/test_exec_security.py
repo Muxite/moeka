@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import socket
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -20,6 +20,37 @@ def _fake_resolve_localhost(hostname, port, family=0, type_=0):
 
 def _fake_resolve_public(hostname, port, family=0, type_=0):
     return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+
+
+@pytest.mark.asyncio
+async def test_exec_blocks_sudo_by_default():
+    """Sudo commands should fail once when allow_sudo is disabled."""
+    tool = ExecTool()
+    with patch.object(ExecTool, "_spawn", new_callable=AsyncMock) as mock_spawn:
+        result = await tool.execute(command="sudo -n true")
+    assert "sudo is not enabled" in result
+    assert "SUDO_REQUIRED" not in result
+    mock_spawn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_exec_allows_sudo_when_enabled():
+    """When allow_sudo is enabled, sudo should run through the normal exec path."""
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"ok", b"")
+    mock_proc.returncode = 0
+
+    tool = ExecTool(allow_sudo=True)
+    with (
+        patch.object(ExecTool, "_guard_command", return_value=None) as mock_guard,
+        patch.object(ExecTool, "_spawn", return_value=mock_proc) as mock_spawn,
+    ):
+        result = await tool.execute(command="sudo -n true")
+
+    assert "ok" in result
+    assert "SUDO_REQUIRED" not in result
+    mock_guard.assert_called_once()
+    assert mock_spawn.call_args[0][0] == "sudo -n true"
 
 
 @pytest.mark.asyncio
