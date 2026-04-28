@@ -184,11 +184,9 @@ class CronService:
         return self._store
 
     def _save_store(self) -> None:
-        """Save jobs to disk."""
+        """Save jobs to disk using an atomic write to prevent corruption."""
         if not self._store:
             return
-
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
             "version": self._store.version,
@@ -234,7 +232,14 @@ class CronService:
             ]
         }
 
-        self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            self.store_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(data, indent=2, ensure_ascii=False)
+            tmp = self.store_path.with_suffix(".json.tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(self.store_path)
+        except Exception as exc:
+            logger.error("Failed to save cron store to {}: {}", self.store_path, exc)
 
     async def start(self) -> None:
         """Start the cron service."""
@@ -286,8 +291,16 @@ class CronService:
 
         async def tick():
             await asyncio.sleep(delay_s)
-            if self._running:
+            if not self._running:
+                return
+            try:
                 await self._on_timer()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("Cron timer tick failed: {}; re-arming", exc)
+                if self._running:
+                    self._arm_timer()
 
         self._timer_task = asyncio.create_task(tick())
 

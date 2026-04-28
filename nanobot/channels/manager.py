@@ -85,20 +85,22 @@ class ChannelManager:
             return ""
 
     def _validate_allow_from(self) -> None:
+        to_disable: list[str] = []
         for name, ch in self.channels.items():
             cfg = ch.config
             if isinstance(cfg, dict):
-                if "allow_from" in cfg:
-                    allow = cfg.get("allow_from")
-                else:
-                    allow = cfg.get("allowFrom")
+                allow = cfg.get("allow_from") if "allow_from" in cfg else cfg.get("allowFrom")
             else:
                 allow = getattr(cfg, "allow_from", None)
             if allow == []:
-                raise SystemExit(
-                    f'Error: "{name}" has empty allowFrom (denies all). '
-                    f'Set ["*"] to allow everyone, or add specific user IDs.'
+                logger.error(
+                    '"{}" has empty allowFrom — channel would deny everyone. '
+                    'Set allowFrom to ["*"] or add specific IDs. Disabling channel.',
+                    name,
                 )
+                to_disable.append(name)
+        for name in to_disable:
+            del self.channels[name]
 
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
@@ -113,8 +115,7 @@ class ChannelManager:
             logger.warning("No channels enabled")
             return
 
-        # Start outbound dispatcher
-        self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
+        self._dispatch_task = asyncio.create_task(self._dispatch_with_watchdog())
 
         # Start channels
         tasks = []
@@ -164,17 +165,33 @@ class ChannelManager:
             except Exception as e:
                 logger.error("Error stopping {}: {}", name, e)
 
+    async def _dispatch_with_watchdog(self) -> None:
+        """Run _dispatch_outbound, restarting it automatically on unexpected crashes."""
+        _RESTART_DELAY_S = 1.0
+        while True:
+            try:
+                await self._dispatch_outbound()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Outbound dispatcher crashed ({}); restarting in {}s",
+                    exc, _RESTART_DELAY_S,
+                )
+                try:
+                    await asyncio.sleep(_RESTART_DELAY_S)
+                except asyncio.CancelledError:
+                    raise
+
     async def _dispatch_outbound(self) -> None:
         """Dispatch outbound messages to the appropriate channel."""
         logger.info("Outbound dispatcher started")
 
-        # Buffer for messages that couldn't be processed during delta coalescing
-        # (since asyncio.Queue doesn't support push_front)
         pending: list[OutboundMessage] = []
 
         while True:
             try:
-                # First check pending buffer before waiting on queue
                 if pending:
                     msg = pending.pop(0)
                 else:
@@ -189,8 +206,6 @@ class ChannelManager:
                     if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
                         continue
 
-                # Coalesce consecutive _stream_delta messages for the same (channel, chat_id)
-                # to reduce API calls and improve streaming latency
                 if msg.metadata.get("_stream_delta") and not msg.metadata.get("_stream_end"):
                     msg, extra_pending = self._coalesce_stream_deltas(msg)
                     pending.extend(extra_pending)
@@ -204,7 +219,13 @@ class ChannelManager:
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
-                break
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Unexpected error in outbound dispatcher ({}); continuing",
+                    exc,
+                )
+                continue
 
     @staticmethod
     async def _send_once(channel: BaseChannel, msg: OutboundMessage) -> None:

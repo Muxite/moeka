@@ -103,26 +103,32 @@ def _apply_ssrf_whitelist(config: Config) -> None:
 
 def save_config(config: Config, config_path: Path | None = None) -> None:
     """
-    Save configuration to file.
+    Save configuration to file using an atomic write so a mid-write crash
+    never leaves a corrupt config.json.
 
-    Args:
-        config: Configuration to save.
-        config_path: Optional path to save to. Uses default if not provided.
+    :param config: Configuration to save.
+    :param config_path: Optional path to save to. Uses default if not provided.
     """
     path = config_path or get_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    data = config.model_dump(mode="json", by_alias=True)
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = config.model_dump(mode="json", by_alias=True)
+        payload = json.dumps(data, indent=2, ensure_ascii=False)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        logger.error("Failed to save config to {}: {}", path, exc)
 
 
 def resolve_config_env_vars(config: Config) -> Config:
     """Return a copy of *config* with ``${VAR}`` env-var references resolved.
 
     Only string values are affected; other types pass through unchanged.
-    Raises :class:`ValueError` if a referenced variable is not set.
+    Missing variables are logged as warnings and their placeholders are left
+    unreplaced so that the rest of the system can start without them.
+
+    :returns: Config with env-var placeholders substituted.
     """
     data = config.model_dump(mode="json", by_alias=True)
     data = _resolve_env_vars(data)
@@ -144,9 +150,12 @@ def _env_replace(match: re.Match[str]) -> str:
     name = match.group(1)
     value = os.environ.get(name)
     if value is None:
-        raise ValueError(
-            f"Environment variable '{name}' referenced in config is not set"
+        logger.warning(
+            "Environment variable '{}' referenced in config is not set; "
+            "leaving placeholder unreplaced — dependent features will be unavailable",
+            name,
         )
+        return match.group(0)
     return value
 
 

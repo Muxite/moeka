@@ -281,6 +281,8 @@ class AgentLoop:
                     path_append=self.exec_config.path_append,
                     allowed_env_keys=self.exec_config.allowed_env_keys,
                     allow_sudo=self.exec_config.allow_sudo,
+                    deny_patterns=self.exec_config.deny_patterns,
+                    allow_patterns=self.exec_config.allow_patterns,
                 )
             )
         if self.web_config.enable:
@@ -622,6 +624,17 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    def _save_session(self, session: Any) -> None:
+        """Persist *session* without letting a storage error abort the current turn."""
+        try:
+            self._save_session(session)
+        except Exception as exc:
+            logger.warning(
+                "Session save failed for {} — conversation state may not persist: {}",
+                getattr(session, "key", "?"),
+                exc,
+            )
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -641,9 +654,9 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             if self._restore_runtime_checkpoint(session):
-                self.sessions.save(session)
+                self._save_session(session)
             if self._restore_pending_user_turn(session):
-                self.sessions.save(session)
+                self._save_session(session)
 
             session, pending = self.auto_compact.prepare_session(session, key)
 
@@ -664,7 +677,7 @@ class AgentLoop:
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             self._clear_runtime_checkpoint(session)
-            self.sessions.save(session)
+            self._save_session(session)
             self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
             return OutboundMessage(
                 channel=channel,
@@ -684,9 +697,9 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
         if self._restore_runtime_checkpoint(session):
-            self.sessions.save(session)
+            self._save_session(session)
         if self._restore_pending_user_turn(session):
-            self.sessions.save(session)
+            self._save_session(session)
 
         session, pending = self.auto_compact.prepare_session(session, key)
 
@@ -737,7 +750,7 @@ class AgentLoop:
         if isinstance(msg.content, str) and msg.content.strip():
             session.add_message("user", msg.content)
             self._mark_pending_user_turn(session)
-            self.sessions.save(session)
+            self._save_session(session)
             user_persisted_early = True
 
         final_content, _, all_msgs, stop_reason, had_injections = await self._run_agent_loop(
@@ -760,7 +773,7 @@ class AgentLoop:
         self._save_turn(session, all_msgs, save_skip)
         self._clear_pending_user_turn(session)
         self._clear_runtime_checkpoint(session)
-        self.sessions.save(session)
+        self._save_session(session)
         self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
 
         # When follow-up messages were injected mid-turn, a later natural
@@ -874,7 +887,7 @@ class AgentLoop:
     def _set_runtime_checkpoint(self, session: Session, payload: dict[str, Any]) -> None:
         """Persist the latest in-flight turn state into session metadata."""
         session.metadata[self._RUNTIME_CHECKPOINT_KEY] = payload
-        self.sessions.save(session)
+        self._save_session(session)
 
     def _mark_pending_user_turn(self, session: Session) -> None:
         session.metadata[self._PENDING_USER_TURN_KEY] = True

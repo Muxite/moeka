@@ -39,6 +39,23 @@ class ExecTool(Tool):
 
     _SUDO_PATTERN = re.compile(r"(?:^|\s|[;&|`(\n])\s*sudo\b", re.MULTILINE)
 
+    _DEFAULT_DENY_PATTERNS: list[str] = [
+        r"\brm\s+-[rf]{1,2}\b",
+        r"\bdel\s+/[fq]\b",
+        r"\brmdir\s+/s\b",
+        r"(?:^|[;&|]\s*)format\b",
+        r"\b(mkfs|diskpart)\b",
+        r"\bdd\s+if=",
+        r">\s*/dev/sd",
+        r"\b(shutdown|reboot|poweroff)\b",
+        r":\(\)\s*\{.*\};\s*:",
+        r">>?\s*\S*(?:history\.jsonl|\.dream_cursor)",
+        r"\btee\b[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",
+        r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:history\.jsonl|\.dream_cursor)",
+        r"\bdd\b[^|;&<>]*\bof=\S*(?:history\.jsonl|\.dream_cursor)",
+        r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",
+    ]
+
     def __init__(
         self,
         timeout: int = 60,
@@ -55,25 +72,7 @@ class ExecTool(Tool):
         self.working_dir = working_dir
         self.sandbox = sandbox
         self.allow_sudo = allow_sudo
-        self.deny_patterns = deny_patterns or [
-            r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
-            r"\bdel\s+/[fq]\b",              # del /f, del /q
-            r"\brmdir\s+/s\b",               # rmdir /s
-            r"(?:^|[;&|]\s*)format\b",       # format (as standalone command only)
-            r"\b(mkfs|diskpart)\b",          # disk operations
-            r"\bdd\s+if=",                   # dd
-            r">\s*/dev/sd",                  # write to disk
-            r"\b(shutdown|reboot|poweroff)\b",  # system power
-            r":\(\)\s*\{.*\};\s*:",          # fork bomb
-            # Block writes to nanobot internal state files (#2989).
-            # history.jsonl / .dream_cursor are managed by append_history();
-            # direct writes corrupt the cursor format and crash /dream.
-            r">>?\s*\S*(?:history\.jsonl|\.dream_cursor)",            # > / >> redirect
-            r"\btee\b[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",     # tee / tee -a
-            r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:history\.jsonl|\.dream_cursor)",  # cp/mv target
-            r"\bdd\b[^|;&<>]*\bof=\S*(?:history\.jsonl|\.dream_cursor)",  # dd of=
-            r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",  # sed -i
-        ]
+        self.deny_patterns = deny_patterns if deny_patterns is not None else list(self._DEFAULT_DENY_PATTERNS)
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
@@ -90,10 +89,13 @@ class ExecTool(Tool):
     def description(self) -> str:
         return (
             "Execute a shell command and return its output. "
+            "rm -rf, dd, sudo, and shutil.rmtree are all permitted. "
+            "Blocked: format/mkfs/diskpart, shutdown/reboot/poweroff, fork bombs, "
+            "and writes to internal history files. "
             "Prefer read_file/write_file/edit_file over cat/echo/sed, "
             "and grep/glob over shell find/grep. "
             "Use -y or --yes flags to avoid interactive prompts. "
-            "Output is truncated at 10 000 chars; timeout defaults to 60s."
+            "Output truncated at 10 000 chars; timeout defaults to 60s."
         )
 
     @property

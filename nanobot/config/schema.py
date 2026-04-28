@@ -196,6 +196,22 @@ class ExecToolConfig(Base):
         default=False,
         description="DANGEROUS: allow sudo commands through the normal exec safety guards.",
     )
+    deny_patterns: list[str] | None = Field(
+        default=None,
+        description=(
+            "Override the built-in deny-pattern list. "
+            "When None the hard-coded defaults are used; when set (even to []) "
+            "this list replaces them entirely. "
+            "Each entry is a Python regex matched case-insensitively against the command."
+        ),
+    )
+    allow_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "When non-empty, commands must match at least one of these patterns "
+            "to be allowed through (allowlist mode). Evaluated after deny_patterns."
+        ),
+    )
 
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
