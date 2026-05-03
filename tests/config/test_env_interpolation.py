@@ -43,9 +43,9 @@ class TestResolveEnvVars:
     def test_plain_strings_unchanged(self):
         assert _resolve_env_vars("no vars here") == "no vars here"
 
-    def test_missing_var_raises(self):
-        with pytest.raises(ValueError, match="DOES_NOT_EXIST"):
-            _resolve_env_vars("${DOES_NOT_EXIST}")
+    def test_missing_var_leaves_placeholder(self):
+        result = _resolve_env_vars("${DOES_NOT_EXIST}")
+        assert result == "${DOES_NOT_EXIST}"
 
 
 class TestResolveConfig:

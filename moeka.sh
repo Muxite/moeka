@@ -178,19 +178,20 @@ cmd_start() {
 }
 
 cmd_stop() {
+    local stopped=0
+
     # Prefer systemd when the unit is active.
     if systemctl --user is-active --quiet moeka 2>/dev/null; then
         systemctl --user stop moeka
         ok "moeka stopped (systemd)"
-        return 0
-    fi
-    if systemctl --user is-active --quiet nanobot 2>/dev/null; then
+        stopped=1
+    elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
         systemctl --user stop nanobot
         ok "moeka stopped (systemd)"
-        return 0
+        stopped=1
     fi
 
-    # Fall back to PID file.
+    # Clean up PID-file process (may be an orphan separate from systemd).
     if [[ -f "$PID_FILE" ]]; then
         local pid; pid="$(cat "$PID_FILE")"
         if kill -0 "$pid" 2>/dev/null; then
@@ -205,18 +206,20 @@ cmd_stop() {
                 warn "graceful stop timed out — sending SIGKILL"
                 kill -9 "$pid" 2>/dev/null || true
             fi
-            rm -f "$PID_FILE"
-            ok "moeka stopped"
-            return 0
-        else
-            warn "stale PID file removed"
-            rm -f "$PID_FILE"
+            (( stopped++ )) || true
         fi
+        rm -f "$PID_FILE"
     fi
 
-    # Last resort: find by name.
+    # Always sweep for any remaining nanobot gateway processes (orphans survive
+    # both systemd stop and PID-file stops when processes were started outside
+    # systemd supervision).
     if pkill -f "nanobot gateway" 2>/dev/null; then
-        ok "moeka stopped (pkill)"
+        (( stopped++ )) || true
+    fi
+
+    if (( stopped > 0 )); then
+        ok "moeka stopped"
     else
         warn "no running gateway found"
     fi

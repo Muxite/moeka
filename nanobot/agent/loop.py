@@ -489,7 +489,8 @@ class AgentLoop:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
         await self._connect_mcp()
-        self._index_skills_in_vec_store()
+        # Run in a thread so model loading doesn't block the event loop.
+        await asyncio.to_thread(self._index_skills_in_vec_store)
         logger.info("Agent loop started")
 
         while self._running:

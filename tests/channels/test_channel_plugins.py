@@ -789,22 +789,22 @@ class _StartableChannel(BaseChannel):
 
 
 @pytest.mark.asyncio
-async def test_validate_allow_from_raises_on_empty_list():
-    """_validate_allow_from should raise SystemExit when allow_from is empty list."""
+async def test_validate_allow_from_disables_on_empty_list():
+    """_validate_allow_from should disable the channel (not raise) when allow_from is empty list."""
     fake_config = SimpleNamespace(
         channels=ChannelsConfig(),
         providers=SimpleNamespace(groq=SimpleNamespace(api_key="")),
     )
+    channel = _ChannelWithAllowFrom(fake_config, None, [])
 
     mgr = ChannelManager.__new__(ChannelManager)
     mgr.config = fake_config
-    mgr.channels = {"test": _ChannelWithAllowFrom(fake_config, None, [])}
+    mgr.channels = {"test": channel}
     mgr._dispatch_task = None
 
-    with pytest.raises(SystemExit) as exc_info:
-        mgr._validate_allow_from()
+    mgr._validate_allow_from()
 
-    assert "empty allowFrom" in str(exc_info.value)
+    assert "test" not in mgr.channels
 
 
 @pytest.mark.asyncio
@@ -825,22 +825,22 @@ async def test_validate_allow_from_passes_with_asterisk():
 
 
 @pytest.mark.asyncio
-async def test_validate_allow_from_raises_on_empty_dict_allow_from():
-    """_validate_allow_from should reject empty dict-backed allow_from lists."""
+async def test_validate_allow_from_disables_on_empty_dict_allow_from():
+    """_validate_allow_from should disable the channel when allow_from is an empty list."""
     fake_config = SimpleNamespace(
         channels=ChannelsConfig(),
         providers=SimpleNamespace(groq=SimpleNamespace(api_key="")),
     )
+    channel = _ChannelWithAllowFrom({"enabled": True}, None, [])
 
     mgr = ChannelManager.__new__(ChannelManager)
     mgr.config = fake_config
-    mgr.channels = {"test": _ChannelWithAllowFrom({"enabled": True}, None, [])}
+    mgr.channels = {"test": channel}
     mgr._dispatch_task = None
 
-    with pytest.raises(SystemExit) as exc_info:
-        mgr._validate_allow_from()
+    mgr._validate_allow_from()
 
-    assert "empty allowFrom" in str(exc_info.value)
+    assert "test" not in mgr.channels
 
 
 @pytest.mark.asyncio
