@@ -5,12 +5,13 @@
 #   ./moeka.sh start            # start the gateway in the background (terminal-safe)
 #   ./moeka.sh stop             # stop the running instance
 #   ./moeka.sh restart          # stop + start
-#   ./moeka.sh status           # show service/process status
-#   ./moeka.sh logs [-f]        # show (or tail -f) logs
+#   ./moeka.sh status           # show service/process status, port, channels, recent logs
+#   ./moeka.sh logs [-f] [-n N] # show last N lines (default 100), or tail -f
 #   ./moeka.sh shell            # drop into the moeka venv
 #   ./moeka.sh exec -- CMD ...  # run a command inside the venv
-#   ./moeka.sh install          # install Python deps into .venv
-#   ./moeka.sh doctor           # sanity check the environment
+#   ./moeka.sh install          # install Python deps into .venv, show version
+#   ./moeka.sh version          # print installed moeka version
+#   ./moeka.sh doctor           # sanity check: runtime, config, api keys, service state
 #   ./moeka.sh enable           # install + enable systemd user service
 #   ./moeka.sh disable          # stop + disable systemd user service
 #
@@ -122,6 +123,19 @@ LOG_FILE="${MOEKA_WORKSPACE_EXPANDED}/moeka.log"
 # ---------- commands --------------------------------------------------------
 cmd_install() {
     _ensure_venv
+    local py; py="$("$VENV_DIR/bin/python" --version 2>&1)"
+    local ver; ver="$("$VENV_DIR/bin/nanobot" --version 2>/dev/null || echo "unknown")"
+    ok "install complete"
+    printf '  python  : %s\n' "$py"
+    printf '  moeka   : %s\n' "$ver"
+    printf '  venv    : %s\n' "$VENV_DIR"
+}
+
+cmd_version() {
+    _ensure_venv
+    "$VENV_DIR/bin/nanobot" --version 2>/dev/null || \
+        "$VENV_DIR/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('moeka'))" 2>/dev/null || \
+        echo "unknown"
 }
 
 _is_systemd_active() {
@@ -136,6 +150,18 @@ cmd_run() {
     local bin; bin="$(_nanobot_bin)"
     local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
     mkdir -p "$MOEKA_WORKSPACE_EXPANDED"
+
+    # Acquire an exclusive lock so that duplicate starts (e.g. a stale
+    # backoff timer firing after an explicit restart) exit cleanly instead
+    # of running a second gateway instance.  The lock is held across exec
+    # so it stays alive for the full lifetime of the nanobot process.
+    local lock_file="${MOEKA_WORKSPACE_EXPANDED}/gateway.lock"
+    exec 9>"${lock_file}"
+    if ! flock -n 9; then
+        warn "another gateway instance already holds the lock; refusing to start a duplicate"
+        exit 0
+    fi
+
     exec "$bin" gateway --config "$cfg"
 }
 
@@ -230,10 +256,44 @@ cmd_restart() {
     cmd_start "$@"
 }
 
+_status_config_info() {
+    local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
+    [[ -f "$cfg" ]] || return 0
+    local port channels
+    port="$("$VENV_DIR/bin/python" -c "
+import json, sys
+try:
+    c = json.load(open('$cfg'))
+    print(c.get('api', {}).get('port', 8900))
+except: pass
+" 2>/dev/null)"
+    channels="$("$VENV_DIR/bin/python" -c "
+import json, sys
+try:
+    c = json.load(open('$cfg'))
+    enabled = [k for k,v in c.get('channels',{}).items() if isinstance(v,dict) and v.get('enabled')]
+    print(', '.join(enabled) if enabled else 'none')
+except: pass
+" 2>/dev/null)"
+    [[ -n "$port" ]]     && printf 'port         : %s\n' "$port"
+    [[ -n "$channels" ]] && printf 'channels     : %s\n' "$channels"
+}
+
+_status_process_uptime() {
+    local pid="$1"
+    local etime; etime="$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')"
+    [[ -n "$etime" ]] && printf 'uptime       : %s\n' "$etime"
+}
+
 cmd_status() {
+    local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
     printf 'workspace    : %s\n' "$MOEKA_WORKSPACE_EXPANDED"
-    printf 'config file  : %s\n' "${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
+    printf 'config file  : %s\n' "$cfg"
     printf 'log file     : %s\n' "$LOG_FILE"
+    if [[ -x "$VENV_DIR/bin/python" ]]; then
+        _status_config_info
+    fi
+    printf '\n'
     if systemctl --user is-active --quiet moeka 2>/dev/null; then
         systemctl --user status moeka --no-pager || true
     elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
@@ -242,24 +302,45 @@ cmd_status() {
         local pid; pid="$(cat "$PID_FILE")"
         if kill -0 "$pid" 2>/dev/null; then
             ok "running (PID $pid, background)"
+            _status_process_uptime "$pid"
         else
             warn "stale PID file — moeka is not running"
         fi
     else
-        echo "no gateway process running"
+        warn "no gateway process running"
+    fi
+    if [[ -f "$LOG_FILE" ]]; then
+        printf '\n%s--- last 5 log lines ---%s\n' "$_C_DIM" "$_C_RESET"
+        tail -n 5 "$LOG_FILE"
     fi
 }
 
 cmd_logs() {
+    local follow=0 lines=100
+    local extra_args=()
+    while (( $# > 0 )); do
+        case "$1" in
+            -f) follow=1; shift ;;
+            -n) lines="${2:?-n requires a number}"; shift 2 ;;
+            -n*) lines="${1#-n}"; shift ;;
+            *) extra_args+=("$1"); shift ;;
+        esac
+    done
+
     if systemctl --user is-active --quiet moeka 2>/dev/null; then
-        journalctl --user -u moeka "$@"
+        local jargs=("--user" "-u" "moeka")
+        (( follow )) && jargs+=("-f") || jargs+=("-n" "$lines")
+        journalctl "${jargs[@]}" "${extra_args[@]}"
     elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
-        journalctl --user -u nanobot "$@"
+        local jargs=("--user" "-u" "nanobot")
+        (( follow )) && jargs+=("-f") || jargs+=("-n" "$lines")
+        journalctl "${jargs[@]}" "${extra_args[@]}"
     elif [[ -f "$LOG_FILE" ]]; then
-        if [[ "${1:-}" == "-f" ]]; then
+        printf '%s[%s]%s\n' "$_C_DIM" "$LOG_FILE" "$_C_RESET"
+        if (( follow )); then
             tail -f "$LOG_FILE"
         else
-            tail -n 100 "$LOG_FILE"
+            tail -n "$lines" "$LOG_FILE"
         fi
     else
         warn "no log source found (systemd not active, no log file at $LOG_FILE)"
@@ -303,36 +384,93 @@ cmd_disable() {
 }
 
 cmd_doctor() {
+    local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
+
+    printf '%s=== Runtime ===%s\n' "$_C_BLUE" "$_C_RESET"
     command -v python3 >/dev/null 2>&1 \
         && printf 'python3       : %s\n' "$(python3 --version)" \
-        || printf 'python3       : not installed\n'
+        || printf 'python3       : %snot installed%s\n' "$_C_RED" "$_C_RESET"
     command -v uv >/dev/null 2>&1 \
         && printf 'uv            : %s\n' "$(uv --version)" \
-        || printf 'uv            : not installed (recommended: https://docs.astral.sh/uv/)\n'
-    [[ -x "$VENV_DIR/bin/nanobot" ]] \
-        && printf 'venv nanobot  : %s\n' "$VENV_DIR/bin/nanobot" \
-        || printf 'venv nanobot  : not built (run ./moeka.sh install)\n'
-    printf 'workspace     : %s\n' "$MOEKA_WORKSPACE_EXPANDED"
-    [[ -f "${MOEKA_WORKSPACE_EXPANDED}/config.json" ]] \
-        && printf 'config.json   : present\n' \
-        || printf 'config.json   : %smissing%s\n' "$_C_YELLOW" "$_C_RESET"
-    [[ -f "${SCRIPT_DIR}/keys.env" ]] \
-        && printf 'keys.env      : present (repo)\n' \
-        || printf 'keys.env      : missing (see keys.env.example)\n'
-
-    if [[ -f "${MOEKA_WORKSPACE_EXPANDED}/config.json" ]]; then
-        if grep -q '"allowSudo"\s*:\s*true' "${MOEKA_WORKSPACE_EXPANDED}/config.json" 2>/dev/null; then
-            printf 'allow_sudo    : %senabled%s in config (host sudo policy is managed outside moeka.sh)\n' "$_C_GREEN" "$_C_RESET"
-        else
-            printf 'allow_sudo    : disabled in config\n'
-        fi
+        || printf 'uv            : %snot installed%s (recommended: https://docs.astral.sh/uv/)\n' "$_C_YELLOW" "$_C_RESET"
+    if [[ -x "$VENV_DIR/bin/nanobot" ]]; then
+        local venv_py; venv_py="$("$VENV_DIR/bin/python" --version 2>&1)"
+        local moeka_ver; moeka_ver="$("$VENV_DIR/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('moeka'))" 2>/dev/null || echo "unknown")"
+        printf 'venv python   : %s%s%s\n' "$_C_GREEN" "$venv_py" "$_C_RESET"
+        printf 'moeka version : %s%s%s\n' "$_C_GREEN" "$moeka_ver" "$_C_RESET"
+        printf 'nanobot bin   : %s\n' "$VENV_DIR/bin/nanobot"
+    else
+        printf 'venv nanobot  : %snot built%s (run ./moeka.sh install)\n' "$_C_RED" "$_C_RESET"
     fi
 
-    # Systemd status
+    printf '\n%s=== Workspace ===%s\n' "$_C_BLUE" "$_C_RESET"
+    printf 'workspace     : %s\n' "$MOEKA_WORKSPACE_EXPANDED"
+    if [[ -d "$MOEKA_WORKSPACE_EXPANDED" ]]; then
+        local disk_usage; disk_usage="$(du -sh "$MOEKA_WORKSPACE_EXPANDED" 2>/dev/null | cut -f1)"
+        printf 'disk usage    : %s\n' "${disk_usage:-unknown}"
+    fi
+    [[ -f "$cfg" ]] \
+        && printf 'config.json   : %spresent%s\n' "$_C_GREEN" "$_C_RESET" \
+        || printf 'config.json   : %smissing%s\n' "$_C_YELLOW" "$_C_RESET"
+    [[ -f "${SCRIPT_DIR}/keys.env" ]] \
+        && printf 'keys.env      : %spresent (repo)%s\n' "$_C_GREEN" "$_C_RESET" \
+        || printf 'keys.env      : %smissing%s (see keys.env.example)\n' "$_C_YELLOW" "$_C_RESET"
+
+    if [[ -f "$cfg" && -x "$VENV_DIR/bin/python" ]]; then
+        printf '\n%s=== Config ===%s\n' "$_C_BLUE" "$_C_RESET"
+        "$VENV_DIR/bin/python" - <<'PYEOF' "$cfg"
+import json, os, sys
+cfg_path = sys.argv[1]
+try:
+    c = json.load(open(cfg_path))
+    port = c.get('api', {}).get('port', 8900)
+    print(f'api port      : {port}')
+    model = c.get('agents', {}).get('defaults', {}).get('model', 'unknown')
+    provider = c.get('agents', {}).get('defaults', {}).get('provider', 'unknown')
+    print(f'model         : {model}')
+    print(f'provider      : {provider}')
+    channels = c.get('channels', {})
+    enabled  = [k for k,v in channels.items() if isinstance(v,dict) and v.get('enabled')]
+    disabled = [k for k,v in channels.items() if isinstance(v,dict) and not v.get('enabled')]
+    if enabled:
+        print(f'channels on   : {", ".join(enabled)}')
+    if disabled:
+        print(f'channels off  : {", ".join(disabled)}')
+    sudo = c.get('agents', {}).get('defaults', {}).get('allowSudo', False)
+    print(f'allow_sudo    : {"enabled" if sudo else "disabled"}')
+except Exception as e:
+    print(f'config parse error: {e}', file=sys.stderr)
+PYEOF
+    fi
+
+    printf '\n%s=== API Keys ===%s\n' "$_C_BLUE" "$_C_RESET"
+    local key_vars=(TELEGRAM_TOKEN DISCORD_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY GROQ_API_KEY)
+    for v in "${key_vars[@]}"; do
+        if [[ -n "${!v:-}" ]]; then
+            printf '%-22s: %sset%s\n' "$v" "$_C_GREEN" "$_C_RESET"
+        else
+            printf '%-22s: %snot set%s\n' "$v" "$_C_DIM" "$_C_RESET"
+        fi
+    done
+
+    printf '\n%s=== Service ===%s\n' "$_C_BLUE" "$_C_RESET"
     if systemctl --user is-enabled --quiet moeka 2>/dev/null; then
-        printf 'systemd       : %senabled%s\n' "$_C_GREEN" "$_C_RESET"
+        local svc_state; svc_state="$(systemctl --user is-active moeka 2>/dev/null; true)"
+        svc_state="${svc_state:-unknown}"
+        printf 'systemd       : %senabled%s (%s)\n' "$_C_GREEN" "$_C_RESET" "$svc_state"
     else
         printf 'systemd       : not enabled (run ./moeka.sh enable)\n'
+    fi
+    if [[ -f "$PID_FILE" ]]; then
+        local pid; pid="$(cat "$PID_FILE")"
+        if kill -0 "$pid" 2>/dev/null; then
+            local etime; etime="$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')"
+            printf 'process       : %srunning%s (PID %s, up %s)\n' "$_C_GREEN" "$_C_RESET" "$pid" "${etime:-?}"
+        else
+            printf 'process       : %sstale PID file%s\n' "$_C_YELLOW" "$_C_RESET"
+        fi
+    else
+        printf 'process       : not running\n'
     fi
 }
 
@@ -350,6 +488,7 @@ case "$CMD" in
     shell)       cmd_shell ;;
     exec)        cmd_exec "$@" ;;
     install)     cmd_install ;;
+    version)     cmd_version ;;
     doctor)      cmd_doctor ;;
     enable)      cmd_enable ;;
     disable)     cmd_disable ;;

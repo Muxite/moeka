@@ -2,6 +2,8 @@
 Description=Moeka (nanobot) agent gateway
 After=network-online.target
 Wants=network-online.target
+# Never give up — allow unlimited restart attempts.
+StartLimitBurst=0
 
 [Service]
 Type=simple
@@ -9,10 +11,13 @@ WorkingDirectory=%h/projects/moeka
 # 'run' starts the gateway in the foreground so systemd owns the PID.
 # Do NOT use 'start' here — that backgrounds the process and breaks restart.
 ExecStart=%h/projects/moeka/moeka.sh run
-ExecStop=/bin/kill -TERM $MAINPID
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
+# Exponential backoff: 5s → ~10s → ~20s → ~40s → ~80s → 5min (cap).
+# Requires systemd 254+.
 RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=5min
 # Give the process up to 30s to shut down gracefully before SIGKILL
 TimeoutStopSec=30
 StandardOutput=journal

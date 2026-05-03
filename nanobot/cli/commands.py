@@ -653,6 +653,17 @@ def gateway(
     config = _load_runtime_config(config, workspace)
     port = port if port is not None else config.gateway.port
 
+    log_file = config.workspace_path / "moeka.log"
+    logger.add(
+        log_file,
+        level="DEBUG" if verbose else "INFO",
+        rotation="10 MB",
+        retention=5,
+        compression="gz",
+        enqueue=True,
+    )
+    logger.enable("nanobot")
+
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
@@ -863,7 +874,14 @@ def gateway(
             await writer.drain()
             writer.close()
 
-        server = await asyncio.start_server(handle, host, health_port)
+        try:
+            server = await asyncio.start_server(handle, host, health_port)
+        except OSError as exc:
+            logger.warning(
+                "Health server could not bind to {}:{} ({}); continuing without health endpoint",
+                host, health_port, exc.strerror,
+            )
+            return
         console.print(f"[green]✓[/green] Health endpoint: http://{host}:{health_port}/health")
         async with server:
             await server.serve_forever()
