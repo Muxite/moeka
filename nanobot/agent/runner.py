@@ -545,7 +545,7 @@ class AgentRunner:
             "tools": tools,
             "model": spec.model,
             "retry_mode": spec.provider_retry_mode,
-            "on_retry_wait": spec.progress_callback,
+            "on_retry_wait": None,  # retry messages are internal; don't surface to user channel
         }
         if spec.temperature is not None:
             kwargs["temperature"] = spec.temperature

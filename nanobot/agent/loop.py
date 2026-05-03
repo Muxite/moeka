@@ -667,7 +667,7 @@ class AgentLoop:
     def _save_session(self, session: Any) -> None:
         """Persist *session* without letting a storage error abort the current turn."""
         try:
-            self._save_session(session)
+            self.sessions.save(session)
         except Exception as exc:
             logger.warning(
                 "Session save failed for {} — conversation state may not persist: {}",

@@ -129,16 +129,27 @@ _is_systemd_active() {
     systemctl --user is-active --quiet nanobot 2>/dev/null
 }
 
+cmd_run() {
+    # Run the gateway in the FOREGROUND — used by systemd ExecStart only.
+    # Do not call this directly; use 'start' for interactive use.
+    _ensure_venv
+    local bin; bin="$(_nanobot_bin)"
+    local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
+    mkdir -p "$MOEKA_WORKSPACE_EXPANDED"
+    exec "$bin" gateway --config "$cfg"
+}
+
 cmd_start() {
     _ensure_venv
     local bin; bin="$(_nanobot_bin)"
     local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
 
-    # If the systemd unit is managing moeka, delegate to it.
-    if systemctl --user is-enabled --quiet moeka 2>/dev/null; then
-        info "systemd unit is enabled — use './moeka.sh enable' to (re)start, or 'systemctl --user start moeka'"
-        systemctl --user start moeka
-        ok "moeka started via systemd"
+    # If the systemd unit is active, it is already running — nothing to do.
+    # Don't call 'systemctl start moeka' from within ExecStart — that creates
+    # an activation loop.  Users who want to (re)start via systemd should run
+    # 'systemctl --user restart moeka' themselves.
+    if systemctl --user is-active --quiet moeka 2>/dev/null; then
+        warn "systemd unit is already active — use 'systemctl --user restart moeka' to bounce it"
         return 0
     fi
 
@@ -328,6 +339,7 @@ cmd_help() {
 
 case "$CMD" in
     start)       cmd_start "$@" ;;
+    run)         cmd_run ;;
     stop)        cmd_stop ;;
     restart)     cmd_restart "$@" ;;
     status)      cmd_status ;;
