@@ -192,6 +192,7 @@ class TelegramConfig(Base):
     pool_timeout: float = 5.0
     streaming: bool = True
     stream_edit_interval: float = Field(default=_STREAM_EDIT_INTERVAL_DEFAULT, ge=0.1)
+    drop_pending_updates: bool = True  # Drop messages queued while offline to avoid stale floods
 
 
 class TelegramChannel(BaseChannel):
@@ -346,12 +347,15 @@ class TelegramChannel(BaseChannel):
         # Start polling (this runs until stopped)
         await self._app.updater.start_polling(
             allowed_updates=["message"],
-            drop_pending_updates=False,  # Process pending messages on startup
+            drop_pending_updates=self.config.drop_pending_updates,
             error_callback=self._on_polling_error,
         )
 
         # Keep running until stopped
         while self._running:
+            if self._app is None:
+                logger.warning("Telegram app unexpectedly None — stopping channel")
+                break
             await asyncio.sleep(1)
 
     async def stop(self) -> None:

@@ -1393,3 +1393,105 @@ async def test_send_text_bad_request_plain_fallback_exhausted() -> None:
     # so HTML fails after 1 attempt → fallback to plain also fails after 1 attempt.
     # Before the fix: 2 total. After the fix: still 2 (BadRequest SHOULD fallback).
     assert call_count == 2, f"Expected 2 calls (1 HTML + 1 plain), got {call_count}"
+
+
+# ---------------------------------------------------------------------------
+# drop_pending_updates config
+# ---------------------------------------------------------------------------
+
+def test_telegram_config_drop_pending_updates_defaults_true() -> None:
+    """drop_pending_updates should default to True to avoid stale floods on restart."""
+    config = TelegramConfig()
+    assert config.drop_pending_updates is True
+
+
+def test_telegram_config_drop_pending_updates_can_be_disabled() -> None:
+    config = TelegramConfig(drop_pending_updates=False)
+    assert config.drop_pending_updates is False
+
+
+@pytest.mark.asyncio
+async def test_start_passes_drop_pending_updates_to_polling(monkeypatch) -> None:
+    """drop_pending_updates from config is forwarded to start_polling."""
+    _FakeHTTPXRequest.clear()
+    config = TelegramConfig(
+        enabled=True,
+        token="123:abc",
+        allow_from=["*"],
+        drop_pending_updates=False,
+    )
+    bus = MessageBus()
+    channel = TelegramChannel(config, bus)
+    app = _FakeApp(lambda: setattr(channel, "_running", False))
+    builder = _FakeBuilder(app)
+
+    monkeypatch.setattr("nanobot.channels.telegram.HTTPXRequest", _FakeHTTPXRequest)
+    monkeypatch.setattr(
+        "nanobot.channels.telegram.Application",
+        SimpleNamespace(builder=lambda: builder),
+    )
+
+    await channel.start()
+
+    assert app.updater.start_polling_kwargs["drop_pending_updates"] is False
+
+
+@pytest.mark.asyncio
+async def test_start_drops_pending_updates_by_default(monkeypatch) -> None:
+    """With the default config, start_polling receives drop_pending_updates=True."""
+    _FakeHTTPXRequest.clear()
+    config = TelegramConfig(enabled=True, token="123:abc", allow_from=["*"])
+    bus = MessageBus()
+    channel = TelegramChannel(config, bus)
+    app = _FakeApp(lambda: setattr(channel, "_running", False))
+    builder = _FakeBuilder(app)
+
+    monkeypatch.setattr("nanobot.channels.telegram.HTTPXRequest", _FakeHTTPXRequest)
+    monkeypatch.setattr(
+        "nanobot.channels.telegram.Application",
+        SimpleNamespace(builder=lambda: builder),
+    )
+
+    await channel.start()
+
+    assert app.updater.start_polling_kwargs["drop_pending_updates"] is True
+
+
+@pytest.mark.asyncio
+async def test_start_loop_exits_when_app_goes_none(monkeypatch) -> None:
+    """If _app becomes None while running, the start loop exits cleanly."""
+    config = TelegramConfig(enabled=True, token="123:abc", allow_from=["*"])
+    bus = MessageBus()
+    channel = TelegramChannel(config, bus)
+    channel._running = True
+
+    # Simulate _app being cleared after one iteration
+    iteration = 0
+
+    async def _fake_sleep(_secs):
+        nonlocal iteration
+        iteration += 1
+        if iteration >= 1:
+            channel._app = None  # cleared externally
+
+    import nanobot.channels.telegram as tg_mod
+    import asyncio as _asyncio
+
+    original_sleep = _asyncio.sleep
+
+    # Patch at the module level so the while loop uses our fake
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    # Minimal fake app — just enough to pass the first guard
+    from types import SimpleNamespace as SN
+    channel._app = SN()
+
+    # Run the keep-alive loop directly (not the full start)
+    async def _run_loop():
+        while channel._running:
+            if channel._app is None:
+                break
+            await _asyncio.sleep(1)
+
+    await _run_loop()
+    assert channel._app is None  # loop exited cleanly

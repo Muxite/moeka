@@ -3,6 +3,8 @@
 .assets
 .docs
 .env
+# Literal fallback directory created when MOEKA_WORKSPACE placeholder isn't expanded
+${MOEKA_WORKSPACE}/
 .web
 .orion
 

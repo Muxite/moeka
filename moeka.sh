@@ -2,11 +2,11 @@
 # Moeka — nanobot for server management.
 #
 # Usage:
-#   ./moeka.sh start            # run the nanobot gateway
+#   ./moeka.sh start            # start the gateway in the background (terminal-safe)
 #   ./moeka.sh stop             # stop the running instance
 #   ./moeka.sh restart          # stop + start
-#   ./moeka.sh status           # show service status
-#   ./moeka.sh logs [-f]        # tail logs
+#   ./moeka.sh status           # show service/process status
+#   ./moeka.sh logs [-f]        # show (or tail -f) logs
 #   ./moeka.sh shell            # drop into the moeka venv
 #   ./moeka.sh exec -- CMD ...  # run a command inside the venv
 #   ./moeka.sh install          # install Python deps into .venv
@@ -115,26 +115,99 @@ _nanobot_bin() {
     fi
 }
 
+# ---------- runtime paths ---------------------------------------------------
+PID_FILE="${MOEKA_WORKSPACE_EXPANDED}/moeka.pid"
+LOG_FILE="${MOEKA_WORKSPACE_EXPANDED}/moeka.log"
+
 # ---------- commands --------------------------------------------------------
 cmd_install() {
     _ensure_venv
+}
+
+_is_systemd_active() {
+    systemctl --user is-active --quiet moeka 2>/dev/null || \
+    systemctl --user is-active --quiet nanobot 2>/dev/null
 }
 
 cmd_start() {
     _ensure_venv
     local bin; bin="$(_nanobot_bin)"
     local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
-    info "starting gateway: $bin gateway --config $cfg"
-    exec "$bin" gateway --config "$cfg" "$@"
+
+    # If the systemd unit is managing moeka, delegate to it.
+    if systemctl --user is-enabled --quiet moeka 2>/dev/null; then
+        info "systemd unit is enabled — use './moeka.sh enable' to (re)start, or 'systemctl --user start moeka'"
+        systemctl --user start moeka
+        ok "moeka started via systemd"
+        return 0
+    fi
+
+    # Check for a stale or live PID file.
+    if [[ -f "$PID_FILE" ]]; then
+        local pid; pid="$(cat "$PID_FILE")"
+        if kill -0 "$pid" 2>/dev/null; then
+            warn "moeka is already running (PID $pid) — use restart to bounce it"
+            return 0
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    mkdir -p "$MOEKA_WORKSPACE_EXPANDED"
+    info "starting gateway in background"
+    info "  config : $cfg"
+    info "  log    : $LOG_FILE"
+
+    # nohup detaches from SIGHUP; disown removes it from the shell job table so
+    # closing the terminal won't signal the process.
+    nohup "$bin" gateway --config "$cfg" "$@" </dev/null >>"$LOG_FILE" 2>&1 &
+    local pid=$!
+    disown "$pid"
+    echo "$pid" > "$PID_FILE"
+    ok "moeka started (PID $pid)"
 }
 
 cmd_stop() {
+    # Prefer systemd when the unit is active.
     if systemctl --user is-active --quiet moeka 2>/dev/null; then
         systemctl --user stop moeka
-    elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
+        ok "moeka stopped (systemd)"
+        return 0
+    fi
+    if systemctl --user is-active --quiet nanobot 2>/dev/null; then
         systemctl --user stop nanobot
+        ok "moeka stopped (systemd)"
+        return 0
+    fi
+
+    # Fall back to PID file.
+    if [[ -f "$PID_FILE" ]]; then
+        local pid; pid="$(cat "$PID_FILE")"
+        if kill -0 "$pid" 2>/dev/null; then
+            info "stopping moeka (PID $pid)..."
+            kill "$pid"
+            local i=0
+            while kill -0 "$pid" 2>/dev/null && (( i < 20 )); do
+                sleep 0.5
+                (( i++ ))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                warn "graceful stop timed out — sending SIGKILL"
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            rm -f "$PID_FILE"
+            ok "moeka stopped"
+            return 0
+        else
+            warn "stale PID file removed"
+            rm -f "$PID_FILE"
+        fi
+    fi
+
+    # Last resort: find by name.
+    if pkill -f "nanobot gateway" 2>/dev/null; then
+        ok "moeka stopped (pkill)"
     else
-        pkill -f "nanobot gateway" 2>/dev/null || warn "no running gateway found"
+        warn "no running gateway found"
     fi
 }
 
@@ -146,12 +219,20 @@ cmd_restart() {
 cmd_status() {
     printf 'workspace    : %s\n' "$MOEKA_WORKSPACE_EXPANDED"
     printf 'config file  : %s\n' "${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
+    printf 'log file     : %s\n' "$LOG_FILE"
     if systemctl --user is-active --quiet moeka 2>/dev/null; then
         systemctl --user status moeka --no-pager || true
     elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
         systemctl --user status nanobot --no-pager || true
+    elif [[ -f "$PID_FILE" ]]; then
+        local pid; pid="$(cat "$PID_FILE")"
+        if kill -0 "$pid" 2>/dev/null; then
+            ok "running (PID $pid, background)"
+        else
+            warn "stale PID file — moeka is not running"
+        fi
     else
-        pgrep -af "nanobot gateway" || echo "no gateway process running"
+        echo "no gateway process running"
     fi
 }
 
@@ -160,8 +241,14 @@ cmd_logs() {
         journalctl --user -u moeka "$@"
     elif systemctl --user is-active --quiet nanobot 2>/dev/null; then
         journalctl --user -u nanobot "$@"
+    elif [[ -f "$LOG_FILE" ]]; then
+        if [[ "${1:-}" == "-f" ]]; then
+            tail -f "$LOG_FILE"
+        else
+            tail -n 100 "$LOG_FILE"
+        fi
     else
-        warn "no systemd unit active; no log source"
+        warn "no log source found (systemd not active, no log file at $LOG_FILE)"
     fi
 }
 
@@ -177,15 +264,28 @@ cmd_exec() {
 }
 
 cmd_enable() {
+    _ensure_venv
     bash "${SCRIPT_DIR}/install-service.sh"
 }
 
 cmd_disable() {
-    if systemctl --user is-active --quiet moeka 2>/dev/null; then
-        systemctl --user stop moeka
+    # Stop if running (active) or starting (activating)
+    local state
+    state="$(systemctl --user is-active moeka 2>/dev/null || true)"
+    if [[ "$state" == "active" || "$state" == "activating" ]]; then
+        info "stopping moeka service..."
+        systemctl --user stop moeka || true
     fi
+    # Disable and remove the unit file so it won't auto-start on next login
     systemctl --user disable moeka 2>/dev/null || true
-    ok "moeka service disabled"
+    local unit_file="$HOME/.config/systemd/user/moeka.service"
+    if [[ -f "$unit_file" ]]; then
+        rm -f "$unit_file"
+        systemctl --user daemon-reload
+        ok "moeka service disabled and unit file removed"
+    else
+        ok "moeka service disabled"
+    fi
 }
 
 cmd_doctor() {

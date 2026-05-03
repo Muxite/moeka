@@ -255,8 +255,18 @@ class Config(BaseSettings):
 
     @property
     def workspace_path(self) -> Path:
-        """Get expanded workspace path."""
-        return Path(self.agents.defaults.workspace).expanduser()
+        """Get expanded workspace path.
+
+        Falls back to the default state home when the workspace string still
+        contains an unexpanded ``${VAR}`` placeholder (e.g. ``MOEKA_WORKSPACE``
+        was not set in the environment).  This prevents a literal directory
+        named ``${MOEKA_WORKSPACE}`` from being created inside the repo.
+        """
+        ws = self.agents.defaults.workspace
+        if "${" in ws:
+            from nanobot.config.loader import get_state_home
+            return get_state_home()
+        return Path(ws).expanduser()
 
     def _match_provider(
         self, model: str | None = None

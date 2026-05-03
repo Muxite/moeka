@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from nanobot.config.paths import (
     get_bridge_install_dir,
     get_cli_history_path,
@@ -12,6 +14,7 @@ from nanobot.config.paths import (
     get_workspace_path,
     is_default_workspace,
 )
+from nanobot.config.schema import AgentDefaults, AgentsConfig, Config
 
 
 def test_runtime_dirs_follow_config_path(monkeypatch, tmp_path: Path) -> None:
@@ -51,3 +54,54 @@ def test_is_default_workspace_distinguishes_default_and_custom_paths() -> None:
     assert is_default_workspace(None) is True
     assert is_default_workspace(Path.home() / ".nanobot") is True
     assert is_default_workspace("~/custom-workspace") is False
+
+
+# ---------------------------------------------------------------------------
+# Config.workspace_path placeholder-fallback tests
+# ---------------------------------------------------------------------------
+
+def test_workspace_path_falls_back_when_placeholder_unexpanded(monkeypatch) -> None:
+    """workspace_path must return the default state home when ${VAR} is not expanded."""
+    monkeypatch.delenv("MOEKA_WORKSPACE", raising=False)
+    monkeypatch.delenv("MOEKA_STATE", raising=False)
+    monkeypatch.delenv("NANOBOT_HOME", raising=False)
+
+    config = Config()
+    config.agents.defaults.workspace = "${MOEKA_WORKSPACE}"
+    result = config.workspace_path
+
+    assert "${" not in str(result), (
+        f"workspace_path must not contain unexpanded placeholder, got: {result}"
+    )
+    assert result == Path.home() / ".nanobot"
+
+
+def test_workspace_path_falls_back_for_any_unexpanded_var(monkeypatch) -> None:
+    """Any ${...} token in workspace should trigger the fallback."""
+    monkeypatch.delenv("MOEKA_WORKSPACE", raising=False)
+    monkeypatch.delenv("MOEKA_STATE", raising=False)
+    monkeypatch.delenv("NANOBOT_HOME", raising=False)
+
+    config = Config()
+    config.agents.defaults.workspace = "${SOME_OTHER_VAR}/subdir"
+    result = config.workspace_path
+
+    assert "${" not in str(result)
+    assert result == Path.home() / ".nanobot"
+
+
+def test_workspace_path_uses_moeka_workspace_env_when_set(monkeypatch, tmp_path) -> None:
+    """When MOEKA_WORKSPACE is set, workspace_path resolves through get_state_home."""
+    monkeypatch.setenv("MOEKA_WORKSPACE", str(tmp_path / "custom"))
+    config = Config()
+    config.agents.defaults.workspace = "${MOEKA_WORKSPACE}"
+    # Still has placeholder — fallback kicks in, but fallback now reads MOEKA_WORKSPACE
+    result = config.workspace_path
+    assert result == tmp_path / "custom"
+
+
+def test_workspace_path_normal_tilde_path(monkeypatch, tmp_path) -> None:
+    """Normal tilde-expanded paths work unchanged."""
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "mybot")
+    assert config.workspace_path == tmp_path / "mybot"

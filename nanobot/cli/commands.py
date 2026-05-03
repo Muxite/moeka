@@ -1190,6 +1190,76 @@ def channels_status(
     console.print(table)
 
 
+def _set_channel_enabled(channel_name: str, enabled: bool, config_path: str | None) -> None:
+    """Toggle the ``enabled`` flag of a channel in config.json and write it back atomically."""
+    import json
+
+    from nanobot.channels.registry import discover_all
+    from nanobot.config.loader import get_config_path, set_config_path
+
+    resolved = Path(config_path).expanduser().resolve() if config_path else None
+    if resolved is not None:
+        set_config_path(resolved)
+
+    cfg_file = resolved or get_config_path()
+
+    all_channels = discover_all()
+    if channel_name not in all_channels:
+        available = ", ".join(sorted(all_channels.keys()))
+        console.print(f"[red]Unknown channel: {channel_name}[/red]  Available: {available}")
+        raise typer.Exit(1)
+
+    if not cfg_file.exists():
+        console.print(f"[red]Config file not found: {cfg_file}[/red]")
+        console.print("Run [cyan]nanobot onboard[/cyan] first to create it.")
+        raise typer.Exit(1)
+
+    with open(cfg_file, encoding="utf-8") as f:
+        data = json.load(f)
+
+    channels = data.setdefault("channels", {})
+    if channel_name not in channels:
+        # Seed with the channel's default config then flip the flag.
+        channels[channel_name] = all_channels[channel_name].default_config()
+    section = channels[channel_name]
+    if isinstance(section, dict):
+        section["enabled"] = enabled
+    else:
+        section = {"enabled": enabled}
+        channels[channel_name] = section
+
+    tmp = cfg_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(cfg_file)
+
+    verb = "[green]enabled[/green]" if enabled else "[yellow]disabled[/yellow]"
+    display = all_channels[channel_name].display_name
+    console.print(f"{verb} {display} channel in {cfg_file}")
+    if enabled:
+        console.print(
+            f"[dim]Restart the gateway for the change to take effect: "
+            f"./moeka.sh restart[/dim]"
+        )
+
+
+@channels_app.command("enable")
+def channels_enable(
+    channel_name: str = typer.Argument(..., help="Channel name (e.g. telegram, discord)"),
+    config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Enable a channel (sets enabled=true in config.json)."""
+    _set_channel_enabled(channel_name, enabled=True, config_path=config_path)
+
+
+@channels_app.command("disable")
+def channels_disable(
+    channel_name: str = typer.Argument(..., help="Channel name (e.g. telegram, discord)"),
+    config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Disable a channel (sets enabled=false in config.json)."""
+    _set_channel_enabled(channel_name, enabled=False, config_path=config_path)
+
+
 def _get_bridge_dir() -> Path:
     """Get the bridge directory, setting it up if needed."""
     import shutil

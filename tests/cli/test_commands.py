@@ -1356,3 +1356,117 @@ def test_channels_login_requires_channel_name() -> None:
     result = runner.invoke(app, ["channels", "login"])
 
     assert result.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# channels enable / disable
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def channels_config_file(tmp_path: Path):
+    """Write a minimal config.json with a telegram section already present."""
+    cfg = {
+        "channels": {
+            "telegram": {
+                "enabled": False,
+                "token": "${TELEGRAM_TOKEN}",
+                "allowFrom": ["*"],
+            }
+        }
+    }
+    f = tmp_path / "config.json"
+    f.write_text(json.dumps(cfg), encoding="utf-8")
+    return f
+
+
+def test_channels_enable_sets_enabled_true(channels_config_file: Path) -> None:
+    result = runner.invoke(
+        app, ["channels", "enable", "telegram", "--config", str(channels_config_file)]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(channels_config_file.read_text(encoding="utf-8"))
+    assert data["channels"]["telegram"]["enabled"] is True
+    assert "enabled" in result.stdout.lower() or "Telegram" in result.stdout
+
+
+def test_channels_disable_sets_enabled_false(channels_config_file: Path) -> None:
+    # First enable it
+    data = json.loads(channels_config_file.read_text(encoding="utf-8"))
+    data["channels"]["telegram"]["enabled"] = True
+    channels_config_file.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["channels", "disable", "telegram", "--config", str(channels_config_file)]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(channels_config_file.read_text(encoding="utf-8"))
+    assert data["channels"]["telegram"]["enabled"] is False
+
+
+def test_channels_enable_creates_missing_section(tmp_path: Path) -> None:
+    """enable seeds the channel section with defaults when it's absent from config."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"channels": {}}), encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["channels", "enable", "telegram", "--config", str(cfg_file)]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert data["channels"]["telegram"]["enabled"] is True
+
+
+def test_channels_enable_unknown_channel_exits_nonzero(channels_config_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["channels", "enable", "does_not_exist", "--config", str(channels_config_file)],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_channels_disable_unknown_channel_exits_nonzero(channels_config_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["channels", "disable", "does_not_exist", "--config", str(channels_config_file)],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_channels_enable_missing_config_exits_nonzero(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["channels", "enable", "telegram", "--config", str(tmp_path / "nonexistent.json")],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_channels_enable_idempotent(channels_config_file: Path) -> None:
+    """Enabling an already-enabled channel is a no-op (stays enabled)."""
+    data = json.loads(channels_config_file.read_text(encoding="utf-8"))
+    data["channels"]["telegram"]["enabled"] = True
+    channels_config_file.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["channels", "enable", "telegram", "--config", str(channels_config_file)]
+    )
+    assert result.exit_code == 0
+    data = json.loads(channels_config_file.read_text(encoding="utf-8"))
+    assert data["channels"]["telegram"]["enabled"] is True
+
+
+def test_channels_enable_preserves_other_keys(channels_config_file: Path) -> None:
+    """enable must not wipe existing channel config keys (token, allowFrom, etc.)."""
+    result = runner.invoke(
+        app, ["channels", "enable", "telegram", "--config", str(channels_config_file)]
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(channels_config_file.read_text(encoding="utf-8"))
+    assert data["channels"]["telegram"]["token"] == "${TELEGRAM_TOKEN}"
+    assert data["channels"]["telegram"]["allowFrom"] == ["*"]

@@ -25,6 +25,8 @@ cp "$SCRIPT_DIR/moeka.service" "$SERVICE_DIR/moeka.service"
 
 systemctl --user daemon-reload
 systemctl --user enable moeka
+# Use restart so repeated `enable` calls always land on the latest binary/config;
+# systemctl restart starts the service if it isn't running yet.
 systemctl --user restart moeka
 
 echo "moeka service installed and started."
