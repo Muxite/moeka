@@ -93,13 +93,13 @@ _ensure_venv() {
     info "creating venv at $VENV_DIR"
     if command -v uv >/dev/null 2>&1; then
         uv venv "$VENV_DIR" >/dev/null
-        info "installing moeka (uv pip install -e .)"
-        uv pip install --python "$VENV_DIR/bin/python" -e . >/dev/null
+        info "installing moeka (uv pip install -e '.[vec]')"
+        uv pip install --python "$VENV_DIR/bin/python" -e ".[vec]" >/dev/null
     else
         python3 -m venv "$VENV_DIR"
         "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
-        info "installing moeka (pip install -e .)"
-        "$VENV_DIR/bin/pip" install --quiet -e .
+        info "installing moeka (pip install -e '.[vec]')"
+        "$VENV_DIR/bin/pip" install --quiet -e ".[vec]"
     fi
     ok "venv ready"
 }

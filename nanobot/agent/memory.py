@@ -22,6 +22,7 @@ from nanobot.utils.gitstore import GitStore
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
+    from nanobot.agent.vec_store import VecStore
 
 
 # ---------------------------------------------------------------------------
@@ -38,9 +39,15 @@ class MemoryStore:
         r"^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s+[A-Z][A-Z0-9_]*(?:\s+\[tools:\s*[^\]]+\])?:"
     )
 
-    def __init__(self, workspace: Path, max_history_entries: int = _DEFAULT_MAX_HISTORY):
+    def __init__(
+        self,
+        workspace: Path,
+        max_history_entries: int = _DEFAULT_MAX_HISTORY,
+        vec_store: VecStore | None = None,
+    ):
         self.workspace = workspace
         self.max_history_entries = max_history_entries
+        self.vec_store = vec_store
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "history.jsonl"
@@ -214,9 +221,36 @@ class MemoryStore:
 
     # -- context injection (used by context.py) ------------------------------
 
-    def get_memory_context(self) -> str:
+    def get_memory_context(
+        self,
+        query: str | None = None,
+        semantic_threshold: int = 2048,
+        memory_top_k: int = 10,
+    ) -> str:
+        """Return memory context for injection into the system prompt.
+
+        When *query* is provided and MEMORY.md exceeds *semantic_threshold* chars,
+        semantic retrieval is used to pull only the most relevant chunks instead
+        of the full file.  Falls back to full injection when VecStore is unavailable
+        or the file is small enough to fit comfortably.
+        """
         long_term = self.read_memory()
-        return f"## Long-term Memory\n{long_term}" if long_term else ""
+        if not long_term:
+            return ""
+        if (
+            query
+            and self.vec_store
+            and self.vec_store.available
+            and len(long_term) > semantic_threshold
+        ):
+            chunks = self.vec_store.search_memory(query, k=memory_top_k)
+            if chunks:
+                logger.debug(
+                    "VecStore: injecting {} semantic memory chunk(s) for query ({} chars total)",
+                    len(chunks), sum(len(c) for c in chunks),
+                )
+                return "## Long-term Memory\n" + "\n\n---\n\n".join(chunks)
+        return f"## Long-term Memory\n{long_term}"
 
     # -- history.jsonl — append-only, JSONL format ---------------------------
 
@@ -224,10 +258,13 @@ class MemoryStore:
         """Append *entry* to history.jsonl and return its auto-incrementing cursor."""
         cursor = self._next_cursor()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        record = {"cursor": cursor, "timestamp": ts, "content": strip_think(entry.rstrip()) or entry.rstrip()}
+        content = strip_think(entry.rstrip()) or entry.rstrip()
+        record = {"cursor": cursor, "timestamp": ts, "content": content}
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._cursor_file.write_text(str(cursor), encoding="utf-8")
+        if self.vec_store:
+            self.vec_store.upsert_history_entry(cursor, content)
         return cursor
 
     def _next_cursor(self) -> int:
@@ -833,5 +870,11 @@ class Dream:
             sha = self.store.git.auto_commit(commit_msg)
             if sha:
                 logger.info("Dream commit: {}", sha)
+
+        # Re-index MEMORY.md in the vector store after edits
+        if self.store.vec_store and self.store.vec_store.available:
+            updated_memory = self.store.read_memory()
+            if updated_memory:
+                self.store.vec_store.upsert_memory_chunks(updated_memory)
 
         return True

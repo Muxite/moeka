@@ -1,16 +1,24 @@
 """Context builder for assembling agent prompts."""
 
+from __future__ import annotations
+
 import base64
 import mimetypes
 import platform
 from importlib.resources import files as pkg_files
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from loguru import logger
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, current_time_str, detect_image_mime
 from nanobot.utils.prompt_templates import render_template
+
+if TYPE_CHECKING:
+    from nanobot.agent.vec_store import VecStore
+    from nanobot.config.schema import VecConfig
 
 
 class ContextBuilder:
@@ -18,19 +26,29 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
-    _MAX_RECENT_HISTORY = 50
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
+    _MAX_RECENT_HISTORY = 50  # kept for backward compat; actual cap comes from VecConfig
 
-    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        timezone: str | None = None,
+        disabled_skills: list[str] | None = None,
+        vec_store: VecStore | None = None,
+        vec_config: VecConfig | None = None,
+    ):
         self.workspace = workspace
         self.timezone = timezone
-        self.memory = MemoryStore(workspace)
+        self.vec_store = vec_store
+        self.vec_config = vec_config
+        self.memory = MemoryStore(workspace, vec_store=vec_store)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
 
     def build_system_prompt(
         self,
         skill_names: list[str] | None = None,
         channel: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity(channel=channel)]
@@ -39,7 +57,12 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        memory = self.memory.get_memory_context()
+        vc = self.vec_config
+        memory = self.memory.get_memory_context(
+            query=query,
+            semantic_threshold=vc.memory_semantic_threshold if vc else 2048,
+            memory_top_k=vc.memory_top_k if vc else 10,
+        )
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
             parts.append(f"# Memory\n\n{memory}")
 
@@ -53,14 +76,59 @@ class ContextBuilder:
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
-        entries = self.memory.read_unprocessed_history(since_cursor=self.memory.get_last_dream_cursor())
-        if entries:
-            capped = entries[-self._MAX_RECENT_HISTORY:]
-            parts.append("# Recent History\n\n" + "\n".join(
-                f"- [{e['timestamp']}] {e['content']}" for e in capped
-            ))
+        history_section = self._build_history_section(query=query)
+        if history_section:
+            parts.append(history_section)
 
         return "\n\n---\n\n".join(parts)
+
+    def _build_history_section(self, query: str | None = None) -> str:
+        """Build the Recent History section using hybrid recency + semantic retrieval."""
+        vc = self.vec_config
+        recent_k = vc.history_recent_k if vc else 15
+        semantic_k = vc.history_semantic_k if vc else 10
+
+        dream_cursor = self.memory.get_last_dream_cursor()
+        all_entries = self.memory.read_unprocessed_history(since_cursor=dream_cursor)
+        if not all_entries:
+            return ""
+
+        # Always include the most recent entries (recency anchor)
+        recent = all_entries[-recent_k:]
+        recent_cursors = {e["cursor"] for e in recent}
+
+        # Semantically retrieve from the older portion if query and VecStore available
+        semantic_entries: list[dict] = []
+        if (
+            query
+            and self.vec_store
+            and self.vec_store.available
+            and len(all_entries) > recent_k
+        ):
+            older_texts = self.vec_store.search_history(query, k=semantic_k)
+            # We only have text back; match against all_entries by content
+            older_content_map = {
+                e["content"]: e
+                for e in all_entries[:-recent_k]
+                if e["cursor"] not in recent_cursors
+            }
+            for text in older_texts:
+                entry = older_content_map.get(text)
+                if entry and entry["cursor"] not in recent_cursors:
+                    semantic_entries.append(entry)
+            if semantic_entries:
+                logger.debug(
+                    "VecStore: injecting {} semantic history entry/entries in addition to {} recent",
+                    len(semantic_entries), len(recent),
+                )
+
+        combined = sorted(
+            {e["cursor"]: e for e in (semantic_entries + recent)}.values(),
+            key=lambda e: e["cursor"],
+        )
+        return "# Recent History\n\n" + "\n".join(
+            f"- [{e['timestamp']}] {e['content']}" for e in combined
+        )
 
     def _get_identity(self, channel: str | None = None) -> str:
         """Get the core identity section."""
@@ -148,7 +216,9 @@ class ContextBuilder:
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
         messages = [
-            {"role": "system", "content": self.build_system_prompt(skill_names, channel=channel)},
+            {"role": "system", "content": self.build_system_prompt(
+                skill_names, channel=channel, query=current_message or None
+            )},
             *history,
         ]
         if messages[-1].get("role") == current_role:

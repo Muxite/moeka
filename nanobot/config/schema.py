@@ -64,6 +64,23 @@ class DreamConfig(Base):
         return f"every {hours}h"
 
 
+class VecConfig(Base):
+    """Semantic vector memory configuration."""
+
+    enable: bool = True
+    embedding_model: str = "all-MiniLM-L6-v2"
+    # Chars threshold above which MEMORY.md is retrieved semantically instead of injected in full.
+    memory_semantic_threshold: int = 2048
+    # Always include this many most-recent history entries (recency anchor).
+    history_recent_k: int = 15
+    # Pull this many additional semantically-relevant entries from older history.
+    history_semantic_k: int = 10
+    # Maximum skills to surface by semantic relevance when the skills list is long.
+    skills_top_k: int = 10
+    # How many memory chunks to pull per semantic query.
+    memory_top_k: int = 10
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -90,6 +107,7 @@ class AgentDefaults(Base):
         serialization_alias="idleCompactAfterMinutes",
     )  # Auto-compact idle threshold in minutes (0 = disabled)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    vec: VecConfig = Field(default_factory=lambda: VecConfig())
 
 
 class AgentsConfig(Base):

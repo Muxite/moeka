@@ -161,6 +161,7 @@ class AgentLoop:
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
         tools_config: ToolsConfig | None = None,
+        vec_config=None,
     ):
         from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
@@ -194,7 +195,14 @@ class AgentLoop:
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
-        self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
+        _vec_store = self._init_vec_store(workspace, vec_config)
+        self.context = ContextBuilder(
+            workspace,
+            timezone=timezone,
+            disabled_skills=disabled_skills,
+            vec_store=_vec_store,
+            vec_config=vec_config,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.runner = AgentRunner(provider)
@@ -254,6 +262,37 @@ class AgentLoop:
         self._current_iteration: int = 0
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
+
+    @staticmethod
+    def _init_vec_store(workspace: Path, vec_config):
+        """Initialise VecStore if the [vec] dependencies are available and enabled."""
+        if vec_config is not None and not vec_config.enable:
+            return None
+        try:
+            from nanobot.agent.vec_store import VecStore
+
+            model = vec_config.embedding_model if vec_config else "all-MiniLM-L6-v2"
+            store = VecStore(workspace / "memory" / "vec.db", model_name=model)
+            if store.available:
+                logger.info("VecStore: semantic search enabled (model={})", model)
+            return store if store.available else None
+        except Exception:
+            logger.exception("VecStore: failed to initialise; semantic search disabled")
+            return None
+
+    def _index_skills_in_vec_store(self) -> None:
+        """Index all available skills into the vector store (called once after startup)."""
+        vec_store = self.context.vec_store
+        if not vec_store or not vec_store.available:
+            return
+        skills = self.context.skills.list_skills(filter_unavailable=False)
+        pairs: list[tuple[str, str]] = []
+        for entry in skills:
+            content = self.context.skills.load_skill(entry["name"])
+            if content:
+                pairs.append((entry["name"], content[:500]))
+        if pairs:
+            vec_store.upsert_skills(pairs)
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -450,6 +489,7 @@ class AgentLoop:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
         await self._connect_mcp()
+        self._index_skills_in_vec_store()
         logger.info("Agent loop started")
 
         while self._running:

@@ -1,0 +1,297 @@
+"""Semantic vector store backed by sqlite-vec + sentence-transformers.
+
+Provides three collections:
+  - memory_chunks   — MEMORY.md split by section headers
+  - history_entries — history.jsonl entries
+  - skills          — skill definitions (indexed at startup)
+
+All public methods degrade gracefully: if sqlite-vec or
+sentence-transformers are unavailable the caller gets None/[] back.
+Import this module safely; it never raises at import time.
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from loguru import logger
+
+if TYPE_CHECKING:
+    import numpy as np
+
+_SECTION_RE = re.compile(r"^#{1,3} .+", re.MULTILINE)
+_MAX_CHUNK_CHARS = 500
+_EMBEDDING_DIM = 384
+
+
+def _chunk_markdown(text: str) -> list[str]:
+    """Split markdown on section headers; each chunk = heading + its content."""
+    if not text.strip():
+        return []
+    boundaries = [m.start() for m in _SECTION_RE.finditer(text)]
+    if not boundaries:
+        return [text[:_MAX_CHUNK_CHARS]] if text.strip() else []
+    chunks: list[str] = []
+    for i, start in enumerate(boundaries):
+        end = boundaries[i + 1] if i + 1 < len(boundaries) else len(text)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk[:_MAX_CHUNK_CHARS])
+    return chunks
+
+
+class VecStore:
+    """sqlite-vec backed semantic store for memory, history, and skills."""
+
+    def __init__(self, db_path: Path, model_name: str = "all-MiniLM-L6-v2") -> None:
+        self._db_path = db_path
+        self._model_name = model_name
+        self._model = None  # lazy-loaded
+        self._conn: sqlite3.Connection | None = None
+        self._available = self._try_init()
+
+    # ------------------------------------------------------------------
+    # Public availability check
+    # ------------------------------------------------------------------
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    # ------------------------------------------------------------------
+    # Memory chunks
+    # ------------------------------------------------------------------
+
+    def upsert_memory_chunks(self, text: str) -> None:
+        """Re-index all MEMORY.md content (full replace)."""
+        if not self._available:
+            return
+        chunks = _chunk_markdown(text)
+        try:
+            conn = self._connection()
+            conn.execute("DELETE FROM memory_chunks_data")
+            conn.execute("DELETE FROM memory_chunks_vec")
+            if chunks:
+                embeddings = self._embed(chunks)
+                for chunk, emb in zip(chunks, embeddings):
+                    cur = conn.execute(
+                        "INSERT INTO memory_chunks_data(text) VALUES (?)", (chunk,)
+                    )
+                    conn.execute(
+                        "INSERT INTO memory_chunks_vec(rowid, embedding) VALUES (?, ?)",
+                        (cur.lastrowid, emb.tobytes()),
+                    )
+            conn.commit()
+            logger.debug("VecStore: indexed {} memory chunk(s)", len(chunks))
+        except Exception:
+            logger.exception("VecStore: upsert_memory_chunks failed")
+
+    def search_memory(self, query: str, k: int = 5) -> list[str]:
+        """Return the top-k memory chunks semantically closest to *query*."""
+        if not self._available or not query.strip():
+            return []
+        try:
+            conn = self._connection()
+            count = conn.execute("SELECT count(*) FROM memory_chunks_data").fetchone()[0]
+            if count == 0:
+                return []
+            emb = self._embed([query])[0]
+            limit = min(k, count)
+            rows = conn.execute(
+                """
+                SELECT d.text
+                FROM memory_chunks_vec v
+                JOIN memory_chunks_data d ON d.id = v.rowid
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                ORDER BY distance
+                """,
+                (emb.tobytes(), limit),
+            ).fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            logger.exception("VecStore: search_memory failed")
+            return []
+
+    # ------------------------------------------------------------------
+    # History entries
+    # ------------------------------------------------------------------
+
+    def upsert_history_entry(self, cursor: int, text: str) -> None:
+        """Index a single history.jsonl entry by its cursor value."""
+        if not self._available or not text.strip():
+            return
+        try:
+            conn = self._connection()
+            existing = conn.execute(
+                "SELECT id FROM history_entries_data WHERE id = ?", (cursor,)
+            ).fetchone()
+            if existing:
+                return  # already indexed
+            emb = self._embed([text])[0]
+            conn.execute(
+                "INSERT INTO history_entries_data(id, text) VALUES (?, ?)", (cursor, text)
+            )
+            conn.execute(
+                "INSERT INTO history_entries_vec(rowid, embedding) VALUES (?, ?)",
+                (cursor, emb.tobytes()),
+            )
+            conn.commit()
+        except Exception:
+            logger.exception("VecStore: upsert_history_entry failed")
+
+    def search_history(self, query: str, k: int = 5) -> list[str]:
+        """Return the top-k history entries semantically closest to *query*."""
+        if not self._available or not query.strip():
+            return []
+        try:
+            conn = self._connection()
+            count = conn.execute("SELECT count(*) FROM history_entries_data").fetchone()[0]
+            if count == 0:
+                return []
+            emb = self._embed([query])[0]
+            limit = min(k, count)
+            rows = conn.execute(
+                """
+                SELECT d.text
+                FROM history_entries_vec v
+                JOIN history_entries_data d ON d.id = v.rowid
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                ORDER BY distance
+                """,
+                (emb.tobytes(), limit),
+            ).fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            logger.exception("VecStore: search_history failed")
+            return []
+
+    # ------------------------------------------------------------------
+    # Skills
+    # ------------------------------------------------------------------
+
+    def upsert_skills(self, skills: list[tuple[str, str]]) -> None:
+        """Re-index all skills (full replace). *skills* is a list of (name, text)."""
+        if not self._available or not skills:
+            return
+        try:
+            conn = self._connection()
+            conn.execute("DELETE FROM skills_data")
+            conn.execute("DELETE FROM skills_vec")
+            texts = [f"{name}: {text}" for name, text in skills]
+            embeddings = self._embed(texts)
+            for (name, text), emb in zip(skills, embeddings):
+                cur = conn.execute(
+                    "INSERT INTO skills_data(text) VALUES (?)", (f"{name}: {text}",)
+                )
+                conn.execute(
+                    "INSERT INTO skills_vec(rowid, embedding) VALUES (?, ?)",
+                    (cur.lastrowid, emb.tobytes()),
+                )
+            conn.commit()
+            logger.debug("VecStore: indexed {} skill(s)", len(skills))
+        except Exception:
+            logger.exception("VecStore: upsert_skills failed")
+
+    def search_skills(self, query: str, k: int = 5) -> list[str]:
+        """Return the top-k skill texts semantically closest to *query*."""
+        if not self._available or not query.strip():
+            return []
+        try:
+            conn = self._connection()
+            count = conn.execute("SELECT count(*) FROM skills_data").fetchone()[0]
+            if count == 0:
+                return []
+            emb = self._embed([query])[0]
+            limit = min(k, count)
+            rows = conn.execute(
+                """
+                SELECT d.text
+                FROM skills_vec v
+                JOIN skills_data d ON d.id = v.rowid
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                ORDER BY distance
+                """,
+                (emb.tobytes(), limit),
+            ).fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            logger.exception("VecStore: search_skills failed")
+            return []
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _try_init(self) -> bool:
+        try:
+            import sqlite_vec  # noqa: F401
+            from sentence_transformers import SentenceTransformer  # noqa: F401
+        except ImportError:
+            logger.info(
+                "VecStore: sqlite-vec or sentence-transformers not installed; "
+                "semantic search disabled (install moeka[vec] to enable)"
+            )
+            return False
+        try:
+            conn = self._connection()
+            self._ensure_schema(conn)
+            return True
+        except Exception:
+            logger.exception("VecStore: failed to open vec.db")
+            return False
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            import sqlite_vec
+
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            sqlite_vec.load(conn)
+            self._conn = conn
+        return self._conn
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(f"""
+            CREATE TABLE IF NOT EXISTS memory_chunks_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_vec
+                USING vec0(embedding FLOAT[{_EMBEDDING_DIM}]);
+
+            CREATE TABLE IF NOT EXISTS history_entries_data (
+                id INTEGER PRIMARY KEY,
+                text TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS history_entries_vec
+                USING vec0(embedding FLOAT[{_EMBEDDING_DIM}]);
+
+            CREATE TABLE IF NOT EXISTS skills_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS skills_vec
+                USING vec0(embedding FLOAT[{_EMBEDDING_DIM}]);
+        """)
+        conn.commit()
+
+    def _embed(self, texts: list[str]) -> list[np.ndarray]:
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            logger.debug("VecStore: loading embedding model {}", self._model_name)
+            self._model = SentenceTransformer(self._model_name)
+        import numpy as np
+
+        result = self._model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+        # encode() may return a single array when texts has one element
+        if result.ndim == 1:
+            return [result.astype(np.float32)]
+        return [row.astype(np.float32) for row in result]
