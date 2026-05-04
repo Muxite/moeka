@@ -234,12 +234,24 @@ class CronService:
 
         try:
             self.store_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = json.dumps(data, indent=2, ensure_ascii=False)
-            tmp = self.store_path.with_suffix(".json.tmp")
-            tmp.write_text(payload, encoding="utf-8")
+        except Exception as exc:
+            logger.error("Failed to create cron store directory {}: {}", self.store_path.parent, exc)
+            return
+        payload = json.dumps(data, indent=2, ensure_ascii=False)
+        tmp = self.store_path.with_suffix(".json.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                import os as _os
+                _os.fsync(fh.fileno())
+        except Exception as exc:
+            logger.error("Failed to write cron store tmp {}: {}", tmp, exc)
+            return
+        try:
             tmp.replace(self.store_path)
         except Exception as exc:
-            logger.error("Failed to save cron store to {}: {}", self.store_path, exc)
+            logger.error("Failed to rename cron store {} -> {}: {}", tmp, self.store_path, exc)
 
     async def start(self) -> None:
         """Start the cron service."""

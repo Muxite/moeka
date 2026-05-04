@@ -387,6 +387,12 @@ class CanvasChannel(BaseChannel):
         if not self.config.api_url or not self.config.api_token:
             logger.warning("canvas: api_url or api_token not configured — channel disabled")
             return
+        if not (self.config.api_url.startswith("http://") or self.config.api_url.startswith("https://")):
+            logger.warning(
+                "canvas: api_url '{}' is not a valid URL (env var unset?) — channel disabled",
+                self.config.api_url,
+            )
+            return
 
         self._running = True
         logger.info("Starting Canvas LMS channel (polling every {}s)...",
