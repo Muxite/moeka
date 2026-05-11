@@ -1,160 +1,201 @@
-# Moeka
+# moeka
 
-**Moeka** is a nanobot for server management — a native agent built on [nanobot](https://github.com/HKUDS/nanobot) for managing homelabs, Docker infrastructure, and Linux servers. It runs directly on the host via UV and a Python venv, so it has natural access to everything it manages.
+A personal AI agent for server management — homelabs, Docker stacks, and Linux administration. Moeka runs natively on your host using [`uv`](https://docs.astral.sh/uv/), with no containers required. Reach it over Telegram, Discord, or a web canvas from anywhere.
 
-- one script to run it (`./moeka.sh`)
-- one file for secrets (`keys.env`), one for non-secret paths (`.env`)
-- one command for boot setup (`./moeka.sh enable`)
-- one directory for the whole agent — `MOEKA_WORKSPACE` (default `~/.nanobot`) holds config, identity, skills, memory, sessions, media, everything
-- configurable sudo (disabled by default, opt-in through config and host policy)
+Built on [nanobot](https://github.com/HKUDS/nanobot) by HKUDS.
 
-Everything else — the agent loop, channels, providers, tools, skills, MCP support — comes from upstream nanobot and stays pluggable.
+---
+
+## Prerequisites
+
+- Python 3.11+
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ---
 
 ## Quick start
 
-```sh
-# 1. Fill in your secrets (never commit this file)
-cp keys.env.example keys.env
-$EDITOR keys.env
+```bash
+# 1. Clone
+git clone https://github.com/Muxite/moeka.git && cd moeka
 
-# 2. Install — creates .venv with all dependencies
+# 2. Set your secrets
+cp keys.env.example keys.env
+$EDITOR keys.env          # add API keys, bot tokens
+
+# 3. Install into a local venv (uv handles everything)
 ./moeka.sh install
 
-# 3. Run
+# 4. Run
 ./moeka.sh start
-
-# 4. Auto-start on boot (optional)
-./moeka.sh enable
+./moeka.sh status
 ```
 
-`./moeka.sh doctor` will tell you whether Python, UV, config, keys, and systemd are in place.
+To start automatically on boot:
+
+```bash
+./moeka.sh enable         # installs systemd user unit + enables linger
+```
 
 ---
 
 ## Commands
 
-```sh
-./moeka.sh start           # run the nanobot gateway
-./moeka.sh stop            # stop the running instance
-./moeka.sh restart         # stop + start
-./moeka.sh status          # workspace, config, running PID
-./moeka.sh logs -f         # tail output (via journalctl)
-./moeka.sh shell           # drop into the venv
-./moeka.sh exec -- ...     # run any nanobot subcommand
-./moeka.sh install         # create .venv and install deps
-./moeka.sh doctor          # sanity check everything
-./moeka.sh enable          # install + enable systemd user service
-./moeka.sh disable         # stop + disable systemd user service
-```
+| Command | Description |
+|---------|-------------|
+| `./moeka.sh start` | Start gateway in background |
+| `./moeka.sh stop` | Stop gracefully (SIGKILL fallback) |
+| `./moeka.sh restart` | Stop then start |
+| `./moeka.sh status` | Show process, port, channels, uptime |
+| `./moeka.sh logs [-f] [-n N]` | Tail log (follow / line count) |
+| `./moeka.sh install` | Create `.venv` and install deps via uv |
+| `./moeka.sh doctor` | Health check: runtime, config, keys, service |
+| `./moeka.sh shell` | Drop into activated venv |
+| `./moeka.sh exec <cmd>` | Run a nanobot subcommand |
+| `./moeka.sh version` | Show Python and moeka version |
+| `./moeka.sh enable` | Install systemd unit + enable boot autostart |
+| `./moeka.sh disable` | Stop service and remove unit |
 
-Flags: `--config PATH`, `--workspace PATH`.
+Flags accepted by most commands:
+
+```
+--config PATH      path to config.json (default: $MOEKA_WORKSPACE/config.json)
+--workspace PATH   override workspace directory (default: ~/.nanobot)
+```
 
 ---
 
-## How it works
+## Configuration
 
-### `keys.env` — one file for every secret
+Moeka loads configuration in three layers:
 
-`keys.env` is sourced by `moeka.sh`. Any `${VAR}` placeholder in `config.json` is resolved at startup.
+### 1. `keys.env` — secrets (never commit)
 
-```
-keys.env   (gitignored)
-  |  sourced by moeka.sh
-  v
-process env
-  |  read by nanobot config loader
-  v
-config.json   (tracked — holds "${OPENROUTER_API_KEY}" etc.)
-  |  resolve_config_env_vars()
-  v
-live Config
+```bash
+OPENROUTER_API_KEY=sk-or-...
+TELEGRAM_TOKEN=123456:ABC...
+DISCORD_TOKEN=...
 ```
 
-See `keys.env.example` for the full list of supported variables.
+Copy `keys.env.example` to get started. Variables defined here are injected into the environment before the agent starts; use `${VAR}` placeholders in `config.json` to reference them.
 
-### `MOEKA_WORKSPACE` — the one-directory instance
+### 2. `.env` — non-secret settings
 
-Default `~/.nanobot`. Holds config, identity docs, skills, memory, sessions, media, cron, history — everything. `git init` it to carry an agent between machines.
-
-Multi-agent is one env var:
-
-```sh
-MOEKA_WORKSPACE=~/agents/alice ./moeka.sh start
-MOEKA_WORKSPACE=~/agents/bob   ./moeka.sh start   # different terminal
+```bash
+MOEKA_WORKSPACE=~/.nanobot   # agent state directory
+NANOBOT_CONFIG=~/.nanobot/config.json
 ```
 
-### Two permission tiers
+### 3. `config.json` — agent configuration
 
-| Tier | Exec | Sudo | How to enable |
-|---|---|---|---|
-| **Non-sudo** (default) | Runs as current user | No | Default |
-| **Sudo** (opt-in) | Runs as current user + sudo | Yes, through normal exec guards | `tools.exec.allowSudo: true` plus host sudo policy |
+Generated by `./moeka.sh exec onboard` on first run, or create manually. Key sections:
 
-**Sudo opt-in:** Requires `tools.exec.allowSudo: true` in `config.json` and a host sudo policy that lets the Moeka process run the intended elevated commands. When disabled, the exec tool blocks commands containing `sudo` with one clear error. When enabled, sudo commands run through the same safety guards as any other command.
+```jsonc
+{
+  "agents": {
+    "defaults": {
+      "model": "openai/gpt-4o-mini",   // provider/model string
+      "dreamInterval": 7200            // memory consolidation interval (seconds)
+    }
+  },
+  "channels": {
+    "telegram": { "enable": true, "token": "${TELEGRAM_TOKEN}", "allowFrom": ["your-user-id"] },
+    "discord":  { "enable": true, "token": "${DISCORD_TOKEN}",  "allowFrom": ["your-user-id"] },
+    "canvas":   { "enable": false }
+  },
+  "tools": {
+    "exec": {
+      "enable": true,
+      "allow_sudo": false   // set true to allow sudo commands
+    }
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 8900
+  }
+}
+```
+
+Run `./moeka.sh exec onboard` for an interactive setup wizard.
+
+---
+
+## Channels
+
+| Channel | Notes |
+|---------|-------|
+| **Telegram** | Recommended for mobile. Bot token + user ID allowlist. |
+| **Discord** | Thread-aware, supports file uploads. |
+| **Canvas** | Web UI — polls the gateway; no Node.js build needed. |
+| **Slack** | Thread support, file uploads. |
+| **Email** | Attachment support, self-loop guard. |
+| **Matrix** | E2E encryption via matrix-nio. |
+| **Microsoft Teams** | Thread-aware. |
+| **Feishu / DingTalk** | Rich media, CardKit. |
+| **QQ / WeChat** | Group chat, media support. |
+
+Enable any channel in `config.json` under `channels.<name>.enable = true`.
 
 ---
 
 ## Directory layout
 
 ```
-.
-├── moeka.sh              # universal entrypoint
-├── moeka.service         # systemd user unit
-├── install-service.sh    # enable moeka.service, disable legacy nanobot.service
-├── restart-nanobot.sh    # restart helper (safe from inside the agent)
-│
-├── keys.env.example      # every supported secret, with comments
-├── keys.env              # real secrets — gitignored
-├── .env.example          # non-secret runtime paths (MOEKA_WORKSPACE)
-├── .env                  # per-host copy — gitignored
-│
-├── pyproject.toml        # Python package (installed via uv)
-├── OPERATIONS.md         # day-to-day guide
-├── SYSTEMD.md            # boot service details
-│
-├── nanobot/              # upstream source (with moeka's surgical edits)
-├── bridge/               # WhatsApp bridge (Node)
-├── tests/                # pytest suite
-└── docs/                 # deeper-dive technical docs
-```
+moeka/                    ← this repo
+├── moeka.sh              ← universal entrypoint
+├── moeka.service         ← systemd user unit
+├── keys.env.example      ← secrets template
+├── .env.example          ← non-secret env template
+├── pyproject.toml        ← Python package (uv manages deps)
+└── nanobot/              ← agent source
 
-The instance directory (outside this repo):
-
-```
-$MOEKA_WORKSPACE/           # default ~/.nanobot
-├── config.json             # "${OPENROUTER_API_KEY}" etc.
-├── SOUL.md                 # personality / voice
-├── AGENTS.md               # agent identity + behavior
-├── HEARTBEAT.md            # periodic tasks
-├── TOOLS.md                # tool usage notes
-├── USER.md                 # user-authored context
-├── skills/                 # user-authored skills
-├── memory/                 # vector memory + dream history
-├── sessions/               # per-channel conversation state
-├── media/                  # attachments, exports
-├── cron/                   # scheduled job registry
-├── history/                # CLI + shared history
-└── tool-results/           # persisted overflow
+~/.nanobot/               ← MOEKA_WORKSPACE (agent state)
+├── config.json           ← live configuration
+├── SOUL.md               ← agent personality
+├── USER.md               ← user profile
+├── AGENTS.md             ← agent instructions
+├── memory/MEMORY.md      ← long-term memory
+├── skills/               ← custom skills
+├── sessions/             ← per-channel conversation state
+└── moeka.log             ← runtime log
 ```
 
 ---
 
-## Further reading
+## Permissions
 
-- [OPERATIONS.md](./OPERATIONS.md) — first-time setup, day-to-day commands, multi-agent patterns
-- [SYSTEMD.md](./SYSTEMD.md) — how the user service is wired
-- [docs/PYTHON_SDK.md](./docs/PYTHON_SDK.md) — using nanobot from Python
-- [docs/CHANNEL_PLUGIN_GUIDE.md](./docs/CHANNEL_PLUGIN_GUIDE.md) — writing a new channel
-- [docs/MEMORY.md](./docs/MEMORY.md) — how the Dream memory pipeline works
-- [docs/MY_TOOL.md](./docs/MY_TOOL.md) — the agent's self-modification tool
-- [docs/WEBSOCKET.md](./docs/WEBSOCKET.md) — WebSocket channel protocol
+By default moeka runs as your user and cannot use `sudo`. To allow sudo commands, set `tools.exec.allow_sudo = true` in `config.json` and ensure your host's sudoers policy permits it.
+
+---
+
+## Semantic memory
+
+Enable vector search over memory, history, and skills:
+
+```bash
+./moeka.sh exec onboard   # select "vec" extras, or:
+uv pip install -e ".[vec]" --project .
+```
+
+Then add to `config.json`:
+```json
+"vec": { "enable": true, "embeddingModel": "all-MiniLM-L6-v2", "topK": 10 }
+```
+
+---
+
+## Running multiple agents
+
+Set a different workspace per agent:
+
+```bash
+MOEKA_WORKSPACE=~/.nanobot-dev ./moeka.sh start
+```
+
+Or pass `--workspace ~/.nanobot-dev` to any command.
 
 ---
 
 ## Credits
 
-Moeka is a deployment layer on top of **nanobot** by HKUDS. All of the core agent design — the Dream memory pipeline, the Lua-style skill system, the channel plugin architecture, the provider abstractions, MCP support — is their work. See [upstream nanobot](https://github.com/HKUDS/nanobot) for design discussion, release notes, and community.
-
-License: MIT (see [LICENSE](./LICENSE)), inherited from upstream.
+Moeka is a fork of [nanobot](https://github.com/HKUDS/nanobot) by HKUDS. Core agent runtime, providers, and channel integrations are built on their work.

@@ -461,14 +461,28 @@ PYEOF
     else
         printf 'systemd       : not enabled (run ./moeka.sh enable)\n'
     fi
+    local linger_state; linger_state="$(loginctl show-user "$USER" 2>/dev/null | sed -n 's/^Linger=//p')"
+    if [[ "$linger_state" == "yes" ]]; then
+        printf 'linger        : %senabled%s (autostart on boot OK)\n' "$_C_GREEN" "$_C_RESET"
+    else
+        printf 'linger        : %sdisabled%s (run: sudo loginctl enable-linger %s)\n' "$_C_YELLOW" "$_C_RESET" "$USER"
+    fi
+    local _found_pid=""
     if [[ -f "$PID_FILE" ]]; then
         local pid; pid="$(cat "$PID_FILE")"
         if kill -0 "$pid" 2>/dev/null; then
-            local etime; etime="$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')"
-            printf 'process       : %srunning%s (PID %s, up %s)\n' "$_C_GREEN" "$_C_RESET" "$pid" "${etime:-?}"
+            _found_pid="$pid"
         else
             printf 'process       : %sstale PID file%s\n' "$_C_YELLOW" "$_C_RESET"
         fi
+    fi
+    if [[ -z "$_found_pid" ]]; then
+        # Fall back to scanning for the nanobot gateway process (systemd-managed).
+        _found_pid="$(pgrep -f 'nanobot gateway' 2>/dev/null | head -1)"
+    fi
+    if [[ -n "$_found_pid" ]]; then
+        local etime; etime="$(ps -p "$_found_pid" -o etime= 2>/dev/null | tr -d ' ')"
+        printf 'process       : %srunning%s (PID %s, up %s)\n' "$_C_GREEN" "$_C_RESET" "$_found_pid" "${etime:-?}"
     else
         printf 'process       : not running\n'
     fi

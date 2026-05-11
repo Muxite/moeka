@@ -196,7 +196,14 @@ class CanvasChannel(BaseChannel):
                 {"scope": "inbox", "per_page": 100},
             )
         except Exception as e:
-            logger.warning("canvas: inbox poll failed: {}", e)
+            # Redirects to an SSO landing page are a chronic, expected condition
+            # on Canvas instances behind an IdP — demote to debug to keep the
+            # journal readable. Other failures stay at warning.
+            msg = str(e)
+            if "Redirect" in msg or "302" in msg:
+                logger.debug("canvas: inbox poll redirected (likely SSO): {}", e)
+            else:
+                logger.warning("canvas: inbox poll failed: {}", e)
             return
 
         for convo in convos:
@@ -265,7 +272,11 @@ class CanvasChannel(BaseChannel):
                 {"enrollment_state": "active", "per_page": 100},
             )
         except Exception as e:
-            logger.warning("canvas: failed to fetch courses: {}", e)
+            msg = str(e)
+            if "Redirect" in msg or "302" in msg:
+                logger.debug("canvas: courses fetch redirected (likely SSO): {}", e)
+            else:
+                logger.warning("canvas: failed to fetch courses: {}", e)
             return
 
         for course in courses:

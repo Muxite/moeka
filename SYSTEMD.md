@@ -7,7 +7,11 @@
 ```
 
 This copies `moeka.service` to `~/.config/systemd/user/`, disables the legacy
-`nanobot.service` if present, enables lingering, and starts Moeka immediately.
+`nanobot.service` if present, enables user lingering (required for boot
+autostart on headless systems — without it, systemd tears down the user
+manager at logout and moeka does not come up on the next boot), and starts
+Moeka immediately. The linger step uses `sudo loginctl enable-linger $USER`;
+if `sudo` is unavailable, the installer prints the exact command to run.
 
 Alternatively, run the install script directly:
 

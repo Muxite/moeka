@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -67,6 +68,14 @@ class LLMResponse:
         """Check if response contains tool calls."""
         return len(self.tool_calls) > 0
 
+    @property
+    def should_execute_tools(self) -> bool:
+        """Tools execute only when has_tool_calls AND finish_reason is ``tool_calls`` / ``stop``.
+        Blocks gateway-injected calls under ``refusal`` / ``content_filter`` / ``error`` (#3220)."""
+        if not self.has_tool_calls:
+            return False
+        return self.finish_reason in ("tool_calls", "stop")
+
 
 @dataclass(frozen=True)
 class GenerationSettings:
@@ -77,8 +86,13 @@ class GenerationSettings:
     reasoning_effort: str | None = None
 
 
+_SYNTHETIC_USER_CONTENT = "(conversation continued)"
+
+
 class LLMProvider(ABC):
     """Base class for LLM providers."""
+
+    supports_progress_deltas = False
 
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _PERSISTENT_MAX_DELAY = 60
@@ -97,6 +111,7 @@ class LLMProvider(ABC):
         "connection",
         "server error",
         "temporarily unavailable",
+        "速率限制",
     )
     _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
     _TRANSIENT_ERROR_KINDS = frozenset({"timeout", "connection"})
@@ -143,6 +158,7 @@ class LLMProvider(ABC):
         "temporarily unavailable",
         "overloaded",
         "concurrency limit",
+        "速率限制",
     )
 
     _SENTINEL = object()
@@ -409,6 +425,17 @@ class LLMProvider(ABC):
             recovered["role"] = "user"
             merged.append(recovered)
 
+        # Safety net: ensure the first non-system message is not a bare
+        # ``assistant`` message.  Providers like GLM reject system→assistant
+        # with error 1214.  This can happen when upstream truncation (e.g.
+        # _snip_history) drops the only user message.  Insert a synthetic
+        # user message to keep the sequence valid.
+        for i, msg in enumerate(merged):
+            if msg.get("role") != "system":
+                if msg.get("role") == "assistant" and not msg.get("tool_calls"):
+                    merged.insert(i, {"role": "user", "content": _SYNTHETIC_USER_CONTENT})
+                break
+
         return merged
 
     @staticmethod
@@ -617,14 +644,12 @@ class LLMProvider(ABC):
                         return value
             return None
 
-        try:
+        with suppress(TypeError, ValueError):
             retry_ms = _header_value("retry-after-ms")
             if retry_ms is not None:
                 value = float(retry_ms) / 1000.0
                 if value > 0:
                     return value
-        except (TypeError, ValueError):
-            pass
 
         retry_after = _header_value("retry-after")
         if retry_after is None:

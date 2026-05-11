@@ -29,6 +29,26 @@ systemctl --user enable moeka
 # systemctl restart starts the service if it isn't running yet.
 systemctl --user restart moeka
 
+# Enable user lingering — without this, the user manager exits at logout and
+# moeka.service will NOT start on boot when no one is logged in (headless boxes).
+linger_state="$(loginctl show-user "$USER" 2>/dev/null | sed -n 's/^Linger=//p')"
+if [ "$linger_state" != "yes" ]; then
+    echo "enabling user lingering (required for boot autostart on headless systems)"
+    if command -v sudo >/dev/null 2>&1; then
+        if sudo -n true 2>/dev/null || sudo -v; then
+            sudo loginctl enable-linger "$USER" || true
+        else
+            echo "  sudo unavailable — run manually: sudo loginctl enable-linger $USER" >&2
+        fi
+    else
+        echo "  sudo not found — run manually as root: loginctl enable-linger $USER" >&2
+    fi
+    linger_state="$(loginctl show-user "$USER" 2>/dev/null | sed -n 's/^Linger=//p')"
+    if [ "$linger_state" != "yes" ]; then
+        echo "  WARNING: Linger is still '$linger_state'. moeka will not autostart on boot until this is fixed." >&2
+    fi
+fi
+
 echo "moeka service installed and started."
 echo "  Status: systemctl --user status moeka"
 echo "  Logs:   journalctl --user -u moeka -f"

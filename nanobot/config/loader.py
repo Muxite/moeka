@@ -4,9 +4,11 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import pydantic
 from loguru import logger
+from pydantic import BaseModel
 
 from nanobot.config.schema import Config
 
@@ -86,7 +88,7 @@ def load_config(config_path: Path | None = None) -> Config:
             data = _migrate_config(data)
             config = Config.model_validate(data)
         except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
-            logger.warning(f"Failed to load config from {path}: {e}")
+            logger.warning("Failed to load config from {}: {}", path, e)
             logger.warning("Using default configuration.")
 
     _apply_ssrf_whitelist(config)
@@ -121,8 +123,11 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         logger.error("Failed to save config to {}: {}", path, exc)
 
 
+_ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
 def resolve_config_env_vars(config: Config) -> Config:
-    """Return a copy of *config* with ``${VAR}`` env-var references resolved.
+    """Return *config* with ``${VAR}`` env-var references resolved.
 
     Only string values are affected; other types pass through unchanged.
     Missing variables are logged as warnings and their placeholders are left
@@ -130,15 +135,45 @@ def resolve_config_env_vars(config: Config) -> Config:
 
     :returns: Config with env-var placeholders substituted.
     """
-    data = config.model_dump(mode="json", by_alias=True)
-    data = _resolve_env_vars(data)
-    return Config.model_validate(data)
+    return _resolve_in_place(config)
+
+
+def _resolve_in_place(obj: Any) -> Any:
+    if isinstance(obj, str):
+        new = _ENV_REF_PATTERN.sub(_env_replace, obj)
+        return new if new != obj else obj
+    if isinstance(obj, BaseModel):
+        updates: dict[str, Any] = {}
+        for name in type(obj).model_fields:
+            old = getattr(obj, name)
+            new = _resolve_in_place(old)
+            if new is not old:
+                updates[name] = new
+        extras = obj.__pydantic_extra__
+        new_extras: dict[str, Any] | None = None
+        if extras:
+            resolved = {k: _resolve_in_place(v) for k, v in extras.items()}
+            if any(resolved[k] is not extras[k] for k in extras):
+                new_extras = resolved
+        if not updates and new_extras is None:
+            return obj
+        copy = obj.model_copy(update=updates) if updates else obj.model_copy()
+        if new_extras is not None:
+            copy.__pydantic_extra__ = new_extras
+        return copy
+    if isinstance(obj, dict):
+        resolved = {k: _resolve_in_place(v) for k, v in obj.items()}
+        return resolved if any(resolved[k] is not obj[k] for k in obj) else obj
+    if isinstance(obj, list):
+        resolved = [_resolve_in_place(v) for v in obj]
+        return resolved if any(nv is not ov for nv, ov in zip(resolved, obj)) else obj
+    return obj
 
 
 def _resolve_env_vars(obj: object) -> object:
-    """Recursively resolve ``${VAR}`` patterns in string values."""
+    """Recursively resolve ``${VAR}`` patterns in plain strings/dicts/lists."""
     if isinstance(obj, str):
-        return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", _env_replace, obj)
+        return _ENV_REF_PATTERN.sub(_env_replace, obj)
     if isinstance(obj, dict):
         return {k: _resolve_env_vars(v) for k, v in obj.items()}
     if isinstance(obj, list):

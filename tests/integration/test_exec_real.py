@@ -146,17 +146,21 @@ async def test_long_running_command_is_killed() -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_rm_rf_is_blocked_by_default() -> None:
-    output = await _run(_tool(), "rm -rf /tmp/does_not_exist_integration_test")
-    assert any(kw in output.lower() for kw in ["blocked", "denied", "not allowed", "error"]), (
-        f"rm -rf should be blocked by default, got: {output!r}"
+async def test_rm_rf_blockable_when_configured() -> None:
+    # rm -rf is now permitted by default (server-management agent). The deny
+    # filter still works when the operator opts in via config.
+    tool = ExecTool(deny_patterns=[r"\brm\s+-[rf]{1,2}\b"])
+    output = await _run(tool, "rm -rf /tmp/does_not_exist_integration_test")
+    assert any(kw in output.lower() for kw in ["blocked", "denied", "not allowed", "dangerous"]), (
+        f"rm -rf should be blocked when deny_patterns configured, got: {output!r}"
     )
 
 
 @pytest.mark.asyncio
-async def test_shutdown_is_blocked() -> None:
-    output = await _run(_tool(), "shutdown -h now")
-    assert any(kw in output.lower() for kw in ["blocked", "denied", "not allowed", "error"])
+async def test_shutdown_blockable_when_configured() -> None:
+    tool = ExecTool(deny_patterns=[r"\b(shutdown|reboot|poweroff)\b"])
+    output = await _run(tool, "shutdown -h now")
+    assert any(kw in output.lower() for kw in ["blocked", "denied", "not allowed", "dangerous"])
 
 
 # ---------------------------------------------------------------------------

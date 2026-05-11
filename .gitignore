@@ -7,6 +7,8 @@
 ${MOEKA_WORKSPACE}/
 .web
 .orion
+nohup.out
+moeka.log
 
 # Python bytecode & caches
 *.pyc

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.hook import AgentHook
+from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 
@@ -76,6 +76,7 @@ class Nanobot:
             context_block_limit=defaults.context_block_limit,
             max_tool_result_chars=defaults.max_tool_result_chars,
             provider_retry_mode=defaults.provider_retry_mode,
+            tool_hint_max_length=defaults.tool_hint_max_length,
             web_config=config.tools.web,
             exec_config=config.tools.exec,
             restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -84,6 +85,7 @@ class Nanobot:
             unified_session=defaults.unified_session,
             disabled_skills=defaults.disabled_skills,
             session_ttl_minutes=defaults.session_ttl_minutes,
+            consolidation_ratio=defaults.consolidation_ratio,
             tools_config=config.tools,
             vec_config=defaults.vec,
         )
@@ -104,9 +106,10 @@ class Nanobot:
                 Different keys get independent history.
             hooks: Optional lifecycle hooks for this run.
         """
+        capture = SDKCaptureHook()
         prev = self._loop._extra_hooks
-        if hooks is not None:
-            self._loop._extra_hooks = list(hooks)
+        base_hooks = list(hooks) if hooks is not None else list(prev or [])
+        self._loop._extra_hooks = [capture, *base_hooks]
         try:
             response = await self._loop.process_direct(
                 message, session_key=session_key,
@@ -115,67 +118,15 @@ class Nanobot:
             self._loop._extra_hooks = prev
 
         content = (response.content if response else None) or ""
-        return RunResult(content=content, tools_used=[], messages=[])
+        return RunResult(
+            content=content,
+            tools_used=capture.tools_used,
+            messages=capture.messages,
+        )
 
 
 def _make_provider(config: Any) -> Any:
     """Create the LLM provider from config (extracted from CLI)."""
-    from nanobot.providers.base import GenerationSettings
-    from nanobot.providers.registry import find_by_name
+    from nanobot.providers.factory import make_provider
 
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
-    spec = find_by_name(provider_name) if provider_name else None
-    backend = spec.backend if spec else "openai_compat"
-
-    if backend == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            raise ValueError("Azure OpenAI requires api_key and api_base in config.")
-    elif backend == "openai_compat" and not model.startswith("bedrock/"):
-        needs_key = not (p and p.api_key)
-        exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
-        if needs_key and not exempt:
-            raise ValueError(f"No API key configured for provider '{provider_name}'.")
-
-    if backend == "openai_codex":
-        from nanobot.providers.openai_codex_provider import OpenAICodexProvider
-
-        provider = OpenAICodexProvider(default_model=model)
-    elif backend == "github_copilot":
-        from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
-
-        provider = GitHubCopilotProvider(default_model=model)
-    elif backend == "azure_openai":
-        from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key, api_base=p.api_base, default_model=model
-        )
-    elif backend == "anthropic":
-        from nanobot.providers.anthropic_provider import AnthropicProvider
-
-        provider = AnthropicProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-        )
-    else:
-        from nanobot.providers.openai_compat_provider import OpenAICompatProvider
-
-        provider = OpenAICompatProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            spec=spec,
-        )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
-    )
-    return provider
+    return make_provider(config)
