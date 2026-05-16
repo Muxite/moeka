@@ -14,6 +14,10 @@
 #   ./moeka.sh doctor           # sanity check: runtime, config, api keys, service state
 #   ./moeka.sh enable           # install + enable systemd user service
 #   ./moeka.sh disable          # stop + disable systemd user service
+#   ./moeka.sh export [--out F] # bundle workspace into a portable archive
+#   ./moeka.sh import FILE      # extract a workspace archive into MOEKA_WORKSPACE
+#   ./moeka.sh new NAME         # scaffold a fresh-identity workspace at ~/.moeka-NAME
+#   ./moeka.sh telegram-pair    # pair a Telegram bot token + auto-capture user id
 #
 # Flags (anywhere on the command line):
 #   --config PATH       override the config file path
@@ -488,24 +492,234 @@ PYEOF
     fi
 }
 
+# ---------- portability commands -------------------------------------------
+
+# Items that are ALWAYS excluded from an export: secrets, runtime state,
+# logs, bulky on-disk caches, and editor/IDE droppings.
+_export_default_excludes() {
+    cat <<'EOF'
+keys.env
+.env
+moeka.pid
+gateway.lock
+moeka.log
+moeka.log.*
+moeka.*.log
+moeka.*.log.gz
+config.json.bak.*
+tool-results
+bg-shell
+EOF
+}
+
+cmd_export() {
+    local out=""
+    local with_sessions=0
+    local with_media=0
+    local anonymize=0
+    while (( $# > 0 )); do
+        case "$1" in
+            --out) out="$2"; shift 2 ;;
+            --with-sessions) with_sessions=1; shift ;;
+            --with-media)    with_media=1;    shift ;;
+            --anonymize)     anonymize=1;     shift ;;
+            *) err "unknown export flag: $1"; exit 2 ;;
+        esac
+    done
+
+    [[ -d "$MOEKA_WORKSPACE_EXPANDED" ]] || { err "workspace not found: $MOEKA_WORKSPACE_EXPANDED"; exit 1; }
+
+    if [[ -z "$out" ]]; then
+        local stamp; stamp="$(date -u +%Y%m%d-%H%M%S)"
+        out="${PWD}/moeka-export-$(hostname -s 2>/dev/null || hostname)-${stamp}.tar.gz"
+    fi
+
+    local tmpdir; tmpdir="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmpdir'" RETURN
+
+    local excludes_file="$tmpdir/excludes"
+    _export_default_excludes > "$excludes_file"
+    (( with_sessions )) || echo "sessions" >> "$excludes_file"
+    (( with_media ))    || echo "media"    >> "$excludes_file"
+
+    local stage="$tmpdir/workspace"
+    mkdir -p "$stage"
+    info "staging workspace from $MOEKA_WORKSPACE_EXPANDED"
+    # Use tar to copy with excludes (rsync may not be installed everywhere).
+    tar -C "$MOEKA_WORKSPACE_EXPANDED" \
+        --exclude-from="$excludes_file" \
+        --exclude='memory/*.db-shm' --exclude='memory/*.db-wal' \
+        -cf - . | tar -C "$stage" -xf -
+
+    if (( anonymize )); then
+        info "anonymizing identity files"
+        cat > "$stage/USER.md" <<'EOF'
+# User
+
+Replace with the new user's profile.
+EOF
+        if [[ -f "$stage/config.json" ]]; then
+            "$VENV_DIR/bin/python" - "$stage/config.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p))
+for name, ch in (c.get("channels") or {}).items():
+    if isinstance(ch, dict) and "allowFrom" in ch:
+        ch["allowFrom"] = []
+        if "enabled" in ch:
+            ch["enabled"] = False
+open(p, "w").write(json.dumps(c, indent=2) + "\n")
+PY
+        fi
+    fi
+
+    info "writing archive: $out"
+    tar -C "$stage" -czf "$out" .
+    local size; size="$(du -h "$out" | cut -f1)"
+    local count; count="$(tar -tzf "$out" | wc -l)"
+    ok "export complete"
+    printf '  archive : %s\n' "$out"
+    printf '  size    : %s\n' "$size"
+    printf '  entries : %s\n' "$count"
+    (( with_sessions )) && printf '  scope   : +sessions\n'
+    (( with_media ))    && printf '  scope   : +media\n'
+    (( anonymize ))     && printf '  scope   : anonymized\n'
+}
+
+cmd_import() {
+    local force=0
+    local archive=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --force) force=1; shift ;;
+            -h|--help) echo "usage: moeka.sh import FILE [--force]"; return 0 ;;
+            *) archive="$1"; shift ;;
+        esac
+    done
+    [[ -n "$archive" ]] || { err "usage: moeka.sh import FILE [--force]"; exit 2; }
+    [[ -f "$archive" ]] || { err "archive not found: $archive"; exit 1; }
+
+    local ws="$MOEKA_WORKSPACE_EXPANDED"
+    if [[ -d "$ws" && -n "$(ls -A "$ws" 2>/dev/null)" ]] && (( !force )); then
+        err "workspace not empty: $ws (use --force to overwrite)"
+        exit 1
+    fi
+    mkdir -p "$ws"
+    info "extracting $archive -> $ws"
+    tar -C "$ws" -xzf "$archive"
+    ok "import complete"
+
+    # Warn about missing env vars referenced in config.json.
+    local cfg="$ws/config.json"
+    if [[ -f "$cfg" ]]; then
+        local missing
+        missing="$(python3 - "$cfg" <<'PY' || true
+import json, os, re, sys
+c = open(sys.argv[1]).read()
+keys = sorted(set(re.findall(r"\$\{([A-Z0-9_]+)\}", c)))
+missing = [k for k in keys if not os.environ.get(k)]
+print(" ".join(missing))
+PY
+)"
+        if [[ -n "$missing" ]]; then
+            warn "config references env vars not currently set: $missing"
+            warn "add them to keys.env before starting, or run ./moeka.sh telegram-pair / edit keys.env"
+        fi
+    fi
+
+    cat <<EOF
+
+Next steps:
+  1. Edit keys.env to set provider keys and bot tokens.
+  2. ./moeka.sh telegram-pair    # if using Telegram (captures token + user id)
+  3. ./moeka.sh start            # or ./moeka.sh enable for boot autostart
+EOF
+}
+
+cmd_new() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || { err "usage: moeka.sh new NAME [--workspace PATH]"; exit 2; }
+    shift || true
+    # The top-level parser already consumed --workspace into MOEKA_WORKSPACE_EXPANDED.
+    # If the caller passed it, honor that path; otherwise default to ~/.moeka-NAME.
+    local ws
+    if [[ -n "$WORKSPACE_OVERRIDE" ]]; then
+        ws="$MOEKA_WORKSPACE_EXPANDED"
+    else
+        ws="$HOME/.moeka-$name"
+    fi
+
+    if [[ -e "$ws" && -n "$(ls -A "$ws" 2>/dev/null)" ]]; then
+        err "target not empty: $ws"
+        exit 1
+    fi
+    local tpl="${SCRIPT_DIR}/templates/workspace"
+    [[ -d "$tpl" ]] || { err "templates not found: $tpl"; exit 1; }
+
+    info "scaffolding new workspace: $ws"
+    mkdir -p "$ws"
+    tar -C "$tpl" -cf - . | tar -C "$ws" -xf -
+
+    # Substitute {{NAME}} / {{USER_NAME}} placeholders in identity files.
+    local f
+    for f in SOUL.md USER.md; do
+        if [[ -f "$ws/$f" ]]; then
+            sed -i "s/{{NAME}}/${name}/g; s/{{USER_NAME}}/${name}/g" "$ws/$f"
+        fi
+    done
+
+    ok "workspace ready: $ws"
+    cat <<EOF
+
+To use this instance:
+  export MOEKA_WORKSPACE=$ws
+  ./moeka.sh telegram-pair    # wire up Telegram (optional)
+  ./moeka.sh start
+
+Edit $ws/SOUL.md to define this agent's personality.
+Edit $ws/USER.md to describe the user.
+EOF
+}
+
+cmd_telegram_pair() {
+    _ensure_venv
+    local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
+    local keys="${SCRIPT_DIR}/keys.env"
+    [[ -f "$cfg" ]] || { err "config.json not found: $cfg (run ./moeka.sh new or onboard first)"; exit 1; }
+    info "pairing Telegram bot"
+    info "  config : $cfg"
+    info "  keys   : $keys"
+    "$VENV_DIR/bin/python" "${SCRIPT_DIR}/scripts/telegram_pair.py" "$keys" "$cfg" "$@"
+    local rc=$?
+    if (( rc == 0 )); then
+        ok "telegram paired — restart moeka to apply: ./moeka.sh restart"
+    fi
+    return $rc
+}
+
 cmd_help() {
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "$CMD" in
-    start)       cmd_start "$@" ;;
-    run)         cmd_run ;;
-    stop)        cmd_stop ;;
-    restart)     cmd_restart "$@" ;;
-    status)      cmd_status ;;
-    logs)        cmd_logs "$@" ;;
-    shell)       cmd_shell ;;
-    exec)        cmd_exec "$@" ;;
-    install)     cmd_install ;;
-    version)     cmd_version ;;
-    doctor)      cmd_doctor ;;
-    enable)      cmd_enable ;;
-    disable)     cmd_disable ;;
+    start)          cmd_start "$@" ;;
+    run)            cmd_run ;;
+    stop)           cmd_stop ;;
+    restart)        cmd_restart "$@" ;;
+    status)         cmd_status ;;
+    logs)           cmd_logs "$@" ;;
+    shell)          cmd_shell ;;
+    exec)           cmd_exec "$@" ;;
+    install)        cmd_install ;;
+    version)        cmd_version ;;
+    doctor)         cmd_doctor ;;
+    enable)         cmd_enable ;;
+    disable)        cmd_disable ;;
+    export)         cmd_export "$@" ;;
+    import)         cmd_import "$@" ;;
+    new)            cmd_new "$@" ;;
+    telegram-pair)  cmd_telegram_pair "$@" ;;
     help|-h|--help) cmd_help ;;
     *)
         err "unknown command: $CMD"

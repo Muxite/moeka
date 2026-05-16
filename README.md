@@ -13,22 +13,46 @@ Built on [nanobot](https://github.com/HKUDS/nanobot) by HKUDS.
 
 ---
 
-## Quick start
+## Quick start (new machine, Ubuntu 24.04)
 
 ```bash
-# 1. Clone
 git clone https://github.com/Muxite/moeka.git && cd moeka
+./bootstrap.sh
+```
 
-# 2. Set your secrets
+`bootstrap.sh` is idempotent: installs `uv`, builds the venv, seeds
+`keys.env`, walks you through workspace mode (import / new identity /
+onboard), Telegram pairing, and systemd autostart.
+
+## Moving an instance to a new machine
+
+```bash
+# On the source machine:
+./moeka.sh export                       # -> moeka-export-<host>-<ts>.tar.gz
+# Copy the archive over, then on the target:
+git clone https://github.com/Muxite/moeka.git && cd moeka
+./bootstrap.sh                          # pick [i]mport, point at archive
+./moeka.sh telegram-pair                # if bot tokens changed
+```
+
+## Spinning up a *different* moeka
+
+```bash
+./moeka.sh new alice                    # scaffolds ~/.moeka-alice
+export MOEKA_WORKSPACE=~/.moeka-alice
+./moeka.sh telegram-pair
+./moeka.sh start
+```
+
+## Manual quick start (no bootstrap)
+
+```bash
+git clone https://github.com/Muxite/moeka.git && cd moeka
 cp keys.env.example keys.env
 $EDITOR keys.env          # add API keys, bot tokens
-
-# 3. Install into a local venv (uv handles everything)
 ./moeka.sh install
-
-# 4. Run
+./moeka.sh exec onboard   # or ./moeka.sh new NAME
 ./moeka.sh start
-./moeka.sh status
 ```
 
 To start automatically on boot:
@@ -55,6 +79,10 @@ To start automatically on boot:
 | `./moeka.sh version` | Show Python and moeka version |
 | `./moeka.sh enable` | Install systemd unit + enable boot autostart |
 | `./moeka.sh disable` | Stop service and remove unit |
+| `./moeka.sh export [--out FILE] [--with-sessions] [--with-media] [--anonymize]` | Bundle workspace into a portable archive |
+| `./moeka.sh import FILE [--force]` | Extract a workspace archive into `$MOEKA_WORKSPACE` |
+| `./moeka.sh new NAME [--workspace PATH]` | Scaffold a fresh-identity workspace |
+| `./moeka.sh telegram-pair` | Pair a Telegram bot — saves token, captures user ID from first message |
 
 Flags accepted by most commands:
 

@@ -112,3 +112,68 @@ Check status with `./moeka.sh doctor`.
 
 See [SYSTEMD.md](./SYSTEMD.md). `./moeka.sh enable` installs and starts
 the service. `./moeka.sh disable` stops and disables it.
+
+## Portability (export / import / new)
+
+Moeka's state lives entirely in `$MOEKA_WORKSPACE`. Four commands cover
+the full lifecycle of moving or duplicating an instance.
+
+### Export
+
+```sh
+./moeka.sh export                 # default: identity + skills + memory
+./moeka.sh export --with-sessions # also include per-channel chat history
+./moeka.sh export --with-media    # also include media/ (attachments)
+./moeka.sh export --anonymize     # wipe USER.md + allowFrom (for seeding others)
+./moeka.sh export --out /tmp/x.tar.gz
+```
+
+Always included: `SOUL.md`, `USER.md`, `AGENTS.md`, `HEARTBEAT.md`,
+`TOOLS.md`, `config.json` (env-var placeholders intact, no resolved
+secrets), `skills/`, `memory/`, `cron/`.
+
+Always excluded: `keys.env`, `.env`, `*.log`, `moeka.pid`, `gateway.lock`,
+`tool-results/`, `bg-shell/`, `config.json.bak.*`, sqlite WAL/SHM files.
+
+### Import
+
+```sh
+./moeka.sh import moeka-export-host-20260516.tar.gz
+./moeka.sh import x.tar.gz --workspace ~/.moeka-staging --force
+```
+
+Refuses to overwrite a non-empty workspace unless `--force`. Warns if
+`config.json` references env vars that aren't set in the current
+environment / `keys.env`.
+
+### New identity
+
+```sh
+./moeka.sh new alice                  # -> ~/.moeka-alice
+./moeka.sh new bob --workspace /srv/bob
+```
+
+Copies the templates under `templates/workspace/` into the target,
+substituting `{{NAME}}` placeholders in `SOUL.md` / `USER.md`. All
+channels start disabled with empty `allowFrom` — wire them up via
+`./moeka.sh telegram-pair` or by editing `config.json`.
+
+### Telegram pairing
+
+```sh
+./moeka.sh telegram-pair
+```
+
+Prompts for a bot token, validates via `getMe`, writes
+`TELEGRAM_TOKEN=...` into `keys.env`, polls `getUpdates` for ~2 minutes
+waiting for your first message, appends your user id to
+`channels.telegram.allowFrom` in `config.json`, and enables the channel.
+Use any time tokens change.
+
+## Bootstrap on a new Ubuntu 24.04 host
+
+`./bootstrap.sh` runs the full first-time setup interactively: installs
+`uv` if absent, builds the venv, seeds `keys.env`, prompts for workspace
+mode (import / new / onboard), offers Telegram pairing, and offers
+systemd enable. Idempotent — re-running on an already-set-up host skips
+completed steps.

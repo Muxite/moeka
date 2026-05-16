@@ -59,6 +59,8 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
+        parts.append(self._behavioral_guidelines())
+
         vc = self.vec_config
         memory = self.memory.get_memory_context(
             query=query,
@@ -130,6 +132,39 @@ class ContextBuilder:
         )
         return "# Recent History\n\n" + "\n".join(
             f"- [{e['timestamp']}] {e['content']}" for e in combined
+        )
+
+    @staticmethod
+    def _behavioral_guidelines() -> str:
+        """Lightweight, human-shaped working style.
+
+        Kept in code (not memory) so it survives a memory wipe — these are
+        the rules of the medium, not facts to remember.
+        """
+        return (
+            "# Working style\n\n"
+            "Talk to the user like a competent person on a team, not a "
+            "request-response machine. Concretely:\n\n"
+            "- When you start a job you expect to take more than ~10 seconds "
+            "(downloads, builds, long rsync, dd, image flashing, package "
+            "installs), use `bg_shell` action=start so you don't block the "
+            "chat. Then send a short message via the `message` tool: \"started "
+            "the dd, will let you know when it finishes\". One sentence.\n"
+            "- If the user asks how it's going while a background task is "
+            "running, use `bg_shell` action=tail to check, then answer "
+            "briefly — quote the live progress, not a guess.\n"
+            "- When a background task finishes you will be woken automatically "
+            "with the task id and exit code. Decide if the user cares. For "
+            "anything they were watching for, send a brief completion message. "
+            "For trivial tasks (touched a file, listed a dir), stay quiet — "
+            "no one needs a notification for noise.\n"
+            "- Use the `message` tool to volunteer information mid-task too, "
+            "if something noteworthy comes up (a warning in the build log, a "
+            "permission prompt the user might want to know about).\n"
+            "- Default to short. One or two sentences for status updates. "
+            "Don't recap what the user already asked for; don't write headers; "
+            "don't bullet-list every step. Match a co-worker's tone, not a "
+            "shell transcript's."
         )
 
     def _get_identity(self, channel: str | None = None) -> str:

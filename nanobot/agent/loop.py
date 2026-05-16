@@ -30,6 +30,7 @@ from nanobot.agent.tools.ask import (
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.bg_shell import BackgroundProcessRegistry, BackgroundShellTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.notebook import NotebookEditTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -445,6 +446,12 @@ class AgentLoop:
             )
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound, workspace=self.workspace))
         self.tools.register(SpawnTool(manager=self.subagents))
+        # Background shell + completion announcements. The registry publishes
+        # a system-channel inbound message when a tracked process exits, which
+        # wakes this loop via _process_message's system branch so the agent
+        # can decide whether to message the user.
+        self.bg_registry = BackgroundProcessRegistry(bus=self.bus, workspace=self.workspace)
+        self.tools.register(BackgroundShellTool(registry=self.bg_registry))
         if self.cron_service:
             self.tools.register(
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
@@ -488,7 +495,7 @@ class AgentLoop:
             effective_key = UNIFIED_SESSION_KEY
         else:
             effective_key = f"{channel}:{chat_id}"
-        for name in ("message", "spawn", "cron", "my"):
+        for name in ("message", "spawn", "cron", "my", "bg_shell"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     if name == "spawn":
@@ -499,6 +506,8 @@ class AgentLoop:
                         tool.set_context(channel, chat_id, metadata=metadata, session_key=session_key)
                     elif name == "message":
                         tool.set_context(channel, chat_id, message_id, metadata=metadata)
+                    elif name == "bg_shell":
+                        tool.set_context(channel, chat_id, session_key=effective_key)
                     else:
                         tool.set_context(channel, chat_id)
 
@@ -932,6 +941,14 @@ class AgentLoop:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
+        # Terminate any agent-spawned background shells. Policy: kill on
+        # shutdown — the agent's session context is gone when it comes back,
+        # so dangling jobs would orphan without a way to announce themselves.
+        if hasattr(self, "bg_registry"):
+            try:
+                await self.bg_registry.shutdown()
+            except Exception:
+                logger.exception("bg_registry shutdown failed")
         for name, stack in self._mcp_stacks.items():
             try:
                 await stack.aclose()

@@ -1,0 +1,149 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "${MOEKA_WORKSPACE}",
+      "model": "google/gemini-3-flash-preview",
+      "provider": "openrouter",
+      "maxTokens": 32768,
+      "contextWindowTokens": 1048576,
+      "contextBlockLimit": null,
+      "temperature": 0.1,
+      "maxToolIterations": 200,
+      "maxToolResultChars": 16000,
+      "providerRetryMode": "standard",
+      "reasoningEffort": null,
+      "timezone": "UTC",
+      "unifiedSession": false,
+      "disabledSkills": [],
+      "idleCompactAfterMinutes": 0,
+      "dream": {
+        "intervalH": 2,
+        "modelOverride": null,
+        "maxBatchSize": 20,
+        "maxIterations": 10
+      },
+      "vectorMemory": {
+        "enabled": true,
+        "modelName": "all-MiniLM-L6-v2",
+        "topK": 10,
+        "chunkSize": 512
+      }
+    }
+  },
+  "channels": {
+    "sendProgress": true,
+    "sendToolHints": false,
+    "sendMaxRetries": 3,
+    "telegram": {
+      "enabled": false,
+      "token": "${TELEGRAM_TOKEN}",
+      "allowFrom": [],
+      "proxy": null,
+      "replyToMessage": false,
+      "reactEmoji": "👀",
+      "groupPolicy": "mention",
+      "connectionPoolSize": 32,
+      "poolTimeout": 5.0,
+      "streaming": true,
+      "streamEditInterval": 0.6
+    },
+    "discord": {
+      "enabled": false,
+      "token": "${DISCORD_TOKEN}",
+      "allowFrom": [],
+      "intents": 37377,
+      "groupPolicy": "mention",
+      "readReceiptEmoji": "👀",
+      "workingEmoji": "🔧",
+      "workingEmojiDelay": 2.0,
+      "streaming": true
+    },
+    "canvas": {
+      "enabled": false,
+      "apiUrl": "${CANVAS_API_URL}",
+      "apiToken": "${CANVAS_API_TOKEN}",
+      "pollIntervalSeconds": 60,
+      "allowFrom": ["*"]
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "apiKey": "${OPENROUTER_API_KEY}",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "anthropic": {
+      "apiKey": "${ANTHROPIC_API_KEY}",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "openai": {
+      "apiKey": "${OPENAI_API_KEY}",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "groq": {
+      "apiKey": "${GROQ_API_KEY}",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "gemini": {
+      "apiKey": "${GEMINI_API_KEY}",
+      "apiBase": null,
+      "extraHeaders": null
+    },
+    "deepseek": {
+      "apiKey": "${DEEPSEEK_API_KEY}",
+      "apiBase": null,
+      "extraHeaders": null
+    }
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8900,
+    "timeout": 120.0
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 17380,
+    "heartbeat": {
+      "enabled": true,
+      "intervalS": 1800,
+      "keepRecentMessages": 8
+    }
+  },
+  "tools": {
+    "web": {
+      "enable": true,
+      "proxy": null,
+      "search": {
+        "provider": "brave",
+        "apiKey": "${BRAVE_API_KEY}",
+        "baseUrl": "",
+        "maxResults": 5,
+        "timeout": 30
+      }
+    },
+    "exec": {
+      "enable": true,
+      "timeout": 60,
+      "pathAppend": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "sandbox": "",
+      "allowedEnvKeys": [
+        "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY"
+      ],
+      "allowSudo": false,
+      "allowPatterns": [],
+      "denyPatterns": [
+        "\\b(shutdown|reboot|poweroff)\\b",
+        ":\\(\\)\\s*\\{.*\\};\\s*:",
+        ">>?\\s*\\S*(?:history\\.jsonl|\\.dream_cursor)"
+      ]
+    },
+    "restrictToWorkspace": false,
+    "mcpServers": {},
+    "ssrfWhitelist": ["127.0.0.0/8", "::1/128"]
+  }
+}

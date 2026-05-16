@@ -89,6 +89,9 @@ keys.env
 .dockerized
 .moeka-local.env
 
+# Workspace export archives
+moeka-export-*.tar.gz
+
 # Logs & temp
 *.log
 logs/
