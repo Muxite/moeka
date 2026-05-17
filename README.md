@@ -1,8 +1,58 @@
 # moeka
 
-A personal AI agent for server management — homelabs, Docker stacks, and Linux administration. Moeka runs natively on your host using [`uv`](https://docs.astral.sh/uv/), with no containers required. Reach it over Telegram, Discord, or a web canvas from anywhere.
+A personal AI agent for server management — homelabs, Docker stacks, and Linux administration. Moeka runs natively on your host using [`uv`](https://docs.astral.sh/uv/), with no containers required. Reach it over Telegram, Discord, Slack, Matrix, a web UI, or any of the other built-in chat channels from anywhere.
 
-Built on [nanobot](https://github.com/HKUDS/nanobot) by HKUDS.
+Built on [nanobot](https://github.com/HKUDS/nanobot) by HKUDS, with a CS/server-management focus: a permissive sandbox tuned for legitimate homelab ops (`rm`, `dd`, `mkfs`, `format`, `shutdown` are *not* blocked by default), cross-process session locking, dispatcher auto-restart, semantic vector memory, and a `nanobot channels enable/disable` CLI.
+
+---
+
+## Features
+
+### Agent runtime
+- **Model presets + automatic fallback** — declare `agents.defaults.model_preset` and `fallbackModels`; the gateway hot-swaps providers per turn without a restart.
+- **Streaming reasoning** — thinking/CoT chunks render as a separate channel above the assistant bubble (per-channel `showReasoning` toggle).
+- **Sustained goals (`/goal`)** — multi-step missions tracked across turns via `long_task` / `complete_goal`.
+- **Subagents** — `spawn` a focused worker with its own tool registry; results re-injected via system inbound.
+- **Dream two-phase memory consolidation** — automatic summarization with `/dream`, `/dream_log`, `/dream_restore`.
+- **Cross-process FileLock on session save** — safe even if a stray second moeka process starts alongside the systemd one.
+- **Dispatcher watchdog** — outbound queue auto-restarts on unexpected crashes.
+
+### Chat channels
+| Channel | Highlights |
+|---|---|
+| **Telegram** | Inline keyboard buttons, streaming edits, `drop_pending_updates` default-true, full slash command palette (`/goal`, `/pairing`, `/model`, …). |
+| **Discord** | Thread-aware sessions, DM pairing, media uploads. |
+| **Slack** | Socket-mode with handshake timeout; block-kit action buttons; pairing-only mode when `allowFrom` is omitted. |
+| **WebSocket / WebUI** | Built-in WebUI behind the gateway: token-bootstrapped, signed media URLs, runtime model badge, transcript persistence, goal state replay on reconnect. |
+| **Feishu / Lark** | Topic-thread isolation, CardKit streaming, Lark global domain, p2p pairing. |
+| **WhatsApp** | Voice transcription via Groq/OpenAI Whisper, media bridge. |
+| **MS Teams** | Hardened auth check; stale-reference cleanup. |
+| **Matrix** | E2E encryption via `matrix-nio`. |
+| **Email** | Attachment support, self-loop guard. |
+| **QQ / WeChat / WeCom / DingTalk / MoChat** | Group chat, voice, QR/media. |
+
+Pairing: omit `allowFrom` for any channel and unapproved DMs receive a chat-native pairing code instead of being silently dropped. Approve with `/pairing approve <code>`.
+
+### Providers
+OpenRouter, Anthropic, OpenAI, OpenAI Responses, OpenAI Codex (OAuth), Azure OpenAI, AWS Bedrock (native Converse), GitHub Copilot (OAuth), DeepSeek (incl. V4/Reasoner thinking), Kimi (K2.5/K2.6 thinking), Xiaomi MiMo (thinking), Moonshot, MiniMax, Mistral, Qwen, Gemini, Groq, Hugging Face, NVIDIA NIM, LM Studio, Ollama, vLLM, VolcEngine + Coding Plan, BytePlus, LongCat, StepFun, Cohere, Together, Olostep, Brave, Kagi, custom OpenAI-compatible. Transcription via Groq or OpenAI Whisper (now honours per-provider `api_base`).
+
+### Tools
+Filesystem (read/write/edit/list, hash-deduped reads), `exec` shell, web search/fetch (BYO-key for Brave/Kagi/Olostep/HuggingFace), `cron` scheduler, `notebook_edit` for `.ipynb`, MCP servers (stdio + SSE + streamable-HTTP with TCP probe), background subagents (`spawn`), runtime self-inspection (`MyTool`), image generation, `long_task` / `complete_goal` for sustained goals.
+
+### Sandbox (server-management posture)
+- **Internal guards (non-tunable)** — direct writes to `history.jsonl` / `.dream_cursor` are blocked because they corrupt Dream's cursor.
+- **Default user-tunable deny** — only the fork-bomb pattern. Moeka deliberately allows `rm -rf`, `dd`, `mkfs`, `format`, `shutdown`, `>/dev/sd*` because these are legitimate homelab ops. Tighten with `tools.exec.deny_patterns` if you want upstream's stricter posture back.
+- **`allow_sudo` opt-in** — `sudo` is rejected by default; flip `tools.exec.allow_sudo = true` to permit.
+- **SSRF guard** — internal/private URLs blocked in both `exec` shell output URLs and `web_fetch`.
+- **`restrict_to_workspace`** — optional confinement of filesystem & exec to the workspace root.
+
+### Operations
+- `nanobot gateway` — single process, all channels.
+- `nanobot channels enable <name>` / `disable <name>` — atomic config flip without hand-editing JSON.
+- `nanobot channels status` / `login` — discoverable channel state and OAuth/QR flows.
+- OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/models`) for programmatic access.
+- Cron with chat-native natural-language scheduling.
+- `./moeka.sh export` / `import` — portable workspace archives.
 
 ---
 
@@ -148,21 +198,17 @@ Run `./moeka.sh exec onboard` for an interactive setup wizard.
 
 ---
 
-## Channels
+## Enabling channels
 
-| Channel | Notes |
-|---------|-------|
-| **Telegram** | Recommended for mobile. Bot token + user ID allowlist. |
-| **Discord** | Thread-aware, supports file uploads. |
-| **Canvas** | Web UI — polls the gateway; no Node.js build needed. |
-| **Slack** | Thread support, file uploads. |
-| **Email** | Attachment support, self-loop guard. |
-| **Matrix** | E2E encryption via matrix-nio. |
-| **Microsoft Teams** | Thread-aware. |
-| **Feishu / DingTalk** | Rich media, CardKit. |
-| **QQ / WeChat** | Group chat, media support. |
+Atomic flip without hand-editing JSON:
 
-Enable any channel in `config.json` under `channels.<name>.enable = true`.
+```bash
+./moeka.sh exec channels enable telegram
+./moeka.sh exec channels disable slack
+./moeka.sh exec channels status
+```
+
+See the [Features](#features) section above for the full channel matrix.
 
 ---
 
@@ -190,9 +236,14 @@ moeka/                    ← this repo
 
 ---
 
-## Permissions
+## Permissions & sandbox
 
-By default moeka runs as your user and cannot use `sudo`. To allow sudo commands, set `tools.exec.allow_sudo = true` in `config.json` and ensure your host's sudoers policy permits it.
+Moeka's sandbox is tuned for legitimate server-management work. By default:
+
+- `sudo` is **denied** — set `tools.exec.allow_sudo = true` in `config.json` to permit, and ensure your host's sudoers policy permits it.
+- Destructive system commands (`rm -rf`, `dd`, `mkfs`, `format`, `shutdown`, raw block-device writes) are **allowed** — moeka is a homelab agent. To re-add upstream's stricter defaults, set `tools.exec.deny_patterns` in config.
+- Writes to `history.jsonl` / `.dream_cursor` are **always blocked** (these are non-tunable internal-state guards).
+- `restrict_to_workspace = true` confines filesystem & exec to `MOEKA_WORKSPACE`.
 
 ---
 
@@ -208,6 +259,20 @@ uv pip install -e ".[vec]" --project .
 Then add to `config.json`:
 ```json
 "vec": { "enable": true, "embeddingModel": "all-MiniLM-L6-v2", "topK": 10 }
+```
+
+---
+
+## Sustained goals
+
+```text
+/goal       Tell the agent to treat the next request as a long-running mission.
+            Inspect, plan, then call long_task; complete_goal recaps when done.
+/history    Print the last N persisted messages for the current session.
+/dream      Force memory consolidation now.
+/pairing    list | approve <code> | deny <code> | revoke <user_id>
+/model      Show or switch the active model preset (hot-reload — no restart).
+/status     Runtime, provider, channel status.
 ```
 
 ---

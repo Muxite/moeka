@@ -4,7 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
+This repo is **moeka**, a fork of [nanobot](https://github.com/HKUDS/nanobot) (HKUDS) tuned as a CS/server-management bot for homelabs and Linux administration. It is a lightweight Python AI agent framework with a React/TypeScript WebUI, centered on a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
+
+Moeka-specific deviations from upstream nanobot worth knowing:
+
+- **Sandbox posture is permissive by default** — `nanobot/agent/tools/shell.py` keeps only `_INTERNAL_DENY_PATTERNS` (non-tunable history.jsonl / .dream_cursor guards) and a fork-bomb in `_DEFAULT_DENY_PATTERNS`. `rm -rf`, `dd`, `mkfs`, `format`, `shutdown`, `>/dev/sd*` are *not* blocked by default. `allow_sudo` defaults to False and emits a clear opt-in message when denied.
+- **Cross-process session lock** — `nanobot/session/manager.py` wraps `save()` with `FileLock` so a stray second moeka process doesn't clobber appends.
+- **Dispatcher watchdog** — `ChannelManager._dispatch_with_watchdog` auto-restarts the outbound dispatcher on crashes.
+- **`bg_shell` tool is gated off the auto-loader** — needs a `BackgroundProcessRegistry` wired manually; `enabled(ctx)` returns False.
+- **`nanobot channels enable/disable <name>` CLI** — atomic config flip, defined in `nanobot/cli/commands.py`.
+- **Telegram `drop_pending_updates` defaults to True** to avoid stale floods on restart.
+- **Transcription `api_base` propagation** — Groq/OpenAI Whisper provider honours per-provider `api_base`.
+- **Lazy `Config` / `ToolsConfig` model_rebuild** — `nanobot/config/schema.py` re-tries forward-ref resolution on first instantiation to survive circular-import order.
+- **No CONTRIBUTING.md and no upstream `images/nanobot_logo.png`** — both intentionally removed; moeka uses its own `images/GitHub_README.png`.
+- **Lots of upstream features still apply** — model presets + fallback providers, streaming reasoning, pairing-code DM flow, ToolContext plugin system, `/goal` long-running tasks, settings BYOK endpoints, etc.
 
 ## Development Commands
 
@@ -65,7 +78,11 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 
 ## Branching Strategy
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full two-branch model (`main` vs `nightly`) and PR guidelines.
+Two branches:
+- `main` — stable; the running systemd unit follows this branch.
+- `nightly` — integrates upstream `HKUDS/nanobot` plus moeka work; merged into `main` when stable.
+
+The `upstream` remote points at `HKUDS/nanobot`. Periodic merges of `upstream/nightly` into local `nightly` pull in new providers, channels, and runtime features; moeka-specific deviations (see *Project Overview*) must be preserved during conflict resolution.
 
 ## Code Style
 
