@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,7 @@ _SEND_RETRY_DELAYS = (1, 2, 4)
 _BOOL_CAMEL_ALIASES: dict[str, str] = {
     "send_progress": "sendProgress",
     "send_tool_hints": "sendToolHints",
+    "show_reasoning": "showReasoning",
 }
 
 class ChannelManager:
@@ -54,10 +56,12 @@ class ChannelManager:
         bus: MessageBus,
         *,
         session_manager: "SessionManager | None" = None,
+        webui_runtime_model_name: Callable[[], str | None] | None = None,
     ):
         self.config = config
         self.bus = bus
         self._session_manager = session_manager
+        self._webui_runtime_model_name = webui_runtime_model_name
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
         self._origin_reply_fingerprints: dict[tuple[str, str, str], str] = {}
@@ -88,11 +92,14 @@ class ChannelManager:
                 kwargs: dict[str, Any] = {}
                 # Only the WebSocket channel currently hosts the embedded webui
                 # surface; other channels stay oblivious to these knobs.
-                if cls.name == "websocket" and self._session_manager is not None:
-                    kwargs["session_manager"] = self._session_manager
-                    static_path = _default_webui_dist()
-                    if static_path is not None:
-                        kwargs["static_dist_path"] = static_path
+                if cls.name == "websocket":
+                    if self._session_manager is not None:
+                        kwargs["session_manager"] = self._session_manager
+                        static_path = _default_webui_dist()
+                        if static_path is not None:
+                            kwargs["static_dist_path"] = static_path
+                    if self._webui_runtime_model_name is not None:
+                        kwargs["runtime_model_name"] = self._webui_runtime_model_name
                 channel = cls(section, self.bus, **kwargs)
                 channel.transcription_provider = transcription_provider
                 channel.transcription_api_key = transcription_key
@@ -103,6 +110,9 @@ class ChannelManager:
                 )
                 channel.send_tool_hints = self._resolve_bool_override(
                     section, "send_tool_hints", self.config.channels.send_tool_hints,
+                )
+                channel.show_reasoning = self._resolve_bool_override(
+                    section, "show_reasoning", self.config.channels.show_reasoning,
                 )
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)
@@ -130,22 +140,44 @@ class ChannelManager:
             return ""
 
     def _validate_allow_from(self) -> None:
-        to_disable: list[str] = []
         for name, ch in self.channels.items():
             cfg = ch.config
             if isinstance(cfg, dict):
                 allow = cfg.get("allow_from") if "allow_from" in cfg else cfg.get("allowFrom")
             else:
                 allow = getattr(cfg, "allow_from", None)
-            if allow == []:
-                logger.error(
-                    '"{}" has empty allowFrom — channel would deny everyone. '
-                    'Set allowFrom to ["*"] or add specific IDs. Disabling channel.',
+            if allow is None:
+                # allowFrom omitted → pairing-only mode.  Unapproved senders
+                # receive a pairing code instead of being silently ignored.
+                logger.info(
+                    '"{}" has no allowFrom; unapproved users will receive a pairing code',
                     name,
                 )
-                to_disable.append(name)
-        for name in to_disable:
-            del self.channels[name]
+
+    def _should_send_progress(self, channel_name: str, *, tool_hint: bool = False) -> bool:
+        """Return whether progress (or tool-hints) may be sent to *channel_name*."""
+        ch = self.channels.get(channel_name)
+        if ch is None:
+            logger.warning("Progress check for unknown channel: {}", channel_name)
+            return False
+        return ch.send_tool_hints if tool_hint else ch.send_progress
+
+    def _resolve_bool_override(self, section: Any, key: str, default: bool) -> bool:
+        """Return *key* from *section* if it is a bool, otherwise *default*.
+
+        For dict configs also checks the camelCase alias (e.g. ``sendProgress``
+        for ``send_progress``) so raw JSON/TOML configs work alongside
+        Pydantic models.
+        """
+        if isinstance(section, dict):
+            value = section.get(key)
+            if value is None:
+                camel = _BOOL_CAMEL_ALIASES.get(key)
+                if camel:
+                    value = section.get(camel)
+            return value if isinstance(value, bool) else default
+        value = getattr(section, key, None)
+        return value if isinstance(value, bool) else default
 
     def _should_send_progress(self, channel_name: str, *, tool_hint: bool = False) -> bool:
         """Return whether progress (or tool-hints) may be sent to *channel_name*."""
@@ -296,6 +328,23 @@ class ChannelManager:
                         timeout=1.0
                     )
 
+                if (
+                    msg.metadata.get("_reasoning_delta")
+                    or msg.metadata.get("_reasoning_end")
+                    or msg.metadata.get("_reasoning")
+                ):
+                    # Reasoning rides its own plugin channel: only delivered
+                    # when the destination channel opts in via ``show_reasoning``
+                    # and overrides the streaming primitives. Channels without
+                    # a low-emphasis UI affordance keep the base no-op and the
+                    # content silently drops here. ``_reasoning`` (one-shot)
+                    # is accepted for backward compatibility with hooks that
+                    # haven't migrated to delta/end yet.
+                    channel = self.channels.get(msg.channel)
+                    if channel is not None and channel.show_reasoning:
+                        await self._send_with_retry(channel, msg)
+                    continue
+
                 if msg.metadata.get("_progress"):
                     if msg.metadata.get("_tool_hint") and not self._should_send_progress(
                         msg.channel, tool_hint=True,
@@ -308,6 +357,14 @@ class ChannelManager:
 
                 if msg.metadata.get("_retry_wait"):
                     continue
+
+                if (
+                    msg.metadata.get("_runtime_model_updated")
+                    and msg.channel == "websocket"
+                    and "websocket" not in self.channels
+                ):
+                    continue
+
 
                 # Coalesce consecutive _stream_delta messages for the same (channel, chat_id)
                 # to reduce API calls and improve streaming latency
@@ -345,7 +402,16 @@ class ChannelManager:
     @staticmethod
     async def _send_once(channel: BaseChannel, msg: OutboundMessage) -> None:
         """Send one outbound message without retry policy."""
-        if msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_end"):
+        if msg.metadata.get("_reasoning_end"):
+            await channel.send_reasoning_end(msg.chat_id, msg.metadata)
+        elif msg.metadata.get("_reasoning_delta"):
+            await channel.send_reasoning_delta(msg.chat_id, msg.content, msg.metadata)
+        elif msg.metadata.get("_reasoning"):
+            # Back-compat: one-shot reasoning. BaseChannel translates this
+            # to a single delta + end pair so plugins only implement the
+            # streaming primitives.
+            await channel.send_reasoning(msg)
+        elif msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_end"):
             await channel.send_delta(msg.chat_id, msg.content, msg.metadata)
         elif not msg.metadata.get("_streamed"):
             await channel.send(msg)

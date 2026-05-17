@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,8 +12,12 @@ except ImportError:
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.channels.telegram import TELEGRAM_REPLY_CONTEXT_MAX_LEN, TelegramChannel, _StreamBuf
-from nanobot.channels.telegram import TelegramConfig
+from nanobot.channels.telegram import (
+    TELEGRAM_REPLY_CONTEXT_MAX_LEN,
+    TelegramChannel,
+    TelegramConfig,
+    _StreamBuf,
+)
 
 
 class _FakeHTTPXRequest:
@@ -58,6 +61,9 @@ class _FakeBot:
 
     async def send_photo(self, **kwargs) -> None:
         self.sent_media.append({"kind": "photo", **kwargs})
+
+    async def send_video(self, **kwargs) -> None:
+        self.sent_media.append({"kind": "video", **kwargs})
 
     async def send_voice(self, **kwargs) -> None:
         self.sent_media.append({"kind": "voice", **kwargs})
@@ -190,6 +196,7 @@ async def test_start_creates_separate_pools_with_proxy(monkeypatch) -> None:
     assert builder.get_updates_request_value is poll_req
     assert callable(app.updater.start_polling_kwargs["error_callback"])
     assert any(cmd.command == "status" for cmd in app.bot.commands)
+    assert any(cmd.command == "history" for cmd in app.bot.commands)
     assert any(cmd.command == "dream" for cmd in app.bot.commands)
     assert any(cmd.command == "dream_log" for cmd in app.bot.commands)
     assert any(cmd.command == "dream_restore" for cmd in app.bot.commands)
@@ -299,17 +306,19 @@ async def test_on_error_logs_network_issues_as_warning(monkeypatch) -> None:
     recorded: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
-        "nanobot.channels.telegram.logger.warning",
+        channel.logger,
+        "warning",
         lambda message, error: recorded.append(("warning", message.format(error))),
     )
     monkeypatch.setattr(
-        "nanobot.channels.telegram.logger.error",
+        channel.logger,
+        "error",
         lambda message, error: recorded.append(("error", message.format(error))),
     )
 
     await channel._on_error(object(), SimpleNamespace(error=NetworkError("proxy disconnected")))
 
-    assert recorded == [("warning", "Telegram network issue: proxy disconnected")]
+    assert recorded == [("warning", "network issue: proxy disconnected")]
 
 
 @pytest.mark.asyncio
@@ -323,13 +332,14 @@ async def test_on_error_summarizes_empty_network_error(monkeypatch) -> None:
     recorded: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
-        "nanobot.channels.telegram.logger.warning",
+        channel.logger,
+        "warning",
         lambda message, error: recorded.append(("warning", message.format(error))),
     )
 
     await channel._on_error(object(), SimpleNamespace(error=NetworkError("")))
 
-    assert recorded == [("warning", "Telegram network issue: NetworkError")]
+    assert recorded == [("warning", "network issue: NetworkError")]
 
 
 @pytest.mark.asyncio
@@ -341,17 +351,19 @@ async def test_on_error_keeps_non_network_exceptions_as_error(monkeypatch) -> No
     recorded: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
-        "nanobot.channels.telegram.logger.warning",
+        channel.logger,
+        "warning",
         lambda message, error: recorded.append(("warning", message.format(error))),
     )
     monkeypatch.setattr(
-        "nanobot.channels.telegram.logger.error",
+        channel.logger,
+        "error",
         lambda message, error: recorded.append(("error", message.format(error))),
     )
 
     await channel._on_error(object(), SimpleNamespace(error=RuntimeError("boom")))
 
-    assert recorded == [("error", "Telegram error: boom")]
+    assert recorded == [("error", "error: boom")]
 
 
 @pytest.mark.asyncio
@@ -467,8 +479,46 @@ async def test_send_delta_stream_end_falls_back_on_bad_request() -> None:
 
 @pytest.mark.asyncio
 async def test_send_delta_stream_end_splits_oversized_reply() -> None:
-    """Final streamed reply exceeding Telegram limit is split into chunks."""
-    from nanobot.channels.telegram import TELEGRAM_MAX_MESSAGE_LEN
+    """Final streamed reply exceeding Telegram limit is split into chunks.
+
+    The fix converts markdown to HTML first, then splits by 4096 (actual Telegram
+    limit), ensuring the edited message always fits within Telegram's constraint.
+    Previously, the code split by 4000 (TELEGRAM_MAX_MESSAGE_LEN) before HTML
+    conversion, which could still overflow when HTML tags were added.
+    """
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    channel._app.bot.edit_message_text = AsyncMock()
+    channel._app.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=99))
+
+    oversized = "x" * (4000 + 500)
+    channel._stream_bufs["123"] = _StreamBuf(text=oversized, message_id=7, last_edit=0.0)
+
+    await channel.send_delta("123", "", {"_stream_end": True})
+
+    channel._app.bot.edit_message_text.assert_called_once()
+    edit_text = channel._app.bot.edit_message_text.call_args.kwargs.get("text", "")
+    assert len(edit_text) <= 4096, f"edit_text length {len(edit_text)} exceeds Telegram's 4096 limit"
+
+    channel._app.bot.send_message.assert_called_once()
+    send_text = channel._app.bot.send_message.call_args.kwargs.get("text", "")
+    assert len(send_text) <= 4096
+    assert "123" not in channel._stream_bufs
+
+
+@pytest.mark.asyncio
+async def test_send_delta_stream_end_html_expansion_does_not_overflow() -> None:
+    """Markdown that expands when converted to HTML is still split correctly.
+
+    This is the actual bug from issue #3315: markdown like **bold** expands to
+    <b>bold</b>, adding ~33% characters. A 3600-char message with heavy markdown
+    could become 4800+ chars after HTML conversion, exceeding 4096 limit.
+    The fix converts to HTML first, THEN splits by 4096.
+    """
+    from nanobot.channels.telegram import _markdown_to_telegram_html
 
     channel = TelegramChannel(
         TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
@@ -478,14 +528,21 @@ async def test_send_delta_stream_end_splits_oversized_reply() -> None:
     channel._app.bot.edit_message_text = AsyncMock()
     channel._app.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=99))
 
-    oversized = "x" * (TELEGRAM_MAX_MESSAGE_LEN + 500)
-    channel._stream_bufs["123"] = _StreamBuf(text=oversized, message_id=7, last_edit=0.0)
+    markdown_text = "**bold** " * 400  # 3600 chars raw, expands ~33% to 4800 HTML
+    raw_len = len(markdown_text)
+    html_len = len(_markdown_to_telegram_html(markdown_text))
+    assert html_len > 4096, f"Test precondition failed: HTML should exceed 4096 (was {html_len})"
+
+    channel._stream_bufs["123"] = _StreamBuf(text=markdown_text, message_id=7, last_edit=0.0)
 
     await channel.send_delta("123", "", {"_stream_end": True})
 
     channel._app.bot.edit_message_text.assert_called_once()
     edit_text = channel._app.bot.edit_message_text.call_args.kwargs.get("text", "")
-    assert len(edit_text) <= TELEGRAM_MAX_MESSAGE_LEN
+    assert len(edit_text) <= 4096, (
+        f"HTML text length {len(edit_text)} exceeds Telegram's 4096 limit. "
+        f"Raw was {raw_len}, HTML was {html_len}."
+    )
 
     channel._app.bot.send_message.assert_called_once()
     assert "123" not in channel._stream_bufs
@@ -528,6 +585,39 @@ async def test_send_delta_incremental_edit_treats_not_modified_as_success() -> N
     await channel.send_delta("123", "", {"_stream_delta": True, "_stream_id": "s:0"})
 
     assert channel._stream_bufs["123"].last_edit > 0.0
+
+
+@pytest.mark.asyncio
+async def test_send_delta_incremental_edit_splits_oversized_buffer() -> None:
+    """Mid-stream overflow: once buf.text exceeds Telegram's limit, split into
+    chunks, edit the current message with the first chunk, and re-anchor the
+    buffer to a new message for the tail so further deltas keep streaming."""
+    from nanobot.channels.telegram import TELEGRAM_MAX_MESSAGE_LEN
+
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    channel._app.bot.edit_message_text = AsyncMock()
+    channel._app.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=99))
+
+    oversized = "x" * (TELEGRAM_MAX_MESSAGE_LEN + 500)
+    channel._stream_bufs["123"] = _StreamBuf(
+        text=oversized, message_id=7, last_edit=0.0, stream_id="s:0"
+    )
+
+    await channel.send_delta("123", "y", {"_stream_delta": True, "_stream_id": "s:0"})
+
+    channel._app.bot.edit_message_text.assert_called_once()
+    edit_text = channel._app.bot.edit_message_text.call_args.kwargs.get("text", "")
+    assert len(edit_text) <= TELEGRAM_MAX_MESSAGE_LEN
+
+    channel._app.bot.send_message.assert_called_once()
+    buf = channel._stream_bufs["123"]
+    assert buf.message_id == 99
+    assert len(buf.text) <= TELEGRAM_MAX_MESSAGE_LEN
+    assert buf.last_edit > 0.0
 
 
 @pytest.mark.asyncio
@@ -666,6 +756,36 @@ async def test_send_remote_media_url_after_security_validation(monkeypatch) -> N
             "chat_id": 123,
             "photo": "https://example.com/cat.jpg",
             "reply_parameters": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_local_media_preserves_filename(tmp_path: Path) -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    attachment = tmp_path / "report.final.md"
+    attachment.write_bytes(b"# Report\n")
+
+    await channel.send(
+        OutboundMessage(
+            channel="telegram",
+            chat_id="123",
+            content="",
+            media=[str(attachment)],
+        )
+    )
+
+    assert channel._app.bot.sent_media == [
+        {
+            "kind": "document",
+            "chat_id": 123,
+            "document": b"# Report\n",
+            "reply_parameters": None,
+            "filename": "report.final.md",
         }
     ]
 
@@ -1174,6 +1294,20 @@ async def test_forward_command_normalizes_telegram_safe_dream_aliases() -> None:
     assert handled[0]["content"] == "/dream-restore deadbeef"
 
 
+def test_telegram_bus_slash_command_regex_matches_agent_loop_commands() -> None:
+    """Bus-routed slash commands must match the Telegram handler regex (see builtin router)."""
+    pat = TelegramChannel.TELEGRAM_BUS_SLASH_COMMAND_RE
+    assert pat.fullmatch("/history")
+    assert pat.fullmatch("/history 5")
+    assert pat.fullmatch("/goal ship the feature")
+    assert pat.fullmatch("/pairing list")
+    assert pat.fullmatch("/model fast")
+    assert pat.fullmatch("/new@nanobot_bot")
+    assert pat.fullmatch("/goal@nanobot_bot refine objective")
+    assert pat.fullmatch("/dream-log deadbeef") is None
+    assert pat.fullmatch("/dream-restore deadbeef") is None
+
+
 @pytest.mark.asyncio
 async def test_on_help_includes_restart_command() -> None:
     channel = TelegramChannel(
@@ -1191,7 +1325,62 @@ async def test_on_help_includes_restart_command() -> None:
     assert "/status" in help_text
     assert "/dream" in help_text
     assert "/dream-log" in help_text
+    assert "/goal" in help_text
+    assert "/pairing" in help_text
+    assert "/model" in help_text
     assert "/dream-restore" in help_text
+
+
+@pytest.mark.asyncio
+async def test_on_start_ignores_unauthorized_user_silently() -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["999"], group_policy="open"),
+        MessageBus(),
+    )
+    update = _make_telegram_update(text="/start", chat_type="private")
+    update.message.reply_text = AsyncMock()
+
+    await channel._on_start(update, None)
+
+    update.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_help_ignores_unauthorized_user_silently() -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["999"], group_policy="open"),
+        MessageBus(),
+    )
+    update = _make_telegram_update(text="/help", chat_type="private")
+    update.message.reply_text = AsyncMock()
+
+    await channel._on_help(update, None)
+
+    update.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_message_ignores_unauthorized_user_before_side_effects() -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["999"], group_policy="open"),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    started_typing: list[str] = []
+    handled: list[dict] = []
+    channel._start_typing = lambda chat_id: started_typing.append(chat_id)
+    channel._add_reaction = AsyncMock(return_value=None)
+
+    async def capture_handle(**kwargs) -> None:
+        handled.append(kwargs)
+
+    channel._handle_message = capture_handle
+
+    await channel._on_message(_make_telegram_update(text="hello", chat_type="private"), None)
+
+    assert started_typing == []
+    channel._add_reaction.assert_not_awaited()
+    assert handled == []
 
 
 @pytest.mark.asyncio
@@ -1495,3 +1684,274 @@ async def test_start_loop_exits_when_app_goes_none(monkeypatch) -> None:
 
     await _run_loop()
     assert channel._app is None  # loop exited cleanly
+
+
+# ---------------------------------------------------------------------------
+# _markdown_to_telegram_html formatting tests
+# ---------------------------------------------------------------------------
+
+def test_markdown_to_html_headers_become_bold() -> None:
+    from nanobot.channels.telegram import _markdown_to_telegram_html
+
+    assert _markdown_to_telegram_html("# Title") == "<b>Title</b>"
+    assert _markdown_to_telegram_html("## Subtitle") == "<b>Subtitle</b>"
+    assert _markdown_to_telegram_html("### Deep") == "<b>Deep</b>"
+
+
+def test_markdown_to_html_numbered_lists_preserved() -> None:
+    from nanobot.channels.telegram import _markdown_to_telegram_html
+
+    text = "1. First\n2. Second\n3. Third"
+    result = _markdown_to_telegram_html(text)
+    assert "1. First" in result
+    assert "2. Second" in result
+    assert "3. Third" in result
+
+
+def test_markdown_to_html_numbered_list_normalizes_whitespace() -> None:
+    from nanobot.channels.telegram import _markdown_to_telegram_html
+
+    # Extra spaces after dot should be normalized
+    text = "1.   Lots of space\n2.  Two spaces"
+    result = _markdown_to_telegram_html(text)
+    assert "1. Lots of space" in result
+    assert "2. Two spaces" in result
+
+
+def test_markdown_to_html_headers_survive_html_escaping() -> None:
+    """Headers containing special HTML chars should still render as bold."""
+    from nanobot.channels.telegram import _markdown_to_telegram_html
+
+    result = _markdown_to_telegram_html("# A < B & C > D")
+    assert "<b>A &lt; B &amp; C &gt; D</b>" == result
+
+
+def test_markdown_to_html_mixed_formatting() -> None:
+    """Headers, bullets, numbered lists, and bold coexist correctly."""
+    from nanobot.channels.telegram import _markdown_to_telegram_html
+
+    text = "# Overview\n\n- bullet one\n- bullet two\n\n1. step one\n2. step two\n\n**bold text**"
+    result = _markdown_to_telegram_html(text)
+    assert "<b>Overview</b>" in result
+    assert "\u2022 bullet one" in result
+    assert "1. step one" in result
+    assert "<b>bold text</b>" in result
+
+
+# ---------------------------------------------------------------------------
+# _strip_md_block tests
+# ---------------------------------------------------------------------------
+
+def test_strip_md_block_removes_inline_formatting() -> None:
+    from nanobot.channels.telegram import _strip_md_block
+
+    text = "**bold** and _italic_ and ~~struck~~"
+    result = _strip_md_block(text)
+    assert result == "bold and italic and struck"
+
+
+def test_strip_md_block_strips_headers() -> None:
+    from nanobot.channels.telegram import _strip_md_block
+
+    assert _strip_md_block("## Title\nBody") == "Title\nBody"
+
+
+def test_strip_md_block_converts_bullets_and_numbers() -> None:
+    from nanobot.channels.telegram import _strip_md_block
+
+    text = "- item a\n1. item b\n2. item c"
+    result = _strip_md_block(text)
+    assert "\u2022 item a" in result
+    assert "1. item b" in result
+    assert "2. item c" in result
+
+
+def test_strip_md_block_strips_links() -> None:
+    from nanobot.channels.telegram import _strip_md_block
+
+    assert _strip_md_block("[click here](https://example.com)") == "click here"
+
+
+# ---------------------------------------------------------------------------
+# Streaming mid-edit uses _strip_md_block
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_send_delta_mid_stream_strips_markdown() -> None:
+    """Mid-stream edits should strip markdown so users see clean text."""
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    channel._app.bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+    channel._app.bot.edit_message_text = AsyncMock()
+
+    # Initial send with markdown
+    await channel.send_delta("999", "**hello** world")
+    sent_text = channel._app.bot.send_message.call_args.kwargs.get("text", "")
+    # Should NOT contain raw markdown asterisks
+    assert "**" not in sent_text
+    assert "hello world" in sent_text
+
+    # Mid-stream edit
+    import time
+    buf = channel._stream_bufs["999"]
+    buf.last_edit = time.monotonic() - 10  # force edit interval
+    await channel.send_delta("999", "\n### Title\n1. step")
+    edited_text = channel._app.bot.edit_message_text.call_args.kwargs.get("text", "")
+    assert "###" not in edited_text
+    assert "**" not in edited_text
+    assert "Title" in edited_text
+    assert "1. step" in edited_text
+
+
+def test_build_keyboard_respects_inline_keyboards_flag() -> None:
+    """``_build_keyboard`` returns ``None`` whenever the feature flag is off,
+    regardless of whether buttons are provided; returns a proper Markup only
+    when the flag is explicitly enabled. Pins the kill-switch so accidentally
+    flipping the default doesn't silently expose callback handlers."""
+    from telegram import InlineKeyboardMarkup
+
+    off = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", inline_keyboards=False),
+        MessageBus(),
+    )
+    assert off._build_keyboard([["A", "B"]]) is None
+
+    on = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", inline_keyboards=True),
+        MessageBus(),
+    )
+    assert on._build_keyboard([]) is None  # empty still no-op
+    markup = on._build_keyboard([["Yes", "No"], ["Cancel"]])
+    assert isinstance(markup, InlineKeyboardMarkup)
+    rows = markup.inline_keyboard
+    assert [[b.text for b in row] for row in rows] == [["Yes", "No"], ["Cancel"]]
+    # callback_data mirrors label so _on_callback_query can echo the tap back.
+    assert rows[0][0].callback_data == "Yes"
+
+
+def test_safe_callback_data_truncates_at_utf8_boundary() -> None:
+    # Telegram's 64-byte callback_data cap is a hard API limit; silent 400s were the bug.
+    short = "Yes"
+    assert TelegramChannel._safe_callback_data(short) == short
+
+    long_ascii = "a" * 100
+    out = TelegramChannel._safe_callback_data(long_ascii)
+    assert len(out.encode("utf-8")) <= 64
+    assert long_ascii.startswith(out)
+
+    # Multibyte labels must not split a codepoint mid-byte.
+    long_cjk = "同意并继续下一步，我已阅读并同意了服务条款以及隐私政策"
+    assert len(long_cjk.encode("utf-8")) > 64
+    out = TelegramChannel._safe_callback_data(long_cjk)
+    assert len(out.encode("utf-8")) <= 64
+    assert long_cjk.startswith(out)
+    out.encode("utf-8").decode("utf-8")  # must round-trip cleanly
+
+
+def test_build_keyboard_uses_safe_callback_data_for_long_labels() -> None:
+    # Pins the integration so a long-label payload survives ``send_message`` instead of 400ing.
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", inline_keyboards=True),
+        MessageBus(),
+    )
+    long_label = "Approve and continue to the next step with the updated terms of service"
+    assert len(long_label.encode("utf-8")) > 64
+
+    markup = channel._build_keyboard([[long_label]])
+    btn = markup.inline_keyboard[0][0]
+    assert btn.text == long_label  # display preserved
+    assert len(btn.callback_data.encode("utf-8")) <= 64
+    assert long_label.startswith(btn.callback_data)
+
+
+def test_buttons_as_text_format_preserves_rows_and_labels() -> None:
+    # Canonical shape: one row per line, labels bracketed. Layout survives the fallback.
+    assert TelegramChannel._buttons_as_text([["Yes", "No"], ["Cancel"]]) == "[Yes] [No]\n[Cancel]"
+    assert TelegramChannel._buttons_as_text([["Only"]]) == "[Only]"
+    assert TelegramChannel._buttons_as_text([[], ["A"]]) == "[A]"  # empty rows skipped
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_buttons_to_inline_text_when_flag_off() -> None:
+    """Buttons are semantic options; with ``inline_keyboards=False`` we must
+    splice labels into the text so users still see the choices. Silent-drop
+    was the pre-fallback bug — the agent got a success reply while the user
+    saw a question with no options."""
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"], inline_keyboards=False),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+
+    await channel.send(
+        OutboundMessage(
+            channel="telegram",
+            chat_id="123",
+            content="Proceed?",
+            buttons=[["Yes", "No"], ["Cancel"]],
+        )
+    )
+
+    assert len(channel._app.bot.sent_messages) == 1
+    sent = channel._app.bot.sent_messages[0]
+    assert sent.get("reply_markup") is None
+    assert "Proceed?" in sent["text"]
+    assert "[Yes] [No]" in sent["text"]
+    assert "[Cancel]" in sent["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_uses_native_keyboard_when_flag_on() -> None:
+    """With the flag on, the content stays clean and buttons ride in ``reply_markup``."""
+    from telegram import InlineKeyboardMarkup
+
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"], inline_keyboards=True),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+
+    await channel.send(
+        OutboundMessage(
+            channel="telegram",
+            chat_id="123",
+            content="Proceed?",
+            buttons=[["Yes", "No"]],
+        )
+    )
+
+    sent = channel._app.bot.sent_messages[0]
+    assert isinstance(sent.get("reply_markup"), InlineKeyboardMarkup)
+    assert "[Yes]" not in sent["text"]  # native keyboard owns the rendering
+
+
+@pytest.mark.asyncio
+async def test_callback_query_ignores_unauthorized_user_before_side_effects() -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["999"], inline_keyboards=True),
+        MessageBus(),
+    )
+    channel._handle_message = AsyncMock()
+
+    query = SimpleNamespace(
+        id="cb_1",
+        data="Yes",
+        answer=AsyncMock(),
+        message=SimpleNamespace(
+            chat_id=123,
+            edit_reply_markup=AsyncMock(),
+        ),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=12345, username="alice", first_name="Alice"),
+    )
+
+    await channel._on_callback_query(update, None)
+
+    query.answer.assert_not_awaited()
+    query.message.edit_reply_markup.assert_not_awaited()
+    channel._handle_message.assert_not_awaited()

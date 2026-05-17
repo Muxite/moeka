@@ -185,54 +185,11 @@ def record_write(path: str | Path) -> None:
 
 
 def check_read(path: str | Path) -> str | None:
-    """Check if a file has been read and is fresh.
-
-    Returns None if OK, or a warning string.
-    When mtime changed but file content is identical (e.g. touch, editor save),
-    the check passes to avoid false-positive staleness warnings.
-    """
-    p = str(Path(path).resolve())
-    entry = _state.get(p)
-    if entry is None:
-        return "Warning: file has not been read yet. Read it first to verify content before editing."
-    try:
-        current_mtime = os.path.getmtime(p)
-    except OSError:
-        return None
-    current_hash = _hash_file(p)
-    if current_mtime != entry.mtime:
-        if entry.content_hash and current_hash == entry.content_hash:
-            entry.mtime = current_mtime
-            return None
-        return "Warning: file has been modified since last read. Re-read to verify content before editing."
-    # Same mtime — still verify hash (fast filesystems can alias timestamps).
-    if entry.content_hash and current_hash and current_hash != entry.content_hash:
-        return "Warning: file has been modified since last read. Re-read to verify content before editing."
-    return None
+    return _default.check_read(path)
 
 
 def is_unchanged(path: str | Path, offset: int = 1, limit: int | None = None) -> bool:
-    """Return True if file was previously read with same params and content is unchanged."""
-    p = str(Path(path).resolve())
-    entry = _state.get(p)
-    if entry is None:
-        return False
-    if not entry.can_dedup:
-        return False
-    if entry.offset != offset or entry.limit != limit:
-        return False
-    try:
-        current_mtime = os.path.getmtime(p)
-    except OSError:
-        return False
-    if current_mtime != entry.mtime:
-        return False
-    # Same mtime — verify hash to catch in-place modifications on fast filesystems.
-    if entry.content_hash:
-        current_hash = _hash_file(p)
-        if current_hash and current_hash != entry.content_hash:
-            return False
-    return True
+    return _default.is_unchanged(path, offset=offset, limit=limit)
 
 
 def clear() -> None:

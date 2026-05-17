@@ -760,6 +760,7 @@ async def test_runner_batches_read_only_tools_before_exclusive_work():
             ToolCallRequest(id="rw1", name="write_a", arguments={}),
         ],
         {},
+        {},
     )
 
     assert shared_events[0:2] == ["start:read_a", "start:read_b"]
@@ -803,6 +804,7 @@ async def test_runner_does_not_batch_exclusive_read_only_tools():
             ToolCallRequest(id="ddg1", name="ddg_like", arguments={}),
             ToolCallRequest(id="ro2", name="read_b", arguments={}),
         ],
+        {},
         {},
     )
 
@@ -1030,7 +1032,12 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
 
     request_messages = provider.chat_with_retry.await_args_list[1].kwargs["messages"]
     non_system = [message for message in request_messages if message.get("role") != "system"]
-    assert non_system[0] == {"role": "user", "content": "first question"}
+    # User messages are annotated with a "[Message Time: ...]" prefix during
+    # replay; strip it for content comparison.
+    import re as _re
+    _strip_ts = lambda s: _re.sub(r"^\[Message Time: [^\]]+\]\n?", "", s) if isinstance(s, str) else s
+    assert non_system[0]["role"] == "user"
+    assert _strip_ts(non_system[0]["content"]) == "first question"
     assert non_system[1] == {
         "role": "assistant",
         "content": _PERSISTED_MODEL_ERROR_PLACEHOLDER,

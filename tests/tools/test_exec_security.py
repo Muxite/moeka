@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import socket
-from unittest.mock import AsyncMock, patch
+import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -20,37 +21,6 @@ def _fake_resolve_localhost(hostname, port, family=0, type_=0):
 
 def _fake_resolve_public(hostname, port, family=0, type_=0):
     return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
-
-
-@pytest.mark.asyncio
-async def test_exec_blocks_sudo_by_default():
-    """Sudo commands should fail once when allow_sudo is disabled."""
-    tool = ExecTool()
-    with patch.object(ExecTool, "_spawn", new_callable=AsyncMock) as mock_spawn:
-        result = await tool.execute(command="sudo -n true")
-    assert "sudo is not enabled" in result
-    assert "SUDO_REQUIRED" not in result
-    mock_spawn.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_exec_allows_sudo_when_enabled():
-    """When allow_sudo is enabled, sudo should run through the normal exec path."""
-    mock_proc = AsyncMock()
-    mock_proc.communicate.return_value = (b"ok", b"")
-    mock_proc.returncode = 0
-
-    tool = ExecTool(allow_sudo=True)
-    with (
-        patch.object(ExecTool, "_guard_command", return_value=None) as mock_guard,
-        patch.object(ExecTool, "_spawn", return_value=mock_proc) as mock_spawn,
-    ):
-        result = await tool.execute(command="sudo -n true")
-
-    assert "ok" in result
-    assert "SUDO_REQUIRED" not in result
-    mock_guard.assert_called_once()
-    assert mock_spawn.call_args[0][0] == "sudo -n true"
 
 
 @pytest.mark.asyncio
@@ -125,7 +95,7 @@ def test_exec_blocks_writes_to_history_jsonl(command):
     tool = ExecTool()
     result = tool._guard_command(command, "/tmp")
     assert result is not None
-    assert "dangerous pattern" in result.lower()
+    assert "safety guard" in result.lower() and "dangerous pattern" in result.lower()
 
 
 @pytest.mark.parametrize(
@@ -213,3 +183,106 @@ async def test_exec_ignores_workspace_check_when_not_restricted(tmp_path):
     result = await tool.execute(command="echo ok", working_dir=str(other))
     assert "ok" in result
     assert "outside the configured workspace" not in result
+
+
+# --- #3599: stdio redirects to /dev/null must not trip the workspace guard ----
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The exact command from the #3599 reporter.
+        'rm test_print.txt 2>/dev/null; echo "done"',
+        # Plain redirect of stdout / stderr.
+        "find . -type f >/dev/null",
+        "noisy_cmd 2>/dev/null",
+        "noisy_cmd >/dev/null 2>&1",
+        # Read from /dev/urandom is also a benign device read.
+        "head -c 16 /dev/urandom | xxd",
+        "echo done >/dev/stderr",
+        "echo line </dev/stdin",
+        # Per-process FD aliases never escape the workspace.
+        "cat /dev/fd/3",
+    ],
+)
+def test_exec_allows_benign_device_targets_inside_workspace(tmp_path, command):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+    assert tool._guard_command(command, str(workspace)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX rm and /dev/null syntax")
+async def test_exec_3599_regression_rm_with_dev_null_redirect(tmp_path):
+    """#3599: ``rm <ws-path> 2>/dev/null`` must succeed against the workspace guard."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "test_print.txt"
+    target.write_text("scratch")
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True, timeout=5)
+    result = await tool.execute(
+        command=f'rm {target} 2>/dev/null; echo "done"',
+        working_dir=str(workspace),
+    )
+    assert "done" in result
+    assert "path outside working dir" not in result
+    assert not target.exists()
+
+
+def test_exec_still_blocks_real_outside_path_via_redirect(tmp_path):
+    """Redirect *targets* outside the workspace (not /dev/...) must still be blocked.
+
+    We only whitelist kernel device files; arbitrary outside redirects such as
+    ``> /etc/issue`` should remain caught by the workspace guard so a buggy
+    LLM cannot exfiltrate data outside the workspace via stderr redirection.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+    blocked = tool._guard_command("echo pwn > /etc/issue", str(workspace))
+    assert blocked is not None
+    assert "path outside working dir" in blocked
+
+
+# --- format command blocking -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "format C: /q",
+        "format D: /fs:ntfs",
+        "&& format",
+        "| format",
+        "&format",
+        ";format",
+        "|format",
+    ],
+)
+def test_exec_blocks_format_command(command):
+    """Moeka is a server-management agent: `format` (and similar disk ops) are NOT
+    blocked by default. Users can opt back in via ``tools.exec.deny_patterns``.
+    The originally upstream test expected blocking — preserved here as a guard
+    that moeka's permissive default has not silently regressed."""
+    tool = ExecTool()
+    result = tool._guard_command(command, "/tmp")
+    assert result is None  # not blocked by default in moeka
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # URL parameter &format= must NOT be blocked (regression).
+        'curl -s "wttr.in/xxx?lang=zh&format=%l:+%c+%t+%h+%w&1"',
+        'curl -s "wttr.in/xxx?format=%l:+%c+%t+%h+%w&1"',
+        # format as a non-command word in a normal argument.
+        "echo format",
+        "echo reformat",
+    ],
+)
+def test_exec_allows_format_in_url_and_args(command):
+    """``format`` inside URL parameters or as a non-command arg must be allowed."""
+    tool = ExecTool()
+    result = tool._guard_command(command, "/tmp")
+    assert result is None

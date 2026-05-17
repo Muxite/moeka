@@ -269,6 +269,12 @@ class BackgroundShellTool(Tool):
             "bg_origin_session_key", default="cli:direct",
         )
 
+    @classmethod
+    def enabled(cls, ctx: Any) -> bool:
+        # bg_shell needs a BackgroundProcessRegistry that the loop wires in
+        # manually outside the auto-loader. Skip auto-discovery.
+        return False
+
     @property
     def name(self) -> str:
         return "bg_shell"

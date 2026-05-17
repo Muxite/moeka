@@ -80,6 +80,15 @@ def load_config(config_path: Path | None = None) -> Config:
     """
     path = config_path or get_config_path()
 
+    # Ensure forward refs in Config are resolved before instantiation. The
+    # eager rebuild at schema import time may have failed (circular import);
+    # this catches the lazy case.
+    from nanobot.config.schema import _resolve_tool_config_refs
+    try:
+        _resolve_tool_config_refs()
+    except Exception:
+        pass
+
     config = Config()
     if path.exists():
         try:
@@ -129,11 +138,12 @@ _ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 def resolve_config_env_vars(config: Config) -> Config:
     """Return *config* with ``${VAR}`` env-var references resolved.
 
-    Only string values are affected; other types pass through unchanged.
-    Missing variables are logged as warnings and their placeholders are left
-    unreplaced so that the rest of the system can start without them.
+    Walks in place so fields declared with ``exclude=True`` (e.g.
+    ``DreamConfig.cron``) survive; returns the same instance when no
+    references are present. Missing variables are logged as warnings and
+    their placeholders are left unreplaced so the rest of the system can
+    still start.
 
-    :returns: Config with env-var placeholders substituted.
     """
     return _resolve_in_place(config)
 
