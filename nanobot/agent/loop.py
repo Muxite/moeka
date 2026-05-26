@@ -38,6 +38,7 @@ from nanobot.session.goal_state import (
 )
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.artifacts import generated_image_paths_from_messages
+from nanobot.utils.background import log_task_exceptions
 from nanobot.utils.document import extract_documents
 from nanobot.utils.helpers import image_placeholder_text
 from nanobot.utils.helpers import truncate_text as truncate_text_fn
@@ -1050,7 +1051,18 @@ class AgentLoop:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
-        task.add_done_callback(self._background_tasks.remove)
+        log_done = log_task_exceptions(name="agent-background")
+
+        def _on_done(t: asyncio.Task) -> None:
+            # list.remove raises ValueError if the task was already removed;
+            # asyncio swallows that and we'd lose the original task exception.
+            try:
+                self._background_tasks.remove(t)
+            except ValueError:
+                pass
+            log_done(t)
+
+        task.add_done_callback(_on_done)
 
     def stop(self) -> None:
         """Stop the agent loop."""

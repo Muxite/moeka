@@ -1,5 +1,6 @@
 """Configuration loading utilities."""
 
+import contextvars
 import json
 import os
 import re
@@ -11,6 +12,13 @@ from loguru import logger
 from pydantic import BaseModel
 
 from nanobot.config.schema import Config
+
+# Tracks the dotted field path during `_resolve_in_place` recursion so the
+# env-var warning can tell the user *where* in config.json the missing
+# `${VAR}` reference lives (e.g. `providers.openrouter.apiKey`).
+_RESOLVE_PATH: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "_RESOLVE_PATH", default=(),
+)
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
@@ -154,15 +162,26 @@ def _resolve_in_place(obj: Any) -> Any:
         return new if new != obj else obj
     if isinstance(obj, BaseModel):
         updates: dict[str, Any] = {}
+        base_path = _RESOLVE_PATH.get()
         for name in type(obj).model_fields:
             old = getattr(obj, name)
-            new = _resolve_in_place(old)
+            token = _RESOLVE_PATH.set(base_path + (name,))
+            try:
+                new = _resolve_in_place(old)
+            finally:
+                _RESOLVE_PATH.reset(token)
             if new is not old:
                 updates[name] = new
         extras = obj.__pydantic_extra__
         new_extras: dict[str, Any] | None = None
         if extras:
-            resolved = {k: _resolve_in_place(v) for k, v in extras.items()}
+            resolved: dict[str, Any] = {}
+            for k, v in extras.items():
+                token = _RESOLVE_PATH.set(base_path + (k,))
+                try:
+                    resolved[k] = _resolve_in_place(v)
+                finally:
+                    _RESOLVE_PATH.reset(token)
             if any(resolved[k] is not extras[k] for k in extras):
                 new_extras = resolved
         if not updates and new_extras is None:
@@ -172,11 +191,25 @@ def _resolve_in_place(obj: Any) -> Any:
             copy.__pydantic_extra__ = new_extras
         return copy
     if isinstance(obj, dict):
-        resolved = {k: _resolve_in_place(v) for k, v in obj.items()}
-        return resolved if any(resolved[k] is not obj[k] for k in obj) else obj
+        base_path = _RESOLVE_PATH.get()
+        resolved_dict: dict[Any, Any] = {}
+        for k, v in obj.items():
+            token = _RESOLVE_PATH.set(base_path + (str(k),))
+            try:
+                resolved_dict[k] = _resolve_in_place(v)
+            finally:
+                _RESOLVE_PATH.reset(token)
+        return resolved_dict if any(resolved_dict[k] is not obj[k] for k in obj) else obj
     if isinstance(obj, list):
-        resolved = [_resolve_in_place(v) for v in obj]
-        return resolved if any(nv is not ov for nv, ov in zip(resolved, obj)) else obj
+        base_path = _RESOLVE_PATH.get()
+        resolved_list: list[Any] = []
+        for i, v in enumerate(obj):
+            token = _RESOLVE_PATH.set(base_path + (f"[{i}]",))
+            try:
+                resolved_list.append(_resolve_in_place(v))
+            finally:
+                _RESOLVE_PATH.reset(token)
+        return resolved_list if any(nv is not ov for nv, ov in zip(resolved_list, obj)) else obj
     return obj
 
 
@@ -195,10 +228,12 @@ def _env_replace(match: re.Match[str]) -> str:
     name = match.group(1)
     value = os.environ.get(name)
     if value is None:
+        path = _RESOLVE_PATH.get()
+        location = ".".join(path) if path else "<unknown>"
         logger.warning(
-            "Environment variable '{}' referenced in config is not set; "
+            "Environment variable '{}' referenced in config at {} is not set; "
             "leaving placeholder unreplaced — dependent features will be unavailable",
-            name,
+            name, location,
         )
         return match.group(0)
     return value

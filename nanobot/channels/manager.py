@@ -64,6 +64,10 @@ class ChannelManager:
         self._webui_runtime_model_name = webui_runtime_model_name
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
+        # Counter for dispatcher watchdog restarts; escalates to critical
+        # when it crosses _DISPATCH_RESTART_WARN so a crash loop is
+        # visually distinct from a one-off crash in journalctl.
+        self._dispatch_restart_count: int = 0
         self._origin_reply_fingerprints: dict[tuple[str, str, str], str] = {}
 
         self._init_channels()
@@ -293,9 +297,12 @@ class ChannelManager:
 
         return False
 
+    _DISPATCH_RESTART_WARN = 3
+    _DISPATCH_RESTART_DELAY_S = 1.0
+
     async def _dispatch_with_watchdog(self) -> None:
         """Run _dispatch_outbound, restarting it automatically on unexpected crashes."""
-        _RESTART_DELAY_S = 1.0
+        delay = self._DISPATCH_RESTART_DELAY_S
         while True:
             try:
                 await self._dispatch_outbound()
@@ -303,12 +310,18 @@ class ChannelManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.error(
-                    "Outbound dispatcher crashed ({}); restarting in {}s",
-                    exc, _RESTART_DELAY_S,
+                self._dispatch_restart_count += 1
+                log = (
+                    logger.critical
+                    if self._dispatch_restart_count >= self._DISPATCH_RESTART_WARN
+                    else logger.error
+                )
+                log(
+                    "Outbound dispatcher crashed (count={}, exc={}); restarting in {}s",
+                    self._dispatch_restart_count, exc, delay,
                 )
                 try:
-                    await asyncio.sleep(_RESTART_DELAY_S)
+                    await asyncio.sleep(delay)
                 except asyncio.CancelledError:
                     raise
 
