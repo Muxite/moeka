@@ -20,14 +20,43 @@ keys and the active model/preset come from the user's existing moeka setup.
 from __future__ import annotations
 
 import asyncio
+import base64
+import mimetypes
 from pathlib import Path
 from typing import Any
+
+
+def _image_part(image: str | bytes | Path) -> dict[str, Any]:
+    """Build an OpenAI-style image content part from a path, URL, or raw bytes.
+
+    Accepts: an http(s)/data URL (passed through), a local file path, or raw
+    image bytes. Local files and bytes are base64-encoded into a data URL.
+    """
+    if isinstance(image, (bytes, bytearray)):
+        data = base64.b64encode(bytes(image)).decode()
+        url = f"data:image/png;base64,{data}"
+    elif isinstance(image, str) and image.startswith(("http://", "https://", "data:")):
+        url = image
+    else:
+        path = Path(image)
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        data = base64.b64encode(path.read_bytes()).decode()
+        url = f"data:{mime};base64,{data}"
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _user_content(prompt: str, images: list[str | bytes | Path] | None) -> Any:
+    """Plain string when no images, else a multimodal content-part list."""
+    if not images:
+        return prompt
+    return [{"type": "text", "text": prompt}] + [_image_part(i) for i in images]
 
 
 async def acomplete(
     prompt: str,
     *,
     system: str | None = None,
+    images: list[str | bytes | Path] | None = None,
     config_path: str | Path | None = None,
     model: str | None = None,
     preset: str | None = None,
@@ -39,6 +68,8 @@ async def acomplete(
     Args:
         prompt: The user message.
         system: Optional system prompt.
+        images: Optional images (paths, http/data URLs, or raw bytes) for
+            vision-capable models. Sent as OpenAI-style multimodal content.
         config_path: Path to ``config.json``; defaults to ``~/.nanobot/config.json``.
         model: Override the resolved model (provider-specific id).
         preset: Named model preset to use instead of the active default.
@@ -58,7 +89,7 @@ async def acomplete(
     messages: list[dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    messages.append({"role": "user", "content": _user_content(prompt, images)})
 
     response = await provider.chat_with_retry(
         messages=messages,
@@ -78,6 +109,7 @@ def complete(
     prompt: str,
     *,
     system: str | None = None,
+    images: list[str | bytes | Path] | None = None,
     config_path: str | Path | None = None,
     model: str | None = None,
     preset: str | None = None,
@@ -101,6 +133,7 @@ def complete(
         acomplete(
             prompt,
             system=system,
+            images=images,
             config_path=config_path,
             model=model,
             preset=preset,
