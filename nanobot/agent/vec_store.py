@@ -43,6 +43,46 @@ def _chunk_markdown(text: str) -> list[str]:
     return chunks
 
 
+def _chunk_document(text: str) -> list[str]:
+    """Split arbitrary text into <=_MAX_CHUNK_CHARS windows without truncating.
+
+    Prefers markdown-section boundaries when present, then packs paragraphs into
+    size-bounded chunks, hard-splitting any single paragraph that overflows. Unlike
+    :func:`_chunk_markdown`, no content is dropped — suitable for host documents.
+    """
+    if not text.strip():
+        return []
+    units = _chunk_markdown(text) if _SECTION_RE.search(text) else _split_paragraphs(text)
+    chunks: list[str] = []
+    for unit in units:
+        unit = unit.strip()
+        while len(unit) > _MAX_CHUNK_CHARS:
+            cut = unit.rfind(" ", 0, _MAX_CHUNK_CHARS)
+            if cut <= 0:
+                cut = _MAX_CHUNK_CHARS
+            chunks.append(unit[:cut].strip())
+            unit = unit[cut:].strip()
+        if unit:
+            chunks.append(unit)
+    return chunks
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Pack blank-line-separated paragraphs into <=_MAX_CHUNK_CHARS groups."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    groups: list[str] = []
+    buf = ""
+    for para in paras:
+        if buf and len(buf) + len(para) + 2 > _MAX_CHUNK_CHARS:
+            groups.append(buf)
+            buf = para
+        else:
+            buf = f"{buf}\n\n{para}" if buf else para
+    if buf:
+        groups.append(buf)
+    return groups
+
+
 class VecStore:
     """sqlite-vec backed semantic store for memory, history, and skills."""
 
@@ -225,6 +265,63 @@ class VecStore:
             return []
 
     # ------------------------------------------------------------------
+    # Host documents (incremental, append-only)
+    # ------------------------------------------------------------------
+
+    def add_documents(self, text: str, source: str | None = None) -> int:
+        """Chunk and index host-supplied *text* incrementally. Returns chunk count."""
+        if not self._available or not text.strip():
+            return 0
+        chunks = _chunk_document(text)
+        if not chunks:
+            return 0
+        try:
+            conn = self._connection()
+            embeddings = self._embed(chunks)
+            for chunk, emb in zip(chunks, embeddings):
+                cur = conn.execute(
+                    "INSERT INTO documents_data(source, text) VALUES (?, ?)",
+                    (source, chunk),
+                )
+                conn.execute(
+                    "INSERT INTO documents_vec(rowid, embedding) VALUES (?, ?)",
+                    (cur.lastrowid, emb.tobytes()),
+                )
+            conn.commit()
+            logger.debug("VecStore: indexed {} document chunk(s)", len(chunks))
+            return len(chunks)
+        except Exception:
+            logger.exception("VecStore: add_documents failed")
+            return 0
+
+    def search_documents(self, query: str, k: int = 5) -> list[str]:
+        """Return the top-k host-document chunks semantically closest to *query*."""
+        if not self._available or not query.strip():
+            return []
+        try:
+            conn = self._connection()
+            count = conn.execute("SELECT count(*) FROM documents_data").fetchone()[0]
+            if count == 0:
+                return []
+            emb = self._embed([query])[0]
+            limit = min(k, count)
+            rows = conn.execute(
+                """
+                SELECT d.text
+                FROM documents_vec v
+                JOIN documents_data d ON d.id = v.rowid
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                ORDER BY distance
+                """,
+                (emb.tobytes(), limit),
+            ).fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            logger.exception("VecStore: search_documents failed")
+            return []
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -278,6 +375,14 @@ class VecStore:
                 text TEXT NOT NULL
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS skills_vec
+                USING vec0(embedding FLOAT[{_EMBEDDING_DIM}]);
+
+            CREATE TABLE IF NOT EXISTS documents_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT,
+                text TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS documents_vec
                 USING vec0(embedding FLOAT[{_EMBEDDING_DIM}]);
         """)
         conn.commit()

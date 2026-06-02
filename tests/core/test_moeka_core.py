@@ -1,0 +1,254 @@
+"""Tests for the MoekaCore facade."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+
+from nanobot.core import MoekaCore, RunResult
+
+
+def _write_config(tmp_path: Path) -> Path:
+    data = {
+        "providers": {"openrouter": {"apiKey": "sk-test-key"}},
+        "agents": {"defaults": {"model": "openai/gpt-4.1"}},
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(data))
+    return config_path
+
+
+def _make_core(tmp_path: Path) -> MoekaCore:
+    return MoekaCore.create(config_path=_write_config(tmp_path), workspace=tmp_path)
+
+
+def test_create_missing_config():
+    with pytest.raises(FileNotFoundError):
+        MoekaCore.create(config_path="/nonexistent/config.json")
+
+
+def test_create_builds_loop(tmp_path):
+    core = _make_core(tmp_path)
+    assert core.loop is not None
+    assert core.loop.workspace == tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
+
+def test_action_decorator_registers_tool(tmp_path):
+    core = _make_core(tmp_path)
+
+    @core.action
+    def get_weather(city: str) -> str:
+        """Get weather."""
+        return f"sunny in {city}"
+
+    assert core.loop.tools.has("get_weather")
+    tool = core.loop.tools.get("get_weather")
+    assert tool.description == "Get weather."
+    assert tool.parameters["required"] == ["city"]
+
+
+def test_action_parameterized(tmp_path):
+    core = _make_core(tmp_path)
+
+    @core.action(name="lookup", read_only=True)
+    def fn(q: str) -> str:
+        return q
+
+    assert core.loop.tools.has("lookup")
+    assert core.loop.tools.get("lookup").read_only is True
+
+
+def test_register_and_unregister_action(tmp_path):
+    core = _make_core(tmp_path)
+    name = core.register_action(lambda x: x, name="echo")
+    assert name == "echo"
+    assert core.loop.tools.has("echo")
+    core.unregister_action("echo")
+    assert not core.loop.tools.has("echo")
+
+
+def test_actions_coexist_with_builtins(tmp_path):
+    core = _make_core(tmp_path)
+    builtin_count = len(core.loop.tools)
+    assert builtin_count > 0  # default tools loaded at construction
+
+    @core.action
+    def custom(x: int) -> str:
+        return str(x)
+
+    assert len(core.loop.tools) == builtin_count + 1
+    assert core.loop.tools.has("read_file")  # a builtin survived
+
+
+# ---------------------------------------------------------------------------
+# Running the loop — the registered action is exposed to the engine
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_run_returns_result_and_drains_bus(tmp_path):
+    from nanobot.bus.events import OutboundMessage
+
+    core = _make_core(tmp_path)
+    core.loop.process_direct = AsyncMock(
+        return_value=OutboundMessage(channel="cli", chat_id="direct", content="hello back"),
+    )
+
+    result = await core.run("hi")
+    assert isinstance(result, RunResult)
+    assert result.content == "hello back"
+    assert core.loop.bus.outbound.empty()
+
+
+@pytest.mark.asyncio
+async def test_run_captures_tools_used(tmp_path):
+    from nanobot.agent.hook import AgentHookContext
+    from nanobot.bus.events import OutboundMessage
+    from nanobot.providers.base import ToolCallRequest
+
+    core = _make_core(tmp_path)
+
+    @core.action
+    def do_thing(x: int) -> str:
+        return str(x)
+
+    async def fake_process_direct(message, *, session_key, media=None):
+        # The action is visible to the engine at run time.
+        assert core.loop.tools.has("do_thing")
+        ctx = AgentHookContext(iteration=0, messages=[{"role": "user", "content": message}])
+        ctx.tool_calls = [ToolCallRequest(id="c1", name="do_thing", arguments={"x": 1})]
+        for h in core.loop._extra_hooks:
+            await h.after_iteration(ctx)
+        return OutboundMessage(channel="cli", chat_id="direct", content="done")
+
+    core.loop.process_direct = fake_process_direct
+    result = await core.run("go")
+    assert result.content == "done"
+    assert result.tools_used == ["do_thing"]
+
+
+@pytest.mark.asyncio
+async def test_action_invoked_by_real_engine(tmp_path):
+    """End-to-end: a registered Python function is actually called by the agent.
+
+    Uses a scripted fake provider (no mocking of process_direct) so the call goes
+    through the real runner -> ToolRegistry -> FunctionTool path.
+    """
+    from unittest.mock import MagicMock
+
+    from nanobot.providers.base import (
+        GenerationSettings,
+        LLMProvider,
+        LLMResponse,
+        ToolCallRequest,
+    )
+
+    calls: list[dict] = []
+
+    provider = MagicMock(spec=LLMProvider)
+    provider.generation = GenerationSettings()
+    provider.supports_progress_deltas = False
+    step = {"n": 0}
+
+    async def chat_with_retry(**kwargs):
+        step["n"] += 1
+        if step["n"] == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="c1", name="multiply", arguments={"a": 6, "b": 7})],
+            )
+        return LLMResponse(content="The answer is 42.", tool_calls=[], usage={})
+
+    provider.chat_with_retry = chat_with_retry
+
+    core = MoekaCore.create(
+        config_path=_write_config(tmp_path), workspace=tmp_path, provider=provider,
+    )
+
+    @core.action
+    def multiply(a: int, b: int) -> str:
+        """Multiply two integers."""
+        calls.append({"a": a, "b": b})
+        return str(a * b)
+
+    result = await core.run("what is 6 times 7?")
+
+    assert calls == [{"a": 6, "b": 7}]          # the host function really ran
+    assert "multiply" in result.tools_used
+    assert result.content == "The answer is 42."
+
+
+@pytest.mark.asyncio
+async def test_think_returns_text(tmp_path):
+    from nanobot.bus.events import OutboundMessage
+
+    core = _make_core(tmp_path)
+    core.loop.process_direct = AsyncMock(
+        return_value=OutboundMessage(channel="cli", chat_id="direct", content="42"),
+    )
+    assert await core.think("answer?") == "42"
+
+
+@pytest.mark.asyncio
+async def test_run_restores_hooks_on_error(tmp_path):
+    core = _make_core(tmp_path)
+    original = core.loop._extra_hooks
+    core.loop.process_direct = AsyncMock(side_effect=RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        await core.run("hi")
+    assert core.loop._extra_hooks is original
+
+
+# ---------------------------------------------------------------------------
+# Host-document RAG (requires moeka[vec])
+# ---------------------------------------------------------------------------
+
+def test_ingest_noop_without_vec(tmp_path, monkeypatch):
+    core = _make_core(tmp_path)
+    # Force the unavailable path regardless of installed extras.
+    if core.loop.vec_store is not None:
+        monkeypatch.setattr(core.loop.vec_store, "_available", False)
+    assert core.ingest("some text") == 0
+    assert core.retrieve("query") == []
+    assert core.vec_available is False
+
+
+def test_ingest_retrieve_roundtrip(tmp_path):
+    pytest.importorskip("sqlite_vec")
+    pytest.importorskip("sentence_transformers")
+
+    from nanobot.agent.vec_store import VecStore
+
+    store = VecStore(tmp_path / "vec.db")
+    if not store.available:
+        pytest.skip("vec backend unavailable")
+
+    n = store.add_documents(
+        "The Eiffel Tower is located in Paris, France. "
+        "It was completed in 1889 for the World's Fair.",
+        source="facts",
+    )
+    assert n >= 1
+    hits = store.search_documents("Where is the Eiffel Tower?", k=3)
+    assert any("Paris" in h for h in hits)
+
+
+def test_ingest_from_file(tmp_path):
+    pytest.importorskip("sqlite_vec")
+    pytest.importorskip("sentence_transformers")
+
+    core = _make_core(tmp_path)
+    if not core.vec_available:
+        pytest.skip("vec backend unavailable")
+
+    doc = tmp_path / "note.txt"
+    doc.write_text("Project Moeka ships on Friday at noon.")
+    assert core.ingest(doc, source=None) >= 1
+    hits = core.retrieve("When does the project ship?", k=3)
+    assert any("Friday" in h for h in hits)

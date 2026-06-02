@@ -65,6 +65,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# moeka-core: the reusable RAG/agentic "thinking core" (nanobot.core.MoekaCore)
+# ships inside the base install — `from nanobot.core import MoekaCore` pulls no
+# channel/gateway deps (all heavy imports are lazy). For semantic RAG over memory,
+# history, and host documents, install the `vec` extra below. A standalone slim
+# `moeka-core` wheel (without channels/CLI/gateway deps) is planned separately.
 api = [
     "aiohttp>=3.9.0,<4.0.0",
 ]
