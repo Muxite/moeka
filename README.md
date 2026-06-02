@@ -52,7 +52,13 @@ Filesystem (read/write/edit/list, hash-deduped reads), `exec` shell, web search/
 - `nanobot channels status` / `login` — discoverable channel state and OAuth/QR flows.
 - OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/models`) for programmatic access.
 - Cron with chat-native natural-language scheduling.
-- `./moeka.sh export` / `import` — portable workspace archives.
+- `./bin/moeka.sh export` / `import` — portable workspace archives.
+
+### Embeddable core (moeka-core)
+- **`from nanobot.core import MoekaCore`** — drop the agent/RAG engine into your own Python with no channels, gateway, or WebUI. The import boundary is enforced by a test, so it pulls no chat-runtime dependencies.
+- **Data, not files** — build from an in-memory `config_dict` / `Config` (or a `config_path`); `${VAR}` placeholders resolve from the environment (the same `keys.env` pattern). With no workspace it runs in a throwaway temp dir instead of touching `~/.nanobot`.
+- **Host actions + documents** — register plain Python functions as tools with `@core.action`, ingest docs for retrieval, and run a multi-step tool-calling loop. One-shot `complete()` / `acomplete()` skip the loop entirely.
+- Minimal install: `pip install moeka[core]` (add `[vec]` for semantic RAG). See [Embedding the core](#embedding-the-core-moeka-core) below.
 
 ---
 
@@ -67,7 +73,7 @@ Filesystem (read/write/edit/list, hash-deduped reads), `exec` shell, web search/
 
 ```bash
 git clone https://github.com/Muxite/moeka.git && cd moeka
-./bootstrap.sh
+./bin/bootstrap.sh
 ```
 
 `bootstrap.sh` is idempotent: installs `uv`, builds the venv, seeds
@@ -78,20 +84,20 @@ onboard), Telegram pairing, and systemd autostart.
 
 ```bash
 # On the source machine:
-./moeka.sh export                       # -> moeka-export-<host>-<ts>.tar.gz
+./bin/moeka.sh export                       # -> moeka-export-<host>-<ts>.tar.gz
 # Copy the archive over, then on the target:
 git clone https://github.com/Muxite/moeka.git && cd moeka
-./bootstrap.sh                          # pick [i]mport, point at archive
-./moeka.sh telegram-pair                # if bot tokens changed
+./bin/bootstrap.sh                          # pick [i]mport, point at archive
+./bin/moeka.sh telegram-pair                # if bot tokens changed
 ```
 
 ## Spinning up a *different* moeka
 
 ```bash
-./moeka.sh new alice                    # scaffolds ~/.moeka-alice
+./bin/moeka.sh new alice                    # scaffolds ~/.moeka-alice
 export MOEKA_WORKSPACE=~/.moeka-alice
-./moeka.sh telegram-pair
-./moeka.sh start
+./bin/moeka.sh telegram-pair
+./bin/moeka.sh start
 ```
 
 ## Manual quick start (no bootstrap)
@@ -100,15 +106,15 @@ export MOEKA_WORKSPACE=~/.moeka-alice
 git clone https://github.com/Muxite/moeka.git && cd moeka
 cp keys.env.example keys.env
 $EDITOR keys.env          # add API keys, bot tokens
-./moeka.sh install
-./moeka.sh exec onboard   # or ./moeka.sh new NAME
-./moeka.sh start
+./bin/moeka.sh install
+./bin/moeka.sh exec onboard   # or ./bin/moeka.sh new NAME
+./bin/moeka.sh start
 ```
 
 To start automatically on boot:
 
 ```bash
-./moeka.sh enable         # installs systemd user unit + enables linger
+./bin/moeka.sh enable         # installs systemd user unit + enables linger
 ```
 
 ---
@@ -117,22 +123,22 @@ To start automatically on boot:
 
 | Command | Description |
 |---------|-------------|
-| `./moeka.sh start` | Start gateway in background |
-| `./moeka.sh stop` | Stop gracefully (SIGKILL fallback) |
-| `./moeka.sh restart` | Stop then start |
-| `./moeka.sh status` | Show process, port, channels, uptime |
-| `./moeka.sh logs [-f] [-n N]` | Tail log (follow / line count) |
-| `./moeka.sh install` | Create `.venv` and install deps via uv |
-| `./moeka.sh doctor` | Health check: runtime, config, keys, service |
-| `./moeka.sh shell` | Drop into activated venv |
-| `./moeka.sh exec <cmd>` | Run a nanobot subcommand |
-| `./moeka.sh version` | Show Python and moeka version |
-| `./moeka.sh enable` | Install systemd unit + enable boot autostart |
-| `./moeka.sh disable` | Stop service and remove unit |
-| `./moeka.sh export [--out FILE] [--with-sessions] [--with-media] [--anonymize]` | Bundle workspace into a portable archive |
-| `./moeka.sh import FILE [--force]` | Extract a workspace archive into `$MOEKA_WORKSPACE` |
-| `./moeka.sh new NAME [--workspace PATH]` | Scaffold a fresh-identity workspace |
-| `./moeka.sh telegram-pair` | Pair a Telegram bot — saves token, captures user ID from first message |
+| `./bin/moeka.sh start` | Start gateway in background |
+| `./bin/moeka.sh stop` | Stop gracefully (SIGKILL fallback) |
+| `./bin/moeka.sh restart` | Stop then start |
+| `./bin/moeka.sh status` | Show process, port, channels, uptime |
+| `./bin/moeka.sh logs [-f] [-n N]` | Tail log (follow / line count) |
+| `./bin/moeka.sh install` | Create `.venv` and install deps via uv |
+| `./bin/moeka.sh doctor` | Health check: runtime, config, keys, service |
+| `./bin/moeka.sh shell` | Drop into activated venv |
+| `./bin/moeka.sh exec <cmd>` | Run a nanobot subcommand |
+| `./bin/moeka.sh version` | Show Python and moeka version |
+| `./bin/moeka.sh enable` | Install systemd unit + enable boot autostart |
+| `./bin/moeka.sh disable` | Stop service and remove unit |
+| `./bin/moeka.sh export [--out FILE] [--with-sessions] [--with-media] [--anonymize]` | Bundle workspace into a portable archive |
+| `./bin/moeka.sh import FILE [--force]` | Extract a workspace archive into `$MOEKA_WORKSPACE` |
+| `./bin/moeka.sh new NAME [--workspace PATH]` | Scaffold a fresh-identity workspace |
+| `./bin/moeka.sh telegram-pair` | Pair a Telegram bot — saves token, captures user ID from first message |
 
 Flags accepted by most commands:
 
@@ -166,7 +172,7 @@ NANOBOT_CONFIG=~/.nanobot/config.json
 
 ### 3. `config.json` — agent configuration
 
-Generated by `./moeka.sh exec onboard` on first run, or create manually. Key sections:
+Generated by `./bin/moeka.sh exec onboard` on first run, or create manually. Key sections:
 
 ```jsonc
 {
@@ -193,7 +199,7 @@ Generated by `./moeka.sh exec onboard` on first run, or create manually. Key sec
 }
 ```
 
-Run `./moeka.sh exec onboard` for an interactive setup wizard.
+Run `./bin/moeka.sh exec onboard` for an interactive setup wizard.
 
 ---
 
@@ -202,9 +208,9 @@ Run `./moeka.sh exec onboard` for an interactive setup wizard.
 Atomic flip without hand-editing JSON:
 
 ```bash
-./moeka.sh exec channels enable telegram
-./moeka.sh exec channels disable slack
-./moeka.sh exec channels status
+./bin/moeka.sh exec channels enable telegram
+./bin/moeka.sh exec channels disable slack
+./bin/moeka.sh exec channels status
 ```
 
 See the [Features](#features) section above for the full channel matrix.
@@ -215,8 +221,11 @@ See the [Features](#features) section above for the full channel matrix.
 
 ```
 moeka/                    ← this repo
-├── moeka.sh              ← universal entrypoint
-├── moeka.service         ← systemd user unit
+├── bin/                  ← user entrypoints
+│   ├── moeka.sh          ← universal launcher
+│   └── bootstrap.sh      ← first-run setup
+├── scripts/              ← ops & helpers (install-service, moeka.service, …)
+├── docs/                 ← documentation
 ├── keys.env.example      ← secrets template
 ├── .env.example          ← non-secret env template
 ├── pyproject.toml        ← Python package (uv manages deps)
@@ -251,7 +260,7 @@ Moeka's sandbox is tuned for legitimate server-management work. By default:
 Enable vector search over memory, history, and skills:
 
 ```bash
-./moeka.sh exec onboard   # select "vec" extras, or:
+./bin/moeka.sh exec onboard   # select "vec" extras, or:
 uv pip install -e ".[vec]" --project .
 ```
 
@@ -281,10 +290,53 @@ Then add to `config.json`:
 Set a different workspace per agent:
 
 ```bash
-MOEKA_WORKSPACE=~/.nanobot-dev ./moeka.sh start
+MOEKA_WORKSPACE=~/.nanobot-dev ./bin/moeka.sh start
 ```
 
 Or pass `--workspace ~/.nanobot-dev` to any command.
+
+---
+
+## Embedding the core (moeka-core)
+
+`nanobot.core.MoekaCore` is the reusable agentic/RAG "thinking core" — embed the
+engine in your own Python without channels, gateway, or WebUI (the import has no
+chat-runtime dependencies, and a guard test keeps it that way). It needs **data,
+not files**: a config file is just one way to produce the pydantic `Config` it
+consumes.
+
+```python
+from nanobot.core import MoekaCore
+
+# No ~/.nanobot needed — pass config as a dict; ${VAR} resolves from the
+# environment (the same keys.env pattern), and with no workspace given the core
+# runs in a throwaway temp dir instead of touching ~/.nanobot.
+core = MoekaCore.create(config_dict={
+    "providers": {"openrouter": {"apiKey": "${OPENROUTER_API_KEY}"}},
+    "agents": {"defaults": {"model": "google/gemini-3-flash-preview",
+                            "provider": "openrouter"}},
+})
+
+@core.action
+def get_disk_usage(path: str) -> str:
+    "Return human-readable disk usage for a path."
+    import shutil
+    total, used, free = shutil.disk_usage(path)
+    return f"{used // 2**30} GiB used, {free // 2**30} GiB free"
+
+result = await core.run("How much disk is free on /?")
+print(result.content, result.tools_used)
+core.cleanup()  # remove the ephemeral workspace
+```
+
+`MoekaCore.create()` accepts **at most one** config source: `config=` (a built
+`Config`), `config_dict=` (a dict), or `config_path=` (a file); with none it
+discovers `~/.nanobot/config.json` like the bot does. `MoekaCore.from_config(config)`
+is the pure `(Config, workspace) → core` data seam. The one-shot
+`complete()` / `acomplete()` helpers take the same `config=` / `config_dict=` /
+`config_path=` inputs, so neither the loop nor a single completion ever requires a
+file on disk. Install the minimal dependency surface with the `core` extra
+(`pip install moeka[core]`); add `[vec]` for semantic RAG.
 
 ---
 

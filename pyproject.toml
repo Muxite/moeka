@@ -65,11 +65,34 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# moeka-core: the reusable RAG/agentic "thinking core" (nanobot.core.MoekaCore)
-# ships inside the base install — `from nanobot.core import MoekaCore` pulls no
-# channel/gateway deps (all heavy imports are lazy). For semantic RAG over memory,
-# history, and host documents, install the `vec` extra below. A standalone slim
-# `moeka-core` wheel (without channels/CLI/gateway deps) is planned separately.
+# moeka-core: the reusable RAG/agentic "thinking core" (nanobot.core.MoekaCore).
+# `from nanobot.core import MoekaCore` pulls no channel/gateway deps — the import
+# boundary is enforced by tests/core/test_import_boundary.py. The base install is
+# a superset; the `core` extra below names the minimal dependency surface the
+# embedding path actually needs, so a host can audit/trim toward it (a fully
+# separate slim wheel is not split out yet — this is the dependency contract).
+# Add the `vec` extra for semantic RAG over memory, history, and host documents.
+core = [
+    "pydantic>=2.12.0,<3.0.0",
+    "pydantic-settings>=2.12.0,<3.0.0",
+    "anthropic>=0.45.0,<1.0.0",
+    "openai>=2.8.0",
+    "httpx>=0.28.0,<1.0.0",
+    "loguru>=0.7.3,<1.0.0",
+    "tiktoken>=0.12.0,<1.0.0",
+    "jinja2>=3.1.0,<4.0.0",
+    "filelock>=3.25.2",
+    "json-repair>=0.57.0,<1.0.0",
+    "croniter>=6.0.0,<7.0.0",
+    "dulwich>=0.22.0,<1.0.0",
+    "chardet>=3.0.2,<6.0.0",
+    "pyyaml>=6.0,<7.0.0",
+    # document ingestion (core.ingest); drop if RAG over files is not needed:
+    "pypdf>=5.0.0,<6.0.0",
+    "python-docx>=1.1.0,<2.0.0",
+    "openpyxl>=3.1.0,<4.0.0",
+    "python-pptx>=1.0.0,<2.0.0",
+]
 api = [
     "aiohttp>=3.9.0,<4.0.0",
 ]

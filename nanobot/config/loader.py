@@ -112,6 +112,60 @@ def load_config(config_path: Path | None = None) -> Config:
     return config
 
 
+def config_from_sources(
+    *,
+    config: Config | None = None,
+    config_dict: dict | None = None,
+    config_path: Path | str | None = None,
+) -> tuple[Config, bool]:
+    """Resolve a :class:`Config` from at most one source — files optional.
+
+    This is the shared file→data adapter used by the embedding entry points
+    (``MoekaCore``, ``acomplete``). Whatever the host has — a pydantic object, a
+    plain dict, a file path, or nothing — becomes a single resolved ``Config``.
+    ``${VAR}`` placeholders are resolved from the environment in every case.
+
+    Args:
+        config: A pre-built :class:`Config` (pure data).
+        config_dict: A plain dict (e.g. parsed JSON) validated into a ``Config``.
+        config_path: Path to a ``config.json`` to read.
+        (none): discover ``~/.nanobot/config.json`` as the gateway does.
+
+    Returns:
+        ``(config, from_file)`` — ``from_file`` is True when the config came from
+        a file or default discovery (so the caller may trust
+        ``config.workspace_path``), False for purely in-memory inputs.
+
+    Raises:
+        ValueError: more than one source supplied.
+        FileNotFoundError: ``config_path`` given but missing.
+    """
+    sources = [s for s in (config, config_dict, config_path) if s is not None]
+    if len(sources) > 1:
+        raise ValueError("Pass at most one of config=, config_dict=, config_path=.")
+
+    # Resolve forward refs before any in-memory model_validate (load_config does
+    # this itself; the data routes need it too).
+    from nanobot.config.schema import _resolve_tool_config_refs
+    try:
+        _resolve_tool_config_refs()
+    except Exception:
+        pass
+
+    if config is not None:
+        return resolve_config_env_vars(config), False
+    if config_dict is not None:
+        cfg = Config.model_validate(_migrate_config(dict(config_dict)))
+        return resolve_config_env_vars(cfg), False
+
+    resolved = None
+    if config_path is not None:
+        resolved = Path(config_path).expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Config not found: {resolved}")
+    return resolve_config_env_vars(load_config(resolved)), True
+
+
 def _apply_ssrf_whitelist(config: Config) -> None:
     """Apply SSRF whitelist from config to the network security module."""
     from nanobot.security.network import configure_ssrf_whitelist

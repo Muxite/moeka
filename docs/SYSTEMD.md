@@ -3,7 +3,7 @@
 ## Install / enable
 
 ```sh
-./moeka.sh enable
+./bin/moeka.sh enable
 ```
 
 This copies `moeka.service` to `~/.config/systemd/user/`, disables the legacy
@@ -16,13 +16,26 @@ if `sudo` is unavailable, the installer prints the exact command to run.
 Alternatively, run the install script directly:
 
 ```sh
-bash install-service.sh
+bash scripts/install-service.sh
 ```
+
+### Upgrading from an older layout (one-time)
+
+The launcher moved from the repo root (`moeka.sh`) to `bin/moeka.sh`, and the
+unit's `ExecStart` was updated to match. If you have a unit installed from
+before this change, refresh it once so systemd points at the new path:
+
+```sh
+./bin/moeka.sh enable    # re-copies moeka.service and restarts the service
+```
+
+Until you do this, `systemctl --user restart moeka` will fail because the old
+`ExecStart` still references the removed root `moeka.sh`.
 
 ## Disable
 
 ```sh
-./moeka.sh disable
+./bin/moeka.sh disable
 ```
 
 ## Common commands
@@ -44,7 +57,7 @@ loginctl enable-linger "$USER"
 ## Self-restart from inside Moeka
 
 ```sh
-~/projects/moeka/restart-nanobot.sh
+~/projects/moeka/scripts/restart-nanobot.sh
 ```
 
 The script targets `moeka.service` when available and falls back to the legacy

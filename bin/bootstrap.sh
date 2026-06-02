@@ -7,7 +7,7 @@
 #
 # Steps:
 #   1. Verify python3 (>= 3.11) and install `uv` if missing.
-#   2. Install moeka into a local venv via ./moeka.sh install.
+#   2. Install moeka into a local venv via ./bin/moeka.sh install.
 #   3. Seed keys.env from the example if it doesn't exist.
 #   4. Choose workspace bootstrap mode: import / new identity / onboard wizard.
 #   5. Optionally pair Telegram.
@@ -15,7 +15,9 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# This script lives in bin/; cd to the *repo root* (its parent) so
+# ./bin/moeka.sh, ./.env and ./keys.env all resolve from the project root.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
 cd "$SCRIPT_DIR"
 
 C_BLUE=$'\033[34m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
@@ -65,7 +67,7 @@ command -v uv >/dev/null 2>&1 && ok "uv $(uv --version 2>&1 | awk '{print $2}')"
 
 # ---------- 2. venv + moeka --------------------------------------------------
 info "installing moeka into .venv"
-./moeka.sh install
+./bin/moeka.sh install
 ok "moeka installed"
 
 # ---------- 3. keys.env ------------------------------------------------------
@@ -90,9 +92,9 @@ fi
 if ! is_interactive; then
     info "non-interactive shell — skipping workspace setup prompts"
     info "run one of these next:"
-    info "  ./moeka.sh import FILE     # import a workspace archive"
-    info "  ./moeka.sh new NAME        # fresh-identity workspace"
-    info "  ./moeka.sh exec onboard    # interactive onboard wizard"
+    info "  ./bin/moeka.sh import FILE     # import a workspace archive"
+    info "  ./bin/moeka.sh new NAME        # fresh-identity workspace"
+    info "  ./bin/moeka.sh exec onboard    # interactive onboard wizard"
     exit 0
 fi
 
@@ -109,12 +111,12 @@ case "${choice,,}" in
         archive="$(ask "path to .tar.gz archive: " "")"
         [[ -f "$archive" ]] || { err "file not found: $archive"; exit 1; }
         ws="$(ask "target workspace path [default: ~/.nanobot]: " "$HOME/.nanobot")"
-        MOEKA_WORKSPACE="$ws" ./moeka.sh import "$archive"
+        MOEKA_WORKSPACE="$ws" ./bin/moeka.sh import "$archive"
         ;;
     n)
         name="$(ask "name for this moeka instance (e.g. alice): " "moeka")"
         ws="$HOME/.moeka-$name"
-        ./moeka.sh new "$name" --workspace "$ws"
+        ./bin/moeka.sh new "$name" --workspace "$ws"
         warn "remember to set MOEKA_WORKSPACE=$ws in your shell or .env"
         # Persist for the bootstrap session by appending to .env (gitignored).
         if [[ ! -f .env ]] || ! grep -q '^MOEKA_WORKSPACE=' .env; then
@@ -124,7 +126,7 @@ case "${choice,,}" in
         export MOEKA_WORKSPACE="$ws"
         ;;
     o)
-        ./moeka.sh exec onboard
+        ./bin/moeka.sh exec onboard
         ;;
     s|*)
         info "skipping workspace setup"
@@ -135,16 +137,16 @@ esac
 echo
 do_tg="$(ask "pair a Telegram bot now? [y/N]: " N)"
 if [[ "${do_tg,,}" == "y" ]]; then
-    ./moeka.sh telegram-pair || warn "telegram pairing did not complete"
+    ./bin/moeka.sh telegram-pair || warn "telegram pairing did not complete"
 fi
 
 # ---------- 6. systemd -------------------------------------------------------
 echo
 do_enable="$(ask "enable systemd autostart (recommended for always-on)? [Y/n]: " Y)"
 if [[ "${do_enable,,}" != "n" ]]; then
-    ./moeka.sh enable
+    ./bin/moeka.sh enable
 fi
 
 echo
 ok "bootstrap complete"
-./moeka.sh doctor || true
+./bin/moeka.sh doctor || true

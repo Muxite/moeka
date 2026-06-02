@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nanobot.core import MoekaCore, RunResult
+from nanobot.core import Config, MoekaCore, RunResult
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -25,6 +25,12 @@ def _make_core(tmp_path: Path) -> MoekaCore:
     return MoekaCore.create(config_path=_write_config(tmp_path), workspace=tmp_path)
 
 
+_CONFIG_DATA = {
+    "providers": {"openrouter": {"apiKey": "sk-test-key"}},
+    "agents": {"defaults": {"model": "openai/gpt-4.1"}},
+}
+
+
 def test_create_missing_config():
     with pytest.raises(FileNotFoundError):
         MoekaCore.create(config_path="/nonexistent/config.json")
@@ -34,6 +40,77 @@ def test_create_builds_loop(tmp_path):
     core = _make_core(tmp_path)
     assert core.loop is not None
     assert core.loop.workspace == tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Data-driven construction — files are optional
+# ---------------------------------------------------------------------------
+
+def test_create_from_config_dict_no_file(tmp_path):
+    """A plain dict builds a working core with no config.json on disk."""
+    core = MoekaCore.create(config_dict=dict(_CONFIG_DATA), workspace=tmp_path)
+    assert core.loop is not None
+    assert core.loop.workspace == tmp_path
+    assert core.loop.tools.has("read_file")  # builtins still load
+
+
+def test_create_from_config_object(tmp_path):
+    """A pre-built Config object is consumed directly (no disk read)."""
+    config = Config.model_validate(dict(_CONFIG_DATA))
+    core = MoekaCore.from_config(config, workspace=tmp_path)
+    assert core.loop.workspace == tmp_path
+
+
+def test_create_in_memory_uses_ephemeral_workspace(monkeypatch):
+    """In-memory config with no workspace lands in temp, never ~/.nanobot."""
+    import tempfile
+
+    # Guard: make the default state home explode if anything tries to use it.
+    def _boom():
+        raise AssertionError("core touched ~/.nanobot for an in-memory config")
+
+    monkeypatch.setattr("nanobot.config.loader.get_state_home", _boom)
+
+    core = MoekaCore.create(config_dict=dict(_CONFIG_DATA))
+    try:
+        ws = core.workspace
+        assert str(ws).startswith(tempfile.gettempdir())
+        assert core._ephemeral_workspace == ws
+    finally:
+        core.cleanup()
+    assert not ws.exists()
+    assert core._ephemeral_workspace is None
+
+
+def test_create_explicit_workspace_is_not_ephemeral(tmp_path):
+    core = MoekaCore.create(config_dict=dict(_CONFIG_DATA), workspace=tmp_path)
+    assert core._ephemeral_workspace is None
+    core.cleanup()  # no-op
+    assert tmp_path.exists()
+
+
+def test_create_rejects_multiple_sources(tmp_path):
+    with pytest.raises(ValueError):
+        MoekaCore.create(
+            config=Config.model_validate(dict(_CONFIG_DATA)),
+            config_dict=dict(_CONFIG_DATA),
+            workspace=tmp_path,
+        )
+
+
+def test_create_resolves_env_placeholders(tmp_path, monkeypatch):
+    """`${VAR}` in an in-memory config is resolved from the environment.
+
+    This is the keys.env pattern: secrets live in the environment, the config
+    (file or dict) only references them — so it stays shareable.
+    """
+    monkeypatch.setenv("MOEKA_TEST_KEY", "sk-resolved-from-env")
+    data = {
+        "providers": {"openrouter": {"apiKey": "${MOEKA_TEST_KEY}"}},
+        "agents": {"defaults": {"model": "openai/gpt-4.1"}},
+    }
+    core = MoekaCore.create(config_dict=data, workspace=tmp_path)
+    assert core.loop.provider.api_key == "sk-resolved-from-env"
 
 
 # ---------------------------------------------------------------------------

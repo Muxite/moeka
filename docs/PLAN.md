@@ -43,9 +43,9 @@ Implemented as a direct Nanobot-style exec policy:
 
 ### 5. Easy boot setup
 
-- `./moeka.sh enable` -> copies moeka.service, enables + starts via systemd
-- `./moeka.sh disable` -> stops + disables the service
-- `install-service.sh` remains as a standalone alternative
+- `./bin/moeka.sh enable` -> copies moeka.service, enables + starts via systemd
+- `./bin/moeka.sh disable` -> stops + disables the service
+- `scripts/install-service.sh` remains as a standalone alternative
 - `loginctl enable-linger` documented for headless servers
 
 ### 6. Documentation rewrite
@@ -62,11 +62,11 @@ All docs updated to reflect:
 User installs moeka:
   git clone ... && cd moeka
   cp keys.env.example keys.env && $EDITOR keys.env
-  ./moeka.sh install          # uv venv + uv pip install -e .
-  ./moeka.sh start            # exec nanobot gateway
+  ./bin/moeka.sh install          # uv venv + uv pip install -e .
+  ./bin/moeka.sh start            # exec nanobot gateway
 
 Boot setup:
-  ./moeka.sh enable           # systemd user service + linger
+  ./bin/moeka.sh enable           # systemd user service + linger
 
 Permissions:
   Non-sudo (default)          # runs as current user, no sudo

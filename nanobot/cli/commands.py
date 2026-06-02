@@ -1387,7 +1387,7 @@ def _set_channel_enabled(channel_name: str, enabled: bool, config_path: str | No
     if enabled:
         console.print(
             "[dim]Restart the gateway for the change to take effect: "
-            "./moeka.sh restart[/dim]"
+            "./bin/moeka.sh restart[/dim]"
         )
 
 

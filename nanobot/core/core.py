@@ -45,39 +45,89 @@ class MoekaCore:
 
     def __init__(self, loop: AgentLoop) -> None:
         self._loop = loop
+        # Set by :meth:`create` when it allocated a throwaway workspace for an
+        # in-memory config; ``None`` when the host owns the workspace.
+        self._ephemeral_workspace: Path | None = None
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
 
+    # Default workspace sentinel — when an in-memory config still carries this,
+    # the core has no instance dir of its own and falls back to an ephemeral one
+    # instead of writing into the user's ``~/.nanobot``.
+    _DEFAULT_WORKSPACE = "~/.nanobot"
+
     @classmethod
     def create(
         cls,
         *,
+        config: Any | None = None,
+        config_dict: dict[str, Any] | None = None,
         config_path: str | Path | None = None,
         workspace: str | Path | None = None,
         model: str | None = None,
         provider: Any | None = None,
     ) -> MoekaCore:
-        """Build a core from moeka config.
+        """Build a core from moeka config — files optional.
+
+        This is the adapter/router that turns *whatever the host has* into the
+        pydantic :class:`~nanobot.config.schema.Config` the core actually needs,
+        then hands off to :meth:`from_config`. Supply **at most one** config
+        source (precedence top→bottom):
 
         Args:
-            config_path: Path to ``config.json``; defaults to
-                ``~/.nanobot/config.json``.
-            workspace: Override the workspace (where memory/sessions/vec.db live).
+            config: A pre-built :class:`Config` object (pure data; no disk read).
+            config_dict: A plain ``dict`` (e.g. parsed JSON); validated into a
+                :class:`Config` and env-var-resolved in memory — no file needed.
+            config_path: Path to a ``config.json`` file to read.
+            workspace: Override where memory/sessions/vec.db live. When omitted
+                and the config carries no explicit workspace, an in-memory config
+                gets an **ephemeral** temp dir (so embedding the core never
+                pollutes ``~/.nanobot``); the file/default route keeps using the
+                config's own workspace.
             model: Override the resolved model id.
             provider: Pre-built :class:`LLMProvider` to use instead of building one
                 from config (lets a host fully control provider selection).
         """
-        from nanobot.config.loader import load_config, resolve_config_env_vars
+        from nanobot.config.loader import config_from_sources
 
-        resolved: Path | None = None
-        if config_path is not None:
-            resolved = Path(config_path).expanduser().resolve()
-            if not resolved.exists():
-                raise FileNotFoundError(f"Config not found: {resolved}")
+        cfg, from_file = config_from_sources(
+            config=config, config_dict=config_dict, config_path=config_path,
+        )
 
-        config = resolve_config_env_vars(load_config(resolved))
+        # Resolve the workspace. An explicit arg always wins. Otherwise the
+        # file/default route trusts the config's own workspace, while an
+        # in-memory config with only the default sentinel gets an ephemeral dir.
+        ws: str | Path | None = workspace
+        ephemeral: Path | None = None
+        if ws is None and not from_file:
+            ws_str = cfg.agents.defaults.workspace
+            if ws_str == cls._DEFAULT_WORKSPACE or "${" in ws_str:
+                import tempfile
+
+                ephemeral = Path(tempfile.mkdtemp(prefix="moeka-core-"))
+                ws = ephemeral
+
+        core = cls.from_config(cfg, workspace=ws, model=model, provider=provider)
+        core._ephemeral_workspace = ephemeral
+        return core
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Any,
+        *,
+        workspace: str | Path | None = None,
+        model: str | None = None,
+        provider: Any | None = None,
+    ) -> MoekaCore:
+        """Build a core directly from an in-memory :class:`Config` (the data seam).
+
+        Pure ``(Config, workspace) -> MoekaCore``: it does not read or discover any
+        config file. ``workspace`` overrides ``config.agents.defaults.workspace``
+        when given; otherwise the config's own workspace is used as-is.
+        """
         if workspace is not None:
             config.agents.defaults.workspace = str(Path(workspace).expanduser().resolve())
 
@@ -124,6 +174,24 @@ class MoekaCore:
     def loop(self) -> AgentLoop:
         """The wrapped :class:`AgentLoop`, for advanced configuration."""
         return self._loop
+
+    @property
+    def workspace(self) -> Path:
+        """The resolved workspace directory backing this core's persistence."""
+        return self._loop.workspace
+
+    def cleanup(self) -> None:
+        """Remove the ephemeral workspace, if :meth:`create` allocated one.
+
+        No-op when the host supplied its own workspace (nothing to clean up).
+        """
+        ws = self._ephemeral_workspace
+        if ws is None:
+            return
+        import shutil
+
+        shutil.rmtree(ws, ignore_errors=True)
+        self._ephemeral_workspace = None
 
     # ------------------------------------------------------------------
     # Actions — connect host code to the agent

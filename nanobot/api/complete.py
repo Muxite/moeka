@@ -57,6 +57,8 @@ async def acomplete(
     *,
     system: str | None = None,
     images: list[str | bytes | Path] | None = None,
+    config: Any | None = None,
+    config_dict: dict[str, Any] | None = None,
     config_path: str | Path | None = None,
     model: str | None = None,
     preset: str | None = None,
@@ -70,7 +72,10 @@ async def acomplete(
         system: Optional system prompt.
         images: Optional images (paths, http/data URLs, or raw bytes) for
             vision-capable models. Sent as OpenAI-style multimodal content.
+        config: A pre-built :class:`Config` (pure data; no file read).
+        config_dict: A plain dict validated into a ``Config`` in memory.
         config_path: Path to ``config.json``; defaults to ``~/.nanobot/config.json``.
+            Supply at most one of ``config`` / ``config_dict`` / ``config_path``.
         model: Override the resolved model (provider-specific id).
         preset: Named model preset to use instead of the active default.
         max_tokens / temperature: Generation overrides; ``None`` uses the
@@ -79,12 +84,13 @@ async def acomplete(
     Returns:
         The assistant's text content.
     """
-    from nanobot.config.loader import load_config, resolve_config_env_vars
+    from nanobot.config.loader import config_from_sources
     from nanobot.providers.factory import make_provider
 
-    resolved = Path(config_path).expanduser().resolve() if config_path else None
-    config = resolve_config_env_vars(load_config(resolved))
-    provider = make_provider(config, preset_name=preset, model=model)
+    resolved_config, _ = config_from_sources(
+        config=config, config_dict=config_dict, config_path=config_path,
+    )
+    provider = make_provider(resolved_config, preset_name=preset, model=model)
 
     messages: list[dict[str, Any]] = []
     if system:
@@ -110,6 +116,8 @@ def complete(
     *,
     system: str | None = None,
     images: list[str | bytes | Path] | None = None,
+    config: Any | None = None,
+    config_dict: dict[str, Any] | None = None,
     config_path: str | Path | None = None,
     model: str | None = None,
     preset: str | None = None,
@@ -134,6 +142,8 @@ def complete(
             prompt,
             system=system,
             images=images,
+            config=config,
+            config_dict=config_dict,
             config_path=config_path,
             model=model,
             preset=preset,
