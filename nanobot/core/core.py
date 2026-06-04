@@ -26,6 +26,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,19 @@ from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.loop import AgentLoop
 from nanobot.core.function_tool import FunctionTool
 from nanobot.nanobot import RunResult
+
+
+@dataclass(frozen=True)
+class RetrievedChunk:
+    """One host-document chunk returned by :meth:`MoekaCore.retrieve_documents`.
+
+    ``score`` is the vec0 distance (lower is closer); ``source`` is whatever the
+    host passed at ingest time (may be ``None``).
+    """
+
+    text: str
+    source: str | None
+    score: float
 
 
 class MoekaCore:
@@ -277,6 +291,17 @@ class MoekaCore:
             return 0
         return vs.add_documents(text, source=src)
 
+    def ingest_text(self, text: str, *, source: str | None = None) -> int:
+        """Ingest raw text — never path-detects, unlike :meth:`ingest`.
+
+        Use this when the input is host-supplied content that must not be
+        interpreted as a filename. Returns the number of chunks indexed.
+        """
+        vs = self._loop.vec_store
+        if vs is None or not vs.available or not text.strip():
+            return 0
+        return vs.add_documents(text, source=source)
+
     @staticmethod
     def _resolve_ingest_input(
         text_or_path: str | Path, source: str | None
@@ -297,6 +322,34 @@ class MoekaCore:
         if vs is None or not vs.available:
             return []
         return vs.search_documents(query, k=k)
+
+    def retrieve_documents(self, query: str, *, k: int = 5) -> list[RetrievedChunk]:
+        """Structured retrieval: top-k chunks with source attribution and score.
+
+        Unlike :meth:`retrieve`, each result carries the ingest-time ``source``
+        and the vec0 distance, so hosts can map chunks back to their own
+        documents and threshold on closeness.
+        """
+        vs = self._loop.vec_store
+        if vs is None or not vs.available:
+            return []
+        return [
+            RetrievedChunk(text=text, source=source, score=score)
+            for source, text, score in vs.search_documents_scored(query, k=k)
+        ]
+
+    def clear_documents(self) -> None:
+        """Delete all ingested host documents (agent memory untouched)."""
+        vs = self._loop.vec_store
+        if vs is not None and vs.available:
+            vs.clear_documents()
+
+    def count_documents(self) -> int:
+        """Number of indexed host-document chunks (0 when vec is unavailable)."""
+        vs = self._loop.vec_store
+        if vs is None or not vs.available:
+            return 0
+        return vs.count_documents()
 
     # ------------------------------------------------------------------
     # Run the thinking loop

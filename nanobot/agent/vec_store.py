@@ -296,6 +296,16 @@ class VecStore:
 
     def search_documents(self, query: str, k: int = 5) -> list[str]:
         """Return the top-k host-document chunks semantically closest to *query*."""
+        return [text for _source, text, _score in self.search_documents_scored(query, k=k)]
+
+    def search_documents_scored(
+        self, query: str, k: int = 5
+    ) -> list[tuple[str | None, str, float]]:
+        """Top-k host-document chunks as ``(source, text, score)`` tuples.
+
+        ``score`` is the vec0 distance (lower is closer). ``source`` is whatever
+        the host passed to :meth:`add_documents` (may be ``None``).
+        """
         if not self._available or not query.strip():
             return []
         try:
@@ -307,7 +317,7 @@ class VecStore:
             limit = min(k, count)
             rows = conn.execute(
                 """
-                SELECT d.text
+                SELECT d.source, d.text, distance
                 FROM documents_vec v
                 JOIN documents_data d ON d.id = v.rowid
                 WHERE v.embedding MATCH ?
@@ -316,10 +326,38 @@ class VecStore:
                 """,
                 (emb.tobytes(), limit),
             ).fetchall()
-            return [r[0] for r in rows]
+            return [(r[0], r[1], float(r[2])) for r in rows]
         except Exception:
-            logger.exception("VecStore: search_documents failed")
+            logger.exception("VecStore: search_documents_scored failed")
             return []
+
+    def clear_documents(self) -> None:
+        """Delete all host-document chunks (memory/history/skills untouched).
+
+        Lets a host reindex deterministically after its corpus changes, without
+        knowing the on-disk layout.
+        """
+        if not self._available:
+            return
+        try:
+            conn = self._connection()
+            conn.execute("DELETE FROM documents_vec")
+            conn.execute("DELETE FROM documents_data")
+            conn.commit()
+            logger.debug("VecStore: cleared host documents")
+        except Exception:
+            logger.exception("VecStore: clear_documents failed")
+
+    def count_documents(self) -> int:
+        """Number of indexed host-document chunks (0 when unavailable)."""
+        if not self._available:
+            return 0
+        try:
+            conn = self._connection()
+            return int(conn.execute("SELECT count(*) FROM documents_data").fetchone()[0])
+        except Exception:
+            logger.exception("VecStore: count_documents failed")
+            return 0
 
     # ------------------------------------------------------------------
     # Internal helpers

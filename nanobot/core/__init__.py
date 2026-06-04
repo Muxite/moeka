@@ -31,15 +31,18 @@ All heavy imports are lazy; importing this package has no channel/gateway deps.
 
 from nanobot.api.complete import acomplete, complete
 from nanobot.config.schema import Config
-from nanobot.core.core import MoekaCore
+from nanobot.core.core import MoekaCore, RetrievedChunk
 from nanobot.core.function_tool import FunctionTool
+from nanobot.core.vec import open_vec_store
 from nanobot.nanobot import RunResult
 
 __all__ = [
     "MoekaCore",
+    "RetrievedChunk",
     "Config",
     "FunctionTool",
     "RunResult",
     "complete",
     "acomplete",
+    "open_vec_store",
 ]
