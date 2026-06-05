@@ -42,6 +42,9 @@ class ExecToolConfig(Base):
     allowed_env_keys: list[str] = Field(default_factory=list)
     allow_patterns: list[str] = Field(default_factory=list)
     deny_patterns: list[str] = Field(default_factory=list)
+    # DANGEROUS (moeka deviation): allow sudo commands. When enabled, sudo
+    # commands require an inline safety justification before execution.
+    allow_sudo: bool = False
 
 
 
@@ -87,6 +90,7 @@ class ExecTool(Tool):
             allowed_env_keys=cfg.allowed_env_keys,
             allow_patterns=cfg.allow_patterns,
             deny_patterns=cfg.deny_patterns,
+            allow_sudo=cfg.allow_sudo,
         )
 
     _SUDO_PATTERN = re.compile(r"(?:^|\s|[;&|`(\n])\s*sudo\b", re.MULTILINE)
@@ -132,6 +136,14 @@ class ExecTool(Tool):
         user_layer = deny_patterns if deny_patterns is not None else self._DEFAULT_DENY_PATTERNS
         self.deny_patterns = list(self._INTERNAL_DENY_PATTERNS) + list(user_layer)
         self.allow_patterns = allow_patterns or []
+        if self.allow_patterns:
+            # Non-empty allow_patterns flips exec into whitelist-only mode —
+            # easy to leave behind after a one-off task, so make it loud.
+            logger.warning(
+                "exec: whitelist-only mode active — tools.exec.allow_patterns has "
+                "{} pattern(s); every non-matching command will be blocked",
+                len(self.allow_patterns),
+            )
         self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
         self.allowed_env_keys = allowed_env_keys or []
@@ -395,7 +407,13 @@ class ExecTool(Tool):
 
             if self.allow_patterns:
                 return (
-                    "Error: Command blocked by allowlist filter (not in tools.exec.allow_patterns)"
+                    "Error: Command blocked by allowlist filter. exec is in "
+                    "whitelist-only mode: tools.exec.allow_patterns is non-empty "
+                    f"({len(self.allow_patterns)} pattern(s)), so ONLY commands matching "
+                    "those patterns may run. Retrying with different commands will not "
+                    "help — every non-matching command is blocked. Report to the user "
+                    "that tools.exec.allowPatterns in the nanobot config must be "
+                    "cleared or extended."
                 )
 
         from nanobot.security.network import contains_internal_url

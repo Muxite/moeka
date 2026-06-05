@@ -33,7 +33,9 @@ from nanobot.utils.runtime import (
     build_finalization_retry_message,
     build_length_recovery_message,
     ensure_nonempty_tool_result,
+    exec_guard_violation_signature,
     is_blank_text,
+    repeated_exec_guard_error,
     repeated_external_lookup_error,
     repeated_workspace_violation_error,
 )
@@ -954,6 +956,27 @@ class AgentRunner:
             )
             event["detail"] = self._event_detail("ssrf_violation: ", raw_text)
             return self._ssrf_soft_payload(raw_text), event, None
+
+        if exec_guard_violation_signature(raw_text) is not None:
+            # Allowlist / deny-pattern denials: the model retries different
+            # commands, so throttle on the denial class to avoid burning the
+            # whole iteration budget against a config-level block.
+            escalation = repeated_exec_guard_error(raw_text, workspace_violation_counts)
+            event["detail"] = self._event_detail("exec_guard_denial: ", raw_text)
+            if escalation is not None:
+                logger.warning(
+                    "Tool {} blocked repeatedly by exec command guard; escalating hint",
+                    tool_call.name,
+                )
+                event["detail"] = self._event_detail(
+                    "exec_guard_denial_escalated: ",
+                    raw_text,
+                )
+                return escalation, event, None
+            # Return the denial verbatim — the generic "try a different
+            # approach" retry hint in soft_payload contradicts the guard's
+            # "retrying will not help" instruction.
+            return raw_text, event, None
 
         if self._is_workspace_violation(raw_text):
             escalation = repeated_workspace_violation_error(

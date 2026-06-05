@@ -168,3 +168,54 @@ def repeated_workspace_violation_error(
         "access it and ask how they want to proceed (e.g. copy the file "
         "into the workspace, or disable restrict_to_workspace for this run)."
     )
+
+
+# Exec command-guard denials (allowlist / deny patterns) are config-level
+# blocks: the model retries a *different* command each time, so the per-target
+# counting above never trips. Key on the denial class instead so the counter
+# accumulates across distinct commands within a turn.
+
+_EXEC_GUARD_MARKERS: tuple[tuple[str, str], ...] = (
+    ("blocked by allowlist filter", "violation:exec-allowlist"),
+    ("blocked by safety guard (dangerous pattern detected)", "violation:exec-denyguard"),
+)
+
+
+def exec_guard_violation_signature(raw_text: str) -> str | None:
+    """Stable signature for exec guard denials, keyed on the denial class."""
+    if not raw_text:
+        return None
+    lowered = raw_text.lower()
+    for marker, signature in _EXEC_GUARD_MARKERS:
+        if marker in lowered:
+            return signature
+    return None
+
+
+def repeated_exec_guard_error(
+    raw_text: str,
+    seen_counts: dict[str, int],
+) -> str | None:
+    """Return an escalated error after repeated exec guard denials."""
+    signature = exec_guard_violation_signature(raw_text)
+    if signature is None:
+        return None
+    count = seen_counts.get(signature, 0) + 1
+    seen_counts[signature] = count
+    if count <= _MAX_REPEAT_WORKSPACE_VIOLATIONS:
+        return None
+    logger.warning(
+        "Escalating repeated exec guard denial {} (attempt {})",
+        signature,
+        count,
+    )
+    kind = "allow" if signature == "violation:exec-allowlist" else "deny"
+    return (
+        "Error: refusing repeated exec attempts against the command guard.\n"
+        f"{count} commands have been blocked by the configured "
+        f"tools.exec.{kind}_patterns this turn. This is a config-level block — "
+        "trying different commands, tools, or quoting tricks will NOT change "
+        "the answer. Stop retrying. Tell the user which commands you need and "
+        "that tools.exec.allowPatterns / denyPatterns in the nanobot config "
+        "must be updated before you can proceed."
+    )
