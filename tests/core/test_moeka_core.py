@@ -429,6 +429,49 @@ def test_documents_api_degrades_without_vec(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Failure / cancellation edge cases — the finally path must always run
+# ---------------------------------------------------------------------------
+
+async def test_run_cancellation_restores_hooks(tmp_path):
+    import asyncio
+
+    core = _make_core(tmp_path)
+    prev_hooks = core.loop._extra_hooks
+    started = asyncio.Event()
+
+    async def hanging_process_direct(message, *, session_key, media=None, on_stream=None):
+        started.set()
+        await asyncio.sleep(60)
+
+    core.loop.process_direct = hanging_process_direct
+    task = asyncio.create_task(core.run("hi"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert core.loop._extra_hooks is prev_hooks
+
+
+async def test_run_provider_error_restores_hooks_and_drains(tmp_path):
+    from nanobot.bus.events import OutboundMessage
+
+    core = _make_core(tmp_path)
+    prev_hooks = core.loop._extra_hooks
+    await core.loop.bus.publish_outbound(
+        OutboundMessage(channel="cli", chat_id="direct", content="stale")
+    )
+
+    async def failing_process_direct(message, *, session_key, media=None, on_stream=None):
+        raise RuntimeError("provider exploded")
+
+    core.loop.process_direct = failing_process_direct
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        await core.run("hi")
+    assert core.loop._extra_hooks is prev_hooks
+    assert core.loop.bus.outbound.empty()
+
+
+# ---------------------------------------------------------------------------
 # Thinker API — streaming + structured one-shots
 # ---------------------------------------------------------------------------
 
