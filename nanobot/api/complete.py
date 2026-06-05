@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +113,136 @@ async def acomplete(
     return response.content
 
 
+_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+
+
+def _extract_json_text(text: str) -> str:
+    """Best-effort extraction of the JSON payload from a model reply.
+
+    Order: fenced ```json block, then the outermost {...} or [...] span,
+    then the raw text (let json.loads produce the error).
+    """
+    fenced = _FENCE_RE.search(text)
+    if fenced:
+        return fenced.group(1).strip()
+    stripped = text.strip()
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = stripped.find(opener)
+        end = stripped.rfind(closer)
+        if start != -1 and end > start:
+            return stripped[start:end + 1]
+    return stripped
+
+
+def _json_system_suffix(schema: dict[str, Any] | None) -> str:
+    base = (
+        "Respond ONLY with valid JSON — no prose, no markdown fences, "
+        "no explanations before or after."
+    )
+    if schema is not None:
+        base += " The JSON must match this JSON Schema:\n" + json.dumps(schema, indent=2)
+    return base
+
+
+async def acomplete_json(
+    prompt: str,
+    *,
+    schema: dict[str, Any] | None = None,
+    model_cls: type | None = None,
+    retries: int = 2,
+    system: str | None = None,
+    **kwargs: Any,
+) -> Any:
+    """One-shot completion constrained to JSON, with parse-retry.
+
+    Provider-agnostic by design (no native JSON mode required): a schema-aware
+    instruction is appended to the system prompt, the reply is parsed, and on
+    a parse/validation failure the model is re-prompted with the error, up to
+    *retries* extra attempts.
+
+    Args:
+        prompt: The user message.
+        schema: Optional JSON Schema dict the reply must match (sent to the
+            model as an instruction; validated only via ``model_cls``).
+        model_cls: Optional pydantic ``BaseModel`` subclass. Its schema is
+            derived automatically (overriding *schema*) and the parsed JSON is
+            validated — the validated instance is returned.
+        retries: Extra attempts after a failed parse/validation.
+        system: Optional system prompt; the JSON instruction is appended.
+        **kwargs: Forwarded to :func:`acomplete` (``model``, ``preset``,
+            ``images``, ``max_tokens``, ``temperature``, config sources, ...).
+
+    Returns:
+        The parsed JSON value (dict/list), or a validated ``model_cls``
+        instance when given.
+
+    Raises:
+        ValueError: When every attempt fails to produce valid JSON.
+    """
+    if model_cls is not None:
+        schema = model_cls.model_json_schema()
+
+    suffix = _json_system_suffix(schema)
+    full_system = f"{system}\n\n{suffix}" if system else suffix
+
+    attempt_prompt = prompt
+    last_error = ""
+    for _ in range(max(retries, 0) + 1):
+        reply = await acomplete(attempt_prompt, system=full_system, **kwargs)
+        payload = _extract_json_text(reply)
+        try:
+            parsed = json.loads(payload)
+            if model_cls is not None:
+                return model_cls.model_validate(parsed)
+            return parsed
+        except Exception as exc:  # json decode or pydantic validation
+            last_error = str(exc)
+            attempt_prompt = (
+                f"{prompt}\n\n"
+                f"Your previous reply was not valid:\n{reply}\n\n"
+                f"Error: {last_error}\n"
+                "Reply again with ONLY corrected valid JSON."
+            )
+    raise ValueError(f"model did not produce valid JSON after {retries + 1} attempt(s): {last_error}")
+
+
+def complete_json(
+    prompt: str,
+    *,
+    schema: dict[str, Any] | None = None,
+    model_cls: type | None = None,
+    retries: int = 2,
+    system: str | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Synchronous wrapper around :func:`acomplete_json`.
+
+    Raises if called from within a running event loop — use
+    :func:`acomplete_json` there instead.
+    """
+    _reject_running_loop("complete_json", "acomplete_json")
+    return asyncio.run(
+        acomplete_json(
+            prompt,
+            schema=schema,
+            model_cls=model_cls,
+            retries=retries,
+            system=system,
+            **kwargs,
+        )
+    )
+
+
+def _reject_running_loop(sync_name: str, async_name: str) -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(
+        f"{sync_name}() cannot run inside an active event loop; await {async_name}()"
+    )
+
+
 def complete(
     prompt: str,
     *,
@@ -129,14 +261,7 @@ def complete(
     Raises if called from within a running event loop — use :func:`acomplete`
     there instead.
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "complete() cannot run inside an active event loop; await acomplete()"
-        )
+    _reject_running_loop("complete", "acomplete")
     return asyncio.run(
         acomplete(
             prompt,

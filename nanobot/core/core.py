@@ -25,7 +25,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -376,10 +376,13 @@ class MoekaCore:
         session_key: str = "core:default",
         media: list[str] | None = None,
         hooks: list[AgentHook] | None = None,
+        on_token: Callable[[str], Awaitable[None]] | None = None,
     ) -> RunResult:
         """Run one agent turn (multi-step tool calling + RAG context) and return it.
 
         Different ``session_key`` values get independent conversation history.
+        ``on_token`` is an async callback awaited with each streamed text delta
+        as the model produces it; the full result is still returned at the end.
         """
         capture = SDKCaptureHook()
         prev = self._loop._extra_hooks
@@ -387,7 +390,7 @@ class MoekaCore:
         self._loop._extra_hooks = [capture, *base_hooks]
         try:
             response = await self._loop.process_direct(
-                message, session_key=session_key, media=media,
+                message, session_key=session_key, media=media, on_stream=on_token,
             )
         finally:
             self._loop._extra_hooks = prev
@@ -430,3 +433,37 @@ class MoekaCore:
         from nanobot.api.complete import acomplete
 
         return await acomplete(prompt, **kwargs)
+
+    @staticmethod
+    def complete_sync(prompt: str, **kwargs: Any) -> str:
+        """Synchronous one-shot completion (no agent loop).
+
+        Thin delegate to :func:`nanobot.api.complete.complete`; raises when
+        called inside a running event loop — await :meth:`complete` there.
+        """
+        from nanobot.api.complete import complete
+
+        return complete(prompt, **kwargs)
+
+    @staticmethod
+    async def think_structured(
+        prompt: str,
+        *,
+        schema: dict[str, Any] | None = None,
+        model_cls: type | None = None,
+        retries: int = 2,
+        **kwargs: Any,
+    ) -> Any:
+        """One-shot structured thinking: a completion constrained to JSON.
+
+        Delegates to :func:`nanobot.api.complete.acomplete_json` — a
+        provider-agnostic parse-retry loop (no native JSON mode required).
+        Pass ``schema`` (JSON Schema dict) or ``model_cls`` (pydantic model;
+        validated instance is returned). Per-call ``model`` / ``temperature``
+        / ``max_tokens`` / ``system`` / ``images`` forward to the provider.
+        """
+        from nanobot.api.complete import acomplete_json
+
+        return await acomplete_json(
+            prompt, schema=schema, model_cls=model_cls, retries=retries, **kwargs
+        )

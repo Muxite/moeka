@@ -29,7 +29,7 @@ workspace is given, runs in a throwaway temp dir instead of ``~/.nanobot``.
 All heavy imports are lazy; importing this package has no channel/gateway deps.
 """
 
-from nanobot.api.complete import acomplete, complete
+from nanobot.api.complete import acomplete, acomplete_json, complete, complete_json
 from nanobot.config.schema import Config
 from nanobot.core.core import MoekaCore
 from nanobot.core.function_tool import FunctionTool
@@ -44,5 +44,7 @@ __all__ = [
     "RunResult",
     "complete",
     "acomplete",
+    "complete_json",
+    "acomplete_json",
     "open_vec_store",
 ]

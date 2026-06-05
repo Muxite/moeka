@@ -5,6 +5,6 @@
   services (e.g. awork) that want moeka's provider layer without the agent loop.
 """
 
-from nanobot.api.complete import acomplete, complete
+from nanobot.api.complete import acomplete, acomplete_json, complete, complete_json
 
-__all__ = ["acomplete", "complete"]
+__all__ = ["acomplete", "acomplete_json", "complete", "complete_json"]

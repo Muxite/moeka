@@ -195,7 +195,7 @@ async def test_run_captures_tools_used(tmp_path):
     def do_thing(x: int) -> str:
         return str(x)
 
-    async def fake_process_direct(message, *, session_key, media=None):
+    async def fake_process_direct(message, *, session_key, media=None, on_stream=None):
         # The action is visible to the engine at run time.
         assert core.loop.tools.has("do_thing")
         ctx = AgentHookContext(iteration=0, messages=[{"role": "user", "content": message}])
@@ -426,3 +426,62 @@ def test_documents_api_degrades_without_vec(tmp_path):
     assert core.retrieve_documents("q") == []
     assert core.count_documents() == 0
     core.clear_documents()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Thinker API — streaming + structured one-shots
+# ---------------------------------------------------------------------------
+
+async def test_run_forwards_on_token_as_on_stream(tmp_path):
+    core = _make_core(tmp_path)
+    seen: list[str] = []
+
+    async def on_token(delta: str) -> None:
+        seen.append(delta)
+
+    async def fake_process_direct(message, *, session_key, media=None, on_stream=None):
+        assert on_stream is not None
+        await on_stream("hel")
+        await on_stream("lo")
+        from nanobot.bus.events import OutboundMessage
+
+        return OutboundMessage(channel="cli", chat_id="direct", content="hello")
+
+    core.loop.process_direct = fake_process_direct
+    result = await core.run("hi", on_token=on_token)
+    assert seen == ["hel", "lo"]
+    assert result.content == "hello"
+
+
+async def test_think_structured_delegates_to_acomplete_json(tmp_path, monkeypatch):
+    import importlib
+
+    # nanobot.api re-exports shadow the submodule attribute; resolve the module.
+    complete_mod = importlib.import_module("nanobot.api.complete")
+
+    captured = {}
+
+    async def fake_acomplete_json(prompt, *, schema=None, model_cls=None, retries=2, **kw):
+        captured.update(
+            prompt=prompt, schema=schema, model_cls=model_cls, retries=retries, kw=kw
+        )
+        return {"answer": 42}
+
+    monkeypatch.setattr(complete_mod, "acomplete_json", fake_acomplete_json)
+    schema = {"type": "object"}
+    out = await MoekaCore.think_structured(
+        "question", schema=schema, retries=1, model="m", temperature=0.0
+    )
+    assert out == {"answer": 42}
+    assert captured["prompt"] == "question"
+    assert captured["schema"] is schema
+    assert captured["retries"] == 1
+    assert captured["kw"] == {"model": "m", "temperature": 0.0}
+
+
+def test_complete_sync_delegates(monkeypatch):
+    import importlib
+
+    complete_mod = importlib.import_module("nanobot.api.complete")
+    monkeypatch.setattr(complete_mod, "complete", lambda prompt, **kw: f"sync:{prompt}")
+    assert MoekaCore.complete_sync("hi") == "sync:hi"
