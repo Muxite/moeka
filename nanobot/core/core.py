@@ -32,6 +32,7 @@ from typing import Any
 from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.loop import AgentLoop
 from nanobot.core.function_tool import FunctionTool
+from nanobot.core.vec import RetrievedChunk
 from nanobot.nanobot import RunResult
 
 
@@ -261,12 +262,19 @@ class MoekaCore:
         vs = self._loop.vec_store
         return bool(vs is not None and vs.available)
 
-    def ingest(self, text_or_path: str | Path, *, source: str | None = None) -> int:
+    def ingest(
+        self,
+        text_or_path: str | Path,
+        *,
+        source: str | None = None,
+        collection: str = "default",
+    ) -> int:
         """Ingest text or a document file into the host-document collection.
 
         ``text_or_path`` is treated as a file path if it points at an existing
         file, otherwise as raw text. Returns the number of chunks indexed (0 when
-        ``moeka[vec]`` is not installed).
+        ``moeka[vec]`` is not installed). For text that must never be
+        path-detected, use :meth:`ingest_text`.
         """
         vs = self._loop.vec_store
         if vs is None or not vs.available:
@@ -275,7 +283,27 @@ class MoekaCore:
         text, src = self._resolve_ingest_input(text_or_path, source)
         if not text.strip():
             return 0
-        return vs.add_documents(text, source=src)
+        return vs.add_documents(text, source=src, collection=collection)
+
+    def ingest_text(
+        self,
+        text: str,
+        *,
+        source: str | None = None,
+        collection: str = "default",
+    ) -> int:
+        """Ingest raw *text* verbatim — never path-detects.
+
+        The explicit contract :meth:`ingest` can't give: arbitrary host/corpus
+        text is indexed as-is even if it happens to name an existing file.
+        Returns the number of chunks indexed (0 when ``moeka[vec]`` is missing).
+        """
+        vs = self._loop.vec_store
+        if vs is None or not vs.available:
+            return 0
+        if not text.strip():
+            return 0
+        return vs.add_documents(text, source=source, collection=collection)
 
     @staticmethod
     def _resolve_ingest_input(
@@ -291,12 +319,51 @@ class MoekaCore:
                 return extracted, source or candidate.name
         return str(text_or_path), source
 
-    def retrieve(self, query: str, *, k: int = 5) -> list[str]:
+    def retrieve(
+        self, query: str, *, k: int = 5, collection: str | None = "default"
+    ) -> list[str]:
         """Return the top-k host-document chunks semantically closest to *query*."""
         vs = self._loop.vec_store
         if vs is None or not vs.available:
             return []
-        return vs.search_documents(query, k=k)
+        return vs.search_documents(query, k=k, collection=collection)
+
+    def retrieve_documents(
+        self, query: str, *, k: int = 5, collection: str | None = "default"
+    ) -> list[RetrievedChunk]:
+        """Structured retrieval: top-k chunks with source attribution and score.
+
+        Unlike :meth:`retrieve` (bare strings), each result carries *which*
+        document it came from and *how close* it was — for thresholding,
+        dedupe, and doc-level assembly. ``collection=None`` searches all
+        collections. Empty list when ``moeka[vec]`` is unavailable.
+        """
+        vs = self._loop.vec_store
+        if vs is None or not vs.available:
+            return []
+        return [
+            RetrievedChunk(text=text, source=source, score=score)
+            for source, text, score in vs.search_documents_scored(
+                query, k=k, collection=collection
+            )
+        ]
+
+    def count_documents(self, *, collection: str | None = "default") -> int:
+        """Number of indexed host-document chunks (0 when vec is unavailable)."""
+        vs = self._loop.vec_store
+        if vs is None or not vs.available:
+            return 0
+        return vs.count_documents(collection=collection)
+
+    def clear_documents(self, *, collection: str | None = "default") -> None:
+        """Delete indexed host documents for deterministic reindexing.
+
+        ``collection=None`` clears every collection. No-op when vec is
+        unavailable.
+        """
+        vs = self._loop.vec_store
+        if vs is not None and vs.available:
+            vs.clear_documents(collection=collection)
 
     # ------------------------------------------------------------------
     # Run the thinking loop

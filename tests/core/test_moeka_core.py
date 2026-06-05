@@ -329,3 +329,100 @@ def test_ingest_from_file(tmp_path):
     assert core.ingest(doc, source=None) >= 1
     hits = core.retrieve("When does the project ship?", k=3)
     assert any("Friday" in h for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# Structured documents API (awork contract) — fake store, no embeddings needed
+# ---------------------------------------------------------------------------
+
+class _FakeVecStore:
+    """Records calls; returns canned scored results."""
+
+    available = True
+
+    def __init__(self):
+        self.added: list[tuple[str, str | None, str]] = []
+        self.cleared: list[str | None] = []
+        self.scored = [
+            ("a.md", "alpha text", 0.2),
+            (None, "anonymous text", 0.7),
+        ]
+
+    def add_documents(self, text, source=None, *, collection="default"):
+        self.added.append((text, source, collection))
+        return 1
+
+    def search_documents(self, query, k=5, *, collection="default"):
+        return [t for _s, t, _d in self.scored][:k]
+
+    def search_documents_scored(self, query, k=5, *, collection="default"):
+        self.last_search = (query, k, collection)
+        return self.scored[:k]
+
+    def count_documents(self, *, collection="default"):
+        self.last_count = collection
+        return 42
+
+    def clear_documents(self, *, collection="default"):
+        self.cleared.append(collection)
+
+
+def _core_with_fake_store(tmp_path):
+    core = _make_core(tmp_path)
+    fake = _FakeVecStore()
+    core.loop.vec_store = fake
+    return core, fake
+
+
+def test_ingest_text_never_path_detects(tmp_path):
+    """A path-looking string that names a real file is stored verbatim."""
+    core, fake = _core_with_fake_store(tmp_path)
+    real_file = tmp_path / "secret.txt"
+    real_file.write_text("file contents that must NOT be read")
+
+    assert core.ingest_text(str(real_file), source="raw") == 1
+    text, source, collection = fake.added[0]
+    assert text == str(real_file)  # the literal string, not the file body
+    assert source == "raw"
+    assert collection == "default"
+
+
+def test_ingest_text_blank_is_noop(tmp_path):
+    core, fake = _core_with_fake_store(tmp_path)
+    assert core.ingest_text("   \n  ") == 0
+    assert fake.added == []
+
+
+def test_ingest_threads_collection(tmp_path):
+    core, fake = _core_with_fake_store(tmp_path)
+    core.ingest("raw text body", source="s", collection="jobs")
+    assert fake.added[0] == ("raw text body", "s", "jobs")
+
+
+def test_retrieve_documents_returns_chunks_in_order(tmp_path):
+    from nanobot.core import RetrievedChunk
+
+    core, fake = _core_with_fake_store(tmp_path)
+    chunks = core.retrieve_documents("query", k=2, collection="kb")
+    assert fake.last_search == ("query", 2, "kb")
+    assert chunks == [
+        RetrievedChunk(text="alpha text", source="a.md", score=0.2),
+        RetrievedChunk(text="anonymous text", source=None, score=0.7),
+    ]
+
+
+def test_count_and_clear_documents_passthrough(tmp_path):
+    core, fake = _core_with_fake_store(tmp_path)
+    assert core.count_documents(collection="kb") == 42
+    assert fake.last_count == "kb"
+    core.clear_documents(collection=None)
+    assert fake.cleared == [None]
+
+
+def test_documents_api_degrades_without_vec(tmp_path):
+    core = _make_core(tmp_path)
+    core.loop.vec_store = None
+    assert core.ingest_text("text") == 0
+    assert core.retrieve_documents("q") == []
+    assert core.count_documents() == 0
+    core.clear_documents()  # must not raise

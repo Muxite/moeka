@@ -33,13 +33,16 @@ from nanobot.api.complete import acomplete, complete
 from nanobot.config.schema import Config
 from nanobot.core.core import MoekaCore
 from nanobot.core.function_tool import FunctionTool
+from nanobot.core.vec import RetrievedChunk, open_vec_store
 from nanobot.nanobot import RunResult
 
 __all__ = [
     "MoekaCore",
     "Config",
     "FunctionTool",
+    "RetrievedChunk",
     "RunResult",
     "complete",
     "acomplete",
+    "open_vec_store",
 ]
