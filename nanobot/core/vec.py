@@ -1,6 +1,6 @@
 """Loop-less access to moeka's semantic store.
 
-:func:`open_vec_store` returns a bare :class:`~nanobot.agent.vec_store.VecStore`
+:func:`open_vec_store` returns a bare :class:`~nanobot.core.vec_store.VecStore`
 — no AgentLoop, provider, or config — so a host can use ``moeka[vec]`` as a
 standalone local embeddings library. No API keys are required; in a keyless or
 extras-less environment the store degrades to inert (``.available is False``)
@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from nanobot.agent.vec_store import VecStore
+from nanobot.core.vec_store import VecStore
 
 __all__ = ["RetrievedChunk", "VecStore", "open_vec_store"]
 

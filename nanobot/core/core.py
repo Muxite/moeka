@@ -161,7 +161,7 @@ class MoekaCore:
         vec_config = config.agents.defaults.vec
         if not getattr(vec_config, "enable", False):
             return None
-        from nanobot.agent.vec_store import VecStore
+        from nanobot.core.vec_store import VecStore
 
         db_path = config.workspace_path / "memory" / "vec.db"
         return VecStore(db_path, model_name=vec_config.embedding_model)

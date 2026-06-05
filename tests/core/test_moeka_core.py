@@ -300,7 +300,7 @@ def test_ingest_retrieve_roundtrip(tmp_path):
     pytest.importorskip("sqlite_vec")
     pytest.importorskip("sentence_transformers")
 
-    from nanobot.agent.vec_store import VecStore
+    from nanobot.core.vec_store import VecStore
 
     store = VecStore(tmp_path / "vec.db")
     if not store.available:

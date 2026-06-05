@@ -7,6 +7,13 @@ import os
 
 import pytest
 
+# Embedding tests must not fight the live moeka service (or each other) for
+# VRAM: a handful of per-test SentenceTransformer loads can OOM the GPU and
+# VecStore then degrades to empty results, failing assertions spuriously.
+# The test models are tiny — CPU is fast and deterministic. Set before any
+# torch import; export CUDA_VISIBLE_DEVICES yourself to override.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
 
 @pytest.fixture(autouse=True)
 def _reenable_nanobot_logging():

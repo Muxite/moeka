@@ -23,8 +23,8 @@ from nanobot.utils.helpers import (
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
-    from nanobot.agent.vec_store import VecStore
     from nanobot.config.schema import VecConfig
+    from nanobot.core.vec_store import VecStore
 
 
 class ContextBuilder:

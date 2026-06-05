@@ -24,6 +24,8 @@ _FORBIDDEN = (
 _PROBE = """
 import sys
 import nanobot.core            # noqa: F401
+import nanobot.core.vec        # noqa: F401
+import nanobot.core.vec_store  # noqa: F401
 import nanobot.api.complete    # noqa: F401
 forbidden = {forbidden!r}
 leaked = sorted(

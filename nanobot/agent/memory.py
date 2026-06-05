@@ -30,7 +30,7 @@ from nanobot.utils.helpers import (
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
-    from nanobot.agent.vec_store import VecStore
+    from nanobot.core.vec_store import VecStore
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
 

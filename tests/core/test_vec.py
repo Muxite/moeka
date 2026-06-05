@@ -11,8 +11,8 @@ import dataclasses
 
 import pytest
 
-from nanobot.agent.vec_store import VecStore
 from nanobot.core.vec import RetrievedChunk, open_vec_store
+from nanobot.core.vec_store import VecStore
 
 
 def test_open_vec_store_returns_vec_store(tmp_path):
