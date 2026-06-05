@@ -26,6 +26,14 @@ Moeka-specific deviations from upstream nanobot worth knowing:
 pytest tests/test_openai_api.py::test_function -v
 ruff check nanobot/
 
+# Tests in Docker (preferred for full-suite runs — isolated from the live
+# moeka service and the host venv). Dockerfile.test is layered so the
+# dependency layer is keyed on pyproject.toml + uv.lock only; code edits
+# rebuild in ~2s. The vec extra (CUDA torch) is skipped by default:
+#   --build-arg NO_EXTRA= re-enables it for full CI parity.
+scripts/test-docker.sh                          # build + full suite
+scripts/test-docker.sh pytest tests/agent -v    # build + subset
+
 # WebUI: dev server (proxies API/WS to gateway :8765), build, test
 # Build outputs to ../nanobot/web/dist (bundled into the Python wheel)
 cd webui && bun run dev      # or NANOBOT_API_URL=... bun run dev

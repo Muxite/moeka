@@ -1,0 +1,26 @@
+# Keep the build context minimal so source-layer cache keys are stable.
+.git
+.venv
+.worktrees
+.worktree
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+
+# Secrets — never ship into an image
+keys.env
+keys.env.example
+.env
+
+# Frontend (not needed for Python tests)
+webui
+
+# Local runtime artifacts
+nohup.out
+*.log
+images
+docs
+media
+.assets
+.docs
