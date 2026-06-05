@@ -187,16 +187,17 @@ class BaseChannel(ABC):
             allow_list = self.config.get("allow_from") or self.config.get("allowFrom") or []
         else:
             allow_list = getattr(self.config, "allow_from", None) or []
-        if not allow_list:
-            self.logger.warning("allow_from is empty — all access denied")
-            return False
         if "*" in allow_list:
             return True
         # allowFrom entries are opaque tokens — must match exactly.
         if str(sender_id) in allow_list:
             return True
+        # Empty allowlist still falls through to the pairing store: senders
+        # approved via the pairing-code DM flow stay allowed.
         if is_approved(self.name, str(sender_id)):
             return True
+        if not allow_list:
+            self.logger.warning("allow_from is empty — access via pairing approval only")
         return False
 
     async def _handle_message(
