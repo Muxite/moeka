@@ -600,53 +600,9 @@ async def test_runner_empty_response_does_not_break_tool_chain():
     assert "read_file" in result.tools_used
 
 
-def test_snip_history_drops_orphaned_tool_results_from_trimmed_slice(monkeypatch):
-    from nanobot.agent.runner import AgentRunSpec, AgentRunner
-
-    provider = MagicMock()
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
-    runner = AgentRunner(provider)
-    messages = [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": "old user"},
-        {
-            "role": "assistant",
-            "content": "tool call",
-            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "call_1", "content": "tool output"},
-        {"role": "assistant", "content": "after tool"},
-    ]
-    spec = AgentRunSpec(
-        initial_messages=messages,
-        tools=tools,
-        model="test-model",
-        max_iterations=1,
-        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        context_window_tokens=2000,
-        context_block_limit=100,
-    )
-
-    monkeypatch.setattr("nanobot.agent.runner.estimate_prompt_tokens_chain", lambda *_args, **_kwargs: (500, None))
-    token_sizes = {
-        "old user": 120,
-        "tool call": 120,
-        "tool output": 40,
-        "after tool": 40,
-        "system": 0,
-    }
-    monkeypatch.setattr(
-        "nanobot.agent.runner.estimate_message_tokens",
-        lambda msg: token_sizes.get(str(msg.get("content")), 40),
-    )
-
-    trimmed = runner._snip_history(spec, messages)
-
-    assert trimmed == [
-        {"role": "system", "content": "system"},
-        {"role": "assistant", "content": "after tool"},
-    ]
+# test_snip_history_drops_orphaned_tool_results_from_trimmed_slice lives in
+# test_runner_governance.py — the copy here predated the GLM error-1214 fix
+# (44b526c4) and asserted the old (now invalid) system→assistant trim result.
 
 
 @pytest.mark.asyncio

@@ -350,8 +350,8 @@ def maybe_persist_tool_result(
     bucket = ensure_dir(root / safe_filename(session_key or "default"))
     try:
         _cleanup_tool_result_buckets(root, bucket)
-    except Exception:
-        logger.exception("Failed to clean stale tool result buckets in {}", root)
+    except Exception as exc:
+        logger.warning("Failed to clean stale tool result buckets in {}: {}", root, exc)
     path = bucket / f"{safe_filename(tool_call_id)}.{suffix}"
     if not path.exists():
         if suffix == "json" and isinstance(content, list):

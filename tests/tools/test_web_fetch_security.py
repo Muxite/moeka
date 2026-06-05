@@ -8,8 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nanobot.agent.tools.web import WebFetchTool
-from nanobot.config.schema import WebFetchConfig
+from nanobot.agent.tools.web import WebFetchConfig, WebFetchTool
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):

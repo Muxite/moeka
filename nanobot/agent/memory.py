@@ -30,9 +30,9 @@ from nanobot.utils.helpers import (
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
+    from nanobot.agent.vec_store import VecStore
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
-    from nanobot.agent.vec_store import VecStore
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +481,6 @@ class Consolidator:
     """Lightweight consolidation: summarizes evicted messages into history.jsonl."""
 
     _MAX_CONSOLIDATION_ROUNDS = 5
-    _MAX_CHUNK_MESSAGES = 50  # cap on messages per consolidation round
 
     _SAFETY_BUFFER = 1024  # extra headroom for tokenizer estimation drift
 
@@ -765,23 +764,11 @@ class Consolidator:
 
                 end_idx = boundary[0]
 
-                # Cap the chunk size. If the proposed range exceeds _MAX_CHUNK_MESSAGES,
-                # find the last user-turn boundary that fits within the cap. If there
-                # is no such boundary, skip this round to avoid archiving a chunk
-                # that is too large for the consolidation LLM.
-                chunk_size = end_idx - session.last_consolidated
-                if chunk_size > self._MAX_CHUNK_MESSAGES:
-                    cap_idx = session.last_consolidated + self._MAX_CHUNK_MESSAGES
-                    msgs = session.messages
-                    prev_user = next(
-                        (i for i in range(cap_idx, session.last_consolidated - 1, -1)
-                         if msgs[i].get("role") == "user"),
-                        None,
-                    )
-                    if prev_user is not None and prev_user > session.last_consolidated:
-                        end_idx = prev_user
-                    else:
-                        break
+                # No message-count cap here (moeka deviation, 2848f698): a hard
+                # cap with no safe user-turn boundary stalls consolidation
+                # forever ("stuck consolidation" / history bloat). Oversized
+                # chunks are instead truncated to the LLM's token budget in
+                # archive() via _truncate_to_token_budget().
 
                 chunk = session.messages[session.last_consolidated:end_idx]
                 if not chunk:

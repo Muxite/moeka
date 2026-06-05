@@ -139,9 +139,11 @@ class ContextBuilder:
             {e["cursor"]: e for e in (semantic_entries + recent)}.values(),
             key=lambda e: e["cursor"],
         )
-        return "# Recent History\n\n" + "\n".join(
+        history_text = "\n".join(
             f"- [{e['timestamp']}] {e['content']}" for e in combined
         )
+        history_text = truncate_text(history_text, self._MAX_HISTORY_CHARS)
+        return "# Recent History\n\n" + history_text
 
     @staticmethod
     def _behavioral_guidelines() -> str:

@@ -6,8 +6,9 @@ import pytest
 
 from nanobot.agent.runner import AgentRunResult
 from nanobot.agent.subagent import SubagentManager, SubagentStatus
-from nanobot.agent.tools.shell import ExecTool
-from nanobot.config.schema import ExecToolConfig, WebToolsConfig
+from nanobot.agent.tools.shell import ExecTool, ExecToolConfig
+from nanobot.agent.tools.web import WebToolsConfig
+from nanobot.config.schema import ToolsConfig
 
 
 class _Bus:
@@ -35,13 +36,15 @@ async def test_subagent_exec_tool_uses_exec_config(tmp_path, monkeypatch):
         workspace=Path(tmp_path),
         bus=_Bus(),
         max_tool_result_chars=1000,
-        web_config=WebToolsConfig(enable=False),
-        exec_config=ExecToolConfig(
-            timeout=123,
-            path_append="/opt/custom/bin",
-            sandbox="",
-            allowed_env_keys=["MY_CUSTOM_VAR"],
-            allow_sudo=True,
+        tools_config=ToolsConfig(
+            web=WebToolsConfig(enable=False),
+            exec=ExecToolConfig(
+                timeout=123,
+                path_append="/opt/custom/bin",
+                sandbox="",
+                allowed_env_keys=["MY_CUSTOM_VAR"],
+                allow_sudo=True,
+            ),
         ),
         restrict_to_workspace=True,
     )
