@@ -1,9 +1,12 @@
 """Semantic vector store backed by sqlite-vec + sentence-transformers.
 
-Provides three collections:
+Provides four stores:
   - memory_chunks   — MEMORY.md split by section headers
   - history_entries — history.jsonl entries
   - skills          — skill definitions (indexed at startup)
+  - documents       — host-supplied text (append-only), optionally split
+                      into named *collections* so a host can keep separate
+                      corpora in one vec.db
 
 All public methods degrade gracefully: if sqlite-vec or
 sentence-transformers are unavailable the caller gets None/[] back.
@@ -268,7 +271,9 @@ class VecStore:
     # Host documents (incremental, append-only)
     # ------------------------------------------------------------------
 
-    def add_documents(self, text: str, source: str | None = None) -> int:
+    def add_documents(
+        self, text: str, source: str | None = None, *, collection: str = "default"
+    ) -> int:
         """Chunk and index host-supplied *text* incrementally. Returns chunk count."""
         if not self._available or not text.strip():
             return 0
@@ -280,8 +285,8 @@ class VecStore:
             embeddings = self._embed(chunks)
             for chunk, emb in zip(chunks, embeddings):
                 cur = conn.execute(
-                    "INSERT INTO documents_data(source, text) VALUES (?, ?)",
-                    (source, chunk),
+                    "INSERT INTO documents_data(source, text, collection) VALUES (?, ?, ?)",
+                    (source, chunk, collection),
                 )
                 conn.execute(
                     "INSERT INTO documents_vec(rowid, embedding) VALUES (?, ?)",
@@ -294,32 +299,120 @@ class VecStore:
             logger.exception("VecStore: add_documents failed")
             return 0
 
-    def search_documents(self, query: str, k: int = 5) -> list[str]:
+    def search_documents(
+        self, query: str, k: int = 5, *, collection: str | None = "default"
+    ) -> list[str]:
         """Return the top-k host-document chunks semantically closest to *query*."""
+        return [
+            text for _source, text, _score in self.search_documents_scored(
+                query, k=k, collection=collection
+            )
+        ]
+
+    def search_documents_scored(
+        self, query: str, k: int = 5, *, collection: str | None = "default"
+    ) -> list[tuple[str | None, str, float]]:
+        """Top-k host-document chunks as ``(source, text, distance)``.
+
+        Lower distance = semantically closer (embeddings are unit-normalized).
+        ``collection=None`` searches across all collections.
+        """
         if not self._available or not query.strip():
             return []
         try:
             conn = self._connection()
-            count = conn.execute("SELECT count(*) FROM documents_data").fetchone()[0]
-            if count == 0:
+            total = conn.execute("SELECT count(*) FROM documents_data").fetchone()[0]
+            if total == 0:
                 return []
+            in_scope = total
+            if collection is not None:
+                in_scope = conn.execute(
+                    "SELECT count(*) FROM documents_data WHERE collection = ?",
+                    (collection,),
+                ).fetchone()[0]
+                if in_scope == 0:
+                    return []
             emb = self._embed([query])[0]
-            limit = min(k, count)
-            rows = conn.execute(
-                """
-                SELECT d.text
-                FROM documents_vec v
-                JOIN documents_data d ON d.id = v.rowid
-                WHERE v.embedding MATCH ?
-                  AND k = ?
-                ORDER BY distance
-                """,
-                (emb.tobytes(), limit),
-            ).fetchall()
-            return [r[0] for r in rows]
+            want = min(k, in_scope)
+            # The collection predicate filters *after* the KNN returns its k
+            # nearest rows, so with mixed collections a plain k would
+            # under-return. Over-fetch, escalating to a full scan if needed
+            # (vec0 brute-forces either way; only row materialization grows).
+            knn_k = want if collection is None or in_scope == total else min(
+                total, max(want * 4, 32)
+            )
+            while True:
+                rows = self._knn_documents(conn, emb, knn_k, collection)
+                if len(rows) >= want or knn_k >= total:
+                    return rows[:want]
+                knn_k = total
+
         except Exception:
-            logger.exception("VecStore: search_documents failed")
+            logger.exception("VecStore: search_documents_scored failed")
             return []
+
+    def _knn_documents(
+        self,
+        conn: sqlite3.Connection,
+        emb: np.ndarray,
+        knn_k: int,
+        collection: str | None,
+    ) -> list[tuple[str | None, str, float]]:
+        sql = """
+            SELECT d.source, d.text, v.distance
+            FROM documents_vec v
+            JOIN documents_data d ON d.id = v.rowid
+            WHERE v.embedding MATCH ?
+              AND k = ?
+        """
+        params: list = [emb.tobytes(), knn_k]
+        if collection is not None:
+            sql += " AND d.collection = ?"
+            params.append(collection)
+        sql += " ORDER BY distance"
+        rows = conn.execute(sql, params).fetchall()
+        return [(r[0], r[1], float(r[2])) for r in rows]
+
+    def count_documents(self, *, collection: str | None = "default") -> int:
+        """Number of indexed document chunks. ``collection=None`` counts all."""
+        if not self._available:
+            return 0
+        try:
+            conn = self._connection()
+            if collection is None:
+                row = conn.execute("SELECT count(*) FROM documents_data").fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT count(*) FROM documents_data WHERE collection = ?",
+                    (collection,),
+                ).fetchone()
+            return int(row[0])
+        except Exception:
+            logger.exception("VecStore: count_documents failed")
+            return 0
+
+    def clear_documents(self, *, collection: str | None = "default") -> None:
+        """Delete indexed document chunks. ``collection=None`` clears all collections."""
+        if not self._available:
+            return
+        try:
+            conn = self._connection()
+            if collection is None:
+                conn.execute("DELETE FROM documents_vec")
+                conn.execute("DELETE FROM documents_data")
+            else:
+                # vec rows first, while the data rows still identify them.
+                conn.execute(
+                    "DELETE FROM documents_vec WHERE rowid IN "
+                    "(SELECT id FROM documents_data WHERE collection = ?)",
+                    (collection,),
+                )
+                conn.execute(
+                    "DELETE FROM documents_data WHERE collection = ?", (collection,)
+                )
+            conn.commit()
+        except Exception:
+            logger.exception("VecStore: clear_documents failed")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -380,11 +473,20 @@ class VecStore:
             CREATE TABLE IF NOT EXISTS documents_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT,
-                text TEXT NOT NULL
+                text TEXT NOT NULL,
+                collection TEXT NOT NULL DEFAULT 'default'
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS documents_vec
                 USING vec0(embedding FLOAT[{_EMBEDDING_DIM}]);
         """)
+        # Migrate pre-collections documents_data in place (idempotent; ADD
+        # COLUMN with a constant default is metadata-only, safe on live dbs).
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(documents_data)")}
+        if "collection" not in cols:
+            conn.execute(
+                "ALTER TABLE documents_data "
+                "ADD COLUMN collection TEXT NOT NULL DEFAULT 'default'"
+            )
         conn.commit()
 
     def _embed(self, texts: list[str]) -> list[np.ndarray]:
