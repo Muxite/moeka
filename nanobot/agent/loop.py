@@ -177,6 +177,10 @@ class AgentLoop:
         hooks: list[AgentHook] | None = None,
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
+        allowed_skills: list[str] | None = None,
+        tools_allow: list[str] | None = None,
+        tools_deny: list[str] | None = None,
+        runner_limits=None,
         tools_config: ToolsConfig | None = None,
         image_generation_provider_config: ProviderConfig | None = None,
         image_generation_provider_configs: dict[str, ProviderConfig] | None = None,
@@ -238,12 +242,18 @@ class AgentLoop:
         self._pending_turn_latency_ms: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
+        self.tools_allow = list(tools_allow) if tools_allow is not None else None
+        self.tools_deny = list(tools_deny) if tools_deny else []
+        from nanobot.agent.runner import RunnerLimits
+        self.runner_limits = runner_limits or RunnerLimits()
+
         self.vec_config = vec_config
         self.vec_store = vec_store
         self.context = ContextBuilder(
             workspace,
             timezone=timezone,
             disabled_skills=disabled_skills,
+            allowed_skills=allowed_skills,
             vec_store=vec_store,
             vec_config=vec_config,
         )
@@ -263,6 +273,8 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
             disabled_skills=disabled_skills,
             max_iterations=self.max_iterations,
+            tools_allow=self.tools_allow,
+            tools_deny=self.tools_deny,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
         )
         self._unified_session = unified_session
@@ -359,6 +371,10 @@ class AgentLoop:
             timezone=defaults.timezone,
             unified_session=defaults.unified_session,
             disabled_skills=defaults.disabled_skills,
+            allowed_skills=defaults.allowed_skills,
+            tools_allow=defaults.tools_allow,
+            tools_deny=defaults.tools_deny,
+            runner_limits=defaults.limits,
             session_ttl_minutes=defaults.session_ttl_minutes,
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
@@ -465,10 +481,14 @@ class AgentLoop:
             timezone=self.context.timezone or "UTC",
         )
         loader = ToolLoader()
-        registered = loader.load(ctx, self.tools)
+        registered = loader.load(ctx, self.tools, allow=self.tools_allow, deny=self.tools_deny)
 
         # MyTool needs runtime state reference — manual registration
-        if self.tools_config.my.enable:
+        # (still subject to the same allow/deny scope as discovered tools)
+        my_allowed = (self.tools_allow is None or "my" in self.tools_allow) and (
+            "my" not in self.tools_deny
+        )
+        if self.tools_config.my.enable and my_allowed:
             self.tools.register(
                 MyTool(runtime_state=self, modify_allowed=self.tools_config.my.allow_set)
             )
@@ -792,6 +812,7 @@ class AgentLoop:
                 retry_wait_callback=on_retry_wait,
                 checkpoint_callback=_checkpoint,
                 injection_callback=_drain_pending,
+                limits=self.runner_limits,
                 # Sustained goals may legitimately exceed NANOBOT_LLM_TIMEOUT_S; idle stall
                 # is still capped by NANOBOT_STREAM_IDLE_TIMEOUT_S in streaming providers.
                 llm_timeout_s=runner_wall_llm_timeout_s(

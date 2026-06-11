@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings
 from nanobot.cron.types import CronSchedule
 
 if TYPE_CHECKING:
+    from nanobot.agent.runner import RunnerLimits
     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
@@ -174,6 +175,32 @@ class AgentDefaults(Base):
     )  # Consolidation target ratio (0.5 = 50% of budget retained after compression)
     dream: DreamConfig = Field(default_factory=DreamConfig)
     vec: VecConfig = Field(default_factory=lambda: VecConfig())
+    tools_allow: list[str] | None = None  # None = all tools; [] = no tools
+    tools_deny: list[str] = Field(default_factory=list)  # tool names never registered
+    allowed_skills: list[str] | None = None  # None = all skills (minus disabled_skills)
+    limits: RunnerLimits = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.runner", "RunnerLimits"),
+    )
+
+
+class AgentProfileConfig(Base):
+    """A named scoping bundle: model preset, persona, tools, skills, limits.
+
+    Resolved by embedding hosts via ``MoekaCore.create(profile=...)``; fields
+    left at their defaults inherit the corresponding ``agents.defaults``
+    behavior. ``tools_allow`` is a hard allowlist applied at tool-discovery
+    time, so tools added to moeka later never silently appear in a scoped agent.
+    """
+
+    model_preset: str | None = None
+    system_prompt_file: str | None = None  # persona seeded to <workspace>/AGENTS.md when absent
+    tools_allow: list[str] | None = None  # None = all tools; [] = no tools
+    tools_deny: list[str] = Field(default_factory=list)
+    skills_include: list[str] | None = None  # None = all skills (minus exclude)
+    skills_exclude: list[str] = Field(default_factory=list)
+    memory_enabled: bool = True  # False disables semantic vec memory for this profile
+    vec_collections: list[str] = Field(default_factory=list)  # document collections this profile uses
+    limits: RunnerLimits | None = None
 
 
 class AgentsConfig(Base):
@@ -313,6 +340,7 @@ class Config(BaseSettings):
         default_factory=dict,
         validation_alias=AliasChoices("modelPresets", "model_presets"),
     )
+    profiles: dict[str, AgentProfileConfig] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_model_preset(self) -> "Config":
@@ -324,7 +352,19 @@ class Config(BaseSettings):
         for fallback in self.agents.defaults.fallback_models:
             if isinstance(fallback, str) and fallback not in self.model_presets:
                 raise ValueError(f"fallback_models entry {fallback!r} not found in model_presets")
+        for profile_name, profile in self.profiles.items():
+            preset = profile.model_preset
+            if preset and preset != "default" and preset not in self.model_presets:
+                raise ValueError(
+                    f"profile {profile_name!r} references unknown model_preset {preset!r}"
+                )
         return self
+
+    def resolve_profile(self, name: str) -> AgentProfileConfig:
+        """Return the named agent profile, raising ``KeyError`` when missing."""
+        if name not in self.profiles:
+            raise KeyError(f"profile {name!r} not found in profiles")
+        return self.profiles[name]
 
     def resolve_default_preset(self) -> ModelPresetConfig:
         """Return the implicit `default` preset from agents.defaults fields."""
@@ -487,6 +527,7 @@ def _resolve_tool_config_refs() -> None:
     """
     import sys
 
+    from nanobot.agent.runner import RunnerLimits
     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
@@ -500,7 +541,10 @@ def _resolve_tool_config_refs() -> None:
     mod.WebFetchConfig = WebFetchConfig  # type: ignore[attr-defined]
     mod.MyToolConfig = MyToolConfig  # type: ignore[attr-defined]
     mod.ImageGenerationToolConfig = ImageGenerationToolConfig  # type: ignore[attr-defined]
+    mod.RunnerLimits = RunnerLimits  # type: ignore[attr-defined]
 
+    AgentDefaults.model_rebuild()
+    AgentProfileConfig.model_rebuild()
     ToolsConfig.model_rebuild()
     Config.model_rebuild()
 
@@ -532,6 +576,8 @@ except ImportError:
 
 _orig_config_init = Config.__init__
 _orig_tools_init = ToolsConfig.__init__
+_orig_agent_defaults_init = AgentDefaults.__init__
+_orig_agent_profile_init = AgentProfileConfig.__init__
 
 
 def _config_init_with_lazy_rebuild(self, *args: Any, **kwargs: Any) -> None:
@@ -544,5 +590,17 @@ def _tools_init_with_lazy_rebuild(self, *args: Any, **kwargs: Any) -> None:
     _orig_tools_init(self, *args, **kwargs)
 
 
+def _agent_defaults_init_with_lazy_rebuild(self, *args: Any, **kwargs: Any) -> None:
+    _ensure_tool_config_refs_resolved()
+    _orig_agent_defaults_init(self, *args, **kwargs)
+
+
+def _agent_profile_init_with_lazy_rebuild(self, *args: Any, **kwargs: Any) -> None:
+    _ensure_tool_config_refs_resolved()
+    _orig_agent_profile_init(self, *args, **kwargs)
+
+
 Config.__init__ = _config_init_with_lazy_rebuild  # type: ignore[method-assign]
 ToolsConfig.__init__ = _tools_init_with_lazy_rebuild  # type: ignore[method-assign]
+AgentDefaults.__init__ = _agent_defaults_init_with_lazy_rebuild  # type: ignore[method-assign]
+AgentProfileConfig.__init__ = _agent_profile_init_with_lazy_rebuild  # type: ignore[method-assign]

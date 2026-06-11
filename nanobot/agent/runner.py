@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
@@ -56,6 +58,22 @@ _COMPACTABLE_TOOLS = frozenset({
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 
 
+class RunnerLimits(BaseModel):
+    """Tunable retry/injection/compaction thresholds for one agent execution.
+
+    Defaults preserve the historical module-constant behavior. Override via
+    ``agents.defaults.limits`` in config or per agent profile.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    max_empty_retries: int = _MAX_EMPTY_RETRIES
+    max_length_recoveries: int = _MAX_LENGTH_RECOVERIES
+    max_injections_per_turn: int = _MAX_INJECTIONS_PER_TURN
+    max_injection_cycles: int = _MAX_INJECTION_CYCLES
+    microcompact_keep_recent: int = _MICROCOMPACT_KEEP_RECENT
+    microcompact_min_chars: int = _MICROCOMPACT_MIN_CHARS
+
 
 @dataclass(slots=True)
 class AgentRunSpec:
@@ -85,6 +103,7 @@ class AgentRunSpec:
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
     llm_timeout_s: float | None = None
+    limits: RunnerLimits = field(default_factory=RunnerLimits)
 
 
 @dataclass(slots=True)
@@ -158,12 +177,13 @@ class AgentRunner:
     ) -> tuple[bool, int]:
         """Drain pending injections. Returns (should_continue, updated_cycles).
 
-        If injections are found and we haven't exceeded _MAX_INJECTION_CYCLES,
-        append them to *messages* (and emit a checkpoint if *assistant_message*
-        and *iteration* are both provided) and return (True, cycles+1) so the
-        caller continues the iteration loop.  Otherwise return (False, cycles).
+        If injections are found and we haven't exceeded the injection-cycle
+        limit, append them to *messages* (and emit a checkpoint if
+        *assistant_message* and *iteration* are both provided) and return
+        (True, cycles+1) so the caller continues the iteration loop.
+        Otherwise return (False, cycles).
         """
-        if injection_cycles >= _MAX_INJECTION_CYCLES:
+        if injection_cycles >= spec.limits.max_injection_cycles:
             return False, injection_cycles
         injections = await self._drain_injections(spec)
         if not injections:
@@ -186,7 +206,7 @@ class AgentRunner:
         self._append_injected_messages(messages, injections)
         logger.info(
             "Injected {} follow-up message(s) {} ({}/{})",
-            len(injections), phase, injection_cycles, _MAX_INJECTION_CYCLES,
+            len(injections), phase, injection_cycles, spec.limits.max_injection_cycles,
         )
         return True, injection_cycles
 
@@ -194,7 +214,7 @@ class AgentRunner:
         """Drain pending user messages via the injection callback.
 
         Returns normalized user messages (capped by
-        ``_MAX_INJECTIONS_PER_TURN``), or an empty list when there is
+        ``spec.limits.max_injections_per_turn``), or an empty list when there is
         nothing to inject. Messages beyond the cap are logged so they
         are not silently lost.
         """
@@ -210,7 +230,7 @@ class AgentRunner:
                 )
             )
             if accepts_limit:
-                items = await spec.injection_callback(limit=_MAX_INJECTIONS_PER_TURN)
+                items = await spec.injection_callback(limit=spec.limits.max_injections_per_turn)
             else:
                 items = await spec.injection_callback()
         except Exception:
@@ -226,13 +246,14 @@ class AgentRunner:
             text = getattr(item, "content", str(item))
             if text.strip():
                 injected_messages.append({"role": "user", "content": text})
-        if len(injected_messages) > _MAX_INJECTIONS_PER_TURN:
-            dropped = len(injected_messages) - _MAX_INJECTIONS_PER_TURN
+        cap = spec.limits.max_injections_per_turn
+        if len(injected_messages) > cap:
+            dropped = len(injected_messages) - cap
             logger.warning(
                 "Injection callback returned {} messages, capping to {} ({} dropped)",
-                len(injected_messages), _MAX_INJECTIONS_PER_TURN, dropped,
+                len(injected_messages), cap, dropped,
             )
-            injected_messages = injected_messages[:_MAX_INJECTIONS_PER_TURN]
+            injected_messages = injected_messages[:cap]
         return injected_messages
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
@@ -260,7 +281,7 @@ class AgentRunner:
                 # later when the caller saves only the new turn.
                 messages_for_model = self._drop_orphan_tool_results(messages)
                 messages_for_model = self._backfill_missing_tool_results(messages_for_model)
-                messages_for_model = self._microcompact(messages_for_model)
+                messages_for_model = self._microcompact(messages_for_model, spec.limits)
                 messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
                 messages_for_model = self._snip_history(spec, messages_for_model)
                 # Snipping may have created new orphans; clean them up.
@@ -413,13 +434,13 @@ class AgentRunner:
             clean = hook.finalize_content(context, response.content)
             if response.finish_reason != "error" and is_blank_text(clean):
                 empty_content_retries += 1
-                if empty_content_retries < _MAX_EMPTY_RETRIES:
+                if empty_content_retries < spec.limits.max_empty_retries:
                     logger.warning(
                         "Empty response on turn {} for {} ({}/{}); retrying",
                         iteration,
                         spec.session_key or "default",
                         empty_content_retries,
-                        _MAX_EMPTY_RETRIES,
+                        spec.limits.max_empty_retries,
                     )
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=False)
@@ -444,13 +465,13 @@ class AgentRunner:
 
             if response.finish_reason == "length" and not is_blank_text(clean):
                 length_recovery_count += 1
-                if length_recovery_count <= _MAX_LENGTH_RECOVERIES:
+                if length_recovery_count <= spec.limits.max_length_recoveries:
                     logger.info(
                         "Output truncated on turn {} for {} ({}/{}); continuing",
                         iteration,
                         spec.session_key or "default",
                         length_recovery_count,
-                        _MAX_LENGTH_RECOVERIES,
+                        spec.limits.max_length_recoveries,
                     )
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=True)
@@ -1133,22 +1154,26 @@ class AgentRunner:
         return updated
 
     @staticmethod
-    def _microcompact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _microcompact(
+        messages: list[dict[str, Any]],
+        limits: RunnerLimits | None = None,
+    ) -> list[dict[str, Any]]:
         """Replace old compactable tool results with one-line summaries."""
+        limits = limits or RunnerLimits()
         compactable_indices: list[int] = []
         for idx, msg in enumerate(messages):
             if msg.get("role") == "tool" and msg.get("name") in _COMPACTABLE_TOOLS:
                 compactable_indices.append(idx)
 
-        if len(compactable_indices) <= _MICROCOMPACT_KEEP_RECENT:
+        if len(compactable_indices) <= limits.microcompact_keep_recent:
             return messages
 
-        stale = compactable_indices[: len(compactable_indices) - _MICROCOMPACT_KEEP_RECENT]
+        stale = compactable_indices[: len(compactable_indices) - limits.microcompact_keep_recent]
         updated: list[dict[str, Any]] | None = None
         for idx in stale:
             msg = messages[idx]
             content = msg.get("content")
-            if not isinstance(content, str) or len(content) < _MICROCOMPACT_MIN_CHARS:
+            if not isinstance(content, str) or len(content) < limits.microcompact_min_chars:
                 continue
             name = msg.get("name", "tool")
             summary = f"[{name} result omitted from context]"

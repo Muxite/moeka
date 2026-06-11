@@ -26,11 +26,19 @@ class SkillsLoader:
     specific tools or perform certain tasks.
     """
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None, disabled_skills: set[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        builtin_skills_dir: Path | None = None,
+        disabled_skills: set[str] | None = None,
+        allowed_skills: set[str] | None = None,
+    ):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
         self.disabled_skills = disabled_skills or set()
+        # None = all skills allowed; a set restricts loading to those names.
+        self.allowed_skills = allowed_skills
 
     def _skill_entries_from_dir(self, base: Path, source: str, *, skip_names: set[str] | None = None) -> list[dict[str, str]]:
         if not base.exists():
@@ -67,6 +75,9 @@ class SkillsLoader:
 
         if self.disabled_skills:
             skills = [s for s in skills if s["name"] not in self.disabled_skills]
+
+        if self.allowed_skills is not None:
+            skills = [s for s in skills if s["name"] in self.allowed_skills]
 
         if filter_unavailable:
             return [skill for skill in skills if self._check_requirements(self._get_skill_meta(skill["name"]))]

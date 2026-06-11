@@ -25,7 +25,8 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,9 @@ class MoekaCore:
         # Set by :meth:`create` when it allocated a throwaway workspace for an
         # in-memory config; ``None`` when the host owns the workspace.
         self._ephemeral_workspace: Path | None = None
+        # Set by :meth:`create` when a named profile was applied.
+        self.profile: Any | None = None
+        self.profile_name: str | None = None
 
     # ------------------------------------------------------------------
     # Construction
@@ -69,6 +73,7 @@ class MoekaCore:
         workspace: str | Path | None = None,
         model: str | None = None,
         provider: Any | None = None,
+        profile: str | None = None,
     ) -> MoekaCore:
         """Build a core from moeka config — files optional.
 
@@ -90,12 +95,20 @@ class MoekaCore:
             model: Override the resolved model id.
             provider: Pre-built :class:`LLMProvider` to use instead of building one
                 from config (lets a host fully control provider selection).
+            profile: Name of an agent profile (``config.profiles``) to apply —
+                a scoping bundle of model preset, persona, tool allow/deny list,
+                skills, memory toggle, and runner limits. The profile is compiled
+                into a deep copy of the config so the caller's object is untouched.
         """
         from nanobot.config.loader import config_from_sources
 
         cfg, from_file = config_from_sources(
             config=config, config_dict=config_dict, config_path=config_path,
         )
+
+        prof = None
+        if profile is not None:
+            cfg, prof = cls._apply_profile(cfg, profile)
 
         # Resolve the workspace. An explicit arg always wins. Otherwise the
         # file/default route trusts the config's own workspace, while an
@@ -112,7 +125,96 @@ class MoekaCore:
 
         core = cls.from_config(cfg, workspace=ws, model=model, provider=provider)
         core._ephemeral_workspace = ephemeral
+        if prof is not None:
+            core.profile = prof
+            core.profile_name = profile
+            cls._seed_profile_persona(core.workspace, prof)
         return core
+
+    @staticmethod
+    def _apply_profile(cfg: Any, name: str) -> tuple[Any, Any]:
+        """Compile a named profile into a deep-copied config's agents.defaults."""
+        prof = cfg.resolve_profile(name)
+        cfg = cfg.model_copy(deep=True)
+        d = cfg.agents.defaults
+        if prof.model_preset:
+            d.model_preset = prof.model_preset
+        if prof.tools_allow is not None:
+            d.tools_allow = list(prof.tools_allow)
+        if prof.tools_deny:
+            d.tools_deny = sorted({*d.tools_deny, *prof.tools_deny})
+        if prof.skills_include is not None:
+            d.allowed_skills = list(prof.skills_include)
+        if prof.skills_exclude:
+            d.disabled_skills = sorted({*d.disabled_skills, *prof.skills_exclude})
+        if not prof.memory_enabled:
+            d.vec.enable = False
+        if prof.limits is not None:
+            d.limits = prof.limits
+        return cfg, prof
+
+    @staticmethod
+    def _seed_profile_persona(workspace: Path, prof: Any) -> None:
+        """Write the profile persona to ``<workspace>/AGENTS.md`` unless one exists."""
+        if not prof.system_prompt_file:
+            return
+        persona_path = Path(prof.system_prompt_file).expanduser()
+        agents_md = workspace / "AGENTS.md"
+        if agents_md.exists():
+            return
+        text = persona_path.read_text(encoding="utf-8")
+        workspace.mkdir(parents=True, exist_ok=True)
+        agents_md.write_text(text, encoding="utf-8")
+
+    @classmethod
+    @contextmanager
+    def scoped(
+        cls,
+        *,
+        profile: str | None = None,
+        workspace: str | Path | None = None,
+        **kwargs: Any,
+    ) -> Iterator[MoekaCore]:
+        """Context-managed core whose workspace is guaranteed to be cleaned up.
+
+        When *workspace* is omitted an ephemeral temp dir is created and removed
+        on exit — even on exceptions — so embedding hosts (pipelines, services)
+        can never leak agent workspaces. A supplied *workspace* persists; only
+        :meth:`cleanup` is called on exit then. Accepts every :meth:`create`
+        keyword (``config_dict``, ``model``, ...)::
+
+            with MoekaCore.scoped(profile="research", config_path=p) as core:
+                answer = await core.run("...")   # inside async code, see scoped_async
+        """
+        import shutil
+        import tempfile
+
+        owned: Path | None = None
+        if workspace is None:
+            owned = Path(tempfile.mkdtemp(prefix="moeka-scoped-"))
+            workspace = owned
+        core = None
+        try:
+            core = cls.create(profile=profile, workspace=workspace, **kwargs)
+            yield core
+        finally:
+            if core is not None:
+                core.cleanup()
+            if owned is not None:
+                shutil.rmtree(owned, ignore_errors=True)
+
+    @classmethod
+    @asynccontextmanager
+    async def scoped_async(
+        cls,
+        *,
+        profile: str | None = None,
+        workspace: str | Path | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[MoekaCore]:
+        """Async twin of :meth:`scoped` for hosts already inside an event loop."""
+        with cls.scoped(profile=profile, workspace=workspace, **kwargs) as core:
+            yield core
 
     @classmethod
     def from_config(

@@ -41,6 +41,7 @@ class ContextBuilder:
         workspace: Path,
         timezone: str | None = None,
         disabled_skills: list[str] | None = None,
+        allowed_skills: list[str] | None = None,
         vec_store: VecStore | None = None,
         vec_config: VecConfig | None = None,
     ):
@@ -49,7 +50,11 @@ class ContextBuilder:
         self.vec_store = vec_store
         self.vec_config = vec_config
         self.memory = MemoryStore(workspace, vec_store=vec_store)
-        self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
+        self.skills = SkillsLoader(
+            workspace,
+            disabled_skills=set(disabled_skills) if disabled_skills else None,
+            allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
+        )
 
     def build_system_prompt(
         self,
