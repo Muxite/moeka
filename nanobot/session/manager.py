@@ -360,11 +360,13 @@ class SessionManager:
         """One-time import of per-session ``.jsonl`` files into sessions.db.
 
         Imported files are renamed to ``*.jsonl.imported`` (kept as backup,
-        never deleted). Sessions already present in the db are skipped.
+        never deleted). Only THIS workspace's own sessions directory is
+        scanned — never the global legacy dir: a scoped/ephemeral workspace
+        must not consume another install's session files into its throwaway
+        db. (For the primary workspace the legacy dir *is* its sessions dir,
+        so the old-layout migration still happens.)
         """
         candidates: list[Path] = sorted(self.sessions_dir.glob("*.jsonl"))
-        if self.legacy_sessions_dir.exists():
-            candidates += sorted(self.legacy_sessions_dir.glob("*.jsonl"))
         if not candidates:
             return
         imported = 0
