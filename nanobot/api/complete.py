@@ -24,6 +24,7 @@ import base64
 import json
 import mimetypes
 import re
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,108 @@ async def acomplete(
             f"error_type={response.error_type!r})"
         )
     return response.content
+
+
+async def acomplete_stream(
+    prompt: str,
+    *,
+    system: str | None = None,
+    images: list[str | bytes | Path] | None = None,
+    config: Any | None = None,
+    config_dict: dict[str, Any] | None = None,
+    config_path: str | Path | None = None,
+    model: str | None = None,
+    preset: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+) -> AsyncIterator[str]:
+    """Stream a single chat completion as text chunks.
+
+    Same arguments as :func:`acomplete`. Providers without native streaming
+    deliver the full reply as one chunk. Raises ``RuntimeError`` when the
+    provider reports an error.
+    """
+    from nanobot.config.loader import config_from_sources
+    from nanobot.providers.factory import make_provider
+
+    resolved_config, _ = config_from_sources(
+        config=config, config_dict=config_dict, config_path=config_path,
+    )
+    provider = make_provider(resolved_config, preset_name=preset, model=model)
+
+    messages: list[dict[str, Any]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": _user_content(prompt, images)})
+
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def _on_delta(chunk: str) -> None:
+        await queue.put(chunk)
+
+    async def _run() -> Any:
+        try:
+            return await provider.chat_stream_with_retry(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                on_content_delta=_on_delta,
+            )
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(_run())
+    try:
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+        response = await task
+        if response.finish_reason == "error":
+            raise RuntimeError(f"moeka streaming completion failed: {response.content}")
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+def complete_stream(
+    prompt: str,
+    **kwargs: Any,
+) -> Iterator[str]:
+    """Synchronous streaming bridge for sync hosts (e.g. awork pipeline blocks).
+
+    Runs :func:`acomplete_stream` in a worker thread with its own event loop
+    and yields chunks as they arrive. Raises if called inside a running event
+    loop — iterate :func:`acomplete_stream` there instead.
+    """
+    import queue as _queue
+    import threading
+
+    _reject_running_loop("complete_stream", "acomplete_stream")
+    chunks: _queue.Queue[Any] = _queue.Queue()
+    done = object()
+
+    def _worker() -> None:
+        async def _consume() -> None:
+            async for chunk in acomplete_stream(prompt, **kwargs):
+                chunks.put(chunk)
+
+        try:
+            asyncio.run(_consume())
+            chunks.put(done)
+        except BaseException as exc:  # surfaced to the consuming thread
+            chunks.put(exc)
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    while True:
+        item = chunks.get()
+        if item is done:
+            break
+        if isinstance(item, BaseException):
+            raise item
+        yield item
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
