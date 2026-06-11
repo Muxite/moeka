@@ -37,14 +37,10 @@ from pydantic import Field
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 from nanobot.security.network import validate_url_target
 from nanobot.utils.logging_bridge import redirect_lib_logging
-
-try:
-    from nanobot.config.paths import get_media_dir
-except Exception:  # pragma: no cover
-    get_media_dir = None  # type: ignore
 
 try:
     import botpy
@@ -179,13 +175,8 @@ class QQChannel(BaseChannel):
         """Choose a directory for saving inbound attachments."""
         if self.config.media_dir:
             root = Path(self.config.media_dir).expanduser()
-        elif get_media_dir:
-            try:
-                root = Path(get_media_dir("qq"))
-            except Exception:
-                root = Path.home() / ".nanobot" / "media" / "qq"
         else:
-            root = Path.home() / ".nanobot" / "media" / "qq"
+            root = Path(get_media_dir("qq"))
 
         root.mkdir(parents=True, exist_ok=True)
         self.logger.info("media directory: {}", str(root))
