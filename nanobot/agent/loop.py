@@ -180,6 +180,7 @@ class AgentLoop:
         allowed_skills: list[str] | None = None,
         tools_allow: list[str] | None = None,
         tools_deny: list[str] | None = None,
+        planning: bool = False,
         runner_limits=None,
         tools_config: ToolsConfig | None = None,
         image_generation_provider_config: ProviderConfig | None = None,
@@ -244,6 +245,7 @@ class AgentLoop:
 
         self.tools_allow = list(tools_allow) if tools_allow is not None else None
         self.tools_deny = list(tools_deny) if tools_deny else []
+        self.planning = planning
         from nanobot.agent.runner import RunnerLimits
         self.runner_limits = runner_limits or RunnerLimits()
 
@@ -374,6 +376,7 @@ class AgentLoop:
             allowed_skills=defaults.allowed_skills,
             tools_allow=defaults.tools_allow,
             tools_deny=defaults.tools_deny,
+            planning=defaults.planning,
             runner_limits=defaults.limits,
             session_ttl_minutes=defaults.session_ttl_minutes,
             consolidation_ratio=defaults.consolidation_ratio,
@@ -792,6 +795,8 @@ class AgentLoop:
 
         active_session_key = session.key if session else session_key
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
+        if self.planning:
+            await self._maybe_plan(initial_messages)
         try:
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=initial_messages,
@@ -1502,6 +1507,54 @@ class AgentLoop:
             filtered.append(block)
 
         return filtered
+
+    _PLANNING_SYSTEM = (
+        "You are the planning step of an agent. Produce a short execution plan "
+        "for the request below: 3-7 numbered steps, the tools you expect to use, "
+        "and a one-line success criterion. Output only the plan, no preamble."
+    )
+    _PLANNING_MIN_CHARS = 80  # trivial messages skip the extra call
+    _PLANNING_NOTE_PREFIX = (
+        "[Planning note — generated pre-execution; follow it, or revise it if "
+        "the evidence demands]\n"
+    )
+
+    async def _maybe_plan(self, initial_messages: list[dict[str, Any]]) -> None:
+        """Opt-in plan-then-execute: one small non-tool LLM call before the
+        main run whose output is appended as a planning note. No new loop
+        state — the note rides the normal message list.
+        """
+        user_text = next(
+            (
+                m.get("content")
+                for m in reversed(initial_messages)
+                if m.get("role") == "user" and isinstance(m.get("content"), str)
+            ),
+            None,
+        )
+        if not user_text or len(user_text) < self._PLANNING_MIN_CHARS:
+            return
+        try:
+            response = await asyncio.wait_for(
+                self.provider.chat_with_retry(
+                    messages=[
+                        {"role": "system", "content": self._PLANNING_SYSTEM},
+                        {"role": "user", "content": user_text},
+                    ],
+                    max_tokens=600,
+                    temperature=0.2,
+                ),
+                timeout=90,
+            )
+        except Exception:
+            logger.warning("Planning step failed; continuing without a plan")
+            return
+        plan = (response.content or "").strip()
+        if plan and response.finish_reason != "error":
+            initial_messages.append(
+                {"role": "user", "content": self._PLANNING_NOTE_PREFIX + plan}
+            )
+            logger.info("Planning note injected ({} chars)", len(plan))
 
     def _save_turn(
         self,

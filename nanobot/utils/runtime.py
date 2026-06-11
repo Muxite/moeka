@@ -65,6 +65,20 @@ def build_length_recovery_message() -> dict[str, str]:
     return {"role": "user", "content": LENGTH_RECOVERY_PROMPT}
 
 
+def build_tool_failure_reflection_message(failed_iterations: int) -> dict[str, str]:
+    """Reflection note injected after repeated all-failed tool iterations."""
+    return {
+        "role": "user",
+        "content": (
+            f"[System note] Tool calls have now failed for {failed_iterations} "
+            "iterations in a row. Stop and reassess before calling another tool: "
+            "state in one or two sentences what is failing and why, then either "
+            "take a clearly different approach or report the blocker instead of "
+            "retrying the same call."
+        ),
+    }
+
+
 def external_lookup_signature(tool_name: str, arguments: dict[str, Any]) -> str | None:
     """Stable signature for repeated external lookups we want to throttle."""
     if tool_name == "web_fetch":

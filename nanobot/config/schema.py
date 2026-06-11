@@ -181,6 +181,7 @@ class AgentDefaults(Base):
     tools_allow: list[str] | None = None  # None = all tools; [] = no tools
     tools_deny: list[str] = Field(default_factory=list)  # tool names never registered
     allowed_skills: list[str] | None = None  # None = all skills (minus disabled_skills)
+    planning: bool = False  # plan-then-execute: one pre-run LLM call injects a plan note
     limits: RunnerLimits = Field(
         default_factory=lambda: _lazy_default("nanobot.agent.runner", "RunnerLimits"),
     )
@@ -204,6 +205,7 @@ class AgentProfileConfig(Base):
     skills_exclude: list[str] = Field(default_factory=list)
     memory_enabled: bool = True  # False disables semantic vec memory for this profile
     vec_collections: list[str] = Field(default_factory=list)  # document collections this profile uses
+    planning: bool = False  # plan-then-execute for this profile
     limits: RunnerLimits | None = None
 
 

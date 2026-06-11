@@ -34,6 +34,7 @@ from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
     build_finalization_retry_message,
     build_length_recovery_message,
+    build_tool_failure_reflection_message,
     ensure_nonempty_tool_result,
     exec_guard_violation_signature,
     is_blank_text,
@@ -73,6 +74,9 @@ class RunnerLimits(BaseModel):
     max_injection_cycles: int = _MAX_INJECTION_CYCLES
     microcompact_keep_recent: int = _MICROCOMPACT_KEEP_RECENT
     microcompact_min_chars: int = _MICROCOMPACT_MIN_CHARS
+    # After this many consecutive iterations where every tool call failed,
+    # inject one "stop and reassess" reflection note (0 = disabled).
+    tool_failure_reflection_threshold: int = 3
 
 
 @dataclass(slots=True)
@@ -272,6 +276,8 @@ class AgentRunner:
         length_recovery_count = 0
         had_injections = False
         injection_cycles = 0
+        consecutive_failed_tool_iterations = 0
+        reflection_injected = False
 
         for iteration in range(spec.max_iterations):
             try:
@@ -313,6 +319,11 @@ class AgentRunner:
                 response.content,
             )
             response.content = cleaned_content
+            # Inline <think>-tag reasoning is stripped from content above; copy
+            # it into reasoning_content so it persists to session history like
+            # native reasoning does (otherwise it vanishes after display).
+            if reasoning_text and not response.reasoning_content and not response.thinking_blocks:
+                response.reasoning_content = reasoning_text
             if reasoning_text and not context.streamed_reasoning:
                 await hook.emit_reasoning(reasoning_text)
                 await hook.emit_reasoning_end()
@@ -414,6 +425,31 @@ class AgentRunner:
                 )
                 empty_content_retries = 0
                 length_recovery_count = 0
+
+                # Tool-failure reflection: after N consecutive iterations where
+                # every tool call failed, inject one "stop and reassess" note.
+                if new_events and all(e.get("status") == "error" for e in new_events):
+                    consecutive_failed_tool_iterations += 1
+                else:
+                    consecutive_failed_tool_iterations = 0
+                threshold = spec.limits.tool_failure_reflection_threshold
+                if (
+                    threshold > 0
+                    and not reflection_injected
+                    and consecutive_failed_tool_iterations >= threshold
+                ):
+                    messages.append(
+                        build_tool_failure_reflection_message(
+                            consecutive_failed_tool_iterations
+                        )
+                    )
+                    reflection_injected = True
+                    logger.info(
+                        "Injected tool-failure reflection after {} failed iterations for {}",
+                        consecutive_failed_tool_iterations,
+                        spec.session_key or "default",
+                    )
+
                 # Checkpoint 1: drain injections after tools, before next LLM call
                 _drained, injection_cycles = await self._try_drain_injections(
                     spec, messages, None, injection_cycles,

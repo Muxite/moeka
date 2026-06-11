@@ -163,6 +163,8 @@ class MoekaCore:
             d.disabled_skills = sorted({*d.disabled_skills, *prof.skills_exclude})
         if not prof.memory_enabled:
             d.vec.enable = False
+        if prof.planning:
+            d.planning = True
         if prof.limits is not None:
             d.limits = prof.limits
         return cfg, prof
