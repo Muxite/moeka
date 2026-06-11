@@ -1,263 +1,190 @@
-"""Tests for atomic session save and corrupt-file repair."""
+"""Tests for SQLite session persistence: roundtrip, atomicity, legacy import."""
 
 import json
-from datetime import datetime
+import sqlite3
 from pathlib import Path
 
-from nanobot.session.manager import Session, SessionManager
+from nanobot.session.manager import SessionManager
 
 
-class TestAtomicSave:
-    def test_save_creates_valid_jsonl(self, tmp_path: Path):
+class TestSqliteRoundtrip:
+    def test_save_creates_sessions_db(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        session = Session(key="test:1")
+        session = mgr.get_or_create("test:1")
         session.add_message("user", "hello")
-        session.add_message("assistant", "hi")
-
+        session.add_message("assistant", "hi", tool_calls=[{"id": "x"}])
         mgr.save(session)
 
-        path = mgr._get_session_path("test:1")
-        lines = path.read_text(encoding="utf-8").strip().split("\n")
-        assert len(lines) == 3
+        assert (tmp_path / "sessions.db").exists()
+        fresh = SessionManager(tmp_path)
+        loaded = fresh.get_or_create("test:1")
+        assert [m["role"] for m in loaded.messages] == ["user", "assistant"]
+        assert loaded.messages[1]["tool_calls"] == [{"id": "x"}]
 
-        meta = json.loads(lines[0])
-        assert meta["_type"] == "metadata"
-        assert meta["key"] == "test:1"
-
-        msg1 = json.loads(lines[1])
-        assert msg1["role"] == "user"
-        assert msg1["content"] == "hello"
-
-    def test_no_tmp_file_left_after_successful_save(self, tmp_path: Path):
+    def test_metadata_and_consolidation_roundtrip(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        session = Session(key="test:clean")
+        session = mgr.get_or_create("test:meta")
+        session.add_message("user", "a")
+        session.metadata["title"] = "My chat"
+        session.last_consolidated = 1
         mgr.save(session)
 
-        tmp_files = list(mgr.sessions_dir.glob("*.tmp"))
-        assert tmp_files == []
+        loaded = SessionManager(tmp_path).get_or_create("test:meta")
+        assert loaded.metadata["title"] == "My chat"
+        assert loaded.last_consolidated == 1
 
-    def test_tmp_file_cleaned_up_on_write_failure(self, tmp_path: Path):
+    def test_save_is_full_replace(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        session = Session(key="test:fail")
-        path = mgr._get_session_path("test:fail")
-        tmp_path_file = path.with_suffix(".jsonl.tmp")
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path_file.write_text("stale")
-
-        class BadMessage:
-            def __init__(self, data):
-                self.data = data
-
-        original_dumps = json.dumps
-
-        def failing_dumps(obj, **kwargs):
-            if isinstance(obj, dict) and obj.get("role") == "assistant":
-                raise OSError("simulated disk full")
-            return original_dumps(obj, **kwargs)
-
-        session = Session(key="test:fail")
-        session.messages = [
-            {"role": "user", "content": "ok"},
-            {"role": "assistant", "content": "will fail"},
-        ]
-
-        import unittest.mock
-        with unittest.mock.patch("nanobot.session.manager.json.dumps", side_effect=failing_dumps):
-            try:
-                mgr.save(session)
-            except OSError:
-                pass
-
-        assert not tmp_path_file.exists()
-
-    def test_overwrite_preserves_latest_data(self, tmp_path: Path):
-        mgr = SessionManager(tmp_path)
-        session = Session(key="test:overwrite")
-
-        session.add_message("user", "first")
+        session = mgr.get_or_create("test:replace")
+        session.add_message("user", "one")
+        session.add_message("user", "two")
+        mgr.save(session)
+        session.messages = session.messages[-1:]
         mgr.save(session)
 
-        session.add_message("user", "second")
-        mgr.save(session)
+        loaded = SessionManager(tmp_path).get_or_create("test:replace")
+        assert len(loaded.messages) == 1
+        assert loaded.messages[0]["content"] == "two"
 
-        mgr.invalidate("test:overwrite")
-        loaded = mgr.get_or_create("test:overwrite")
-        assert len(loaded.messages) == 2
-        assert loaded.messages[0]["content"] == "first"
-        assert loaded.messages[1]["content"] == "second"
-
-    def test_consecutive_saves_are_consistent(self, tmp_path: Path):
+    def test_unicode_content_roundtrip(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        session = Session(key="test:consistency")
+        session = mgr.get_or_create("test:uni")
+        session.add_message("user", "héllo 日本語 🦊")
+        mgr.save(session)
+        loaded = SessionManager(tmp_path).get_or_create("test:uni")
+        assert loaded.messages[0]["content"] == "héllo 日本語 🦊"
 
-        for i in range(5):
-            session.add_message("user", f"msg{i}")
-            mgr.save(session)
+    def test_corrupt_message_row_skipped(self, tmp_path: Path):
+        mgr = SessionManager(tmp_path)
+        session = mgr.get_or_create("test:corrupt")
+        session.add_message("user", "good")
+        mgr.save(session)
+        conn = sqlite3.connect(tmp_path / "sessions.db")
+        conn.execute(
+            "INSERT INTO messages(session_key, seq, role, created_at, data)"
+            " VALUES ('test:corrupt', 99, 'user', NULL, '{not json')"
+        )
+        conn.commit()
+        conn.close()
 
-        mgr.invalidate("test:consistency")
-        loaded = mgr.get_or_create("test:consistency")
-        assert len(loaded.messages) == 5
-        for i in range(5):
-            assert loaded.messages[i]["content"] == f"msg{i}"
+        loaded = SessionManager(tmp_path).get_or_create("test:corrupt")
+        assert [m["content"] for m in loaded.messages] == ["good"]
 
 
-class TestRepairCorruptFile:
-    def _write_corrupt_jsonl(self, path: Path, lines: list[str]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+class TestLegacyJsonlImport:
+    @staticmethod
+    def _write_jsonl(workspace: Path, key: str, lines: list[str]) -> Path:
+        sessions = workspace / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        path = sessions / f"{SessionManager.safe_key(key)}.jsonl"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
 
-    def test_truncated_last_line_recovered(self, tmp_path: Path):
-        mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:trunc")
-
-        valid_meta = json.dumps({
-            "_type": "metadata",
-            "key": "test:trunc",
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "metadata": {},
-            "last_consolidated": 0,
-        })
-        valid_msg = json.dumps({"role": "user", "content": "hello"})
-
-        self._write_corrupt_jsonl(path, [
-            valid_meta,
-            valid_msg,
-            '{"role": "assistant", "content": "partial...',
+    def test_jsonl_imported_once_and_renamed(self, tmp_path: Path):
+        path = self._write_jsonl(tmp_path, "telegram:42", [
+            json.dumps({"_type": "metadata", "key": "telegram:42",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-02T00:00:00",
+                        "metadata": {"title": "imported"},
+                        "last_consolidated": 0}),
+            json.dumps({"role": "user", "content": "from jsonl"}),
         ])
-
-        session = mgr._load("test:trunc")
-        assert session is not None
-        assert len(session.messages) == 1
-        assert session.messages[0]["content"] == "hello"
-
-    def test_corrupt_metadata_line_skipped(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:badmeta")
+        loaded = mgr.get_or_create("telegram:42")
+        assert loaded.messages[0]["content"] == "from jsonl"
+        assert loaded.metadata["title"] == "imported"
+        assert not path.exists()
+        assert path.with_suffix(".jsonl.imported").exists()
 
-        self._write_corrupt_jsonl(path, [
-            "NOT VALID JSON!!!",
-            '{"role": "user", "content": "survived"}',
-        ])
-
-        session = mgr._load("test:badmeta")
-        assert session is not None
-        assert len(session.messages) == 1
-        assert session.messages[0]["content"] == "survived"
-
-    def test_all_corrupt_lines_returns_none(self, tmp_path: Path):
-        mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:allbad")
-
-        self._write_corrupt_jsonl(path, [
-            "garbage line 1",
-            "garbage line 2",
-            "{{invalid json",
-        ])
-
-        session = mgr._load("test:allbad")
-        assert session is None
-
-    def test_empty_file_returns_empty_session(self, tmp_path: Path):
-        mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:empty")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("", encoding="utf-8")
-
-        session = mgr._load("test:empty")
-        assert session is not None
-        assert session.messages == []
-        assert session.key == "test:empty"
-
-    def test_repair_preserves_valid_messages_amid_corruption(self, tmp_path: Path):
-        mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:mixed")
-
-        self._write_corrupt_jsonl(path, [
-            json.dumps({"_type": "metadata", "key": "test:mixed",
-                        "created_at": datetime.now().isoformat(),
-                        "updated_at": datetime.now().isoformat(),
+    def test_corrupt_lines_skipped_on_import(self, tmp_path: Path):
+        self._write_jsonl(tmp_path, "test:trunc", [
+            json.dumps({"_type": "metadata", "key": "test:trunc",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-01T00:00:00",
                         "metadata": {}, "last_consolidated": 0}),
-            "BROKEN",
-            json.dumps({"role": "user", "content": "msg1"}),
-            '{"role": "assistant", "content": "broken',
-            json.dumps({"role": "user", "content": "msg2"}),
+            json.dumps({"role": "user", "content": "kept"}),
+            '{"role": "assistant", "content": "trunca',  # corrupt
+            json.dumps({"role": "assistant", "content": "also kept"}),
         ])
-
-        session = mgr._load("test:mixed")
-        assert session is not None
-        assert len(session.messages) == 2
-        assert session.messages[0]["content"] == "msg1"
-        assert session.messages[1]["content"] == "msg2"
-
-    def test_repair_with_bad_timestamp_uses_fallback(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:badts")
+        loaded = mgr.get_or_create("test:trunc")
+        assert [m["content"] for m in loaded.messages] == ["kept", "also kept"]
 
-        self._write_corrupt_jsonl(path, [
-            json.dumps({"_type": "metadata", "key": "test:badts",
-                        "created_at": "not-a-date",
-                        "updated_at": "also-bad",
-                        "metadata": {}, "last_consolidated": 5}),
-            json.dumps({"role": "user", "content": "hi"}),
+    def test_newer_jsonl_wins_over_stale_db(self, tmp_path: Path):
+        """A jsonl written after the db row (old-code process during the
+        migration window) replaces the stale db copy — no message loss."""
+        mgr = SessionManager(tmp_path)
+        session = mgr.get_or_create("test:overlap")
+        session.add_message("user", "stale db version")
+        mgr.save(session)
+
+        self._write_jsonl(tmp_path, "test:overlap", [
+            json.dumps({"_type": "metadata", "key": "test:overlap",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2099-01-01T00:00:00",
+                        "metadata": {}, "last_consolidated": 0}),
+            json.dumps({"role": "user", "content": "fresher jsonl version"}),
         ])
+        fresh = SessionManager(tmp_path)
+        loaded = fresh.get_or_create("test:overlap")
+        assert loaded.messages[0]["content"] == "fresher jsonl version"
 
-        session = mgr._load("test:badts")
-        assert session is not None
-        assert session.last_consolidated == 5
-        assert isinstance(session.created_at, datetime)
-
-    def test_read_session_file_repairs_corrupt_jsonl(self, tmp_path: Path):
+    def test_db_session_wins_over_jsonl(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:read-repair")
+        session = mgr.get_or_create("test:dup")
+        session.add_message("user", "db version")
+        mgr.save(session)
 
-        self._write_corrupt_jsonl(path, [
-            json.dumps({
-                "_type": "metadata",
-                "key": "test:read-repair",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
-                "metadata": {"source": "repair"},
-                "last_consolidated": 0,
-            }),
-            json.dumps({"role": "user", "content": "survived"}),
-            '{"role": "assistant", "content": "partial...',
+        self._write_jsonl(tmp_path, "test:dup", [
+            json.dumps({"_type": "metadata", "key": "test:dup",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-01T00:00:00",
+                        "metadata": {}, "last_consolidated": 0}),
+            json.dumps({"role": "user", "content": "jsonl version"}),
         ])
+        fresh = SessionManager(tmp_path)
+        loaded = fresh.get_or_create("test:dup")
+        assert loaded.messages[0]["content"] == "db version"
 
-        payload = mgr.read_session_file("test:read-repair")
-        assert payload is not None
-        assert payload["key"] == "test:read-repair"
-        assert payload["metadata"] == {"source": "repair"}
-        assert payload["messages"] == [{"role": "user", "content": "survived"}]
-
-    def test_list_sessions_keeps_repaired_corrupt_file(self, tmp_path: Path):
-        mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:list-repair")
-
-        self._write_corrupt_jsonl(path, [
-            "NOT VALID JSON",
-            json.dumps({
-                "_type": "metadata",
-                "key": "test:list-repair",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
-                "metadata": {},
-                "last_consolidated": 0,
-            }),
-            json.dumps({"role": "user", "content": "hello"}),
+    def test_all_corrupt_file_not_imported(self, tmp_path: Path):
+        path = self._write_jsonl(tmp_path, "test:allbad", [
+            "not json", "{broken", "[1,2,",
         ])
-
-        sessions = mgr.list_sessions()
-        assert any(s["key"] == "test:list-repair" for s in sessions)
-
-    def test_get_or_create_returns_new_session_for_corrupt_file(self, tmp_path: Path):
         mgr = SessionManager(tmp_path)
-        path = mgr._get_session_path("test:fallback")
+        assert mgr.read_session_file("test:allbad") is None
+        # File still renamed so it isn't re-parsed every startup.
+        assert not path.exists()
 
-        self._write_corrupt_jsonl(path, ["{{{{"])
+    def test_dump_jsonl_export(self, tmp_path: Path):
+        mgr = SessionManager(tmp_path)
+        session = mgr.get_or_create("test:dump")
+        session.add_message("user", "exported")
+        mgr.save(session)
+        dump = mgr.dump_jsonl("test:dump")
+        assert dump is not None
+        lines = [json.loads(line) for line in dump.strip().splitlines()]
+        assert lines[0]["_type"] == "metadata"
+        assert lines[1]["content"] == "exported"
+        assert mgr.dump_jsonl("missing:key") is None
 
-        session = mgr.get_or_create("test:fallback")
-        assert session is not None
-        assert session.messages == []
-        assert session.key == "test:fallback"
+
+class TestListSessions:
+    def test_list_sessions_orders_and_previews(self, tmp_path: Path):
+        mgr = SessionManager(tmp_path)
+        for key, text in (("a:1", "first chat"), ("b:2", "second chat")):
+            s = mgr.get_or_create(key)
+            s.add_message("user", text)
+            mgr.save(s)
+        infos = mgr.list_sessions()
+        assert {i["key"] for i in infos} == {"a:1", "b:2"}
+        by_key = {i["key"]: i for i in infos}
+        assert by_key["a:1"]["preview"] == "first chat"
+        assert by_key["b:2"]["preview"] == "second chat"
+
+    def test_assistant_preview_fallback(self, tmp_path: Path):
+        mgr = SessionManager(tmp_path)
+        s = mgr.get_or_create("c:3")
+        s.add_message("assistant", "proactive hello")
+        mgr.save(s)
+        (info,) = mgr.list_sessions()
+        assert info["preview"] == "proactive hello"

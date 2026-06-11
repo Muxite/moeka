@@ -35,12 +35,16 @@ def test_from_config_creates_instance(tmp_path):
     assert bot._loop.workspace == tmp_path
 
 
-def test_from_config_default_path():
+def test_from_config_default_path(tmp_path):
     from nanobot.config.schema import Config
 
+    # Hermetic workspace: a bare Config() would otherwise point the loop (and
+    # its SessionManager) at the user's live ~/.nanobot.
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path)
     with patch("nanobot.config.loader.load_config") as mock_load, \
          patch("nanobot.providers.factory.make_provider") as mock_prov:
-        mock_load.return_value = Config()
+        mock_load.return_value = config
         mock_prov.return_value = MagicMock()
         mock_prov.return_value.get_default_model.return_value = "test"
         mock_prov.return_value.generation.max_tokens = 4096

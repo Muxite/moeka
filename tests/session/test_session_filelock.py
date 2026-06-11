@@ -1,13 +1,10 @@
-"""Tests for the moeka deviation: cross-process FileLock on session save.
+"""Cross-process write safety for SQLite-backed sessions.
 
-CLAUDE.md flags ``nanobot/session/manager.py`` ``save()`` as wrapped in a
-``FileLock`` so a stray second moeka process (e.g. one launched by hand
-alongside the systemd unit) can't clobber recent appends.
-
-This test exercises the contract by spawning a child process that holds
-the lock for ~1 second, then asserts the parent's ``save()`` blocks for
-roughly that long before completing, and that the resulting file reloads
-cleanly.
+The old per-file FileLock is gone; SQLite's own locking (WAL +
+busy_timeout) serializes concurrent writers. This exercises the contract by
+having a child process hold a write transaction on sessions.db while the
+parent saves: the parent must block until the child commits, and both
+writes must survive.
 """
 
 from __future__ import annotations
@@ -29,56 +26,47 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
-def workspace(tmp_path: Path) -> Path:
-    return tmp_path
-
-
-@pytest.fixture
-def manager(workspace: Path) -> SessionManager:
-    return SessionManager(workspace=workspace)
-
-
-def _child_holds_lock_script(lock_path: Path, ready_marker: Path, hold_seconds: float) -> str:
+def _child_holds_write_txn_script(db_path: Path, ready_marker: Path, hold_seconds: float) -> str:
     return textwrap.dedent(
         f"""
+        import sqlite3, time
         from pathlib import Path
-        from filelock import FileLock
-        lock = FileLock({str(lock_path)!r})
-        with lock:
-            Path({str(ready_marker)!r}).write_text("ready", encoding="utf-8")
-            import time
-            time.sleep({hold_seconds!r})
+        conn = sqlite3.connect({str(db_path)!r})
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO sessions(key, created_at, updated_at, metadata,"
+            " last_consolidated) VALUES ('child:1', 'x', 'x', '{{}}', 0)"
+        )
+        Path({str(ready_marker)!r}).write_text("ready", encoding="utf-8")
+        time.sleep({hold_seconds!r})
+        conn.commit()
+        conn.close()
         """
     )
 
 
-def test_save_blocks_while_other_process_holds_lock(
-    manager: SessionManager, workspace: Path, tmp_path: Path
-):
+def test_save_blocks_while_other_process_writes(tmp_path: Path):
     import subprocess
 
-    session = manager.get_or_create("test:filelock")
+    manager = SessionManager(workspace=tmp_path)
+    session = manager.get_or_create("test:sqlite-lock")
     session.add_message("user", "hello from parent")
-
-    # Pre-create the session file path so the lock file is at a known location.
-    session_path = manager._get_session_path(session.key)
-    lock_path = Path(str(session_path) + ".lock")
-    session_path.parent.mkdir(parents=True, exist_ok=True)
 
     ready_marker = tmp_path / "child_ready"
     hold_seconds = 1.0
 
     child = subprocess.Popen(
-        [sys.executable, "-c", _child_holds_lock_script(lock_path, ready_marker, hold_seconds)],
+        [sys.executable, "-c", _child_holds_write_txn_script(
+            manager.db_path, ready_marker, hold_seconds,
+        )],
     )
 
-    # Wait until the child confirms it has acquired the lock.
     deadline = time.monotonic() + 5.0
     try:
         while time.monotonic() < deadline and not ready_marker.exists():
             time.sleep(0.02)
-        assert ready_marker.exists(), "child failed to acquire lock in time"
+        assert ready_marker.exists(), "child failed to open write txn in time"
 
         start = time.monotonic()
         result: dict = {}
@@ -92,7 +80,7 @@ def test_save_blocks_while_other_process_holds_lock(
 
         t = threading.Thread(target=do_save)
         t.start()
-        t.join(timeout=hold_seconds + 5.0)
+        t.join(timeout=hold_seconds + 10.0)
         assert not t.is_alive(), "save() never returned"
         elapsed = time.monotonic() - start
 
@@ -101,13 +89,15 @@ def test_save_blocks_while_other_process_holds_lock(
         # time. Generous lower bound to absorb subprocess startup jitter.
         assert elapsed >= hold_seconds * 0.5, (
             f"save() returned in {elapsed:.3f}s; expected to block "
-            f">= {hold_seconds * 0.5:.3f}s while child held lock"
+            f">= {hold_seconds * 0.5:.3f}s while child held the write txn"
         )
     finally:
         child.wait(timeout=10.0)
 
-    # The persisted session must reload cleanly.
-    fresh = SessionManager(workspace=workspace)
+    # Both writes survived: the parent's session and the child's row.
+    fresh = SessionManager(workspace=tmp_path)
     reloaded = fresh.get_or_create(session.key)
     history = reloaded.get_history(max_messages=10)
     assert any(m.get("content") == "hello from parent" for m in history)
+    keys = {info["key"] for info in fresh.list_sessions()}
+    assert "child:1" in keys

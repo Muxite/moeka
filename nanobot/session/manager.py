@@ -1,16 +1,15 @@
 """Session management for conversation history."""
 
 import json
-import os
 import re
-import shutil
+import sqlite3
+import threading
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from filelock import FileLock
 from loguru import logger
 
 from nanobot.config.paths import get_legacy_sessions_dir
@@ -291,41 +290,161 @@ class Session:
 
 
 class SessionManager:
-    """
-    Manages conversation sessions.
+    """Manages conversation sessions.
 
-    Sessions are stored as JSONL files in the sessions directory.
+    Sessions are stored in a single SQLite database (``sessions.db``, WAL
+    mode) under the workspace. SQLite's locking replaces the old per-file
+    FileLock for cross-process safety; messages are kept as one JSON blob per
+    row so heterogeneous message dicts round-trip exactly. Legacy per-session
+    ``.jsonl`` files are imported once on startup (then renamed to
+    ``*.jsonl.imported`` as a backup).
     """
+
+    _SCHEMA_VERSION = 1
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
+        self.db_path = self.workspace / "sessions.db"
         self._cache: dict[str, Session] = {}
+        self._conn_obj: sqlite3.Connection | None = None
+        self._write_lock = threading.Lock()
+        self._ensure_schema()
+        self._import_legacy_jsonl()
 
     @staticmethod
     def safe_key(key: str) -> str:
         """Public helper used by HTTP handlers to map an arbitrary key to a stable filename stem."""
         return safe_filename(key.replace(":", "_"))
 
-    def _get_session_path(self, key: str) -> Path:
-        """Get the file path for a session."""
-        return self.sessions_dir / f"{self.safe_key(key)}.jsonl"
+    # ------------------------------------------------------------------
+    # SQLite plumbing
+    # ------------------------------------------------------------------
 
-    def _get_legacy_session_path(self, key: str) -> Path:
-        """Legacy global session path (~/.nanobot/sessions/)."""
-        return self.legacy_sessions_dir / f"{self.safe_key(key)}.jsonl"
+    def _conn(self) -> sqlite3.Connection:
+        if self._conn_obj is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(
+                str(self.db_path), check_same_thread=False, timeout=30.0,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            self._conn_obj = conn
+        return self._conn_obj
+
+    def _ensure_schema(self) -> None:
+        conn = self._conn()
+        conn.executescript(f"""
+            CREATE TABLE IF NOT EXISTS sessions (
+                key TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{{}}',
+                last_consolidated INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                session_key TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                role TEXT,
+                created_at TEXT,
+                data TEXT NOT NULL,
+                PRIMARY KEY (session_key, seq)
+            );
+            PRAGMA user_version = {self._SCHEMA_VERSION};
+        """)
+        conn.commit()
+
+    def _import_legacy_jsonl(self) -> None:
+        """One-time import of per-session ``.jsonl`` files into sessions.db.
+
+        Imported files are renamed to ``*.jsonl.imported`` (kept as backup,
+        never deleted). Sessions already present in the db are skipped.
+        """
+        candidates: list[Path] = sorted(self.sessions_dir.glob("*.jsonl"))
+        if self.legacy_sessions_dir.exists():
+            candidates += sorted(self.legacy_sessions_dir.glob("*.jsonl"))
+        if not candidates:
+            return
+        imported = 0
+        for path in candidates:
+            try:
+                session = self._parse_jsonl(path)
+                if session is not None:
+                    row = self._conn().execute(
+                        "SELECT updated_at FROM sessions WHERE key = ?", (session.key,)
+                    ).fetchone()
+                    # Newer-wins: a jsonl written after the db row (e.g. by an
+                    # old-code process that ran during the migration window)
+                    # replaces it; otherwise the db copy is kept.
+                    if row is None or row[0] < session.updated_at.isoformat():
+                        self.save(session)
+                        self._cache.pop(session.key, None)
+                        imported += 1
+                # Rename unconditionally (even unparseable files) so the same
+                # file is never re-parsed on every startup.
+                path.rename(path.with_suffix(".jsonl.imported"))
+            except Exception:
+                logger.exception("Failed to import legacy session file {}", path)
+        if imported:
+            logger.info(
+                "Imported {} legacy jsonl session(s) into {}", imported, self.db_path
+            )
+
+    @staticmethod
+    def _parse_jsonl(path: Path) -> Session | None:
+        """Tolerantly parse a legacy jsonl session file (corrupt lines skipped)."""
+        messages: list[dict[str, Any]] = []
+        metadata: dict[str, Any] = {}
+        key: str | None = None
+        created_at: datetime | None = None
+        updated_at: datetime | None = None
+        last_consolidated = 0
+        skipped = 0
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+                if data.get("_type") == "metadata":
+                    metadata = data.get("metadata", {})
+                    key = data.get("key") or key
+                    if data.get("created_at"):
+                        with suppress(ValueError, TypeError):
+                            created_at = datetime.fromisoformat(data["created_at"])
+                    if data.get("updated_at"):
+                        with suppress(ValueError, TypeError):
+                            updated_at = datetime.fromisoformat(data["updated_at"])
+                    last_consolidated = data.get("last_consolidated", 0)
+                else:
+                    messages.append(data)
+        if skipped:
+            logger.warning("Skipped {} corrupt line(s) importing {}", skipped, path)
+        if key is None:
+            key = path.stem.replace("_", ":", 1)
+        if not messages and not metadata:
+            return None
+        return Session(
+            key=key,
+            messages=messages,
+            created_at=created_at or datetime.now(),
+            updated_at=updated_at or datetime.now(),
+            metadata=metadata,
+            last_consolidated=last_consolidated,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def get_or_create(self, key: str) -> Session:
-        """
-        Get an existing session or create a new one.
-
-        Args:
-            key: Session key (usually channel:chat_id).
-
-        Returns:
-            The session.
-        """
+        """Get an existing session or create a new one."""
         if key in self._cache:
             return self._cache[key]
 
@@ -337,111 +456,43 @@ class SessionManager:
         return session
 
     def _load(self, key: str) -> Session | None:
-        """Load a session from disk."""
-        path = self._get_session_path(key)
-        if not path.exists():
-            legacy_path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
-                try:
-                    shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
-                except Exception:
-                    logger.exception("Failed to migrate session {}", key)
-
-        if not path.exists():
-            return None
-
+        """Load a session from the database."""
         try:
-            messages = []
-            metadata = {}
-            created_at = None
-            updated_at = None
-            last_consolidated = 0
-
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    data = json.loads(line)
-
-                    if data.get("_type") == "metadata":
-                        metadata = data.get("metadata", {})
-                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
-                        updated_at = datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else None
-                        last_consolidated = data.get("last_consolidated", 0)
-                    else:
-                        messages.append(data)
-
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT created_at, updated_at, metadata, last_consolidated"
+                " FROM sessions WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return None
+            messages: list[dict[str, Any]] = []
+            for (data,) in conn.execute(
+                "SELECT data FROM messages WHERE session_key = ? ORDER BY seq", (key,)
+            ):
+                try:
+                    messages.append(json.loads(data))
+                except json.JSONDecodeError:
+                    logger.warning("Skipping corrupt message row in session {}", key)
+            created_at = updated_at = None
+            with suppress(ValueError, TypeError):
+                created_at = datetime.fromisoformat(row[0])
+            with suppress(ValueError, TypeError):
+                updated_at = datetime.fromisoformat(row[1])
+            try:
+                metadata = json.loads(row[2]) if row[2] else {}
+            except json.JSONDecodeError:
+                metadata = {}
             return Session(
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
                 updated_at=updated_at or datetime.now(),
                 metadata=metadata,
-                last_consolidated=last_consolidated
+                last_consolidated=row[3] or 0,
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
-            repaired = self._repair(key)
-            if repaired is not None:
-                logger.info("Recovered session {} from corrupt file ({} messages)", key, len(repaired.messages))
-            return repaired
-
-    def _repair(self, key: str) -> Session | None:
-        """Attempt to recover a session from a corrupt JSONL file."""
-        path = self._get_session_path(key)
-        if not path.exists():
-            return None
-
-        try:
-            messages: list[dict[str, Any]] = []
-            metadata: dict[str, Any] = {}
-            created_at: datetime | None = None
-            updated_at: datetime | None = None
-            last_consolidated = 0
-            skipped = 0
-
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        skipped += 1
-                        continue
-
-                    if data.get("_type") == "metadata":
-                        metadata = data.get("metadata", {})
-                        if data.get("created_at"):
-                            with suppress(ValueError, TypeError):
-                                created_at = datetime.fromisoformat(data["created_at"])
-                        if data.get("updated_at"):
-                            with suppress(ValueError, TypeError):
-                                updated_at = datetime.fromisoformat(data["updated_at"])
-                        last_consolidated = data.get("last_consolidated", 0)
-                    else:
-                        messages.append(data)
-
-            if skipped:
-                logger.warning("Skipped {} corrupt lines in session {}", skipped, key)
-
-            if not messages and not metadata:
-                return None
-
-            return Session(
-                key=key,
-                messages=messages,
-                created_at=created_at or datetime.now(),
-                updated_at=updated_at or datetime.now(),
-                metadata=metadata,
-                last_consolidated=last_consolidated
-            )
-        except Exception as e:
-            logger.warning("Repair failed for session {}: {}", key, e)
             return None
 
     @staticmethod
@@ -455,59 +506,52 @@ class SessionManager:
         }
 
     def save(self, session: Session, *, fsync: bool = False) -> None:
-        """Save a session to disk atomically.
+        """Persist a session in one transaction (full replace of its rows).
 
-        When *fsync* is ``True`` the final file and its parent directory are
-        explicitly flushed to durable storage.  This is intentionally off by
-        default (the OS page-cache is sufficient for normal operation) but
-        should be enabled during graceful shutdown so that filesystems with
-        write-back caching (e.g. rclone VFS, NFS, FUSE mounts) do not lose
-        the most recent writes.
+        SQLite WAL + the transaction give atomicity; concurrent writers from
+        other processes are serialized by SQLite's own locking (busy_timeout
+        retries). When *fsync* is ``True`` the WAL is checkpointed so the
+        write is durable on filesystems with write-back caching.
         """
-        path = self._get_session_path(session.key)
-        tmp_path = path.with_suffix(".jsonl.tmp")
-        # Cross-process lock keyed on the session file. Atomic rename already
-        # protects readers from torn files, but two writers (e.g. a stray
-        # second moeka process started by hand alongside the systemd one)
-        # could otherwise overwrite each other's recent appends. The lock
-        # serialises writes; reads remain lock-free (rename gives them an
-        # all-or-nothing view).
-        lock = FileLock(str(path) + ".lock")
-
-        try:
-            with lock:
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    metadata_line = {
-                        "_type": "metadata",
-                        "key": session.key,
-                        "created_at": session.created_at.isoformat(),
-                        "updated_at": session.updated_at.isoformat(),
-                        "metadata": session.metadata,
-                        "last_consolidated": session.last_consolidated
-                    }
-                    f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-                    for msg in session.messages:
-                        f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-                    if fsync:
-                        f.flush()
-                        os.fsync(f.fileno())
-
-                os.replace(tmp_path, path)
-
-                if fsync:
-                    # fsync the directory so the rename is durable.
-                    # On Windows, opening a directory with O_RDONLY raises
-                    # PermissionError — skip the dir sync there (NTFS
-                    # journals metadata synchronously).
-                    with suppress(PermissionError):
-                        fd = os.open(str(path.parent), os.O_RDONLY)
-                        try:
-                            os.fsync(fd)
-                        finally:
-                            os.close(fd)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        conn = self._conn()
+        rows = []
+        for seq, msg in enumerate(session.messages):
+            rows.append((
+                session.key,
+                seq,
+                msg.get("role"),
+                msg.get("timestamp"),
+                json.dumps(msg, ensure_ascii=False),
+            ))
+        with self._write_lock:
+            with conn:  # one transaction
+                conn.execute(
+                    "INSERT INTO sessions(key, created_at, updated_at, metadata,"
+                    " last_consolidated) VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT(key) DO UPDATE SET"
+                    " created_at = excluded.created_at,"
+                    " updated_at = excluded.updated_at,"
+                    " metadata = excluded.metadata,"
+                    " last_consolidated = excluded.last_consolidated",
+                    (
+                        session.key,
+                        session.created_at.isoformat(),
+                        session.updated_at.isoformat(),
+                        json.dumps(session.metadata, ensure_ascii=False),
+                        session.last_consolidated,
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM messages WHERE session_key = ?", (session.key,)
+                )
+                conn.executemany(
+                    "INSERT INTO messages(session_key, seq, role, created_at, data)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    rows,
+                )
+            if fsync:
+                with suppress(sqlite3.OperationalError):
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         self._cache[session.key] = session
 
@@ -532,132 +576,96 @@ class SessionManager:
         self._cache.pop(key, None)
 
     def delete_session(self, key: str) -> bool:
-        """Remove a session from disk and the in-memory cache.
+        """Remove a session from the database and the in-memory cache.
 
-        Returns True if a JSONL file was found and unlinked.
+        Returns True if a stored session was found and deleted.
         """
-        path = self._get_session_path(key)
         self.invalidate(key)
-        if not path.exists():
-            return False
         try:
-            path.unlink()
-            return True
-        except OSError as e:
-            logger.warning("Failed to delete session file {}: {}", path, e)
+            conn = self._conn()
+            with self._write_lock, conn:
+                cur = conn.execute("DELETE FROM sessions WHERE key = ?", (key,))
+                conn.execute("DELETE FROM messages WHERE session_key = ?", (key,))
+            return cur.rowcount > 0
+        except Exception as e:
+            logger.warning("Failed to delete session {}: {}", key, e)
             return False
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
-        """Load a session from disk without caching; intended for read-only HTTP endpoints.
+        """Load a session without caching; intended for read-only HTTP endpoints.
 
         Returns ``{"key", "created_at", "updated_at", "metadata", "messages"}`` or
-        ``None`` when the session file does not exist or fails to parse.
+        ``None`` when the session does not exist.
         """
-        path = self._get_session_path(key)
-        if not path.exists():
+        session = self._load(key)
+        if session is None:
             return None
-        try:
-            messages: list[dict[str, Any]] = []
-            metadata: dict[str, Any] = {}
-            created_at: str | None = None
-            updated_at: str | None = None
-            stored_key: str | None = None
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    data = json.loads(line)
-                    if data.get("_type") == "metadata":
-                        metadata = data.get("metadata", {})
-                        created_at = data.get("created_at")
-                        updated_at = data.get("updated_at")
-                        stored_key = data.get("key")
-                    else:
-                        messages.append(data)
-            return {
-                "key": stored_key or key,
-                "created_at": created_at,
-                "updated_at": updated_at,
-                "metadata": metadata,
-                "messages": messages,
-            }
-        except Exception as e:
-            logger.warning("Failed to read session {}: {}", key, e)
-            repaired = self._repair(key)
-            if repaired is not None:
-                logger.info("Recovered read-only session view {} from corrupt file", key)
-                return self._session_payload(repaired)
-            return None
+        return self._session_payload(session)
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        """
-        List all sessions.
-
-        Returns:
-            List of session info dicts.
-        """
-        sessions = []
-
-        for path in self.sessions_dir.glob("*.jsonl"):
-            fallback_key = path.stem.replace("_", ":", 1)
+        """List all sessions (most recently updated first) with a short preview."""
+        sessions: list[dict[str, Any]] = []
+        try:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT key, created_at, updated_at, metadata FROM sessions"
+                " ORDER BY updated_at DESC"
+            ).fetchall()
+        except Exception:
+            logger.exception("Failed to list sessions")
+            return []
+        for row in rows:
             try:
-                # Read the metadata line and a small preview for WebUI/session lists.
-                with open(path, encoding="utf-8") as f:
-                    first_line = f.readline().strip()
-                    if first_line:
-                        data = json.loads(first_line)
-                        if data.get("_type") == "metadata":
-                            key = data.get("key") or path.stem.replace("_", ":", 1)
-                            metadata = data.get("metadata", {})
-                            title = metadata.get("title") if isinstance(metadata, dict) else None
-                            preview = ""
-                            fallback_preview = ""
-                            for line in f:
-                                if not line.strip():
-                                    continue
-                                item = json.loads(line)
-                                if item.get("_type") == "metadata":
-                                    continue
-                                text = _message_preview_text(item)
-                                if not text:
-                                    continue
-                                if item.get("role") == "user":
-                                    preview = text
-                                    break
-                                if not fallback_preview and item.get("role") == "assistant":
-                                    fallback_preview = text
-                            preview = preview or fallback_preview
-                            sessions.append({
-                                "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
-                                "title": title if isinstance(title, str) else "",
-                                "preview": preview,
-                                "path": str(path)
-                            })
-            except Exception:
-                repaired = self._repair(fallback_key)
-                if repaired is not None:
-                    sessions.append({
-                        "key": repaired.key,
-                        "created_at": repaired.created_at.isoformat(),
-                        "updated_at": repaired.updated_at.isoformat(),
-                        "title": (
-                            repaired.metadata.get("title")
-                            if isinstance(repaired.metadata.get("title"), str)
-                            else ""
-                        ),
-                        "preview": next(
-                            (
-                                text
-                                for msg in repaired.messages
-                                if (text := _message_preview_text(msg))
-                            ),
-                            "",
-                        ),
-                        "path": str(path)
-                    })
-                continue
+                metadata = json.loads(row[3]) if row[3] else {}
+            except json.JSONDecodeError:
+                metadata = {}
+            title = metadata.get("title") if isinstance(metadata, dict) else None
+            sessions.append({
+                "key": row[0],
+                "created_at": row[1],
+                "updated_at": row[2],
+                "title": title if isinstance(title, str) else "",
+                "preview": self._preview(row[0]),
+                "path": str(self.db_path),
+            })
+        return sessions
 
-        return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+    def _preview(self, key: str) -> str:
+        """First user message preview (assistant fallback), like the old file scan."""
+        fallback = ""
+        try:
+            for (data,) in self._conn().execute(
+                "SELECT data FROM messages WHERE session_key = ?"
+                " ORDER BY seq LIMIT 100",
+                (key,),
+            ):
+                try:
+                    item = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                text = _message_preview_text(item)
+                if not text:
+                    continue
+                if item.get("role") == "user":
+                    return text
+                if not fallback and item.get("role") == "assistant":
+                    fallback = text
+        except Exception:
+            logger.exception("Failed to build preview for session {}", key)
+        return fallback
+
+    def dump_jsonl(self, key: str) -> str | None:
+        """Export one session in the legacy jsonl format (for debugging)."""
+        session = self._load(key)
+        if session is None:
+            return None
+        lines = [json.dumps({
+            "_type": "metadata",
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "last_consolidated": session.last_consolidated,
+        }, ensure_ascii=False)]
+        lines += [json.dumps(msg, ensure_ascii=False) for msg in session.messages]
+        return "\n".join(lines) + "\n"

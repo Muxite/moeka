@@ -1,16 +1,13 @@
-"""Tests for session fsync and flush_all on graceful shutdown."""
+"""Tests for durable session saves (WAL checkpoint) and flush_all on shutdown."""
 
 from __future__ import annotations
 
-import sys
+import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from nanobot.session.manager import SessionManager
-
-_IS_WINDOWS = sys.platform == "win32"
 
 
 @pytest.fixture
@@ -25,39 +22,37 @@ def manager(sessions_dir: Path) -> SessionManager:
     return SessionManager(workspace=sessions_dir)
 
 
-class TestSaveFsync:
-    """Verify that save(fsync=True) calls os.fsync."""
+class TestSaveDurability:
+    """save(fsync=True) checkpoints the WAL so writes hit the main db file."""
 
-    def test_save_without_fsync_does_not_call_fsync(self, manager: SessionManager):
-        session = manager.get_or_create("test:no-fsync")
-        session.add_message("user", "hello")
-
-        with patch("os.fsync") as mock_fsync:
-            manager.save(session, fsync=False)
-            mock_fsync.assert_not_called()
-
-    def test_save_with_fsync_calls_fsync(self, manager: SessionManager):
+    def test_save_with_fsync_truncates_wal(self, manager: SessionManager):
         session = manager.get_or_create("test:with-fsync")
         session.add_message("user", "hello")
+        manager.save(session, fsync=True)
 
-        with patch("os.fsync") as mock_fsync:
-            manager.save(session, fsync=True)
-            # File fsync always runs; directory fsync only on non-Windows.
-            expected = 1 if _IS_WINDOWS else 2
-            assert mock_fsync.call_count == expected
+        wal = Path(str(manager.db_path) + "-wal")
+        # TRUNCATE checkpoint leaves an empty (or absent) WAL.
+        assert not wal.exists() or os.path.getsize(wal) == 0
 
-    def test_save_default_no_fsync(self, manager: SessionManager):
-        """Default save() should not fsync (backward compat)."""
+    def test_save_without_fsync_leaves_wal_pending(self, manager: SessionManager):
+        session = manager.get_or_create("test:no-fsync")
+        session.add_message("user", "hello")
+        manager.save(session, fsync=False)
+
+        wal = Path(str(manager.db_path) + "-wal")
+        assert wal.exists() and os.path.getsize(wal) > 0
+
+    def test_save_default_no_checkpoint(self, manager: SessionManager):
+        """Default save() skips the checkpoint (backward compat with fsync=False)."""
         session = manager.get_or_create("test:default")
         session.add_message("user", "hello")
-
-        with patch("os.fsync") as mock_fsync:
-            manager.save(session)
-            mock_fsync.assert_not_called()
+        manager.save(session)
+        wal = Path(str(manager.db_path) + "-wal")
+        assert wal.exists() and os.path.getsize(wal) > 0
 
 
 class TestFlushAll:
-    """Verify flush_all re-saves all cached sessions with fsync."""
+    """Verify flush_all re-saves all cached sessions durably."""
 
     def test_flush_all_empty_cache(self, manager: SessionManager):
         assert manager.flush_all() == 0
@@ -74,16 +69,14 @@ class TestFlushAll:
         flushed = manager.flush_all()
         assert flushed == 2
 
-    def test_flush_all_uses_fsync(self, manager: SessionManager):
+    def test_flush_all_checkpoints_wal(self, manager: SessionManager):
         session = manager.get_or_create("test:fsync-check")
         session.add_message("user", "important")
         manager.save(session)
 
-        with patch("os.fsync") as mock_fsync:
-            manager.flush_all()
-            # file fsync always; directory fsync only on non-Windows
-            expected = 1 if _IS_WINDOWS else 2
-            assert mock_fsync.call_count == expected
+        manager.flush_all()
+        wal = Path(str(manager.db_path) + "-wal")
+        assert not wal.exists() or os.path.getsize(wal) == 0
 
     def test_flush_all_continues_on_error(self, manager: SessionManager):
         """One broken session should not prevent others from flushing."""
