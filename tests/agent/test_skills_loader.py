@@ -397,3 +397,119 @@ def test_get_skill_metadata_handles_yaml_types(tmp_path: Path) -> None:
     assert meta.get("always") is True
     # metadata is a parsed dict, not a JSON string
     assert isinstance(meta.get("metadata"), dict)
+
+
+# -- inline (in-code) skills ----------------------------------------------------
+
+
+def _empty_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    return workspace, builtin
+
+
+def _inline(name: str = "host_skill", **kw) -> dict:
+    return {"name": name, "content": f"# {name}\nDo the thing.", "description": f"{name} desc", **kw}
+
+
+def test_inline_skill_listed_loaded_and_summarized(tmp_path: Path) -> None:
+    workspace, builtin = _empty_dirs(tmp_path)
+    loader = SkillsLoader(workspace, builtin_skills_dir=builtin, inline_skills=[_inline()])
+
+    entries = loader.list_skills(filter_unavailable=False)
+    assert entries == [{"name": "host_skill", "path": "inline:host_skill", "source": "inline"}]
+    assert loader.load_skill("host_skill") == "# host_skill\nDo the thing."
+
+    summary = loader.build_skills_summary()
+    assert "host_skill" in summary
+    assert "host_skill desc" in summary
+    # No file path hint — there is no file an agent could read.
+    assert "inline:host_skill" not in summary
+
+
+def test_inline_skill_object_with_attributes(tmp_path: Path) -> None:
+    """Inline skills are duck-typed: InlineSkillConfig (or any object) works."""
+    from nanobot.config.schema import InlineSkillConfig
+
+    workspace, builtin = _empty_dirs(tmp_path)
+    skill = InlineSkillConfig(name="typed_skill", content="# T", description="typed")
+    loader = SkillsLoader(workspace, builtin_skills_dir=builtin, inline_skills=[skill])
+    assert loader.load_skill("typed_skill") == "# T"
+    assert loader.get_skill_metadata("typed_skill")["description"] == "typed"
+
+
+def test_inline_skill_shadows_workspace_and_builtin(tmp_path: Path) -> None:
+    workspace, builtin = _empty_dirs(tmp_path)
+    ws_skills = workspace / "skills"
+    ws_skills.mkdir()
+    _write_skill(ws_skills, "dup", body="# Workspace")
+    _write_skill(builtin, "dup", body="# Builtin")
+
+    loader = SkillsLoader(
+        workspace, builtin_skills_dir=builtin,
+        inline_skills=[_inline("dup", content="# Inline wins")],
+    )
+    entries = loader.list_skills(filter_unavailable=False)
+    assert len(entries) == 1
+    assert entries[0]["source"] == "inline"
+    assert loader.load_skill("dup") == "# Inline wins"
+
+
+def test_inline_skill_bypasses_allowed_skills(tmp_path: Path) -> None:
+    """skills_include=[] (empty allowlist) drops file skills but keeps inline ones."""
+    workspace, builtin = _empty_dirs(tmp_path)
+    ws_skills = workspace / "skills"
+    ws_skills.mkdir()
+    _write_skill(ws_skills, "file_skill", body="# F")
+    _write_skill(builtin, "builtin_skill", body="# B")
+
+    loader = SkillsLoader(
+        workspace, builtin_skills_dir=builtin,
+        allowed_skills=set(),
+        inline_skills=[_inline()],
+    )
+    entries = loader.list_skills(filter_unavailable=False)
+    assert [e["name"] for e in entries] == ["host_skill"]
+
+
+def test_inline_skill_honors_disabled_skills(tmp_path: Path) -> None:
+    workspace, builtin = _empty_dirs(tmp_path)
+    loader = SkillsLoader(
+        workspace, builtin_skills_dir=builtin,
+        disabled_skills={"host_skill"},
+        inline_skills=[_inline()],
+    )
+    assert loader.list_skills(filter_unavailable=False) == []
+
+
+def test_inline_skill_always_metadata(tmp_path: Path) -> None:
+    workspace, builtin = _empty_dirs(tmp_path)
+    loader = SkillsLoader(
+        workspace, builtin_skills_dir=builtin,
+        inline_skills=[_inline(metadata={"always": True})],
+    )
+    assert loader.get_always_skills() == ["host_skill"]
+
+
+def test_inline_skill_requirements_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, builtin = _empty_dirs(tmp_path)
+    loader = SkillsLoader(
+        workspace, builtin_skills_dir=builtin,
+        inline_skills=[_inline(metadata={"requires": {"bins": ["nanobot_test_fake_binary"]}})],
+    )
+
+    monkeypatch.setattr("nanobot.agent.skills.shutil.which", lambda _cmd: None)
+    assert loader.list_skills(filter_unavailable=True) == []
+
+    monkeypatch.setattr("nanobot.agent.skills.shutil.which", lambda _cmd: "/x")
+    assert [e["name"] for e in loader.list_skills(filter_unavailable=True)] == ["host_skill"]
+
+
+def test_inline_skill_in_context_loading(tmp_path: Path) -> None:
+    workspace, builtin = _empty_dirs(tmp_path)
+    loader = SkillsLoader(workspace, builtin_skills_dir=builtin, inline_skills=[_inline()])
+    content = loader.load_skills_for_context(["host_skill"])
+    assert "### Skill: host_skill" in content
+    assert "Do the thing." in content

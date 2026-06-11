@@ -187,6 +187,22 @@ class AgentDefaults(Base):
     )
 
 
+class InlineSkillConfig(Base):
+    """A skill defined in code rather than as a SKILL.md on disk.
+
+    ``metadata`` mirrors the SKILL.md nanobot frontmatter payload
+    (``always: bool``, ``requires: {bins: [...], env: [...]}``). Inline skills
+    shadow workspace/builtin skills of the same name and are exempt from
+    ``skills_include`` filtering (the host registered them explicitly), but
+    still honor ``skills_exclude``.
+    """
+
+    name: str
+    content: str
+    description: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentProfileConfig(Base):
     """A named scoping bundle: model preset, persona, tools, skills, limits.
 
@@ -198,11 +214,12 @@ class AgentProfileConfig(Base):
 
     model_preset: str | None = None
     system_prompt: str | None = None  # inline persona text (wins over system_prompt_file)
-    system_prompt_file: str | None = None  # persona seeded to <workspace>/AGENTS.md when absent
+    system_prompt_file: str | None = None  # persona file, read once at create time
     tools_allow: list[str] | None = None  # None = all tools; [] = no tools
     tools_deny: list[str] = Field(default_factory=list)
-    skills_include: list[str] | None = None  # None = all skills (minus exclude)
+    skills_include: list[str] | None = None  # None = all skills (minus exclude); [] = none
     skills_exclude: list[str] = Field(default_factory=list)
+    skills_inline: list[InlineSkillConfig] = Field(default_factory=list)  # in-code skills
     memory_enabled: bool = True  # False disables semantic vec memory for this profile
     vec_collections: list[str] = Field(default_factory=list)  # document collections this profile uses
     planning: bool = False  # plan-then-execute for this profile

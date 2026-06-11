@@ -32,13 +32,29 @@ class SkillsLoader:
         builtin_skills_dir: Path | None = None,
         disabled_skills: set[str] | None = None,
         allowed_skills: set[str] | None = None,
+        inline_skills: list | None = None,
     ):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
         self.disabled_skills = disabled_skills or set()
         # None = all skills allowed; a set restricts loading to those names.
+        # Inline skills are exempt: the host registered them explicitly.
         self.allowed_skills = allowed_skills
+        # In-memory skill definitions (objects or dicts with name/content/
+        # description/metadata), keyed by name. Shadow workspace and builtin
+        # skills of the same name.
+        self.inline_skills: dict[str, object] = {}
+        for skill in inline_skills or []:
+            name = self._inline_field(skill, "name")
+            if name:
+                self.inline_skills[str(name)] = skill
+
+    @staticmethod
+    def _inline_field(skill: object, key: str, default=None):
+        if isinstance(skill, dict):
+            return skill.get(key, default)
+        return getattr(skill, key, default)
 
     def _skill_entries_from_dir(self, base: Path, source: str, *, skip_names: set[str] | None = None) -> list[dict[str, str]]:
         if not base.exists():
@@ -66,18 +82,29 @@ class SkillsLoader:
         Returns:
             List of skill info dicts with 'name', 'path', 'source'.
         """
-        skills = self._skill_entries_from_dir(self.workspace_skills, "workspace")
+        inline_names = set(self.inline_skills)
+        skills = self._skill_entries_from_dir(
+            self.workspace_skills, "workspace", skip_names=inline_names
+        )
         workspace_names = {entry["name"] for entry in skills}
         if self.builtin_skills and self.builtin_skills.exists():
             skills.extend(
-                self._skill_entries_from_dir(self.builtin_skills, "builtin", skip_names=workspace_names)
+                self._skill_entries_from_dir(
+                    self.builtin_skills, "builtin",
+                    skip_names=workspace_names | inline_names,
+                )
             )
-
-        if self.disabled_skills:
-            skills = [s for s in skills if s["name"] not in self.disabled_skills]
 
         if self.allowed_skills is not None:
             skills = [s for s in skills if s["name"] in self.allowed_skills]
+
+        skills = [
+            {"name": name, "path": f"inline:{name}", "source": "inline"}
+            for name in self.inline_skills
+        ] + skills
+
+        if self.disabled_skills:
+            skills = [s for s in skills if s["name"] not in self.disabled_skills]
 
         if filter_unavailable:
             return [skill for skill in skills if self._check_requirements(self._get_skill_meta(skill["name"]))]
@@ -93,6 +120,9 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
+        inline = self.inline_skills.get(name)
+        if inline is not None:
+            return str(self._inline_field(inline, "content", "") or "")
         roots = [self.workspace_skills]
         if self.builtin_skills:
             roots.append(self.builtin_skills)
@@ -144,12 +174,14 @@ class SkillsLoader:
             meta = self._get_skill_meta(skill_name)
             available = self._check_requirements(meta)
             desc = self._get_skill_description(skill_name)
+            # Inline skills have no file an agent could read_file — omit the path.
+            path_hint = "" if entry["source"] == "inline" else f"  `{entry['path']}`"
             if available:
-                lines.append(f"- **{skill_name}** — {desc}  `{entry['path']}`")
+                lines.append(f"- **{skill_name}** — {desc}{path_hint}")
             else:
                 missing = self._get_missing_requirements(meta)
                 suffix = f" (unavailable: {missing})" if missing else " (unavailable)"
-                lines.append(f"- **{skill_name}** — {desc}{suffix}  `{entry['path']}`")
+                lines.append(f"- **{skill_name}** — {desc}{suffix}{path_hint}")
         return "\n".join(lines)
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:
@@ -233,6 +265,14 @@ class SkillsLoader:
         Returns:
             Metadata dict or None.
         """
+        inline = self.inline_skills.get(name)
+        if inline is not None:
+            meta = dict(self._inline_field(inline, "metadata", None) or {})
+            desc = self._inline_field(inline, "description", "") or name
+            # Shape mirrors SKILL.md frontmatter: top-level fields plus the
+            # nanobot payload under "metadata" (for _get_skill_meta /
+            # _check_requirements / get_always_skills).
+            return {"description": desc, **meta, "metadata": {"nanobot": meta}}
         content = self.load_skill(name)
         if not content or not content.startswith("---"):
             return None

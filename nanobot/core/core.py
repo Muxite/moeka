@@ -25,7 +25,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
@@ -74,6 +74,8 @@ class MoekaCore:
         model: str | None = None,
         provider: Any | None = None,
         profile: Any | None = None,
+        bootstrap: Mapping[str, str] | None = None,
+        skills: Sequence[Any] | None = None,
     ) -> MoekaCore:
         """Build a core from moeka config — files optional.
 
@@ -100,6 +102,16 @@ class MoekaCore:
                 dict. A scoping bundle of model preset, persona, tool allow/deny
                 list, skills, memory toggle, and runner limits. Compiled into a
                 deep copy of the config so the caller's object is untouched.
+            bootstrap: In-memory bootstrap sections (name -> markdown content),
+                e.g. ``{"AGENTS.md": persona, "USER.md": profile_text}``. Each
+                entry shadows the workspace file of the same name; names outside
+                the bootstrap set are appended as extra sections. The profile
+                persona flows in here too (under ``"AGENTS.md"``, unless the
+                caller supplied that key) — nothing is written to disk.
+            skills: In-code skills — :class:`~nanobot.config.schema.InlineSkillConfig`
+                instances or equivalent dicts. Combined with the profile's
+                ``skills_inline``. Inline skills shadow workspace/builtin skills
+                of the same name and bypass ``skills_include`` filtering.
         """
         from nanobot.config.loader import config_from_sources
 
@@ -110,6 +122,9 @@ class MoekaCore:
         prof = None
         if profile is not None:
             cfg, prof = cls._apply_profile(cfg, profile)
+
+        overrides = cls._build_bootstrap_overrides(prof, bootstrap)
+        inline_skills = cls._build_inline_skills(prof, skills)
 
         # Resolve the workspace. An explicit arg always wins. Otherwise the
         # file/default route trusts the config's own workspace, while an
@@ -124,12 +139,14 @@ class MoekaCore:
                 ephemeral = Path(tempfile.mkdtemp(prefix="moeka-core-"))
                 ws = ephemeral
 
-        core = cls.from_config(cfg, workspace=ws, model=model, provider=provider)
+        core = cls.from_config(
+            cfg, workspace=ws, model=model, provider=provider,
+            bootstrap_overrides=overrides, inline_skills=inline_skills,
+        )
         core._ephemeral_workspace = ephemeral
         if prof is not None:
             core.profile = prof
             core.profile_name = profile if isinstance(profile, str) else "inline"
-            cls._seed_profile_persona(core.workspace, prof)
         return core
 
     @staticmethod
@@ -170,18 +187,36 @@ class MoekaCore:
         return cfg, prof
 
     @staticmethod
-    def _seed_profile_persona(workspace: Path, prof: Any) -> None:
-        """Write the profile persona to ``<workspace>/AGENTS.md`` unless one exists."""
-        text = prof.system_prompt
-        if not text and prof.system_prompt_file:
-            text = Path(prof.system_prompt_file).expanduser().read_text(encoding="utf-8")
-        if not text:
-            return
-        agents_md = workspace / "AGENTS.md"
-        if agents_md.exists():
-            return
-        workspace.mkdir(parents=True, exist_ok=True)
-        agents_md.write_text(text, encoding="utf-8")
+    def _build_bootstrap_overrides(
+        prof: Any, bootstrap: Mapping[str, str] | None
+    ) -> dict[str, str] | None:
+        """Merge the profile persona and explicit bootstrap sections — in memory.
+
+        Explicit ``bootstrap`` entries win; the persona fills ``"AGENTS.md"``
+        only when the caller didn't supply that key. ``system_prompt_file`` is
+        read here, once — the path is the host's choice, the core sees content.
+        """
+        overrides = dict(bootstrap or {})
+        if prof is not None and "AGENTS.md" not in overrides:
+            text = prof.system_prompt
+            if not text and prof.system_prompt_file:
+                text = Path(prof.system_prompt_file).expanduser().read_text(encoding="utf-8")
+            if text:
+                overrides["AGENTS.md"] = text
+        return overrides or None
+
+    @staticmethod
+    def _build_inline_skills(prof: Any, skills: Sequence[Any] | None) -> list[Any] | None:
+        """Combine profile ``skills_inline`` with create-time ``skills`` (validated)."""
+        from nanobot.config.schema import InlineSkillConfig
+
+        combined = list(getattr(prof, "skills_inline", None) or [])
+        for skill in skills or []:
+            if isinstance(skill, InlineSkillConfig):
+                combined.append(skill)
+            else:
+                combined.append(InlineSkillConfig.model_validate(skill))
+        return combined or None
 
     @classmethod
     @contextmanager
@@ -241,12 +276,16 @@ class MoekaCore:
         workspace: str | Path | None = None,
         model: str | None = None,
         provider: Any | None = None,
+        bootstrap_overrides: Mapping[str, str] | None = None,
+        inline_skills: Sequence[Any] | None = None,
     ) -> MoekaCore:
         """Build a core directly from an in-memory :class:`Config` (the data seam).
 
         Pure ``(Config, workspace) -> MoekaCore``: it does not read or discover any
         config file. ``workspace`` overrides ``config.agents.defaults.workspace``
         when given; otherwise the config's own workspace is used as-is.
+        ``bootstrap_overrides`` and ``inline_skills`` are passed through to the
+        loop's context builder (see :meth:`create` for semantics).
         """
         if workspace is not None:
             config.agents.defaults.workspace = str(Path(workspace).expanduser().resolve())
@@ -260,6 +299,10 @@ class MoekaCore:
             "vec_config": defaults.vec,
             "vec_store": cls._build_vec_store(config),
         }
+        if bootstrap_overrides:
+            extra["bootstrap_overrides"] = dict(bootstrap_overrides)
+        if inline_skills:
+            extra["inline_skills"] = list(inline_skills)
         if provider is not None:
             extra["provider"] = provider
         if model is not None:
@@ -374,6 +417,40 @@ class MoekaCore:
     def unregister_action(self, name: str) -> None:
         """Remove a previously registered action."""
         self._loop.tools.unregister(name)
+
+    # ------------------------------------------------------------------
+    # In-memory context: bootstrap sections and skills
+    # ------------------------------------------------------------------
+
+    def set_bootstrap(self, name: str, content: str) -> None:
+        """Set an in-memory bootstrap section (e.g. ``"AGENTS.md"``, ``"USER.md"``).
+
+        Shadows the workspace file of the same name; unknown names become extra
+        sections. The system prompt is rebuilt every turn, so this takes effect
+        on the next :meth:`run`.
+        """
+        self._loop.context.bootstrap_overrides[name] = content
+
+    def add_skill(
+        self,
+        name: str,
+        content: str,
+        *,
+        description: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Register an in-code skill on the live core (effective next turn).
+
+        ``metadata`` mirrors SKILL.md frontmatter (``always``, ``requires``).
+        Shadows workspace/builtin skills of the same name; exempt from
+        ``skills_include`` filtering.
+        """
+        from nanobot.config.schema import InlineSkillConfig
+
+        skill = InlineSkillConfig(
+            name=name, content=content, description=description, metadata=metadata or {},
+        )
+        self._loop.context.skills.inline_skills[name] = skill
 
     # ------------------------------------------------------------------
     # Documents — RAG over host-supplied knowledge

@@ -1,4 +1,4 @@
-"""Agent profiles: tool allowlists, persona seeding, limits, scoped lifecycle."""
+"""Agent profiles: tool allowlists, in-memory persona/skills, limits, scoped lifecycle."""
 
 from __future__ import annotations
 
@@ -132,7 +132,8 @@ def test_unknown_profile_raises(tmp_path):
         )
 
 
-def test_profile_persona_seeded(tmp_path):
+def test_profile_persona_flows_in_memory(tmp_path):
+    """The persona reaches the system prompt without touching the workspace."""
     persona = tmp_path / "persona.md"
     persona.write_text("# research persona\n", encoding="utf-8")
     data = dict(_CONFIG_DATA)
@@ -143,11 +144,14 @@ def test_profile_persona_seeded(tmp_path):
         },
     }
     ws = tmp_path / "ws"
-    MoekaCore.create(config_dict=data, workspace=ws, profile="research")
-    assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "# research persona\n"
+    core = MoekaCore.create(config_dict=data, workspace=ws, profile="research")
+    assert "# research persona" in core.loop.context.build_system_prompt()
+    assert not (ws / "AGENTS.md").exists()
 
 
-def test_profile_persona_never_overwrites(tmp_path):
+def test_profile_persona_shadows_stale_workspace_file(tmp_path):
+    """A pre-existing AGENTS.md no longer wins over the profile persona — the
+    in-memory override shadows it in the prompt but the file stays untouched."""
     persona = tmp_path / "persona.md"
     persona.write_text("new persona", encoding="utf-8")
     ws = tmp_path / "ws"
@@ -157,7 +161,10 @@ def test_profile_persona_never_overwrites(tmp_path):
     data["profiles"] = {
         "research": {"systemPromptFile": str(persona)},
     }
-    MoekaCore.create(config_dict=data, workspace=ws, profile="research")
+    core = MoekaCore.create(config_dict=data, workspace=ws, profile="research")
+    prompt = core.loop.context.build_system_prompt()
+    assert "new persona" in prompt
+    assert "host-owned" not in prompt
     assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "host-owned"
 
 
@@ -174,7 +181,8 @@ def test_inline_profile_object(tmp_path):
     core = MoekaCore.create(config_dict=data, workspace=ws, profile=prof)
     assert set(core.loop.tools.tool_names) <= {"web_search"}
     assert core.profile_name == "inline"
-    assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "# inline persona\n"
+    assert "# inline persona" in core.loop.context.build_system_prompt()
+    assert not (ws / "AGENTS.md").exists()
 
 
 def test_inline_profile_dict(tmp_path):
@@ -184,6 +192,78 @@ def test_inline_profile_dict(tmp_path):
         profile={"toolsAllow": ["web_fetch"]},
     )
     assert set(core.loop.tools.tool_names) <= {"web_fetch"}
+
+
+# ---------------------------------------------------------------------------
+# In-memory bootstrap and inline skills
+# ---------------------------------------------------------------------------
+
+def test_create_bootstrap_sections(tmp_path):
+    core = MoekaCore.create(
+        config_dict=dict(_CONFIG_DATA), workspace=tmp_path,
+        bootstrap={"USER.md": "user-context-marker", "HOST.md": "host-section-marker"},
+    )
+    prompt = core.loop.context.build_system_prompt()
+    assert "user-context-marker" in prompt
+    assert "host-section-marker" in prompt
+    assert not (tmp_path / "USER.md").exists()
+
+
+def test_explicit_bootstrap_wins_over_profile_persona(tmp_path):
+    core = MoekaCore.create(
+        config_dict=dict(_CONFIG_DATA), workspace=tmp_path,
+        profile={"systemPrompt": "profile persona"},
+        bootstrap={"AGENTS.md": "explicit bootstrap persona"},
+    )
+    prompt = core.loop.context.build_system_prompt()
+    assert "explicit bootstrap persona" in prompt
+    assert "profile persona" not in prompt
+
+
+def test_set_bootstrap_on_live_core(tmp_path):
+    core = MoekaCore.create(config_dict=dict(_CONFIG_DATA), workspace=tmp_path)
+    core.set_bootstrap("AGENTS.md", "late-bound persona")
+    assert "late-bound persona" in core.loop.context.build_system_prompt()
+
+
+def test_create_with_inline_skills(tmp_path):
+    core = MoekaCore.create(
+        config_dict=dict(_CONFIG_DATA), workspace=tmp_path,
+        skills=[{"name": "host_howto", "content": "# How-to", "description": "host how-to"}],
+    )
+    skills = core.loop.context.skills
+    assert skills.load_skill("host_howto") == "# How-to"
+    assert "host_howto" in core.loop.context.build_system_prompt()
+
+
+def test_profile_skills_inline(tmp_path):
+    core = MoekaCore.create(
+        config_dict=dict(_CONFIG_DATA), workspace=tmp_path,
+        profile={
+            "skillsInline": [
+                {"name": "prof_skill", "content": "# P", "description": "profile skill"},
+            ],
+        },
+    )
+    assert core.loop.context.skills.load_skill("prof_skill") == "# P"
+
+
+def test_add_skill_on_live_core(tmp_path):
+    core = MoekaCore.create(config_dict=dict(_CONFIG_DATA), workspace=tmp_path)
+    core.add_skill("late_skill", "# Late", description="added at runtime")
+    assert core.loop.context.skills.load_skill("late_skill") == "# Late"
+
+
+def test_skills_include_empty_drops_builtins_keeps_inline(tmp_path):
+    """skills_include=[] is the opt-out from moeka's builtin skill catalog;
+    inline skills are exempt (the host registered them explicitly)."""
+    core = MoekaCore.create(
+        config_dict=dict(_CONFIG_DATA), workspace=tmp_path,
+        profile={"skillsInclude": []},
+        skills=[{"name": "only_skill", "content": "# Only", "description": "the one"}],
+    )
+    entries = core.loop.context.skills.list_skills(filter_unavailable=False)
+    assert [e["name"] for e in entries] == ["only_skill"]
 
 
 # ---------------------------------------------------------------------------

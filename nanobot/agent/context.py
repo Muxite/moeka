@@ -44,16 +44,22 @@ class ContextBuilder:
         allowed_skills: list[str] | None = None,
         vec_store: VecStore | None = None,
         vec_config: VecConfig | None = None,
+        bootstrap_overrides: Mapping[str, str] | None = None,
+        inline_skills: Sequence[Any] | None = None,
     ):
         self.workspace = workspace
         self.timezone = timezone
         self.vec_store = vec_store
         self.vec_config = vec_config
+        # In-memory bootstrap sections (name -> content). A key matching one of
+        # BOOTSTRAP_FILES shadows the workspace file; other keys are appended.
+        self.bootstrap_overrides: dict[str, str] = dict(bootstrap_overrides or {})
         self.memory = MemoryStore(workspace, vec_store=vec_store)
         self.skills = SkillsLoader(
             workspace,
             disabled_skills=set(disabled_skills) if disabled_skills else None,
             allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
+            inline_skills=inline_skills,
         )
 
     def build_system_prompt(
@@ -233,14 +239,21 @@ class ContextBuilder:
         return _to_blocks(left) + _to_blocks(right)
 
     def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
+        """Load bootstrap sections: in-memory overrides shadow workspace files."""
         parts = []
 
         for filename in self.BOOTSTRAP_FILES:
-            file_path = self.workspace / filename
-            if file_path.exists():
+            content = self.bootstrap_overrides.get(filename)
+            if content is None:
+                file_path = self.workspace / filename
+                if not file_path.exists():
+                    continue
                 content = file_path.read_text(encoding="utf-8")
-                parts.append(f"## {filename}\n\n{content}")
+            parts.append(f"## {filename}\n\n{content}")
+
+        for name, content in self.bootstrap_overrides.items():
+            if name not in self.BOOTSTRAP_FILES:
+                parts.append(f"## {name}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
 

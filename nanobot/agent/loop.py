@@ -193,6 +193,8 @@ class AgentLoop:
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
         vec_config=None,
         vec_store=None,
+        bootstrap_overrides: dict[str, str] | None = None,
+        inline_skills: list | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -258,6 +260,8 @@ class AgentLoop:
             allowed_skills=allowed_skills,
             vec_store=vec_store,
             vec_config=vec_config,
+            bootstrap_overrides=bootstrap_overrides,
+            inline_skills=inline_skills,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -278,6 +282,7 @@ class AgentLoop:
             tools_allow=self.tools_allow,
             tools_deny=self.tools_deny,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
+            inline_skills=inline_skills,
         )
         self._unified_session = unified_session
         self._max_messages = max_messages if max_messages > 0 else 120

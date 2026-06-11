@@ -147,6 +147,53 @@ class TestLoadBootstrapFiles:
 
 
 # ---------------------------------------------------------------------------
+# bootstrap_overrides — in-memory bootstrap sections
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapOverrides:
+    def test_override_without_any_files(self, tmp_path):
+        builder = _builder(tmp_path, bootstrap_overrides={"AGENTS.md": "In-memory persona."})
+        result = builder._load_bootstrap_files()
+        assert "## AGENTS.md" in result
+        assert "In-memory persona." in result
+
+    def test_override_shadows_workspace_file(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("stale on-disk persona", encoding="utf-8")
+        builder = _builder(tmp_path, bootstrap_overrides={"AGENTS.md": "fresh persona"})
+        result = builder._load_bootstrap_files()
+        assert "fresh persona" in result
+        assert "stale on-disk persona" not in result
+        # The file itself is left untouched.
+        assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8") == "stale on-disk persona"
+
+    def test_override_and_files_coexist(self, tmp_path):
+        (tmp_path / "SOUL.md").write_text("Soul from disk.", encoding="utf-8")
+        builder = _builder(tmp_path, bootstrap_overrides={"AGENTS.md": "Persona from memory."})
+        result = builder._load_bootstrap_files()
+        assert "Persona from memory." in result
+        assert "Soul from disk." in result
+
+    def test_extra_section_names_appended(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Rules.", encoding="utf-8")
+        builder = _builder(tmp_path, bootstrap_overrides={"HOST.md": "Host context."})
+        result = builder._load_bootstrap_files()
+        assert "## HOST.md" in result
+        assert "Host context." in result
+        # Known bootstrap sections come first.
+        assert result.index("## AGENTS.md") < result.index("## HOST.md")
+
+    def test_set_after_construction(self, tmp_path):
+        builder = _builder(tmp_path)
+        builder.bootstrap_overrides["AGENTS.md"] = "late persona"
+        assert "late persona" in builder._load_bootstrap_files()
+
+    def test_override_reaches_system_prompt(self, tmp_path):
+        builder = _builder(tmp_path, bootstrap_overrides={"AGENTS.md": "persona-marker-xyz"})
+        assert "persona-marker-xyz" in builder.build_system_prompt()
+
+
+# ---------------------------------------------------------------------------
 # _is_template_content (static)
 # ---------------------------------------------------------------------------
 
