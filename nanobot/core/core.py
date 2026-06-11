@@ -73,7 +73,7 @@ class MoekaCore:
         workspace: str | Path | None = None,
         model: str | None = None,
         provider: Any | None = None,
-        profile: str | None = None,
+        profile: Any | None = None,
     ) -> MoekaCore:
         """Build a core from moeka config — files optional.
 
@@ -95,10 +95,11 @@ class MoekaCore:
             model: Override the resolved model id.
             provider: Pre-built :class:`LLMProvider` to use instead of building one
                 from config (lets a host fully control provider selection).
-            profile: Name of an agent profile (``config.profiles``) to apply —
-                a scoping bundle of model preset, persona, tool allow/deny list,
-                skills, memory toggle, and runner limits. The profile is compiled
-                into a deep copy of the config so the caller's object is untouched.
+            profile: Agent profile to apply — a name from ``config.profiles``,
+                an :class:`~nanobot.config.schema.AgentProfileConfig`, or a plain
+                dict. A scoping bundle of model preset, persona, tool allow/deny
+                list, skills, memory toggle, and runner limits. Compiled into a
+                deep copy of the config so the caller's object is untouched.
         """
         from nanobot.config.loader import config_from_sources
 
@@ -127,14 +128,27 @@ class MoekaCore:
         core._ephemeral_workspace = ephemeral
         if prof is not None:
             core.profile = prof
-            core.profile_name = profile
+            core.profile_name = profile if isinstance(profile, str) else "inline"
             cls._seed_profile_persona(core.workspace, prof)
         return core
 
     @staticmethod
-    def _apply_profile(cfg: Any, name: str) -> tuple[Any, Any]:
-        """Compile a named profile into a deep-copied config's agents.defaults."""
-        prof = cfg.resolve_profile(name)
+    def _apply_profile(cfg: Any, profile: Any) -> tuple[Any, Any]:
+        """Compile a profile into a deep-copied config's agents.defaults.
+
+        *profile* may be a name from ``config.profiles``, an
+        :class:`~nanobot.config.schema.AgentProfileConfig` instance, or a plain
+        dict — the latter two let embedding hosts define their scope in code
+        without touching the user's config file.
+        """
+        from nanobot.config.schema import AgentProfileConfig
+
+        if isinstance(profile, str):
+            prof = cfg.resolve_profile(profile)
+        elif isinstance(profile, AgentProfileConfig):
+            prof = profile
+        else:
+            prof = AgentProfileConfig.model_validate(profile)
         cfg = cfg.model_copy(deep=True)
         d = cfg.agents.defaults
         if prof.model_preset:
@@ -156,13 +170,14 @@ class MoekaCore:
     @staticmethod
     def _seed_profile_persona(workspace: Path, prof: Any) -> None:
         """Write the profile persona to ``<workspace>/AGENTS.md`` unless one exists."""
-        if not prof.system_prompt_file:
+        text = prof.system_prompt
+        if not text and prof.system_prompt_file:
+            text = Path(prof.system_prompt_file).expanduser().read_text(encoding="utf-8")
+        if not text:
             return
-        persona_path = Path(prof.system_prompt_file).expanduser()
         agents_md = workspace / "AGENTS.md"
         if agents_md.exists():
             return
-        text = persona_path.read_text(encoding="utf-8")
         workspace.mkdir(parents=True, exist_ok=True)
         agents_md.write_text(text, encoding="utf-8")
 
@@ -171,7 +186,7 @@ class MoekaCore:
     def scoped(
         cls,
         *,
-        profile: str | None = None,
+        profile: Any | None = None,
         workspace: str | Path | None = None,
         **kwargs: Any,
     ) -> Iterator[MoekaCore]:
@@ -208,7 +223,7 @@ class MoekaCore:
     async def scoped_async(
         cls,
         *,
-        profile: str | None = None,
+        profile: Any | None = None,
         workspace: str | Path | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[MoekaCore]:

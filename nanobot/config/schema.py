@@ -193,6 +193,7 @@ class AgentProfileConfig(Base):
     """
 
     model_preset: str | None = None
+    system_prompt: str | None = None  # inline persona text (wins over system_prompt_file)
     system_prompt_file: str | None = None  # persona seeded to <workspace>/AGENTS.md when absent
     tools_allow: list[str] | None = None  # None = all tools; [] = no tools
     tools_deny: list[str] = Field(default_factory=list)

@@ -161,6 +161,31 @@ def test_profile_persona_never_overwrites(tmp_path):
     assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "host-owned"
 
 
+def test_inline_profile_object(tmp_path):
+    """Hosts can pass an AgentProfileConfig (or dict) without naming it in config."""
+    from nanobot.config.schema import AgentProfileConfig
+
+    prof = AgentProfileConfig(
+        tools_allow=["web_search"],
+        system_prompt="# inline persona\n",
+    )
+    data = {k: v for k, v in _CONFIG_DATA.items() if k != "profiles"}
+    ws = tmp_path / "ws"
+    core = MoekaCore.create(config_dict=data, workspace=ws, profile=prof)
+    assert set(core.loop.tools.tool_names) <= {"web_search"}
+    assert core.profile_name == "inline"
+    assert (ws / "AGENTS.md").read_text(encoding="utf-8") == "# inline persona\n"
+
+
+def test_inline_profile_dict(tmp_path):
+    data = {k: v for k, v in _CONFIG_DATA.items() if k != "profiles"}
+    core = MoekaCore.create(
+        config_dict=data, workspace=tmp_path,
+        profile={"toolsAllow": ["web_fetch"]},
+    )
+    assert set(core.loop.tools.tool_names) <= {"web_fetch"}
+
+
 # ---------------------------------------------------------------------------
 # Scoped lifecycle
 # ---------------------------------------------------------------------------
