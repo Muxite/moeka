@@ -90,6 +90,9 @@ class VecConfig(Base):
     skills_top_k: int = 10
     # How many memory chunks to pull per semantic query.
     memory_top_k: int = 10
+    # Record every retrieval (query, store, returned chunks) to a retrieval_log
+    # table in vec.db for observability. Off by default.
+    log_retrievals: bool = False
 
 
 class InlineFallbackConfig(Base):

@@ -35,11 +35,23 @@ class RetrievedChunk:
     score: float  # cosine distance; lower is closer
 
 
-def open_vec_store(db_path: str | Path, *, model: str | None = None) -> VecStore:
+def open_vec_store(
+    db_path: str | Path,
+    *,
+    model: str | None = None,
+    log_retrievals: bool = False,
+) -> VecStore:
     """Open (or create) a :class:`VecStore` at *db_path* — embeddings only.
 
     ``model=None`` uses the default embedding model. No AgentLoop, provider,
     or API key is involved; safe in keyless environments. When ``moeka[vec]``
-    extras are missing the returned store is inert (``.available is False``).
+    extras are missing the returned store degrades to FTS5 keyword search
+    (``.available is False`` but ``.keyword_available`` may stay True).
+    ``log_retrievals=True`` records every search to the ``retrieval_log``
+    table for observability.
     """
-    return VecStore(Path(db_path), model_name=model or _DEFAULT_EMBEDDING_MODEL)
+    return VecStore(
+        Path(db_path),
+        model_name=model or _DEFAULT_EMBEDDING_MODEL,
+        log_retrievals=log_retrievals,
+    )

@@ -281,7 +281,11 @@ class MoekaCore:
         from nanobot.core.vec_store import VecStore
 
         db_path = config.workspace_path / "memory" / "vec.db"
-        return VecStore(db_path, model_name=vec_config.embedding_model)
+        return VecStore(
+            db_path,
+            model_name=vec_config.embedding_model,
+            log_retrievals=getattr(vec_config, "log_retrievals", False),
+        )
 
     @classmethod
     def from_loop(cls, loop: AgentLoop) -> MoekaCore:
