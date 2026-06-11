@@ -391,12 +391,14 @@ class MoekaCore:
         *,
         source: str | None = None,
         collection: str = "default",
+        tags: list[str] | None = None,
     ) -> int:
         """Ingest text or a document file into the host-document collection.
 
         ``text_or_path`` is treated as a file path if it points at an existing
-        file, otherwise as raw text. Returns the number of chunks indexed (0 when
-        ``moeka[vec]`` is not installed). For text that must never be
+        file, otherwise as raw text. ``tags`` are stored with every chunk and
+        filterable at retrieval time. Returns the number of chunks indexed
+        (0 when ``moeka[vec]`` is not installed). For text that must never be
         path-detected, use :meth:`ingest_text`.
         """
         vs = self._loop.vec_store
@@ -406,7 +408,7 @@ class MoekaCore:
         text, src = self._resolve_ingest_input(text_or_path, source)
         if not text.strip():
             return 0
-        return vs.add_documents(text, source=src, collection=collection)
+        return vs.add_documents(text, source=src, collection=collection, tags=tags)
 
     def ingest_text(
         self,
@@ -414,6 +416,7 @@ class MoekaCore:
         *,
         source: str | None = None,
         collection: str = "default",
+        tags: list[str] | None = None,
     ) -> int:
         """Ingest raw *text* verbatim — never path-detects.
 
@@ -426,7 +429,7 @@ class MoekaCore:
             return 0
         if not text.strip():
             return 0
-        return vs.add_documents(text, source=source, collection=collection)
+        return vs.add_documents(text, source=source, collection=collection, tags=tags)
 
     @staticmethod
     def _resolve_ingest_input(
@@ -443,16 +446,40 @@ class MoekaCore:
         return str(text_or_path), source
 
     def retrieve(
-        self, query: str, *, k: int = 5, collection: str | None = "default"
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        collection: str | None = "default",
+        mode: str = "vec",
+        tags: list[str] | None = None,
+        since: str | None = None,
+        caller: str | None = None,
     ) -> list[str]:
-        """Return the top-k host-document chunks semantically closest to *query*."""
+        """Return the top-k host-document chunks closest to *query*.
+
+        ``mode`` may be ``"vec"``, ``"keyword"`` (FTS5; no embeddings needed),
+        or ``"hybrid"``; ``tags``/``since`` filter by stored metadata; ``caller``
+        labels the retrieval-log entry when logging is enabled.
+        """
         vs = self._loop.vec_store
         if vs is None or not vs.available:
             return []
-        return vs.search_documents(query, k=k, collection=collection)
+        return vs.search_documents(
+            query, k=k, collection=collection, mode=mode,
+            tags=tags, since=since, caller=caller,
+        )
 
     def retrieve_documents(
-        self, query: str, *, k: int = 5, collection: str | None = "default"
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        collection: str | None = "default",
+        mode: str = "vec",
+        tags: list[str] | None = None,
+        since: str | None = None,
+        caller: str | None = None,
     ) -> list[RetrievedChunk]:
         """Structured retrieval: top-k chunks with source attribution and score.
 
@@ -467,7 +494,8 @@ class MoekaCore:
         return [
             RetrievedChunk(text=text, source=source, score=score)
             for source, text, score in vs.search_documents_scored(
-                query, k=k, collection=collection
+                query, k=k, collection=collection, mode=mode,
+                tags=tags, since=since, caller=caller,
             )
         ]
 

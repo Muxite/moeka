@@ -348,14 +348,14 @@ class _FakeVecStore:
             (None, "anonymous text", 0.7),
         ]
 
-    def add_documents(self, text, source=None, *, collection="default"):
+    def add_documents(self, text, source=None, *, collection="default", tags=None):
         self.added.append((text, source, collection))
         return 1
 
-    def search_documents(self, query, k=5, *, collection="default"):
+    def search_documents(self, query, k=5, *, collection="default", **kwargs):
         return [t for _s, t, _d in self.scored][:k]
 
-    def search_documents_scored(self, query, k=5, *, collection="default"):
+    def search_documents_scored(self, query, k=5, *, collection="default", **kwargs):
         self.last_search = (query, k, collection)
         return self.scored[:k]
 
