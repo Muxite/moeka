@@ -1,24 +1,38 @@
 import {
   useCallback,
-  useDeferredValue,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import { Check, ChevronRight, Copy, FileIcon, ImageIcon, PlaySquare, Sparkles, Wrench } from "lucide-react";
+import { Check, ChevronRight, Copy, ImageIcon, Sparkles, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { AttachmentTile } from "@/components/AttachmentTile";
+import { CliAppMentionText } from "@/components/CliAppMentionText";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { MarkdownText, preloadMarkdownText } from "@/components/MarkdownText";
 import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { formatTurnLatency } from "@/lib/format";
-import type { UIImage, UIMediaAttachment, UIMessage } from "@/lib/types";
+import { toMediaAttachment } from "@/lib/media";
+import type {
+  CliAppInfo,
+  McpPresetInfo,
+  UICliAppAttachment,
+  UIMcpPresetAttachment,
+  UIImage,
+  UIMediaAttachment,
+  UIMessage,
+} from "@/lib/types";
 
 interface MessageBubbleProps {
   message: UIMessage;
   /** When false, hide the assistant reply copy button (mid-turn text before more agent activity). Default true. */
   showAssistantCopyAction?: boolean;
+  cliApps?: CliAppInfo[];
+  mcpPresets?: McpPresetInfo[];
 }
 
 /**
@@ -33,11 +47,21 @@ interface MessageBubbleProps {
 export function MessageBubble({
   message,
   showAssistantCopyAction = true,
+  cliApps = [],
+  mcpPresets = [],
 }: MessageBubbleProps) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const copyResetRef = useRef<number | null>(null);
   const baseAnim = "animate-in fade-in-0 slide-in-from-bottom-1 duration-300";
+  const mentionCliApps = useMemo(
+    () => mergeCliMentionApps(cliApps, message.cliApps),
+    [cliApps, message.cliApps],
+  );
+  const mentionMcpPresets = useMemo(
+    () => mergeMcpMentionPresets(mcpPresets, message.mcpPresets),
+    [mcpPresets, message.mcpPresets],
+  );
 
   useEffect(() => {
     return () => {
@@ -48,8 +72,8 @@ export function MessageBubble({
   }, []);
 
   const onCopyAssistantReply = useCallback(() => {
-    if (!navigator.clipboard) return;
-    void navigator.clipboard.writeText(message.content).then(() => {
+    void copyTextToClipboard(message.content).then((ok) => {
+      if (!ok) return;
       setCopied(true);
       if (copyResetRef.current !== null) {
         window.clearTimeout(copyResetRef.current);
@@ -89,7 +113,11 @@ export function MessageBubble({
               "text-left text-[16px]/[1.75] whitespace-pre-wrap break-words",
             )}
           >
-            {message.content}
+            <CliAppMentionText
+              text={message.content}
+              cliApps={mentionCliApps}
+              mcpPresets={mentionMcpPresets}
+            />
           </p>
         ) : null}
       </div>
@@ -120,7 +148,7 @@ export function MessageBubble({
         <TypingDots />
       ) : empty && message.isStreaming ? null : (
         <>
-          <MarkdownText>{message.content}</MarkdownText>
+          <MarkdownText streaming={!!message.isStreaming}>{message.content}</MarkdownText>
           {media.length > 0 ? <MessageMedia media={media} align="left" /> : null}
           {showAssistantFooterRow ? (
             <div className="mt-2 flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
@@ -159,6 +187,69 @@ export function MessageBubble({
   );
 }
 
+function mergeMcpMentionPresets(
+  presets: McpPresetInfo[],
+  attachments: UIMcpPresetAttachment[] | undefined,
+): McpPresetInfo[] {
+  if (!attachments?.length) return presets;
+  const byName = new Map(presets.map((preset) => [preset.name.toLowerCase(), preset]));
+  for (const attachment of attachments) {
+    const name = attachment.name?.trim();
+    if (!name) continue;
+    const existing = byName.get(name.toLowerCase());
+    byName.set(name.toLowerCase(), {
+      name,
+      display_name: attachment.display_name || existing?.display_name || name,
+      category: attachment.category || existing?.category || "mcp",
+      description: existing?.description || "",
+      docs_url: existing?.docs_url || "",
+      transport: attachment.transport || existing?.transport || "mcp",
+      requires: existing?.requires || "",
+      note: existing?.note || "",
+      install_supported: existing?.install_supported ?? true,
+      installed: true,
+      configured: attachment.configured ?? existing?.configured ?? true,
+      available: existing?.available ?? true,
+      status: attachment.status || existing?.status || "configured",
+      logo_url: attachment.logo_url ?? existing?.logo_url ?? null,
+      brand_color: attachment.brand_color ?? existing?.brand_color ?? null,
+      required_fields: existing?.required_fields || [],
+      connection_summary: existing?.connection_summary || "",
+    });
+  }
+  return Array.from(byName.values());
+}
+
+function mergeCliMentionApps(
+  cliApps: CliAppInfo[],
+  attachments: UICliAppAttachment[] | undefined,
+): CliAppInfo[] {
+  if (!attachments?.length) return cliApps;
+  const byName = new Map(cliApps.map((app) => [app.name.toLowerCase(), app]));
+  for (const attachment of attachments) {
+    const name = attachment.name?.trim();
+    if (!name) continue;
+    const existing = byName.get(name.toLowerCase());
+    byName.set(name.toLowerCase(), {
+      name,
+      display_name: attachment.display_name || existing?.display_name || name,
+      category: attachment.category || existing?.category || "cli",
+      description: existing?.description || "",
+      requires: existing?.requires || "",
+      source: existing?.source || "attached",
+      entry_point: attachment.entry_point || existing?.entry_point || "",
+      install_supported: existing?.install_supported ?? true,
+      installed: true,
+      available: existing?.available ?? true,
+      status: existing?.status || "installed",
+      logo_url: attachment.logo_url ?? existing?.logo_url ?? null,
+      brand_color: attachment.brand_color ?? existing?.brand_color ?? null,
+      skill_installed: existing?.skill_installed ?? true,
+    });
+  }
+  return Array.from(byName.values());
+}
+
 function MessageMedia({
   media,
   align,
@@ -167,10 +258,16 @@ function MessageMedia({
   align: "left" | "right";
 }) {
   if (media.length === 0) return null;
-  const images = media
-    .filter((item) => item.kind === "image")
-    .map(({ url, name }) => ({ url, name }));
-  const nonImages = media.filter((item) => item.kind !== "image");
+  const images: UIImage[] = [];
+  const nonImages: UIMediaAttachment[] = [];
+  for (const item of media) {
+    const normalized = toMediaAttachment(item);
+    if (normalized.kind === "image") {
+      images.push({ url: normalized.url, name: normalized.name });
+    } else {
+      nonImages.push(normalized);
+    }
+  }
 
   return (
     <div
@@ -183,69 +280,8 @@ function MessageMedia({
         <UserImages images={images} align={align} size={align === "left" ? "large" : "compact"} />
       ) : null}
       {nonImages.map((item, i) => (
-        <MediaCell key={`${item.url ?? item.name ?? item.kind}-${i}`} media={item} />
+        <AttachmentTile key={`${item.url ?? item.name ?? item.kind}-${i}`} attachment={item} />
       ))}
-    </div>
-  );
-}
-
-function MediaCell({ media }: { media: UIMediaAttachment }) {
-  const { t } = useTranslation();
-  const hasUrl = typeof media.url === "string" && media.url.length > 0;
-
-  if (media.kind === "video" && hasUrl) {
-    return (
-      <figure className="max-w-[min(100%,32rem)] overflow-hidden rounded-[14px] border border-border/60 bg-muted/40">
-        <video
-          src={media.url}
-          controls
-          preload="metadata"
-          className="block max-h-[26rem] w-full bg-black"
-          aria-label={media.name ? `${t("message.videoAttachment", { defaultValue: "Video attachment" })}: ${media.name}` : t("message.videoAttachment", { defaultValue: "Video attachment" })}
-        />
-        {media.name ? (
-          <figcaption className="truncate px-3 py-1.5 text-[11.5px] text-muted-foreground">
-            {media.name}
-          </figcaption>
-        ) : null}
-      </figure>
-    );
-  }
-
-  const label =
-    media.kind === "video"
-      ? t("message.videoAttachment", { defaultValue: "Video attachment" })
-      : t("message.fileAttachment", { defaultValue: "File attachment" });
-  const Icon = media.kind === "video" ? PlaySquare : FileIcon;
-
-  const inner = (
-    <>
-      <Icon className="h-4 w-4 flex-none" aria-hidden />
-      <span className="truncate">{media.name ?? label}</span>
-    </>
-  );
-
-  if (hasUrl) {
-    return (
-      <a
-        href={media.url}
-        download={media.name ?? label}
-        title={media.name ?? undefined}
-        aria-label={label}
-        className="flex max-w-[18rem] items-center gap-2 rounded-[14px] border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground hover:underline"
-      >
-        {inner}
-      </a>
-    );
-  }
-
-  return (
-    <div
-      className="flex max-w-[18rem] items-center gap-2 rounded-[14px] border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
-      title={media.name ?? undefined}
-      aria-label={label}
-    >
-      {inner}
     </div>
   );
 }
@@ -276,13 +312,14 @@ function UserImages({
   const { t } = useTranslation();
   // Only real-URL images can open in the lightbox; historical-replay
   // placeholders (no URL) have nothing to zoom into.
-  const viewable = images
-    .map((img, i) => ({ img, i }))
-    .filter(({ img }) => typeof img.url === "string" && img.url.length > 0);
-  const viewableImages = viewable.map(({ img }) => img);
-  const originalToViewable = new Map<number, number>(
-    viewable.map(({ i }, v) => [i, v]),
-  );
+  const viewableImages: UIImage[] = [];
+  const originalToViewable = new Map<number, number>();
+  for (let i = 0; i < images.length; i += 1) {
+    const img = images[i];
+    if (typeof img.url !== "string" || img.url.length === 0) continue;
+    originalToViewable.set(i, viewableImages.length);
+    viewableImages.push(img);
+  }
 
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
@@ -416,7 +453,7 @@ function Dot({ delay }: { delay: string }) {
   );
 }
 
-/** L→R sheen overlay on label text; base copy stays solid ``text-muted-foreground``. */
+/** L→R sheen on the glyphs themselves; inactive labels stay solid muted text. */
 export function StreamingLabelSheen({
   children,
   active,
@@ -426,21 +463,21 @@ export function StreamingLabelSheen({
   active: boolean;
   className?: string;
 }) {
+  const sheenText =
+    typeof children === "string" || typeof children === "number"
+      ? String(children)
+      : undefined;
   return (
-    <span className={cn("relative block min-w-0 py-px", className)}>
+    <span className={cn("block min-w-0 overflow-hidden py-px", className)}>
       <span
+        data-sheen-text={active ? sheenText : undefined}
         className={cn(
-          "relative z-0 block font-medium leading-normal text-muted-foreground",
-          !active && "truncate",
+          "block w-fit max-w-full truncate font-medium leading-normal",
+          active ? "streaming-text-sheen" : "text-muted-foreground",
         )}
       >
         {children}
       </span>
-      {active ? (
-        <span className="reasoning-sheen-track" aria-hidden dir="ltr">
-          <span className="reasoning-sheen-stripe" />
-        </span>
-      ) : null}
     </span>
   );
 }
@@ -474,8 +511,6 @@ export function ReasoningBubble({
   embeddedInCluster = false,
 }: ReasoningBubbleProps) {
   const { t } = useTranslation();
-  const deferredText = useDeferredValue(text);
-  const markdownSource = streaming ? deferredText : text;
   const [userToggled, setUserToggled] = useState(false);
   const [openLocal, setOpenLocal] = useState(true);
   const open = userToggled ? openLocal : streaming;
@@ -531,17 +566,18 @@ export function ReasoningBubble({
           )}
         >
           <MarkdownText
+            streaming={streaming}
             className={cn(
               "text-[12.5px] italic text-muted-foreground/88",
               "prose-p:my-1.5 prose-li:my-0.5",
               "prose-headings:mt-2 prose-headings:mb-1 prose-headings:font-medium",
               "prose-headings:text-muted-foreground/92 prose-strong:text-muted-foreground",
               "prose-h1:text-[15px] prose-h2:text-[13.5px] prose-h3:text-[12.5px] prose-h4:text-[12px]",
-              "prose-a:text-muted-foreground/95 prose-a:underline hover:prose-a:opacity-90",
+              "prose-a:text-blue-500 prose-a:underline hover:prose-a:text-blue-600 dark:prose-a:text-blue-300 dark:hover:prose-a:text-blue-200",
               "prose-code:text-[0.92em]",
             )}
           >
-            {markdownSource}
+            {text}
           </MarkdownText>
         </div>
       )}

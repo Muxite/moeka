@@ -1,19 +1,22 @@
+import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
+
 import { MessageBubble } from "@/components/MessageBubble";
-import {
-  AgentActivityCluster,
-  isAgentActivityMember,
-} from "@/components/thread/AgentActivityCluster";
-import type { UIMessage } from "@/lib/types";
+import { AgentActivityCluster } from "@/components/thread/AgentActivityCluster";
+import { normalizeActivityTimeline, type TurnUnit } from "@/lib/activity-timeline";
+import type { CliAppInfo, McpPresetInfo, UIMessage } from "@/lib/types";
 
 interface ThreadMessagesProps {
   messages: UIMessage[];
-  /** When true, agent turn still in flight — keeps activity cluster expanded. */
+  /** When true, agent turn still in flight — keeps activity timeline expanded. */
   isStreaming?: boolean;
+  hiddenMessageCount?: number;
+  onLoadEarlier?: () => void;
+  cliApps?: CliAppInfo[];
+  mcpPresets?: McpPresetInfo[];
 }
 
-export type DisplayUnit =
-  | { type: "cluster"; messages: UIMessage[] }
-  | { type: "single"; message: UIMessage };
+export type DisplayUnit = TurnUnit;
 
 /** True when this unit index is the last assistant text slice before the next user message (or end of thread). */
 export function isFinalAssistantSliceBeforeNextUser(
@@ -21,40 +24,68 @@ export function isFinalAssistantSliceBeforeNextUser(
   index: number,
 ): boolean {
   const u = units[index];
-  if (u.type !== "single" || u.message.role !== "assistant") return true;
+  if (u.type !== "message" || u.message.role !== "assistant") return true;
   for (let j = index + 1; j < units.length; j++) {
     const v = units[j];
-    if (v.type === "single" && v.message.role === "user") break;
+    if (v.type === "message" && v.message.role === "user") break;
     return false;
   }
   return true;
 }
 
-function buildDisplayUnits(messages: UIMessage[]): DisplayUnit[] {
-  const out: DisplayUnit[] = [];
-  let i = 0;
-  while (i < messages.length) {
-    const m = messages[i];
-    if (isAgentActivityMember(m)) {
-      const cluster: UIMessage[] = [];
-      while (i < messages.length && isAgentActivityMember(messages[i])) {
-        cluster.push(messages[i]);
-        i += 1;
-      }
-      out.push({ type: "cluster", messages: cluster });
-      continue;
-    }
-    out.push({ type: "single", message: m });
-    i += 1;
-  }
-  return out;
+export function buildDisplayUnits(messages: UIMessage[]): DisplayUnit[] {
+  return normalizeActivityTimeline(messages);
 }
 
-export function ThreadMessages({ messages, isStreaming = false }: ThreadMessagesProps) {
-  const units = buildDisplayUnits(messages);
+export function assistantCopyFlags(units: DisplayUnit[]): boolean[] {
+  const flags = new Array<boolean>(units.length).fill(true);
+  let hasLaterUnitBeforeUser = false;
+  for (let i = units.length - 1; i >= 0; i -= 1) {
+    const unit = units[i];
+    if (unit.type === "message" && unit.message.role === "user") {
+      hasLaterUnitBeforeUser = false;
+      continue;
+    }
+    if (unit.type === "message" && unit.message.role === "assistant") {
+      flags[i] = !hasLaterUnitBeforeUser;
+    }
+    hasLaterUnitBeforeUser = true;
+  }
+  return flags;
+}
+
+export function ThreadMessages({
+  messages,
+  isStreaming = false,
+  hiddenMessageCount = 0,
+  onLoadEarlier,
+  cliApps = [],
+  mcpPresets = [],
+}: ThreadMessagesProps) {
+  const { t } = useTranslation();
+  const units = useMemo(() => buildDisplayUnits(messages), [messages]);
+  const copyFlags = useMemo(() => assistantCopyFlags(units), [units]);
+  const liveActivityClusterIndices = useMemo(
+    () => isStreaming ? currentActivityClusterIndices(units) : new Set<number>(),
+    [isStreaming, units],
+  );
 
   return (
     <div className="flex w-full flex-col">
+      {hiddenMessageCount > 0 && onLoadEarlier ? (
+        <div className="mb-4 flex justify-center">
+          <button
+            type="button"
+            onClick={onLoadEarlier}
+            className="rounded-full border border-border/60 bg-background/85 px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-sm transition-colors hover:bg-muted/55 hover:text-foreground"
+          >
+            {t("thread.loadEarlier", {
+              count: hiddenMessageCount,
+              defaultValue: "Load earlier messages",
+            })}
+          </button>
+        </div>
+      ) : null}
       {units.map((unit, index) => {
         const prev = units[index - 1];
         const marginTop =
@@ -63,26 +94,40 @@ export function ThreadMessages({ messages, isStreaming = false }: ThreadMessages
             : "";
         const next = units[index + 1];
         const hasBodyBelow =
-          unit.type === "cluster"
-          && next?.type === "single"
+          unit.type === "activity"
+          && next?.type === "message"
           && next.message.role === "assistant";
 
+        const userPromptId =
+          unit.type === "message" && unit.message.role === "user"
+            ? unit.message.id
+            : undefined;
+
         return (
-          <div key={unitKey(unit, index)} className={marginTop}>
-            {unit.type === "cluster" ? (
+          <div
+            key={unitKey(unit, index)}
+            className={marginTop}
+            data-user-prompt-id={userPromptId}
+          >
+            {unit.type === "activity" ? (
               <AgentActivityCluster
                 messages={unit.messages}
-                isTurnStreaming={isStreaming}
+                isTurnStreaming={liveActivityClusterIndices.has(index)}
                 hasBodyBelow={hasBodyBelow}
+                turnLatencyMs={unit.turnLatencyMs}
+                cliApps={cliApps}
+                mcpPresets={mcpPresets}
               />
             ) : (
               <MessageBubble
                 message={unit.message}
                 showAssistantCopyAction={
                   unit.message.role === "assistant"
-                    ? isFinalAssistantSliceBeforeNextUser(units, index)
+                    ? copyFlags[index]
                     : true
                 }
+                cliApps={cliApps}
+                mcpPresets={mcpPresets}
               />
             )}
           </div>
@@ -92,16 +137,34 @@ export function ThreadMessages({ messages, isStreaming = false }: ThreadMessages
   );
 }
 
+function currentActivityClusterIndices(units: DisplayUnit[]): Set<number> {
+  const indices = new Set<number>();
+  let markedCurrentActivity = false;
+  for (let i = units.length - 1; i >= 0; i -= 1) {
+    const unit = units[i];
+    if (unit.type === "activity") {
+      if (!markedCurrentActivity) {
+        indices.add(i);
+        markedCurrentActivity = true;
+      }
+      continue;
+    }
+    if (unit.message.role === "assistant" && unit.message.isStreaming) continue;
+    if (unit.message.role === "user") break;
+  }
+  return indices;
+}
+
 function unitKey(unit: DisplayUnit, index: number): string {
-  if (unit.type === "cluster") {
+  if (unit.type === "activity") {
     const anchor = unit.messages[0]?.id;
-    return anchor != null ? `cluster-${anchor}` : `cluster-idx-${index}`;
+    return anchor != null ? `activity-${anchor}` : `activity-idx-${index}`;
   }
   return unit.message.id;
 }
 
 function marginAfterPrevUnit(prev: DisplayUnit): string {
-  if (prev.type === "cluster") {
+  if (prev.type === "activity") {
     return "mt-4";
   }
   const p = prev.message;

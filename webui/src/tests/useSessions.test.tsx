@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useSessionHistory, useSessions } from "@/hooks/useSessions";
+import { sessionTitle, useSessionHistory, useSessions } from "@/hooks/useSessions";
 import * as api from "@/lib/api";
 import { ClientProvider } from "@/providers/ClientProvider";
 
@@ -17,7 +17,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 function fakeClient() {
-  const sessionUpdateHandlers = new Set<(chatId: string) => void>();
+  const sessionUpdateHandlers = new Set<(chatId: string, scope?: string) => void>();
   return {
     status: "open" as const,
     defaultChatId: null as string | null,
@@ -25,12 +25,12 @@ function fakeClient() {
     onError: () => () => {},
     onChat: () => () => {},
     getRunStartedAt: () => null,
-    onSessionUpdate: (handler: (chatId: string) => void) => {
+    onSessionUpdate: (handler: (chatId: string, scope?: string) => void) => {
       sessionUpdateHandlers.add(handler);
       return () => sessionUpdateHandlers.delete(handler);
     },
-    emitSessionUpdate: (chatId: string) => {
-      for (const handler of sessionUpdateHandlers) handler(chatId);
+    emitSessionUpdate: (chatId: string, scope?: string) => {
+      for (const handler of sessionUpdateHandlers) handler(chatId, scope);
     },
     sendMessage: vi.fn(),
     newChat: vi.fn(),
@@ -59,6 +59,28 @@ describe("useSessions", () => {
     vi.mocked(api.listSessions).mockReset();
     vi.mocked(api.deleteSession).mockReset();
     vi.mocked(api.fetchWebuiThread).mockReset();
+  });
+
+  it("does not use low-information greetings as fallback session titles", () => {
+    expect(sessionTitle({
+      key: "websocket:chat-hi",
+      channel: "websocket",
+      chatId: "chat-hi",
+      createdAt: "2026-04-16T10:00:00Z",
+      updatedAt: "2026-04-16T10:00:00Z",
+      title: "",
+      preview: "hi",
+    })).toBe("New chat");
+
+    expect(sessionTitle({
+      key: "websocket:chat-work",
+      channel: "websocket",
+      chatId: "chat-work",
+      createdAt: "2026-04-16T10:00:00Z",
+      updatedAt: "2026-04-16T10:00:00Z",
+      title: "",
+      preview: "帮我优化 WebUI 性能",
+    })).toBe("帮我优化 WebUI 性能");
   });
 
   it("removes a session from the local list after delete succeeds", async () => {
@@ -133,6 +155,78 @@ describe("useSessions", () => {
 
     await waitFor(() => expect(result.current.sessions[0]?.title).toBe("生成的小标题"));
     expect(api.listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a newly created chat visible until the server session list catches up", async () => {
+    vi.mocked(api.listSessions)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          key: "websocket:chat-new",
+          channel: "websocket",
+          chatId: "chat-new",
+          createdAt: "2026-05-20T10:00:00Z",
+          updatedAt: "2026-05-20T10:01:00Z",
+          title: "Generated title",
+          preview: "First message",
+        },
+      ]);
+    const client = fakeClient();
+    client.newChat.mockResolvedValue("chat-new");
+
+    const { result } = renderHook(() => useSessions(), {
+      wrapper: wrap(client),
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.sessions).toEqual([]);
+
+    await act(async () => {
+      await result.current.createChat();
+    });
+
+    expect(client.newChat).toHaveBeenCalledWith(5000, undefined);
+    expect(result.current.sessions.map((s) => s.key)).toEqual(["websocket:chat-new"]);
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(result.current.sessions.map((s) => s.key)).toEqual(["websocket:chat-new"]);
+    expect(result.current.sessions[0]?.preview).toBe("");
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(result.current.sessions.map((s) => s.key)).toEqual(["websocket:chat-new"]);
+    expect(result.current.sessions[0]?.preview).toBe("First message");
+    expect(result.current.sessions[0]?.title).toBe("Generated title");
+  });
+
+  it("stores optimistic workspace scope when creating a chat", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([]);
+    const client = fakeClient();
+    client.newChat.mockResolvedValue("chat-workspace");
+    const workspaceScope = {
+      project_path: "/tmp/project",
+      project_name: "project",
+      access_mode: "restricted" as const,
+      restrict_to_workspace: true,
+    };
+
+    const { result } = renderHook(() => useSessions(), {
+      wrapper: wrap(client),
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => {
+      await result.current.createChat(workspaceScope);
+    });
+
+    expect(client.newChat).toHaveBeenCalledWith(5000, workspaceScope);
+    expect(result.current.sessions[0]?.workspaceScope).toEqual(workspaceScope);
   });
 
   it("passes through WebUI transcript user media as images and media", async () => {

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.context import ToolContext
+from nanobot.agent.tools.loader import _SKIP_MODULES, ToolLoader
 
 
 class _MinimalTool(Tool):
@@ -51,8 +52,6 @@ def test_tool_plugin_discoverable_default_is_true():
 
 # --- ToolContext tests ---
 
-from nanobot.agent.tools.context import ToolContext
-
 
 def test_tool_context_has_required_fields():
     field_names = {f.name for f in fields(ToolContext)}
@@ -76,8 +75,6 @@ def test_tool_context_defaults():
 
 # --- ToolLoader tests ---
 
-from nanobot.agent.tools.loader import ToolLoader, _SKIP_MODULES
-
 
 def test_skip_modules_excludes_infrastructure():
     infra = {"base", "schema", "registry", "context", "loader", "config",
@@ -89,9 +86,12 @@ def test_discover_finds_concrete_tools():
     loader = ToolLoader()
     discovered = loader.discover()
     class_names = {cls.__name__ for cls in discovered}
+    assert "ApplyPatchTool" in class_names
     assert "ExecTool" in class_names
+    assert "CliAppsTool" in class_names
     assert "MessageTool" in class_names
     assert "SpawnTool" in class_names
+    assert "WriteStdinTool" in class_names
 
 
 def test_discover_excludes_abstract_and_mcp():
@@ -112,9 +112,32 @@ def test_discover_skips_private_classes():
         assert not cls.__name__.startswith("_")
 
 
-# --- Task 4: _FsTool.create() ---
+def test_loader_registers_exec_with_real_tools_config(tmp_path):
+    """Real config objects catch bad ctx.config attribute paths that mocks hide."""
+    from types import SimpleNamespace
 
-from pathlib import Path
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.config.schema import ToolsConfig
+
+    ctx = ToolContext(
+        config=ToolsConfig(),
+        workspace=str(tmp_path),
+        bus=None,
+        subagent_manager=SimpleNamespace(
+            get_running_count=lambda: 0,
+            max_concurrent_subagents=4,
+        ),
+        cron_service=None,
+        timezone="UTC",
+    )
+    registry = ToolRegistry()
+    registered = ToolLoader().load(ctx, registry)
+
+    assert "exec" in registered
+    assert registry.has("exec")
+
+
+# --- Task 4: _FsTool.create() ---
 
 
 def test_fs_tool_create_builds_from_context():
@@ -232,7 +255,7 @@ def test_exec_tool_create():
 
 
 def test_web_tools_config_cls():
-    from nanobot.agent.tools.web import WebSearchTool, WebFetchTool, WebToolsConfig
+    from nanobot.agent.tools.web import WebFetchTool, WebSearchTool, WebToolsConfig
     assert WebSearchTool.config_key == "web"
     assert WebSearchTool.config_cls() is WebToolsConfig
     assert WebFetchTool.config_key == "web"
@@ -321,7 +344,7 @@ def test_my_tool_enabled():
 
 
 def test_mcp_wrappers_not_discoverable():
-    from nanobot.agent.tools.mcp import MCPToolWrapper, MCPResourceWrapper, MCPPromptWrapper
+    from nanobot.agent.tools.mcp import MCPPromptWrapper, MCPResourceWrapper, MCPToolWrapper
     assert MCPToolWrapper._plugin_discoverable is False
     assert MCPResourceWrapper._plugin_discoverable is False
     assert MCPPromptWrapper._plugin_discoverable is False
@@ -364,6 +387,7 @@ def test_config_defaults():
     assert config.tools.my.enable is True
     assert config.tools.my.allow_set is False
     assert config.tools.image_generation.enabled is False
+    assert config.tools.cli_apps.enable is True
     assert config.tools.restrict_to_workspace is False
 
 
@@ -406,7 +430,8 @@ def test_loader_registers_same_tools_as_old_hardcoded():
 
     expected = {
         "read_file", "write_file", "edit_file", "list_dir",
-        "grep", "notebook_edit", "exec", "web_search", "web_fetch",
+        "find_files", "grep", "exec", "write_stdin", "list_exec_sessions",
+        "web_search", "web_fetch",
         "message", "spawn", "cron",
     }
     actual = set(registered)

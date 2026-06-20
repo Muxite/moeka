@@ -14,6 +14,7 @@ from nanobot.config.schema import Config
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
+_schema_refs_ready = False
 
 
 def set_config_path(path: Path) -> None:
@@ -78,16 +79,22 @@ def load_config(config_path: Path | None = None) -> Config:
     Returns:
         Loaded configuration object.
     """
-    path = config_path or get_config_path()
+    # moeka: lazy, circular-import-resilient forward-ref rebuild. The eager
+    # rebuild at schema import time may have failed (circular import order);
+    # this catches the lazy case. The import is function-local and wrapped in
+    # try/except so a transient import-order failure never blocks config load.
+    # The _schema_refs_ready flag keeps it to a single successful rebuild.
+    global _schema_refs_ready
+    if not _schema_refs_ready:
+        try:
+            from nanobot.config.schema import _resolve_tool_config_refs
 
-    # Ensure forward refs in Config are resolved before instantiation. The
-    # eager rebuild at schema import time may have failed (circular import);
-    # this catches the lazy case.
-    from nanobot.config.schema import _resolve_tool_config_refs
-    try:
-        _resolve_tool_config_refs()
-    except Exception:
-        pass
+            _resolve_tool_config_refs()
+            _schema_refs_ready = True
+        except Exception:
+            pass
+
+    path = config_path or get_config_path()
 
     config = Config()
     if path.exists():
@@ -142,8 +149,8 @@ def resolve_config_env_vars(config: Config) -> Config:
     ``DreamConfig.cron``) survive; returns the same instance when no
     references are present. Missing variables are logged as warnings and
     their placeholders are left unreplaced so the rest of the system can
-    still start.
-
+    still start (moeka deviation: non-fatal, since keys.env injects secrets
+    at process start and a single missing var should not block boot).
     """
     return _resolve_in_place(config)
 

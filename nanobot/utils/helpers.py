@@ -576,7 +576,7 @@ def build_status_content(
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
-    """Sync bundled templates to workspace. Only creates missing files."""
+    """Sync bundled templates to workspace. Creates missing files without overwriting user files."""
     from importlib.resources import files as pkg_files
 
     try:
@@ -589,10 +589,11 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     added: list[str] = []
 
     def _write(src, dest: Path):
+        content = src.read_text(encoding="utf-8") if src else ""
         if dest.exists():
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
+        dest.write_text(content, encoding="utf-8")
         added.append(str(dest.relative_to(workspace)))
 
     for item in tpl.iterdir():
@@ -625,3 +626,14 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         logger.exception("Failed to initialize git store for {}", workspace)
 
     return added
+
+
+def load_bundled_template(template_name: str) -> str | None:
+    """Read a bundled template file from the nanobot package."""
+    from importlib.resources import files as pkg_files
+
+    with suppress(Exception):
+        tpl = pkg_files("nanobot") / "templates" / template_name
+        if tpl.is_file():
+            return tpl.read_text(encoding="utf-8")
+    return None

@@ -3,12 +3,17 @@ import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ThreadShell } from "@/components/thread/ThreadShell";
+import { CLI_APPS_CHANGED_EVENT } from "@/lib/cli-app-events";
 import { ClientProvider } from "@/providers/ClientProvider";
-import type { UIMessage } from "@/lib/types";
+import type { CliAppsPayload, SettingsPayload, UIMessage } from "@/lib/types";
+
+const HERO_GREETING_PATTERN =
+  /What should we work on\?|Where should we start\?|What are we building today\?|What should we tackle together\?/;
+
 function makeClient() {
   const errorHandlers = new Set<(err: { kind: string }) => void>();
   const chatHandlers = new Map<string, Set<(ev: import("@/lib/types").InboundEvent) => void>>();
-  const sessionUpdateHandlers = new Set<(chatId: string) => void>();
+  const sessionUpdateHandlers = new Set<(chatId: string, scope?: string) => void>();
   const goalStateByChatId = new Map<string, import("@/lib/types").GoalStateWsPayload>();
   return {
     status: "open" as const,
@@ -34,7 +39,7 @@ function makeClient() {
         errorHandlers.delete(handler);
       };
     },
-    onSessionUpdate: (handler: (chatId: string) => void) => {
+    onSessionUpdate: (handler: (chatId: string, scope?: string) => void) => {
       sessionUpdateHandlers.add(handler);
       return () => {
         sessionUpdateHandlers.delete(handler);
@@ -49,8 +54,8 @@ function makeClient() {
       }
       for (const h of chatHandlers.get(chatId) ?? []) h(ev);
     },
-    _emitSessionUpdate(chatId: string) {
-      for (const h of sessionUpdateHandlers) h(chatId);
+    _emitSessionUpdate(chatId: string, scope?: string) {
+      for (const h of sessionUpdateHandlers) h(chatId, scope);
     },
     sendMessage: vi.fn(),
     newChat: vi.fn(),
@@ -61,11 +66,12 @@ function makeClient() {
   };
 }
 
-function wrap(client: ReturnType<typeof makeClient>, children: ReactNode) {
+function wrap(client: ReturnType<typeof makeClient>, children: ReactNode, modelName?: string | null) {
   return (
     <ClientProvider
       client={client as unknown as import("@/lib/nanobot-client").NanobotClient}
       token="tok"
+      modelName={modelName ?? null}
     >
       {children}
     </ClientProvider>
@@ -105,6 +111,98 @@ function httpJson(body: unknown) {
   };
 }
 
+function modelSettings(model: string, provider: string): SettingsPayload {
+  return {
+    agent: {
+      model,
+      provider,
+      resolved_provider: provider,
+      has_api_key: true,
+      model_preset: "default",
+      max_tokens: 4096,
+      context_window_tokens: 65536,
+      temperature: 0.7,
+      reasoning_effort: null,
+      timezone: "UTC",
+      bot_name: "nanobot",
+      bot_icon: "",
+      tool_hint_max_length: 40,
+    },
+    model_presets: [{
+      name: "default",
+      label: "Default",
+      active: true,
+      is_default: true,
+      model,
+      provider,
+      max_tokens: 4096,
+      context_window_tokens: 65536,
+      temperature: 0.7,
+      reasoning_effort: null,
+    }],
+    providers: [
+      { name: "deepseek", label: "DeepSeek", configured: true },
+      { name: "openai_codex", label: "OpenAI Codex", configured: true },
+    ],
+    web_search: {
+      provider: "duckduckgo",
+      api_key_hint: null,
+      base_url: null,
+      max_results: 5,
+      timeout: 30,
+      providers: [],
+    },
+    web: {
+      enable: true,
+      proxy: null,
+      user_agent: null,
+      search: { max_results: 5, timeout: 30 },
+      fetch: { use_jina_reader: true },
+    },
+    image_generation: {
+      enabled: false,
+      provider: "openrouter",
+      provider_configured: false,
+      model: "openai/gpt-5.4-image-2",
+      default_aspect_ratio: "1:1",
+      default_image_size: "1K",
+      max_images_per_turn: 4,
+      save_dir: "generated",
+      providers: [],
+    },
+    runtime: {
+      config_path: "/tmp/config.json",
+      workspace_path: "/tmp/workspace",
+      gateway_host: "127.0.0.1",
+      gateway_port: 18790,
+      heartbeat: {
+        enabled: true,
+        interval_s: 1800,
+        keep_recent_messages: 8,
+      },
+      dream: {
+        schedule: "every 2h",
+        max_batch_size: 20,
+        max_iterations: 15,
+        annotate_line_ages: true,
+      },
+      unified_session: false,
+    },
+    advanced: {
+      restrict_to_workspace: false,
+      webui_allow_local_service_access: true,
+      webui_default_access_mode: "default",
+      private_service_protection_enabled: true,
+      ssrf_whitelist_count: 0,
+      mcp_server_count: 0,
+      exec_enabled: true,
+      exec_sandbox: null,
+      exec_path_append_set: false,
+    },
+    requires_restart: false,
+  };
+}
+
 describe("ThreadShell", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -135,6 +233,87 @@ describe("ThreadShell", () => {
     fireEvent.click(screen.getByText("Important conversation"));
 
     expect(onGoHome).not.toHaveBeenCalled();
+  });
+
+  it("updates the composer model logo when settings snapshot changes", async () => {
+    const client = makeClient();
+    const { rerender } = render(
+      wrap(
+        client,
+        <ThreadShell
+          session={session("model-logo")}
+          title="Model logo"
+          onToggleSidebar={() => {}}
+          settingsSnapshot={modelSettings("deepseek-v4-pro", "deepseek")}
+        />,
+        "deepseek-v4-pro",
+      ),
+    );
+
+    expect(await screen.findByTestId("composer-model-logo-deepseek")).toBeInTheDocument();
+
+    await act(async () => {
+      rerender(
+        wrap(
+          client,
+          <ThreadShell
+            session={session("model-logo")}
+            title="Model logo"
+            onToggleSidebar={() => {}}
+            settingsSnapshot={modelSettings("openai-codex/gpt-5.5", "openai_codex")}
+          />,
+          "openai-codex/gpt-5.5",
+        ),
+      );
+    });
+
+    expect(await screen.findByTestId("composer-model-logo-openai_codex")).toBeInTheDocument();
+  });
+
+  it("keeps image generation controls out of the composer", async () => {
+    const client = makeClient();
+    const disabledSettings = modelSettings("deepseek-v4-pro", "deepseek");
+    const enabledSettings: SettingsPayload = {
+      ...disabledSettings,
+      image_generation: {
+        ...disabledSettings.image_generation,
+        enabled: true,
+        provider_configured: true,
+      },
+    };
+
+    const { rerender } = render(
+      wrap(
+        client,
+        <ThreadShell
+          session={session("image-generation-disabled")}
+          title="Image generation disabled"
+          onToggleSidebar={() => {}}
+          settingsSnapshot={disabledSettings}
+        />,
+        "deepseek-v4-pro",
+      ),
+    );
+
+    await screen.findByLabelText("Message input");
+    expect(screen.queryByRole("button", { name: "Toggle image generation mode" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      rerender(
+        wrap(
+          client,
+          <ThreadShell
+            session={session("image-generation-disabled")}
+            title="Image generation disabled"
+            onToggleSidebar={() => {}}
+            settingsSnapshot={enabledSettings}
+          />,
+          "deepseek-v4-pro",
+        ),
+      );
+    });
+
+    expect(screen.queryByRole("button", { name: "Toggle image generation mode" })).not.toBeInTheDocument();
   });
 
   it("restores in-memory messages when switching away and back to a session", async () => {
@@ -336,39 +515,107 @@ describe("ThreadShell", () => {
     await waitFor(() =>
       expect(screen.getByText("first message should stay")).toBeInTheDocument(),
     );
-    expect(screen.queryByText("What can I do for you?")).not.toBeInTheDocument();
+    expect(screen.queryByText(HERO_GREETING_PATTERN)).not.toBeInTheDocument();
   });
 
-  it("sends quick action prompts from the empty thread landing", async () => {
+  it("keeps a live first command reply when the initial history snapshot is stale", async () => {
     const client = makeClient();
-    const onNewChat = vi.fn().mockResolvedValue("chat-a");
+    const onCreateChat = vi.fn().mockResolvedValue("chat-new");
+    let resolveThread:
+      | ((value: { ok: boolean; status: number; json: () => Promise<unknown> }) => void)
+      | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("websocket%3Achat-new/webui-thread")) {
+          return new Promise((resolve) => {
+            resolveThread = resolve;
+          });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: async () => ({}),
+        });
+      }),
+    );
 
-    render(
+    const { rerender } = render(
       wrap(
         client,
         <ThreadShell
-          session={session("chat-a")}
-          title="Chat chat-a"
+          session={null}
+          title="nanobot"
           onToggleSidebar={() => {}}
-          onGoHome={() => {}}
-          onNewChat={onNewChat}
+          onCreateChat={onCreateChat}
         />,
       ),
     );
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Write code" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Message input"), {
+      target: { value: "/model" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(onCreateChat).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      rerender(
+        wrap(
+          client,
+          <ThreadShell
+            session={session("chat-new")}
+            title="Chat chat-new"
+            onToggleSidebar={() => {}}
+            onCreateChat={onCreateChat}
+          />,
+        ),
+      );
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Write code" }));
-
     await waitFor(() =>
-      expect(client.sendMessage).toHaveBeenCalledWith(
-        "chat-a",
-        "Help me write the code for this task, starting with the smallest useful change.",
-        undefined,
+      expect(client.sendMessage).toHaveBeenCalledWith("chat-new", "/model", undefined),
+    );
+
+    await act(async () => {
+      client._emitChat("chat-new", {
+        event: "message",
+        chat_id: "chat-new",
+        text: "## Model\n- Current model: `Ring-2.6-1T`",
+      });
+    });
+    expect(screen.getByText(/Current model/)).toBeInTheDocument();
+
+    await act(async () => {
+      resolveThread?.(
+        httpJson(transcriptFromSimpleMessages([{ role: "user", content: "/model" }])),
+      );
+    });
+
+    await waitFor(() => expect(screen.getByText(/Current model/)).toBeInTheDocument());
+  });
+
+  it("keeps the empty thread landing focused on the composer", async () => {
+    const client = makeClient();
+    render(
+      wrap(
+        client,
+        <ThreadShell
+          session={null}
+          title="nanobot"
+          onToggleSidebar={() => {}}
+          onGoHome={() => {}}
+          onNewChat={() => {}}
+        />,
       ),
     );
+    await act(async () => {});
+
+    expect(screen.getByText(HERO_GREETING_PATTERN)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Ask anything...")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Write code" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create a project plan" })).not.toBeInTheDocument();
   });
 
   it("does not leak the previous thread when opening a brand-new chat", async () => {
@@ -574,7 +821,7 @@ describe("ThreadShell", () => {
     });
 
     expect(screen.queryByText("live assistant reply")).not.toBeInTheDocument();
-    expect(screen.getByText("What can I do for you?")).toBeInTheDocument();
+    expect(screen.getByText(HERO_GREETING_PATTERN)).toBeInTheDocument();
 
     await act(async () => {
       rerender(
@@ -651,6 +898,52 @@ describe("ThreadShell", () => {
     expect(historyCalls).toBe(1);
   });
 
+  it("does not refetch thread history for metadata-only session updates", async () => {
+    const client = makeClient();
+    let historyCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("websocket%3Achat-a/webui-thread")) {
+          historyCalls += 1;
+          return httpJson(
+            transcriptFromSimpleMessages([
+              { role: "user", content: "question" },
+              { role: "assistant", content: "answer" },
+            ]),
+          );
+        }
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({}),
+        };
+      }),
+    );
+
+    render(
+      wrap(
+        client,
+        <ThreadShell
+          session={session("chat-a")}
+          title="Chat chat-a"
+          onToggleSidebar={() => {}}
+          onNewChat={() => {}}
+        />,
+      ),
+    );
+
+    await waitFor(() => expect(screen.getByText("answer")).toBeInTheDocument());
+    expect(historyCalls).toBe(1);
+
+    await act(async () => {
+      client._emitSessionUpdate("chat-a", "metadata");
+    });
+
+    expect(historyCalls).toBe(1);
+  });
+
   it("scrolls to the bottom after loading a session from the blank new-chat page", async () => {
     const client = makeClient();
     const scrollIntoView = vi.fn();
@@ -689,7 +982,7 @@ describe("ThreadShell", () => {
         ),
       );
 
-      expect(screen.getByText("What can I do for you?")).toBeInTheDocument();
+      expect(screen.getByText(HERO_GREETING_PATTERN)).toBeInTheDocument();
       scrollIntoView.mockClear();
 
       await act(async () => {
@@ -772,8 +1065,9 @@ describe("ThreadShell", () => {
     expect(screen.getByRole("option", { name: /\/history/i })).toBeInTheDocument();
   });
 
-  it("switches welcome quick actions when image mode is enabled", async () => {
+  it("does not bring back welcome cards when image mode is enabled", async () => {
     const client = makeClient();
+    const settings = modelSettings("deepseek-v4-pro", "deepseek");
     render(
       wrap(
         client,
@@ -782,17 +1076,23 @@ describe("ThreadShell", () => {
           title="nanobot"
           onToggleSidebar={() => {}}
           onNewChat={() => {}}
+          settingsSnapshot={{
+            ...settings,
+            image_generation: {
+              ...settings.image_generation,
+              enabled: true,
+              provider_configured: true,
+            },
+          }}
         />,
       ),
     );
     await act(async () => {});
 
-    expect(screen.getByText("Write code")).toBeInTheDocument();
     expect(screen.queryByText("Design an app icon")).not.toBeInTheDocument();
+    expect(screen.queryByText("Write code")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Toggle image generation mode" }));
-
-    expect(screen.getByText("Design an app icon")).toBeInTheDocument();
+    expect(screen.queryByText("Design an app icon")).not.toBeInTheDocument();
     expect(screen.queryByText("Write code")).not.toBeInTheDocument();
   });
 
@@ -947,5 +1247,51 @@ describe("ThreadShell", () => {
 
     await waitFor(() => expect(screen.getByText("from chat b")).toBeInTheDocument());
     expect(screen.queryByText("from chat a")).not.toBeInTheDocument();
+  });
+
+  it("updates @ CLI app suggestions when settings broadcasts an install", async () => {
+    const client = makeClient();
+    render(wrap(
+      client,
+      <ThreadShell
+        session={session("chat-cli-apps")}
+        title="Chat chat-cli-apps"
+        onToggleSidebar={() => {}}
+        onGoHome={() => {}}
+        onNewChat={() => {}}
+      />,
+    ));
+
+    const input = await screen.findByLabelText("Message input");
+    expect(screen.queryByRole("listbox", { name: "Apps" })).not.toBeInTheDocument();
+
+    const payload: CliAppsPayload = {
+      apps: [{
+        name: "gimp",
+        display_name: "GIMP",
+        category: "image",
+        description: "Image editing",
+        requires: "",
+        source: "harness",
+        entry_point: "cli-anything-gimp",
+        install_supported: true,
+        installed: true,
+        available: true,
+        status: "installed",
+        logo_url: null,
+        brand_color: "#5C5543",
+        skill_installed: true,
+      }],
+      installed_count: 1,
+      catalog_updated_at: "2026-04-18",
+    };
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(CLI_APPS_CHANGED_EVENT, { detail: payload }));
+    });
+    fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
+
+    expect(screen.getByRole("listbox", { name: "Apps" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /@gimp/i })).toBeInTheDocument();
   });
 });
