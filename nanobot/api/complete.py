@@ -96,6 +96,7 @@ async def acomplete(
     max_tokens: int | None = None,
     temperature: float | None = None,
     usage_sink: Any | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     """Run a single chat completion through moeka's provider layer.
 
@@ -134,6 +135,7 @@ async def acomplete(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
+            response_format=response_format,
         )
     finally:
         # Release the provider's async HTTP client inside this loop so the sync
@@ -292,6 +294,22 @@ def _json_system_suffix(schema: dict[str, Any] | None) -> str:
     return base
 
 
+def _json_response_format(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Native provider structured-output request for a JSON Schema.
+
+    OpenAI/OpenRouter ``response_format`` — ``strict: false`` so providers whose
+    models don't do strict schema validation still accept the request (a hard
+    rejection is caught by :func:`acomplete_json` and falls back to the reprompt
+    loop). Returns ``None`` without a schema — no native mode, keep the prompt
+    suffix path."""
+    if not schema:
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "response", "schema": schema, "strict": False},
+    }
+
+
 async def acomplete_json(
     prompt: str,
     *,
@@ -333,10 +351,26 @@ async def acomplete_json(
     suffix = _json_system_suffix(schema)
     full_system = f"{system}\n\n{suffix}" if system else suffix
 
+    # Try native provider structured output first (skips the reprompt round-trip);
+    # keep the schema-in-system suffix as belt-and-suspenders. If the provider
+    # rejects response_format, drop it and fall back to the parse-retry path.
+    native_rf = _json_response_format(schema)
+    use_native = native_rf is not None
+
     attempt_prompt = prompt
     last_error = ""
     for _ in range(max(retries, 0) + 1):
-        reply = await acomplete(attempt_prompt, system=full_system, **kwargs)
+        try:
+            reply = await acomplete(
+                attempt_prompt, system=full_system,
+                response_format=native_rf if use_native else None, **kwargs,
+            )
+        except Exception as exc:  # provider likely rejected response_format
+            if use_native:
+                use_native = False
+                last_error = str(exc)
+                continue
+            raise
         payload = _extract_json_text(reply)
         try:
             parsed = json.loads(payload)
@@ -345,6 +379,7 @@ async def acomplete_json(
             return parsed
         except Exception as exc:  # json decode or pydantic validation
             last_error = str(exc)
+            use_native = False  # native didn't help; reprompt in plain text mode
             attempt_prompt = (
                 f"{prompt}\n\n"
                 f"Your previous reply was not valid:\n{reply}\n\n"

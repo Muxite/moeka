@@ -502,6 +502,7 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float,
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         model_name = model or self.default_model
         spec = self._spec
@@ -623,6 +624,12 @@ class OpenAICompatProvider(LLMProvider):
         if self._extra_body:
             existing = kwargs.get("extra_body", {})
             kwargs["extra_body"] = _deep_merge(existing, self._extra_body)
+
+        # Native structured output (OpenAI/OpenRouter `response_format`). Only set
+        # when the caller asked for it (acomplete_json); providers that reject it
+        # surface an error the caller falls back from, so this is additive.
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         return kwargs
 
@@ -1164,6 +1171,7 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         try:
             if self._should_use_responses_api(model, reasoning_effort):
@@ -1187,7 +1195,7 @@ class OpenAICompatProvider(LLMProvider):
 
             kwargs = self._build_kwargs(
                 messages, tools, model, max_tokens, temperature,
-                reasoning_effort, tool_choice,
+                reasoning_effort, tool_choice, response_format,
             )
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
