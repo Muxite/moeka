@@ -21,12 +21,40 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import mimetypes
 import re
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
+
+
+async def _aclose_provider(provider: Any) -> None:
+    """Best-effort close of a provider's async HTTP client.
+
+    The sync wrappers run each completion via ``asyncio.run``, which closes the
+    loop as soon as the coroutine returns. If the provider's underlying
+    ``AsyncOpenAI`` / ``AsyncAnthropic`` client is left to be garbage-collected,
+    its httpx connection pool tries to close against the now-dead loop and emits
+    noisy ``RuntimeError: Event loop is closed`` / "Task exception was never
+    retrieved" tracebacks. Closing it here — inside the live loop, in a
+    ``finally`` — releases those connections cleanly. Never raises.
+    """
+    targets = [getattr(provider, attr, None) for attr in ("aclose", "close")]
+    client = getattr(provider, "_client", None)
+    if client is not None:
+        targets += [getattr(client, attr, None) for attr in ("close", "aclose")]
+    for fn in targets:
+        if not callable(fn):
+            continue
+        try:
+            res = fn()
+            if inspect.isawaitable(res):
+                await res
+        except Exception:  # noqa: BLE001 — teardown must never break a call
+            pass
+        return
 
 
 def _image_part(image: str | bytes | Path) -> dict[str, Any]:
@@ -67,6 +95,7 @@ async def acomplete(
     preset: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    usage_sink: Any | None = None,
 ) -> str:
     """Run a single chat completion through moeka's provider layer.
 
@@ -100,11 +129,26 @@ async def acomplete(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": _user_content(prompt, images)})
 
-    response = await provider.chat_with_retry(
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    try:
+        response = await provider.chat_with_retry(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    finally:
+        # Release the provider's async HTTP client inside this loop so the sync
+        # ``asyncio.run`` wrapper doesn't leave it to be GC'd against a closed
+        # loop (noisy "Event loop is closed" tracebacks).
+        await _aclose_provider(provider)
+    # Optional usage callback: hand the caller the provider's token usage so it
+    # can meter cost without a second HTTP client. Best-effort — a sink error
+    # must never break a completion. (No cost here: providers only return token
+    # counts; the caller prices them.)
+    if usage_sink is not None and getattr(response, "usage", None):
+        try:
+            usage_sink({"model": model, **dict(response.usage)})
+        except Exception:  # noqa: BLE001 — metering must not break inference
+            pass
     if response.content is None:
         raise RuntimeError(
             "moeka completion returned no content "
@@ -175,6 +219,7 @@ async def acomplete_stream(
     finally:
         if not task.done():
             task.cancel()
+        await _aclose_provider(provider)
 
 
 def complete_stream(
@@ -358,6 +403,7 @@ def complete(
     preset: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    usage_sink: Any | None = None,
 ) -> str:
     """Synchronous wrapper around :func:`acomplete`.
 
@@ -377,5 +423,6 @@ def complete(
             preset=preset,
             max_tokens=max_tokens,
             temperature=temperature,
+            usage_sink=usage_sink,
         )
     )
