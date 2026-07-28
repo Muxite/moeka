@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from "react";
 import {
   Archive,
+  Brain,
+  CalendarClock,
   Menu,
   Search,
   Settings,
@@ -12,7 +14,6 @@ import { useTranslation } from "react-i18next";
 import { ChatList } from "@/components/ChatList";
 import { ConnectionBadge } from "@/components/ConnectionBadge";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import type {
   ChatSummary,
   SidebarViewState,
@@ -34,8 +35,11 @@ interface SidebarProps {
   onNewChatInProject: (projectPath: string, projectName: string) => void;
   onOpenSettings: () => void;
   onOpenApps: () => void;
+  onOpenSkills: () => void;
+  onOpenAutomations: () => void;
+  onSettingsIntent?: () => void;
   onOpenSearch: () => void;
-  activeUtility?: "apps" | null;
+  activeUtility?: "apps" | "skills" | "automations" | null;
   onToggleArchived: () => void;
   onCollapse: () => void;
   onExpand?: () => void;
@@ -47,12 +51,28 @@ interface SidebarProps {
   projectNameOverrides?: Record<string, string>;
   collapsedGroups?: Record<string, boolean>;
   runningChatIds?: string[];
-  completedChatIds?: string[];
+  updatedChatIds?: string[];
   viewState?: SidebarViewState;
   showArchived?: boolean;
   archivedCount?: number;
   defaultWorkspacePath?: string | null;
   hostChromeInset?: boolean;
+}
+
+type NavigatorWithUserAgentData = Navigator & {
+  userAgentData?: { platform?: string };
+};
+
+function isApplePlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const platform = navigator.platform || "";
+  const userAgentPlatform =
+    (navigator as NavigatorWithUserAgentData).userAgentData?.platform || "";
+  return /mac|iphone|ipad|ipod/i.test(`${platform} ${userAgentPlatform}`);
+}
+
+function newChatShortcutLabel(): string {
+  return isApplePlatform() ? "⌘⇧O" : "Ctrl+Shift+O";
 }
 
 export function Sidebar(props: SidebarProps) {
@@ -61,6 +81,7 @@ export function Sidebar(props: SidebarProps) {
     useState<HTMLElement | null>(null);
   const collapsed = Boolean(props.collapsed);
   const toggleLabel = t("thread.header.toggleSidebar");
+  const newChatShortcut = newChatShortcutLabel();
 
   return (
     <nav
@@ -69,7 +90,6 @@ export function Sidebar(props: SidebarProps) {
       className={cn(
         "flex h-full w-full min-w-0 flex-col text-sidebar-foreground",
         props.hostChromeInset ? "bg-transparent" : "bg-sidebar",
-        !props.hostChromeInset && "border-r border-sidebar-border/60",
       )}
     >
       <div
@@ -94,7 +114,7 @@ export function Sidebar(props: SidebarProps) {
           )}
         >
           <img
-            src="/brand/nanobot_icon.png"
+            src="/brand/nanobot_mark.svg"
             alt=""
             className="h-8 w-8 select-none object-contain"
             draggable={false}
@@ -124,7 +144,8 @@ export function Sidebar(props: SidebarProps) {
           label={t("sidebar.newChat")}
           onClick={props.onNewChat}
           icon={<SquarePen className="h-4 w-4" />}
-          shortcut="Cmd/Ctrl+Shift+O"
+          shortcut={newChatShortcut}
+          ariaKeyShortcuts="Meta+Shift+O Control+Shift+O"
         />
         <SidebarActionButton
           collapsed={collapsed}
@@ -136,8 +157,25 @@ export function Sidebar(props: SidebarProps) {
           collapsed={collapsed}
           label={t("sidebar.apps")}
           onClick={props.onOpenApps}
+          onIntent={props.onSettingsIntent}
           active={props.activeUtility === "apps"}
           icon={<Blocks className="h-4 w-4" />}
+        />
+        <SidebarActionButton
+          collapsed={collapsed}
+          label={t("sidebar.skills.title")}
+          onClick={props.onOpenSkills}
+          onIntent={props.onSettingsIntent}
+          active={props.activeUtility === "skills"}
+          icon={<Brain className="h-4 w-4" />}
+        />
+        <SidebarActionButton
+          collapsed={collapsed}
+          label={t("sidebar.automations", { defaultValue: "Automations" })}
+          onClick={props.onOpenAutomations}
+          onIntent={props.onSettingsIntent}
+          active={props.activeUtility === "automations"}
+          icon={<CalendarClock className="h-4 w-4" />}
         />
         {props.archivedCount ? (
           <SidebarActionButton
@@ -174,7 +212,7 @@ export function Sidebar(props: SidebarProps) {
             projectNameOverrides={props.projectNameOverrides}
             collapsedGroups={props.collapsedGroups}
             runningChatIds={props.runningChatIds}
-            completedChatIds={props.completedChatIds}
+            updatedChatIds={props.updatedChatIds}
             density={props.viewState?.density}
             showPreviews={props.viewState?.show_previews}
             showTimestamps={props.viewState?.show_timestamps}
@@ -187,10 +225,9 @@ export function Sidebar(props: SidebarProps) {
           />
         )}
       </div>
-      <Separator className="bg-sidebar-border/50" />
       <div
         className={cn(
-          "flex items-center gap-1 px-2.5 py-2.5 text-xs",
+          "flex items-center gap-1 bg-sidebar/55 px-2.5 py-3 text-xs",
           collapsed && "w-14 flex-col px-0",
         )}
       >
@@ -198,6 +235,7 @@ export function Sidebar(props: SidebarProps) {
           collapsed={collapsed}
           label={t("sidebar.settings")}
           onClick={props.onOpenSettings}
+          onIntent={props.onSettingsIntent}
           className={collapsed ? undefined : "flex-1"}
           icon={<Settings className="h-4 w-4" />}
         />
@@ -215,6 +253,8 @@ function SidebarActionButton({
   active = false,
   className,
   shortcut,
+  ariaKeyShortcuts,
+  onIntent,
 }: {
   collapsed: boolean;
   label: string;
@@ -223,6 +263,8 @@ function SidebarActionButton({
   active?: boolean;
   className?: string;
   shortcut?: string;
+  ariaKeyShortcuts?: string;
+  onIntent?: () => void;
 }) {
   const title = shortcut ? `${label} (${shortcut})` : collapsed ? label : undefined;
 
@@ -232,10 +274,13 @@ function SidebarActionButton({
       variant="ghost"
       aria-label={label}
       aria-current={active ? "page" : undefined}
+      aria-keyshortcuts={ariaKeyShortcuts}
       title={title}
       onClick={() => onClick()}
+      onFocus={onIntent}
+      onPointerEnter={onIntent}
       className={cn(
-        "group h-8 min-w-0 gap-2 overflow-hidden rounded-full font-medium text-sidebar-foreground/85 hover:bg-sidebar-accent/75 hover:text-sidebar-foreground",
+        "touch-target group h-8 min-w-0 gap-2 overflow-hidden rounded-full font-medium text-sidebar-foreground/85 hover:bg-sidebar-accent/75 hover:text-sidebar-foreground",
         "transition-[width,padding,border-radius,color,background-color] duration-300 ease-out",
         collapsed
           ? "w-9 justify-center gap-0 rounded-xl px-0"

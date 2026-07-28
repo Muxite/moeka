@@ -48,7 +48,9 @@ async def test_subagent_exec_tool_uses_exec_config(tmp_path, monkeypatch):
         ),
         restrict_to_workspace=True,
     )
-    monkeypatch.setattr(manager, "_build_subagent_prompt", lambda: "subagent prompt")
+    monkeypatch.setattr(
+        manager, "_build_subagent_prompt", lambda workspace=None: "subagent prompt"
+    )
 
     captured = {}
 
@@ -70,6 +72,7 @@ async def test_subagent_exec_tool_uses_exec_config(tmp_path, monkeypatch):
         "label",
         {"channel": "cli", "chat_id": "direct"},
         status,
+        manager._compat_runtime,
     )
 
     exec_tool = captured["exec_tool"]

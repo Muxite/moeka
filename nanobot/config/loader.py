@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from nanobot.config.paths import get_state_home  # noqa: F401 — re-export for back-compat
 from nanobot.config.schema import Config
+from nanobot.utils.helpers import _write_text_atomic
 
 # Tracks the dotted field path during `_resolve_in_place` recursion so the
 # env-var warning can tell the user *where* in config.json the missing
@@ -74,8 +75,7 @@ def load_config(config_path: Path | None = None) -> Config:
             data = _migrate_config(data)
             config = Config.model_validate(data)
         except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
-            logger.warning("Failed to load config from {}: {}", path, e)
-            logger.warning("Using default configuration.")
+            raise ValueError(f"Failed to load config from {path}: {e}") from e
 
     _apply_ssrf_whitelist(config)
     return config
@@ -152,15 +152,40 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     :param config_path: Optional path to save to. Uses default if not provided.
     """
     path = config_path or get_config_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = config.model_dump(mode="json", by_alias=True)
-        payload = json.dumps(data, indent=2, ensure_ascii=False)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.replace(path)
-    except Exception as exc:
-        logger.error("Failed to save config to {}: {}", path, exc)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = config.model_dump(mode="json", by_alias=True)
+    # OAuth credentials live in dedicated token stores. Persist only the
+    # non-credential request settings consumed by these provider backends.
+    for alias, provider in (
+        ("openaiCodex", config.providers.openai_codex),
+        ("xaiGrok", config.providers.xai_grok),
+    ):
+        settings = provider.model_dump(
+            mode="json",
+            by_alias=True,
+            include={"proxy", "extra_body"},
+            exclude_none=True,
+        )
+        if settings:
+            data.setdefault("providers", {})[alias] = settings
+
+    # Temp + replace so a crash mid-write cannot leave a truncated config.json.
+    _write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def merge_missing_defaults(existing: Any, defaults: Any) -> Any:
+    """Recursively add missing defaults without replacing configured values."""
+    if not isinstance(existing, dict) or not isinstance(defaults, dict):
+        return existing
+
+    merged = dict(existing)
+    for key, value in defaults.items():
+        if key not in merged:
+            merged[key] = value
+        else:
+            merged[key] = merge_missing_defaults(merged[key], value)
+    return merged
 
 
 _ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -177,6 +202,24 @@ def resolve_config_env_vars(config: Config) -> Config:
     at process start and a single missing var should not block boot).
     """
     return _resolve_in_place(config)
+
+
+def resolve_env_refs(value: str) -> str:
+    """Resolve ``${VAR}`` references in a single string, leniently.
+
+    Unlike :func:`resolve_config_env_vars` (which walks a whole ``Config`` and
+    raises on a missing variable), this resolves one value and returns an empty
+    string if any reference is unset. It is meant for individual, lazily consumed
+    fields — e.g. a transcription provider's ``api_key`` or ``api_base`` — so a
+    missing variable degrades to "not configured" instead of producing a partial
+    value. Non-string input is returned unchanged.
+    """
+    if not isinstance(value, str):
+        return value
+    names = _ENV_REF_PATTERN.findall(value)
+    if any(name not in os.environ for name in names):
+        return ""
+    return _ENV_REF_PATTERN.sub(lambda m: os.environ[m.group(1)], value)
 
 
 def _resolve_in_place(obj: Any) -> Any:

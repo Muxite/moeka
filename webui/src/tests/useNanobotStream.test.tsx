@@ -60,6 +60,7 @@ function fakeClient() {
       },
       sendMessage: vi.fn(),
       newChat: vi.fn(),
+      forkChat: vi.fn(),
       attach: vi.fn(),
       connect: vi.fn(),
       close: vi.fn(),
@@ -130,6 +131,55 @@ describe("useNanobotStream", () => {
     requestFrame.mockRestore();
   });
 
+  it("coalesces hidden-tab deltas without scheduling paint frames", () => {
+    vi.useFakeTimers();
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame");
+
+    try {
+      const fake = fakeClient();
+      const { result } = renderHook(
+        () => useNanobotStream("chat-background", EMPTY_MESSAGES),
+        { wrapper: wrap(fake.client) },
+      );
+
+      act(() => {
+        fake.emit("chat-background", {
+          event: "delta",
+          chat_id: "chat-background",
+          text: "Quiet",
+        });
+        fake.emit("chat-background", {
+          event: "delta",
+          chat_id: "chat-background",
+          text: " background",
+        });
+      });
+
+      expect(requestFrame).not.toHaveBeenCalled();
+      expect(result.current.messages).toHaveLength(0);
+
+      act(() => vi.advanceTimersByTime(1_000));
+
+      expect(result.current.messages[0]).toMatchObject({
+        content: "Quiet background",
+        isStreaming: true,
+      });
+    } finally {
+      requestFrame.mockRestore();
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      } else {
+        delete (document as Document & { visibilityState?: DocumentVisibilityState }).visibilityState;
+      }
+      vi.useRealTimers();
+    }
+  });
+
   it("flushes pending delta text before turn_end finalizes the turn", () => {
     const fake = fakeClient();
     const { result } = renderHook(() => useNanobotStream("chat-flush", EMPTY_MESSAGES), {
@@ -154,6 +204,58 @@ describe("useNanobotStream", () => {
       content: "final chunk",
       isStreaming: false,
     });
+    expect(result.current.isStreaming).toBe(false);
+  });
+
+  it("preserves proactive automation source metadata on complete assistant messages", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-cron", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      fake.emit("chat-cron", {
+        event: "message",
+        chat_id: "chat-cron",
+        text: "Time to drink water.",
+        source: { kind: "cron", label: "drink water" },
+      });
+    });
+
+    expect(result.current.messages[0]).toMatchObject({
+      role: "assistant",
+      content: "Time to drink water.",
+      source: { kind: "cron", label: "drink water" },
+    });
+  });
+
+  it("does not start streaming from completed trailing activity after an answer", () => {
+    const fake = fakeClient();
+    const initialMessages = [
+      {
+        id: "a1",
+        role: "assistant" as const,
+        content: "Cron test",
+        turnId: "cron:run",
+        createdAt: Date.now(),
+      },
+      {
+        id: "t1",
+        role: "tool" as const,
+        kind: "trace" as const,
+        content: "message({})",
+        traces: ["message({})"],
+        turnId: "cron:run",
+        createdAt: Date.now(),
+      },
+    ];
+
+    const { result } = renderHook(
+      () => useNanobotStream("chat-cron-done", initialMessages),
+      { wrapper: wrap(fake.client) },
+    );
+
+    expect(result.current.messages.at(-1)?.kind).toBe("trace");
     expect(result.current.isStreaming).toBe(false);
   });
 
@@ -541,6 +643,127 @@ describe("useNanobotStream", () => {
       }],
     });
     expect(result.current.messages[0].toolEvents).toBeUndefined();
+  });
+
+  it("keeps live file edits separate from mixed non-file tool traces", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-file-edit-mixed-tools", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      fake.emit("chat-file-edit-mixed-tools", {
+        event: "message",
+        chat_id: "chat-file-edit-mixed-tools",
+        text: "",
+        kind: "tool_hint",
+        tool_events: [
+          {
+            phase: "start",
+            call_id: "call-read",
+            name: "read_file",
+            arguments: { path: "quicksort.py" },
+          },
+          {
+            phase: "start",
+            call_id: "call-write",
+            name: "write_file",
+            arguments: { path: "sorting/quicksort.py", content: "def quicksort():\n" },
+          },
+        ],
+      });
+      fake.emit("chat-file-edit-mixed-tools", {
+        event: "file_edit",
+        chat_id: "chat-file-edit-mixed-tools",
+        edits: [{
+          call_id: "call-write",
+          tool: "write_file",
+          path: "sorting/quicksort.py",
+          phase: "end",
+          added: 3,
+          deleted: 0,
+          approximate: false,
+          status: "done",
+        }],
+      });
+    });
+
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages[0]).toMatchObject({
+      role: "tool",
+      kind: "trace",
+      traces: ['read_file({"path":"quicksort.py"})'],
+    });
+    expect(result.current.messages[0].toolEvents?.map((event) => event.name)).toEqual(["read_file"]);
+    expect(result.current.messages[0].fileEdits).toBeUndefined();
+    expect(result.current.messages[1]).toMatchObject({
+      role: "tool",
+      kind: "trace",
+      traces: [],
+      fileEdits: [{
+        call_id: "call-write",
+        tool: "write_file",
+        path: "sorting/quicksort.py",
+        status: "done",
+      }],
+    });
+    expect(result.current.messages[1].toolEvents).toBeUndefined();
+  });
+
+  it("keeps every file from one apply_patch call", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-apply-patch-many", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      fake.emit("chat-apply-patch-many", {
+        event: "message",
+        chat_id: "chat-apply-patch-many",
+        text: "apply_patch()",
+        kind: "tool_hint",
+        tool_events: [{
+          phase: "start",
+          call_id: "call-patch",
+          name: "apply_patch",
+          arguments: { edits: [] },
+        }],
+      });
+      fake.emit("chat-apply-patch-many", {
+        event: "file_edit",
+        chat_id: "chat-apply-patch-many",
+        edits: [
+          {
+            call_id: "call-patch",
+            tool: "apply_patch",
+            path: "USER.md",
+            phase: "end",
+            added: 0,
+            deleted: 3,
+            approximate: false,
+            status: "done",
+          },
+          {
+            call_id: "call-patch",
+            tool: "apply_patch",
+            path: "MEMORY.md",
+            phase: "end",
+            added: 0,
+            deleted: 4,
+            approximate: false,
+            status: "done",
+          },
+        ],
+      });
+    });
+
+    expect(result.current.messages).toHaveLength(1);
+    expect(result.current.messages[0].traces).toEqual([]);
+    expect(result.current.messages[0].toolEvents).toBeUndefined();
+    expect(result.current.messages[0].fileEdits?.map((edit) => edit.path)).toEqual([
+      "USER.md",
+      "MEMORY.md",
+    ]);
   });
 
   it("upgrades pending file_edit placeholders when the path arrives", () => {
@@ -1342,6 +1565,85 @@ describe("useNanobotStream", () => {
     expect(result.current.messages).toHaveLength(1);
     expect(result.current.messages[0].role).toBe("user");
     expect(result.current.messages[0].content).toBe("fine");
+    expect(result.current.messages[0].turnId).toEqual(expect.any(String));
+    expect(result.current.messages[0].turnPhase).toBe("user");
+  });
+
+  it("returns the submitted turn identity used by the optimistic row and wire frame", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(
+      () => useNanobotStream("chat-submitted-turn", EMPTY_MESSAGES),
+      { wrapper: wrap(fake.client) },
+    );
+
+    let submitted: ReturnType<typeof result.current.send> = null;
+    act(() => {
+      submitted = result.current.send("bind the camera");
+    });
+
+    expect(submitted).not.toBeNull();
+    expect(submitted?.sideChannel).toBe(false);
+    expect(result.current.messages[0]).toMatchObject({
+      id: submitted?.userMessageId,
+      turnId: submitted?.turnId,
+      role: "user",
+    });
+    expect(fake.client.sendMessage).toHaveBeenCalledWith(
+      "chat-submitted-turn",
+      "bind the camera",
+      undefined,
+      expect.objectContaining({ turnId: submitted?.turnId }),
+    );
+  });
+
+  it("adds optimistic user file attachments as media", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-file-send", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+    const attachment = {
+      media: {
+        data_url: "data:application/pdf;base64,JVBERi0xLjQ=",
+        name: "report.pdf",
+      },
+      preview: {
+        kind: "file" as const,
+        url: "data:application/pdf;base64,JVBERi0xLjQ=",
+        name: "report.pdf",
+      },
+    };
+
+    act(() => {
+      result.current.send("summarize", [attachment]);
+    });
+
+    expect(result.current.messages[0].media).toEqual([attachment.preview]);
+    expect(result.current.messages[0].images).toBeUndefined();
+    expect(fake.client.sendMessage).toHaveBeenCalledWith(
+      "chat-file-send",
+      "summarize",
+      [attachment.media],
+      expect.objectContaining({ turnId: expect.any(String) }),
+    );
+  });
+
+  it("inlines quoted context into the optimistic and outbound user message", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-quote", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      result.current.send("What about this?", undefined, {
+        quotedContext: "selected assistant excerpt",
+      });
+    });
+
+    const expectedContent = "> [!QUOTE]\n> selected assistant excerpt\n\nWhat about this?";
+    expect(result.current.messages[0].content).toBe(expectedContent);
+    const outbound = fake.client.sendMessage.mock.calls.at(-1)!;
+    expect(outbound[1]).toBe(expectedContent);
+    expect(outbound[3]).not.toHaveProperty("quotedContext");
   });
 
   it("attaches assistant media_urls to complete messages", () => {
@@ -1464,28 +1766,6 @@ describe("useNanobotStream", () => {
     expect(result.current.messages[0].media).toHaveLength(1);
   });
 
-  it("passes image generation options to the websocket client", () => {
-    const fake = fakeClient();
-    const { result } = renderHook(() => useNanobotStream("chat-img", EMPTY_MESSAGES), {
-      wrapper: wrap(fake.client),
-    });
-
-    act(() => {
-      result.current.send(
-        "draw a square icon",
-        undefined,
-        { imageGeneration: { enabled: true, aspect_ratio: "1:1" } },
-      );
-    });
-
-    expect(fake.client.sendMessage).toHaveBeenCalledWith(
-      "chat-img",
-      "draw a square icon",
-      undefined,
-      { imageGeneration: { enabled: true, aspect_ratio: "1:1" } },
-    );
-  });
-
   it("stops the active turn without adding a user slash command bubble", () => {
     const fake = fakeClient();
     const { result } = renderHook(() => useNanobotStream("chat-stop", EMPTY_MESSAGES), {
@@ -1508,7 +1788,301 @@ describe("useNanobotStream", () => {
     expect(result.current.messages[0].content).toBe("long task");
   });
 
-  it("keeps streaming alive across stream_end and completes on turn_end", async () => {
+  it("does not mark side-channel slash commands as streaming", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-status", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      result.current.send("/status", undefined, { sideChannel: true });
+    });
+
+    const call = fake.client.sendMessage.mock.calls.at(-1)!;
+    const turnId = call[3]?.turnId;
+    expect(call[3]).not.toHaveProperty("sideChannel");
+    expect(result.current.isStreaming).toBe(false);
+
+    act(() => {
+      fake.emit("chat-status", {
+        event: "message",
+        chat_id: "chat-status",
+        text: "status reply",
+        turn_id: turnId,
+      });
+    });
+
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.messages.map((message) => message.content)).toEqual([
+      "/status",
+      "status reply",
+    ]);
+  });
+
+  it("finalizes active streaming before turn-ending side-channel commands", async () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-new", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      result.current.send("long task");
+    });
+    const activeTurnId = fake.client.sendMessage.mock.calls.at(-1)![3]?.turnId;
+
+    act(() => {
+      fake.emit("chat-new", {
+        event: "delta",
+        chat_id: "chat-new",
+        text: "partial answer",
+        turn_id: activeTurnId,
+      });
+    });
+    await flushStreamFrame();
+
+    expect(result.current.isStreaming).toBe(true);
+    expect(result.current.messages.find((message) => message.content === "partial answer"))
+      .toMatchObject({ isStreaming: true });
+
+    act(() => {
+      result.current.send("/new", undefined, {
+        sideChannel: true,
+        finalizeActiveTurn: true,
+      });
+    });
+
+    const newCall = fake.client.sendMessage.mock.calls.at(-1)!;
+    expect(newCall[3]).not.toHaveProperty("sideChannel");
+    expect(newCall[3]).not.toHaveProperty("finalizeActiveTurn");
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.messages.find((message) => message.content === "partial answer"))
+      .toMatchObject({ isStreaming: false });
+
+    act(() => {
+      fake.emit("chat-new", {
+        event: "message",
+        chat_id: "chat-new",
+        text: "New session started.",
+        turn_id: newCall[3]?.turnId,
+      });
+    });
+
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.messages.map((message) => message.content)).toEqual([
+      "long task",
+      "partial answer",
+      "/new",
+      "New session started.",
+    ]);
+  });
+
+  it("lets stream_end finish streaming while side-channel status replies arrive", () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeClient();
+      const { result } = renderHook(() => useNanobotStream("chat-status-loop", EMPTY_MESSAGES), {
+        wrapper: wrap(fake.client),
+      });
+
+      act(() => {
+        result.current.send("write normally");
+      });
+      const promptTurnId = fake.client.sendMessage.mock.calls.at(-1)![3]?.turnId;
+
+      act(() => {
+        fake.emit("chat-status-loop", {
+          event: "stream_end",
+          chat_id: "chat-status-loop",
+          text: "done",
+          turn_id: promptTurnId,
+        });
+      });
+
+      act(() => {
+        result.current.send("/status", undefined, { sideChannel: true });
+      });
+      const statusTurnId = fake.client.sendMessage.mock.calls.at(-1)![3]?.turnId;
+
+      act(() => {
+        fake.emit("chat-status-loop", {
+          event: "message",
+          chat_id: "chat-status-loop",
+          text: "status reply",
+          turn_id: statusTurnId,
+        });
+      });
+
+      expect(result.current.isStreaming).toBe(true);
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+
+      expect(result.current.isStreaming).toBe(false);
+      expect(result.current.messages.find((message) => message.content === "done")).toMatchObject({
+        isStreaming: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps guided output in place while the active turn resumes", async () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-guide", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      result.current.send("research this");
+    });
+    const activeTurnId = fake.client.sendMessage.mock.calls.at(-1)![3]?.turnId;
+
+    act(() => {
+      fake.emit("chat-guide", {
+        event: "delta",
+        chat_id: "chat-guide",
+        text: "Initial findings",
+        turn_id: activeTurnId,
+      });
+    });
+    await flushStreamFrame();
+
+    act(() => {
+      result.current.send("focus on primary sources", undefined, {
+        continueActiveTurn: true,
+      });
+    });
+
+    const guideCall = fake.client.sendMessage.mock.calls.at(-1)!;
+    expect(guideCall[3]).not.toHaveProperty("continueActiveTurn");
+    expect(result.current.messages.map((message) => message.content)).toEqual([
+      "research this",
+      "Initial findings",
+      "focus on primary sources",
+    ]);
+
+    act(() => {
+      fake.emit("chat-guide", {
+        event: "stream_end",
+        chat_id: "chat-guide",
+        text: "Initial findings",
+        resuming: true,
+        turn_id: activeTurnId,
+      });
+    });
+
+    expect(result.current.isStreaming).toBe(true);
+    expect(result.current.messages).toHaveLength(3);
+    expect(result.current.messages[1]).toMatchObject({
+      content: "Initial findings",
+      isStreaming: false,
+    });
+
+    act(() => {
+      fake.emit("chat-guide", {
+        event: "delta",
+        chat_id: "chat-guide",
+        text: "Updated with primary sources",
+        turn_id: activeTurnId,
+      });
+    });
+    await flushStreamFrame();
+
+    expect(result.current.messages.map((message) => message.content)).toEqual([
+      "research this",
+      "Initial findings",
+      "focus on primary sources",
+      "Updated with primary sources",
+    ]);
+    expect(result.current.messages[3]).toMatchObject({ isStreaming: true });
+
+    act(() => {
+      fake.emit("chat-guide", {
+        event: "turn_end",
+        chat_id: "chat-guide",
+        turn_id: activeTurnId,
+      });
+    });
+
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.messages.every((message) => !message.isStreaming)).toBe(true);
+  });
+
+  it("keeps length-recovery segments in one assistant message", async () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-length", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      result.current.send("give a long answer");
+    });
+    const activeTurnId = fake.client.sendMessage.mock.calls.at(-1)![3]?.turnId;
+
+    act(() => {
+      fake.emit("chat-length", {
+        event: "delta",
+        chat_id: "chat-length",
+        text: "first ",
+        turn_id: activeTurnId,
+      });
+    });
+    await flushStreamFrame();
+    const assistantId = result.current.messages[1].id;
+
+    act(() => {
+      fake.emit("chat-length", {
+        event: "stream_end",
+        chat_id: "chat-length",
+        text: "first ",
+        resuming: true,
+        merge_next: true,
+        turn_id: activeTurnId,
+      });
+    });
+
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages[1]).toMatchObject({
+      id: assistantId,
+      content: "first ",
+      isStreaming: true,
+    });
+
+    act(() => {
+      fake.emit("chat-length", {
+        event: "delta",
+        chat_id: "chat-length",
+        text: "second",
+        turn_id: activeTurnId,
+      });
+    });
+    await flushStreamFrame();
+
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages[1]).toMatchObject({
+      id: assistantId,
+      content: "first second",
+      isStreaming: true,
+    });
+
+    act(() => {
+      fake.emit("chat-length", {
+        event: "turn_end",
+        chat_id: "chat-length",
+        turn_id: activeTurnId,
+      });
+    });
+
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages[1]).toMatchObject({
+      id: assistantId,
+      content: "first second",
+      isStreaming: false,
+    });
+  });
+
+  it("keeps streaming alive across stream_end when tool activity follows", async () => {
     const fake = fakeClient();
     const onTurnEnd = vi.fn();
     const { result } = renderHook(() => useNanobotStream("chat-s", EMPTY_MESSAGES, false, onTurnEnd), {
@@ -1546,14 +2120,15 @@ describe("useNanobotStream", () => {
       fake.emit("chat-s", {
         event: "message",
         chat_id: "chat-s",
-        text: "Hello world",
+        kind: "progress",
+        text: "Calling tool",
       });
     });
 
     expect(result.current.isStreaming).toBe(true);
     expect(result.current.messages.at(-1)).toMatchObject({
-      role: "assistant",
-      content: "Hello world",
+      role: "tool",
+      content: "Calling tool",
     });
 
     act(() => {
@@ -1622,30 +2197,39 @@ describe("useNanobotStream", () => {
     });
   });
 
-  it("stamps latency on the last assistant bubble from turn_end", () => {
-    const fake = fakeClient();
-    const { result } = renderHook(() => useNanobotStream("chat-lat", EMPTY_MESSAGES), {
-      wrapper: wrap(fake.client),
-    });
-
-    act(() => {
-      fake.emit("chat-lat", {
-        event: "delta",
-        chat_id: "chat-lat",
-        text: "Hi",
+  it("stamps completion time and latency on the last assistant bubble from turn_end", () => {
+    const completedAt = Date.UTC(2026, 6, 25, 12, 34, 56);
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(completedAt);
+    try {
+      const fake = fakeClient();
+      const { result } = renderHook(() => useNanobotStream("chat-lat", EMPTY_MESSAGES), {
+        wrapper: wrap(fake.client),
       });
-    });
 
-    act(() => {
-      fake.emit("chat-lat", {
-        event: "turn_end",
-        chat_id: "chat-lat",
-        latency_ms: 2400,
+      act(() => {
+        fake.emit("chat-lat", {
+          event: "delta",
+          chat_id: "chat-lat",
+          text: "Hi",
+        });
       });
-    });
 
-    const lastAssistant = [...result.current.messages].reverse().find((m) => m.role === "assistant");
-    expect(lastAssistant?.latencyMs).toBe(2400);
+      act(() => {
+        fake.emit("chat-lat", {
+          event: "turn_end",
+          chat_id: "chat-lat",
+          latency_ms: 2400,
+        });
+      });
+
+      const lastAssistant = [...result.current.messages]
+        .reverse()
+        .find((m) => m.role === "assistant");
+      expect(lastAssistant?.latencyMs).toBe(2400);
+      expect(lastAssistant?.completedAt).toBe(completedAt);
+    } finally {
+      dateNow.mockRestore();
+    }
   });
 
   it("tracks goal_status running and clears on idle", () => {
@@ -1655,6 +2239,7 @@ describe("useNanobotStream", () => {
     });
 
     expect(result.current.runStartedAt).toBeNull();
+    expect(result.current.isStreaming).toBe(false);
 
     act(() => {
       fake.emit("chat-g", {
@@ -1665,6 +2250,7 @@ describe("useNanobotStream", () => {
       });
     });
     expect(result.current.runStartedAt).toBe(1700);
+    expect(result.current.isStreaming).toBe(true);
 
     act(() => {
       fake.emit("chat-g", {
@@ -1674,6 +2260,7 @@ describe("useNanobotStream", () => {
       });
     });
     expect(result.current.runStartedAt).toBeNull();
+    expect(result.current.isStreaming).toBe(false);
   });
 
   it("clears runStartedAt on turn_end even without idle", () => {
@@ -1691,6 +2278,7 @@ describe("useNanobotStream", () => {
       });
     });
     expect(result.current.runStartedAt).toBe(1700);
+    expect(result.current.isStreaming).toBe(true);
 
     act(() => {
       fake.emit("chat-g", {
@@ -1699,6 +2287,7 @@ describe("useNanobotStream", () => {
       });
     });
     expect(result.current.runStartedAt).toBeNull();
+    expect(result.current.isStreaming).toBe(false);
   });
 
   it("restores runStartedAt after switching away and back when goal_status was recorded without a subscriber", () => {
@@ -1720,9 +2309,11 @@ describe("useNanobotStream", () => {
       });
     });
     expect(result.current.runStartedAt).toBe(4242);
+    expect(result.current.isStreaming).toBe(true);
 
     rerender({ chatId: "chat-b" });
     expect(result.current.runStartedAt).toBeNull();
+    expect(result.current.isStreaming).toBe(false);
 
     act(() => {
       fake.emit("chat-a", {
@@ -1735,6 +2326,7 @@ describe("useNanobotStream", () => {
 
     rerender({ chatId: "chat-a" });
     expect(result.current.runStartedAt).toBe(9001);
+    expect(result.current.isStreaming).toBe(true);
   });
 
   it("tracks goal_state per chat and restores after switching sessions", () => {

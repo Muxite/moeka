@@ -11,7 +11,7 @@ Built on [nanobot](https://github.com/HKUDS/nanobot) by HKUDS, with a CS/server-
 ### Agent runtime
 - **Model presets + automatic fallback** — declare `agents.defaults.model_preset` and `fallbackModels`; the gateway hot-swaps providers per turn without a restart.
 - **Streaming reasoning** — thinking/CoT chunks render as a separate channel above the assistant bubble (per-channel `showReasoning` toggle).
-- **Sustained goals (`/goal`)** — multi-step missions tracked across turns via `long_task` / `complete_goal`.
+- **Sustained goals (`/goal`)** — multi-step missions tracked across turns via `long_task` / `update_goal`.
 - **Subagents** — `spawn` a focused worker with its own tool registry; results re-injected via system inbound.
 - **Dream two-phase memory consolidation** — automatic summarization with `/dream`, `/dream_log`, `/dream_restore`.
 - **Cross-process FileLock on session save** — safe even if a stray second moeka process starts alongside the systemd one.
@@ -37,7 +37,7 @@ Pairing: omit `allowFrom` for any channel and unapproved DMs receive a chat-nati
 OpenRouter, Anthropic, OpenAI, OpenAI Responses, OpenAI Codex (OAuth), Azure OpenAI, AWS Bedrock (native Converse), GitHub Copilot (OAuth), DeepSeek (incl. V4/Reasoner thinking), Kimi (K2.5/K2.6 thinking), Xiaomi MiMo (thinking), Moonshot, MiniMax, Mistral, Qwen, Gemini, Groq, Hugging Face, NVIDIA NIM, LM Studio, Ollama, vLLM, VolcEngine + Coding Plan, BytePlus, LongCat, StepFun, Cohere, Together, Olostep, Brave, Kagi, custom OpenAI-compatible. Transcription via Groq or OpenAI Whisper (now honours per-provider `api_base`).
 
 ### Tools
-Filesystem (read/write/edit/list, hash-deduped reads), `exec` shell, web search/fetch (BYO-key for Brave/Kagi/Olostep/HuggingFace), `cron` scheduler, `notebook_edit` for `.ipynb`, MCP servers (stdio + SSE + streamable-HTTP with TCP probe), background subagents (`spawn`), runtime self-inspection (`MyTool`), image generation, `long_task` / `complete_goal` for sustained goals.
+Filesystem (read/write/edit/list, hash-deduped reads), `exec` shell, web search/fetch (BYO-key for Brave/Kagi/Olostep/HuggingFace), `cron` scheduler, `notebook_edit` for `.ipynb`, MCP servers (stdio + SSE + streamable-HTTP with TCP probe), background subagents (`spawn`), runtime self-inspection (`MyTool`), image generation, `long_task` / `update_goal` for sustained goals.
 
 ### Sandbox (server-management posture)
 - **Internal guards (non-tunable)** — direct writes to `history.jsonl` / `.dream_cursor` are blocked because they corrupt Dream's cursor.
@@ -275,7 +275,7 @@ Then add to `config.json`:
 
 ```text
 /goal       Tell the agent to treat the next request as a long-running mission.
-            Inspect, plan, then call long_task; complete_goal recaps when done.
+            Inspect, plan, then call long_task; update_goal (action='complete') recaps when done.
 /history    Print the last N persisted messages for the current session.
 /dream      Force memory consolidation now.
 /pairing    list | approve <code> | deny <code> | revoke <user_id>
@@ -337,6 +337,25 @@ is the pure `(Config, workspace) → core` data seam. The one-shot
 `config_path=` inputs, so neither the loop nor a single completion ever requires a
 file on disk. Install the minimal dependency surface with the `core` extra
 (`pip install moeka[core]`); add `[vec]` for semantic RAG.
+
+---
+
+## Docs
+
+Moeka inherits nanobot's upstream documentation for anything that isn't
+moeka-specific (providers, MCP, architecture, the Python SDK, …). Ops docs
+above (Quick start, Configuration, Commands) describe moeka's own bootstrap;
+everything below is upstream reference material that still applies:
+
+- [Concepts](./docs/concepts.md) — runtime model overview
+- [Architecture](./docs/architecture.md) — source-level map
+- [Providers and Models](./docs/providers.md) · [Provider Cookbook](./docs/provider-cookbook.md)
+- [Configuration](./docs/configuration.md) — full config reference (web search, MCP, security, …)
+- [Chat Apps](./docs/chat-apps.md) — per-channel setup details
+- [Automations](./docs/automations.md) — cron and scheduled work
+- [OpenAI-Compatible API](./docs/openai-api.md) · [Python SDK](./docs/python-sdk.md)
+- [Troubleshooting](./docs/troubleshooting.md)
+- [Guides](./docs/guides/README.md) — task-oriented walkthroughs
 
 ---
 

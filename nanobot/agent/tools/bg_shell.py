@@ -245,7 +245,6 @@ class BackgroundProcessRegistry:
         label=StringSchema("Short human-readable label for status/list output (action=start only)"),
         task_id=StringSchema("Task id (action=status|tail|kill)"),
         max_chars=IntegerSchema(
-            4000,
             description="Tail size in characters (action=tail). Default 4000.",
             minimum=200,
             maximum=20000,

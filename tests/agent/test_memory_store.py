@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,12 @@ class TestHistoryWithCursor:
         data = json.loads(content)
         assert data["cursor"] == 1
 
+    def test_append_history_includes_session_key_when_provided(self, store):
+        store.append_history("event 1", session_key="telegram:chat-1")
+        content = store.read_file(store.history_file)
+        data = json.loads(content)
+        assert data["session_key"] == "telegram:chat-1"
+
     def test_cursor_persists_across_appends(self, store):
         store.append_history("event 1")
         store.append_history("event 2")
@@ -106,6 +113,54 @@ class TestHistoryWithCursor:
         entries = store.read_unprocessed_history(since_cursor=0)
         assert len(entries) == 2
 
+    def test_prompt_history_filters_to_current_session(self, store):
+        store.append_history("legacy entry without session")
+        store.append_history("telegram entry", session_key="telegram:chat-1")
+        store.append_history("slack entry", session_key="slack:chat-2")
+
+        entries = store.read_recent_history_for_prompt(
+            since_cursor=0,
+            session_key="telegram:chat-1",
+        )
+
+        assert [e["content"] for e in entries] == ["telegram entry"]
+        assert [e["content"] for e in store.read_unprocessed_history(0)] == [
+            "legacy entry without session",
+            "telegram entry",
+            "slack entry",
+        ]
+
+    def test_unified_prompt_history_excludes_internal_cron_sessions(self, store):
+        store.append_history("legacy entry without session")
+        store.append_history("unified entry", session_key="unified:default")
+        store.append_history("telegram entry", session_key="telegram:chat-1")
+        store.append_history("cron internal entry", session_key="cron:job-1")
+
+        entries = store.read_recent_history_for_prompt(
+            since_cursor=0,
+            session_key="unified:default",
+            unified_session=True,
+        )
+
+        assert [e["content"] for e in entries] == [
+            "legacy entry without session",
+            "unified entry",
+            "telegram entry",
+        ]
+
+    def test_unified_cron_prompt_history_includes_own_cron_entry(self, store):
+        store.append_history("unified entry", session_key="unified:default")
+        store.append_history("other cron entry", session_key="cron:job-2")
+        store.append_history("own cron entry", session_key="cron:job-1")
+
+        entries = store.read_recent_history_for_prompt(
+            since_cursor=0,
+            session_key="cron:job-1",
+            unified_session=True,
+        )
+
+        assert [e["content"] for e in entries] == ["unified entry", "own cron entry"]
+
     def test_read_unprocessed_skips_entries_without_cursor(self, store):
         """Regression: entries missing the cursor key should be silently skipped."""
         store.history_file.write_text(
@@ -116,6 +171,23 @@ class TestHistoryWithCursor:
         )
         entries = store.read_unprocessed_history(since_cursor=0)
         assert [e["cursor"] for e in entries] == [2, 3]
+
+    def test_read_unprocessed_skips_malformed_history_payloads(self, store):
+        """Externally edited JSONL can keep an int cursor but miss required payload fields."""
+        store.history_file.write_text(
+            '{"cursor": 1, "timestamp": "2026-04-01 10:00", "content": "valid"}\n'
+            '{"cursor": 2, "timestamp": "2026-04-01 10:01"}\n'
+            '{"cursor": 3, "content": "missing timestamp"}\n'
+            '{"cursor": 4, "timestamp": "2026-04-01 10:03", "content": 123}\n'
+            '{"cursor": 5, "timestamp": "2026-04-01 10:04", "content": "bad session", "session_key": 42}\n'
+            '{"cursor": 6, "timestamp": "2026-04-01 10:05", "content": "also valid", "session_key": "telegram:chat-1"}\n',
+            encoding="utf-8",
+        )
+
+        entries = store.read_unprocessed_history(since_cursor=0)
+
+        assert [e["cursor"] for e in entries] == [1, 6]
+        assert [e["content"] for e in entries] == ["valid", "also valid"]
 
     def test_next_cursor_falls_back_when_last_entry_has_no_cursor(self, store):
         """Regression: _next_cursor should not KeyError on entries without cursor."""
@@ -163,10 +235,22 @@ class TestHistoryWithCursor:
         store.append_history("event 3")
         store.append_history("event 4")
         store.append_history("event 5")
+        store.set_last_dream_cursor(5)
         store.compact_history()
         entries = store.read_unprocessed_history(since_cursor=0)
         assert len(entries) == 2
         assert entries[0]["cursor"] in {4, 5}
+
+    def test_compact_history_preserves_entries_after_dream_cursor(self, tmp_path):
+        store = MemoryStore(tmp_path, max_history_entries=50)
+        for index in range(1, 101):
+            store.append_history(f"event {index}")
+        store.set_last_dream_cursor(20)
+
+        store.compact_history()
+
+        entries = store.read_unprocessed_history(since_cursor=0)
+        assert [entry["cursor"] for entry in entries] == list(range(21, 101))
 
     def test_write_entries_uses_atomic_write(self, tmp_path):
         """_write_entries uses temp file + os.replace for atomicity."""
@@ -258,6 +342,27 @@ class TestAppendHistoryHardCap:
 class TestDreamCursor:
     def test_initial_cursor_is_zero(self, store):
         assert store.get_last_dream_cursor() == 0
+
+    def test_returns_zero_when_empty(self, store):
+        assert store.get_latest_cursor() == 0
+
+    def test_returns_cursor_of_last_entry(self, store):
+        store.append_history("event 1")
+        store.append_history("event 2")
+        store.append_history("event 3")
+
+        assert store.get_latest_cursor() == 3
+
+    def test_returns_zero_when_no_entries(self, store):
+        store.history_file.write_text("", encoding="utf-8")
+
+        assert store.get_latest_cursor() == 0
+
+    def test_matches_next_cursor_minus_one(self, store):
+        store.append_history("event 1")
+        store.append_history("event 2")
+
+        assert store.get_latest_cursor() == max(store._next_cursor() - 1, 0)
 
     def test_set_and_get_cursor(self, store):
         store.set_last_dream_cursor(5)
@@ -446,3 +551,33 @@ class TestLegacyHistoryMigration:
         assert entries[0]["timestamp"] == "2026-04-01 10:00"
         assert "Broken" in entries[0]["content"]
         assert "migration." in entries[0]["content"]
+
+
+def test_history_skips_non_dict_jsonl_lines(tmp_path: Path) -> None:
+    """Null/list/bool history lines must not crash reads or appends."""
+    memory = MemoryStore(tmp_path)
+    memory.history_file.parent.mkdir(parents=True, exist_ok=True)
+    memory.history_file.write_text(
+        "\n".join([
+            "null",
+            "[1, 2]",
+            "true",
+            json.dumps({
+                "cursor": 1,
+                "timestamp": "2026-01-01T00:00:00",
+                "content": "kept",
+                "session_key": "cli:t",
+            }),
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    entries = memory.read_unprocessed_history(since_cursor=0)
+    assert entries == [{
+        "cursor": 1,
+        "timestamp": "2026-01-01T00:00:00",
+        "content": "kept",
+        "session_key": "cli:t",
+    }]
+    next_cursor = memory.append_history("next", session_key="cli:t")
+    assert next_cursor == 2

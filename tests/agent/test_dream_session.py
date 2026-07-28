@@ -1,8 +1,10 @@
 """Tests for Dream session key generation and rotation."""
-import time
-from datetime import datetime
+
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from nanobot.agent.memory import MemoryStore
+from nanobot.session.manager import SessionManager
 
 
 class TestDreamSessionKey:
@@ -13,52 +15,49 @@ class TestDreamSessionKey:
         datetime.strptime(ts_part, "%Y%m%d-%H%M%S")
 
     def test_unique_across_calls(self):
-        k1 = MemoryStore.dream_session_key()
-        time.sleep(1.1)
-        k2 = MemoryStore.dream_session_key()
+        now = datetime(2026, 5, 28, 10, 0, 0)
+        with patch("nanobot.agent.memory.datetime") as mock_dt:
+            mock_dt.now.side_effect = [now, now + timedelta(seconds=1)]
+            k1 = MemoryStore.dream_session_key()
+            k2 = MemoryStore.dream_session_key()
+
         assert k1 != k2
 
 
 class TestPruneDreamSessions:
+    @staticmethod
+    def _make_dream_session(sessions: SessionManager, key: str, updated_at: datetime) -> None:
+        session = sessions.get_or_create(key)
+        session.add_message("user", "dream scratch turn")
+        session.updated_at = updated_at
+        sessions.save(session)
+
     def test_keeps_n_most_recent(self, tmp_path):
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
+        sessions = SessionManager(tmp_path)
+        base = datetime(2026, 5, 28, 10, 0, 0)
+        keys = [f"dream:20260528-{100000 + i:06d}" for i in range(15)]
+        for i, key in enumerate(keys):
+            self._make_dream_session(sessions, key, base + timedelta(seconds=i))
 
-        for i in range(15):
-            key = f"dream:20260528-{100000 + i:06d}"
-            safe_key = key.replace(":", "_")
-            path = sessions_dir / f"{safe_key}.jsonl"
-            path.write_text(
-                f'{{"_type": "metadata", "key": "{key}", '
-                f'"created_at": "2026-05-28T10:00:{i:02d}", '
-                f'"updated_at": "2026-05-28T10:00:{i:02d}"}}\n',
-                encoding="utf-8",
-            )
+        self._make_dream_session(sessions, "telegram:123", base)
 
-        normal_path = sessions_dir / "telegram_123.jsonl"
-        normal_path.write_text('{"_type": "metadata"}\n', encoding="utf-8")
+        MemoryStore.prune_dream_sessions(sessions, keep=10)
 
-        MemoryStore.prune_dream_sessions(sessions_dir, keep=10)
-
-        dream_files = sorted(sessions_dir.glob("dream_*.jsonl"))
-        assert len(dream_files) == 10
-        remaining_keys = [f.stem for f in dream_files]
-        assert "dream_20260528-100000" not in remaining_keys
-        assert "dream_20260528-100014" in remaining_keys
-        assert normal_path.exists()
+        remaining = {row["key"] for row in sessions.list_sessions()}
+        # Oldest 5 dream sessions pruned, most recent 10 kept.
+        assert remaining == set(keys[5:]) | {"telegram:123"}
 
     def test_noop_when_under_limit(self, tmp_path):
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        for i in range(3):
-            key = f"dream:20260528-{100000 + i:06d}"
-            safe_key = key.replace(":", "_")
-            (sessions_dir / f"{safe_key}.jsonl").write_text("{}", encoding="utf-8")
+        sessions = SessionManager(tmp_path)
+        base = datetime(2026, 5, 28, 10, 0, 0)
+        keys = [f"dream:20260528-{100000 + i:06d}" for i in range(3)]
+        for i, key in enumerate(keys):
+            self._make_dream_session(sessions, key, base + timedelta(seconds=i))
 
-        MemoryStore.prune_dream_sessions(sessions_dir, keep=10)
-        assert len(list(sessions_dir.glob("dream_*.jsonl"))) == 3
+        MemoryStore.prune_dream_sessions(sessions, keep=10)
+        assert {row["key"] for row in sessions.list_sessions()} == set(keys)
 
-    def test_empty_dir_noop(self, tmp_path):
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        MemoryStore.prune_dream_sessions(sessions_dir, keep=10)
+    def test_empty_store_noop(self, tmp_path):
+        sessions = SessionManager(tmp_path)
+        MemoryStore.prune_dream_sessions(sessions, keep=10)
+        assert sessions.list_sessions() == []

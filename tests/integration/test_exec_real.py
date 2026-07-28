@@ -169,8 +169,15 @@ async def test_shutdown_blockable_when_configured() -> None:
 
 @pytest.mark.asyncio
 async def test_allow_patterns_restricts_to_whitelist() -> None:
-    """When allow_patterns is set, only matching commands run."""
-    tool = ExecTool(allow_patterns=[r"^echo\b"])
+    """When allow_patterns is set, only matching commands run.
+
+    Patterns are matched with re.fullmatch against each top-level shell
+    segment (not re.search against the whole command) so a chained command
+    like "echo hi; rm -rf /" can't slip a disallowed segment through by
+    matching only the first one — so the pattern must cover the full segment
+    text, not just a prefix.
+    """
+    tool = ExecTool(allow_patterns=[r"^echo\b.*"])
     output_ok = await _run(tool, "echo allowed")
     assert "allowed" in output_ok
 

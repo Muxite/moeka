@@ -55,11 +55,13 @@ class TestLoadConfigReal:
         config = load_config(tmp_path / "nonexistent.json")
         assert isinstance(config, Config)
 
-    def test_returns_defaults_on_malformed_json(self, tmp_path: Path) -> None:
+    def test_raises_on_malformed_json(self, tmp_path: Path) -> None:
+        """Malformed config.json fails loud rather than silently falling back
+        to defaults (which could mask a real config problem)."""
         cfg_file = tmp_path / "bad.json"
         cfg_file.write_text("{ this is not json }", encoding="utf-8")
-        config = load_config(cfg_file)
-        assert isinstance(config, Config)
+        with pytest.raises(ValueError, match="Failed to load config"):
+            load_config(cfg_file)
 
     def test_loads_channels_enabled_flag(self, tmp_path: Path) -> None:
         cfg_file = tmp_path / "config.json"

@@ -50,7 +50,6 @@ class TestSaveDurability:
         wal = Path(str(manager.db_path) + "-wal")
         assert wal.exists() and os.path.getsize(wal) > 0
 
-
 class TestFlushAll:
     """Verify flush_all re-saves all cached sessions durably."""
 
@@ -121,3 +120,13 @@ class TestFlushAll:
         assert len(history) == 2
         assert history[0]["content"] == "remember this"
         assert history[1]["content"] == "noted"
+
+    # NOTE: upstream also has a TestLoadErrors class asserting that
+    # PermissionError during file I/O is not swallowed as corrupt data. That
+    # doesn't map cleanly onto the SQLite store: reads/writes go through
+    # sqlite3, not builtins.open, and _SESSION_DATA_ERRORS deliberately
+    # catches sqlite3.Error broadly (matching moeka's original defensive
+    # "never crash on load" posture for _load/list_sessions/etc.) rather than
+    # distinguishing access-denied from corrupt-data failures. Flagged for a
+    # human to decide whether SQLite-level permission errors should propagate
+    # instead of being swallowed.

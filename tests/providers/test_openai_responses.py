@@ -19,7 +19,6 @@ from nanobot.providers.openai_responses.parsing import (
     parse_response_output,
 )
 
-
 # ======================================================================
 # converters - split_tool_call_id
 # ======================================================================
@@ -156,6 +155,19 @@ class TestConvertMessages:
         assert items[0]["call_id"] == "call_abc"
         assert items[0]["id"] == "fc_1"
         assert items[0]["name"] == "get_weather"
+        assert items[0]["arguments"] == '{"city": "SF"}'
+
+    def test_assistant_tool_call_history_repairs_malformed_arguments(self):
+        _, items = convert_messages([{
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_abc|fc_1",
+                "function": {"name": "read_file", "arguments": '{path:"foo.txt"}'},
+            }],
+        }])
+
+        assert json.loads(items[0]["arguments"]) == {"path": "foo.txt"}
 
     def test_duplicate_response_item_ids_are_made_unique(self):
         """Codex rejects replayed Responses input items with duplicate ids."""
@@ -227,6 +239,63 @@ class TestConvertMessages:
             "content": {"key": "value"},
         }])
         assert items[0]["output"] == '{"key": "value"}'
+
+    def test_tool_message_preserves_image_content(self):
+        _, items = convert_messages([{
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"},
+                    "_meta": {"path": "/private/image.png"},
+                },
+                {"type": "text", "text": "(Image file: image.png)"},
+            ],
+        }])
+
+        assert items[0]["output"] == [
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,abc",
+                "detail": "auto",
+            },
+            {"type": "input_text", "text": "(Image file: image.png)"},
+        ]
+        assert "_meta" not in str(items[0])
+
+    def test_tool_message_preserves_file_content(self):
+        _, items = convert_messages([{
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [{
+                "type": "input_file",
+                "file_id": "file_123",
+                "filename": "report.pdf",
+                "_meta": {"path": "/private/report.pdf"},
+            }],
+        }])
+
+        assert items[0]["output"] == [{
+            "type": "input_file",
+            "file_id": "file_123",
+            "filename": "report.pdf",
+        }]
+        assert "_meta" not in str(items[0])
+
+    def test_tool_message_preserves_unknown_list_as_json(self):
+        content = [
+            {"type": "text", "text": "status", "code": 7},
+            {"kind": "record", "value": 42},
+        ]
+
+        _, items = convert_messages([{
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": content,
+        }])
+
+        assert items[0]["output"] == json.dumps(content, ensure_ascii=False)
 
     def test_non_standard_keys_not_leaked(self):
         """Extra keys on messages must not appear in converted items."""
@@ -368,7 +437,7 @@ class TestParseResponseOutput:
         assert result.tool_calls[0].id == "call_1|fc_1"
 
     def test_malformed_tool_arguments_logged(self):
-        """Malformed JSON arguments should log a warning and fallback."""
+        """Malformed JSON arguments should log a warning and remain non-object."""
         resp = {
             "output": [{
                 "type": "function_call",
@@ -379,9 +448,28 @@ class TestParseResponseOutput:
         }
         with patch("nanobot.providers.openai_responses.parsing.logger") as mock_logger:
             result = parse_response_output(resp)
-        assert result.tool_calls[0].arguments == {"raw": "{bad json"}
+        assert result.tool_calls[0].arguments == "{bad json"
         mock_logger.warning.assert_called_once()
         assert "Failed to parse tool call arguments" in str(mock_logger.warning.call_args)
+
+    @pytest.mark.parametrize("arguments", [[], False, 0])
+    def test_falsy_non_object_tool_arguments_preserved(self, arguments):
+        resp = {
+            "output": [{
+                "type": "function_call",
+                "call_id": "c1",
+                "id": "fc1",
+                "name": "f",
+                "arguments": arguments,
+            }],
+            "status": "completed",
+            "usage": {},
+        }
+
+        result = parse_response_output(resp)
+
+        assert result.tool_calls[0].arguments == arguments
+        assert type(result.tool_calls[0].arguments) is type(arguments)
 
     def test_reasoning_content_extracted(self):
         resp = {
@@ -478,7 +566,7 @@ class TestConsumeSse:
         async def on_reasoning(delta: str) -> None:
             deltas.append(delta)
 
-        content, tool_calls, finish_reason, reasoning = await consume_sse_with_reasoning(
+        content, tool_calls, finish_reason, usage, reasoning = await consume_sse_with_reasoning(
             response,
             on_reasoning_delta=on_reasoning,
         )
@@ -486,6 +574,7 @@ class TestConsumeSse:
         assert content == "answer"
         assert tool_calls == []
         assert finish_reason == "stop"
+        assert usage == {}
         assert reasoning == "thinking briefly"
         assert deltas == ["thinking ", "briefly"]
 
@@ -506,7 +595,7 @@ class TestConsumeSse:
             },
         ])
 
-        _, _, _, reasoning = await consume_sse_with_reasoning(response)
+        _, _, _, _, reasoning = await consume_sse_with_reasoning(response)
 
         assert reasoning == "cached summary"
 
@@ -527,7 +616,7 @@ class TestConsumeSse:
         async def on_reasoning(delta: str) -> None:
             deltas.append(delta)
 
-        _, _, _, reasoning = await consume_sse_with_reasoning(
+        _, _, _, _, reasoning = await consume_sse_with_reasoning(
             response,
             on_reasoning_delta=on_reasoning,
         )
@@ -545,9 +634,25 @@ class TestConsumeSse:
             {"type": "response.completed", "response": {"status": "completed"}},
         ])
 
-        _, _, _, reasoning = await consume_sse_with_reasoning(response)
+        _, _, _, _, reasoning = await consume_sse_with_reasoning(response)
 
         assert reasoning == "part summary"
+
+    @pytest.mark.asyncio
+    async def test_raw_sse_usage_extracted(self):
+        response = _SseResponse([
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                },
+            },
+        ])
+
+        _, _, _, usage, _ = await consume_sse_with_reasoning(response)
+
+        assert usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 
     @pytest.mark.asyncio
     async def test_tool_call_done_arguments_callback(self):
@@ -594,6 +699,38 @@ class TestConsumeSse:
                 "arguments": '{"path":"a.txt","content":"hello\\n"}',
             },
         ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("arguments", [[], False, 0])
+    async def test_falsy_non_object_tool_arguments_preserved(self, arguments):
+        response = _SseResponse([
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "id": "fc1",
+                    "name": "f",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "id": "fc1",
+                    "name": "f",
+                    "arguments": arguments,
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ])
+
+        _, tool_calls, _, _, _ = await consume_sse_with_reasoning(response)
+
+        assert tool_calls[0].arguments == arguments
+        assert type(tool_calls[0].arguments) is type(arguments)
 
 
 # ======================================================================
@@ -749,6 +886,28 @@ class TestConsumeSdkStream:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("arguments", [[], False, 0])
+    async def test_falsy_non_object_tool_arguments_preserved(self, arguments):
+        item_added = MagicMock(type="function_call", call_id="c1", id="fc1", arguments="")
+        item_added.name = "f"
+        ev1 = MagicMock(type="response.output_item.added", item=item_added)
+        item_done = MagicMock(type="function_call", call_id="c1", id="fc1")
+        item_done.name = "f"
+        item_done.arguments = arguments
+        ev2 = MagicMock(type="response.output_item.done", item=item_done)
+        resp_obj = MagicMock(status="completed", usage=None, output=[])
+        ev3 = MagicMock(type="response.completed", response=resp_obj)
+
+        async def stream():
+            for e in [ev1, ev2, ev3]:
+                yield e
+
+        _, tool_calls, _, _, _ = await consume_sdk_stream(stream())
+
+        assert tool_calls[0].arguments == arguments
+        assert type(tool_calls[0].arguments) is type(arguments)
+
+    @pytest.mark.asyncio
     async def test_usage_extracted(self):
         usage_obj = MagicMock(input_tokens=10, output_tokens=5, total_tokens=15)
         resp_obj = MagicMock(status="completed", usage=usage_obj, output=[])
@@ -795,7 +954,7 @@ class TestConsumeSdkStream:
 
     @pytest.mark.asyncio
     async def test_malformed_tool_args_logged(self):
-        """Malformed JSON in streaming tool args should log a warning."""
+        """Malformed JSON in streaming tool args should log a warning and remain non-object."""
         item_added = MagicMock(type="function_call", call_id="c1", id="fc1", arguments="")
         item_added.name = "f"
         ev1 = MagicMock(type="response.output_item.added", item=item_added)
@@ -812,6 +971,6 @@ class TestConsumeSdkStream:
 
         with patch("nanobot.providers.openai_responses.parsing.logger") as mock_logger:
             _, tool_calls, _, _, _ = await consume_sdk_stream(stream())
-        assert tool_calls[0].arguments == {"raw": "{bad"}
+        assert tool_calls[0].arguments == "{bad"
         mock_logger.warning.assert_called_once()
         assert "Failed to parse tool call arguments" in str(mock_logger.warning.call_args)

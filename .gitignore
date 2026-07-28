@@ -114,6 +114,8 @@ temp/
 *.tmp
 exp/
 .playwright-mcp/
+bridge/node_modules/
+webui/.verify-*
 
 # MagicMock file pollution from tests that mock Path objects
 <MagicMock*

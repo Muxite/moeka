@@ -27,7 +27,9 @@ class TestOpenAITranscriptionApiBase:
     def test_env_used_when_no_explicit_api_base(self, monkeypatch):
         monkeypatch.setenv("OPENAI_TRANSCRIPTION_BASE_URL", "https://env.example/v1")
         provider = OpenAITranscriptionProvider(api_key="k")
-        assert provider.api_url == "https://env.example/v1"
+        # Chat-style bases (no trailing /audio/transcriptions) get the path
+        # appended so the request doesn't 404 (#3637).
+        assert provider.api_url == "https://env.example/v1/audio/transcriptions"
 
     def test_default_when_no_api_base_and_no_env(self, monkeypatch):
         monkeypatch.delenv("OPENAI_TRANSCRIPTION_BASE_URL", raising=False)
@@ -44,7 +46,9 @@ class TestGroqTranscriptionApiBase:
     def test_env_used_when_no_explicit_api_base(self, monkeypatch):
         monkeypatch.setenv("GROQ_BASE_URL", "https://env.example/v1")
         provider = GroqTranscriptionProvider(api_key="k")
-        assert provider.api_url == "https://env.example/v1"
+        # Chat-style bases (no trailing /audio/transcriptions) get the path
+        # appended so the request doesn't 404 (#3637).
+        assert provider.api_url == "https://env.example/v1/audio/transcriptions"
 
     def test_default_when_no_api_base_and_no_env(self, monkeypatch):
         monkeypatch.delenv("GROQ_BASE_URL", raising=False)

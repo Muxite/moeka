@@ -17,6 +17,8 @@ Moeka-specific deviations from upstream nanobot worth knowing:
 - **Transcription `api_base` propagation** — Groq/OpenAI Whisper provider honours per-provider `api_base`.
 - **Lazy `Config` / `ToolsConfig` model_rebuild** — `nanobot/config/schema.py` re-tries forward-ref resolution on first instantiation to survive circular-import order.
 - **No CONTRIBUTING.md and no upstream `images/nanobot_logo.png`** — both intentionally removed; moeka uses its own `images/GitHub_README.png`.
+- **Flat workspace layout** — `AgentDefaults.workspace` defaults to `~/.nanobot` directly (state home *is* the workspace), not upstream's nested `~/.nanobot/workspace`.
+- **Missing `${VAR}` config references warn, not hard-fail** — `resolve_config_env_vars` (`nanobot/config/loader.py`) logs a warning with the dotted field path and leaves the placeholder unreplaced instead of raising, since `keys.env` injects secrets at process start and one missing var shouldn't block boot. See `tests/config/test_env_var_warnings.py`.
 - **Lots of upstream features still apply** — model presets + fallback providers, streaming reasoning, pairing-code DM flow, ToolContext plugin system, `/goal` long-running tasks, settings BYOK endpoints, etc.
 
 ## Development Commands
@@ -90,7 +92,7 @@ Two branches:
 - `main` — stable; the running systemd unit follows this branch.
 - `nightly` — integrates upstream `HKUDS/nanobot` plus moeka work; merged into `main` when stable.
 
-The `upstream` remote points at `HKUDS/nanobot`. Periodic merges of `upstream/nightly` into local `nightly` pull in new providers, channels, and runtime features; moeka-specific deviations (see *Project Overview*) must be preserved during conflict resolution.
+The `upstream` remote points at `HKUDS/nanobot`. Upstream's own `nightly` branch went stale after 2026-06-03 (HKUDS kept developing on `upstream/main` instead), so moeka now syncs periodically from `upstream/main` directly rather than `upstream/nightly`. Periodic merges of `upstream/main` into local `nightly` pull in new providers, channels, and runtime features; moeka-specific deviations (see *Project Overview*) must be preserved during conflict resolution.
 
 ## Code Style
 

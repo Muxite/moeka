@@ -3,7 +3,6 @@ import type {
   InboundEvent,
   Outbound,
   OutboundCliAppMention,
-  OutboundImageGeneration,
   OutboundMcpPresetMention,
   OutboundMedia,
   GoalStateWsPayload,
@@ -82,17 +81,23 @@ type RunStatusHandler = (chatId: string, startedAt: number | null) => void;
  */
 export type StreamError =
   /** Server rejected the inbound frame as too large (WS close code 1009).
-   * Typically means the user attached images whose base64 size exceeded
-   * ``maxMessageBytes`` on the server. */
+   * This is the transport fallback after text and attachment policies have
+   * already been checked independently. */
   | { kind: "message_too_big" }
   | { kind: "workspace_scope_rejected"; reason?: string; chatId?: string };
 
 type ErrorHandler = (error: StreamError) => void;
 
-interface PendingNewChat {
-  resolve: (chatId: string) => void;
+interface PendingRequest<T> {
+  resolve: (value: T) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+const SYSTEM_COMMAND_TURN_PREFIX = "webui-system:";
+
+export function isSystemCommandTurnId(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.startsWith(SYSTEM_COMMAND_TURN_PREFIX);
 }
 
 export interface NanobotClientOptions {
@@ -131,7 +136,9 @@ export class NanobotClient {
   private runStartedAtByChatId = new Map<string, number>();
   /** Latest ``goal_state`` snapshot per ``chat_id`` (multi-session isolation). */
   private goalStateByChatId = new Map<string, GoalStateWsPayload>();
-  private pendingNewChat: PendingNewChat | null = null;
+  private pendingNewChat: PendingRequest<string> | null = null;
+  private pendingTranscriptions = new Map<string, PendingRequest<string>>();
+  private pendingSystemCommands = new Map<string, PendingRequest<void>>();
   // Frames queued while the socket is not yet OPEN
   private sendQueue: Outbound[] = [];
   private reconnectAttempts = 0;
@@ -320,6 +327,52 @@ export class NanobotClient {
     });
   }
 
+  transcribeAudio(
+    dataUrl: string,
+    options?: { durationMs?: number; timeoutMs?: number },
+  ): Promise<string> {
+    const requestId = crypto.randomUUID();
+    const timeoutMs = options?.timeoutMs ?? 120_000;
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingTranscriptions.delete(requestId);
+        reject(new Error("transcription timed out"));
+      }, timeoutMs);
+      this.pendingTranscriptions.set(requestId, { resolve, reject, timer });
+      this.queueSend({
+        type: "transcribe_audio",
+        request_id: requestId,
+        data_url: dataUrl,
+        ...(options?.durationMs !== undefined ? { duration_ms: options.durationMs } : {}),
+      });
+    });
+  }
+
+  /** Ask the server to create a non-destructive fork before a user-message index. */
+  forkChat(
+    sourceChatId: string,
+    beforeUserIndex: number,
+    title?: string,
+    timeoutMs: number = 5_000,
+  ): Promise<string> {
+    if (this.pendingNewChat) {
+      return Promise.reject(new Error("newChat already in flight"));
+    }
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingNewChat = null;
+        reject(new Error("forkChat timed out"));
+      }, timeoutMs);
+      this.pendingNewChat = { resolve, reject, timer };
+      this.queueSend({
+        type: "fork_chat",
+        source_chat_id: sourceChatId,
+        before_user_index: beforeUserIndex,
+        ...(title?.trim() ? { title: title.trim() } : {}),
+      });
+    });
+  }
+
   attach(chatId: string): void {
     this.knownChats.add(chatId);
     if (this.socket?.readyState === WS_OPEN) {
@@ -332,10 +385,11 @@ export class NanobotClient {
     content: string,
     media?: OutboundMedia[],
     options?: {
-      imageGeneration?: OutboundImageGeneration;
       cliApps?: OutboundCliAppMention[];
       mcpPresets?: OutboundMcpPresetMention[];
+      quotedContext?: string;
       workspaceScope?: WorkspaceScopePayload | null;
+      turnId?: string;
     },
   ): void {
     this.knownChats.add(chatId);
@@ -344,13 +398,27 @@ export class NanobotClient {
       chat_id: chatId,
       content,
       ...(media && media.length > 0 ? { media } : {}),
-      ...(options?.imageGeneration ? { image_generation: options.imageGeneration } : {}),
       ...(options?.cliApps?.length ? { cli_apps: options.cliApps } : {}),
       ...(options?.mcpPresets?.length ? { mcp_presets: options.mcpPresets } : {}),
+      ...(options?.quotedContext?.trim() ? { quoted_context: options.quotedContext.trim() } : {}),
       ...(options?.workspaceScope ? { workspace_scope: options.workspaceScope } : {}),
+      ...(options?.turnId ? { turn_id: options.turnId } : {}),
       webui: true,
     };
     this.queueSend(frame);
+  }
+
+  sendSystemCommand(chatId: string, command: string, timeoutMs = 5_000): Promise<void> {
+    const normalized = command.trim();
+    const turnId = `${SYSTEM_COMMAND_TURN_PREFIX}${crypto.randomUUID()}`;
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSystemCommands.delete(turnId);
+        reject(new Error("system command timed out"));
+      }, timeoutMs);
+      this.pendingSystemCommands.set(turnId, { resolve, reject, timer });
+      this.sendMessage(chatId, normalized, undefined, { turnId });
+    });
   }
 
   setWorkspaceScope(chatId: string, workspaceScope: WorkspaceScopePayload): void {
@@ -368,6 +436,13 @@ export class NanobotClient {
     if (this.status_ === status) return;
     this.status_ = status;
     for (const handler of this.statusHandlers) handler(status);
+  }
+
+  private clearRunStatusesForReconnect(): void {
+    if (this.runStartedAtByChatId.size === 0) return;
+    const chatIds = [...this.runStartedAtByChatId.keys()];
+    this.runStartedAtByChatId.clear();
+    for (const chatId of chatIds) this.emitRunStatus(chatId, null);
   }
 
   private handleOpen(): void {
@@ -401,6 +476,16 @@ export class NanobotClient {
       console.log("[nanobot ws inbound]", summarizeInboundWsPayload(parsed));
     }
 
+    const turnId = "turn_id" in parsed && typeof parsed.turn_id === "string"
+      ? parsed.turn_id
+      : null;
+    if (isSystemCommandTurnId(turnId)) {
+      if (parsed.event === "message" || parsed.event === "turn_end") {
+        this.resolveSystemCommand(turnId);
+      }
+      return;
+    }
+
     if (parsed.event === "ready") {
       this.readyChatId = parsed.chat_id;
       this.knownChats.add(parsed.chat_id);
@@ -423,6 +508,16 @@ export class NanobotClient {
       return;
     }
 
+    if (parsed.event === "transcription_result") {
+      this.resolveTranscription(parsed.request_id, parsed.text);
+      return;
+    }
+
+    if (parsed.event === "transcription_error") {
+      this.rejectTranscription(parsed.request_id, parsed.detail || "error");
+      return;
+    }
+
     if (parsed.event === "session_updated") {
       this.emitSessionUpdate(parsed.chat_id, parsed.scope, parsed.workspace_scope);
       return;
@@ -439,6 +534,14 @@ export class NanobotClient {
         this.pendingNewChat.reject(new Error(`workspace_scope_rejected:${parsed.reason || ""}`));
         this.pendingNewChat = null;
       }
+    }
+
+    if (parsed.event === "error" && this.pendingNewChat) {
+      clearTimeout(this.pendingNewChat.timer);
+      const detail = typeof parsed.detail === "string" ? parsed.detail : "server error";
+      const reason = typeof parsed.reason === "string" && parsed.reason ? `:${parsed.reason}` : "";
+      this.pendingNewChat.reject(new Error(`${detail}${reason}`));
+      this.pendingNewChat = null;
     }
 
     const chatId = (parsed as { chat_id?: string }).chat_id;
@@ -498,6 +601,12 @@ export class NanobotClient {
       this.pendingNewChat.reject(new Error("socket closed"));
       this.pendingNewChat = null;
     }
+    this.rejectAllTranscriptions("socket closed");
+    for (const pending of this.pendingSystemCommands.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("socket closed"));
+    }
+    this.pendingSystemCommands.clear();
     // Surface structured reasons *before* reconnect logic so the UI can
     // display the error even while the client transparently reconnects.
     // Browsers populate ``CloseEvent.code`` with the wire-level close code;
@@ -526,7 +635,44 @@ export class NanobotClient {
     }
   }
 
+  private resolveTranscription(requestId: string, text: string): void {
+    const pending = this.pendingTranscriptions.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingTranscriptions.delete(requestId);
+    pending.resolve(text);
+  }
+
+  private rejectTranscription(requestId: string | undefined, detail: string): void {
+    if (!requestId) {
+      this.rejectAllTranscriptions(detail);
+      return;
+    }
+    const pending = this.pendingTranscriptions.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingTranscriptions.delete(requestId);
+    pending.reject(new Error(detail));
+  }
+
+  private rejectAllTranscriptions(detail: string): void {
+    for (const [requestId, pending] of this.pendingTranscriptions) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(detail));
+      this.pendingTranscriptions.delete(requestId);
+    }
+  }
+
+  private resolveSystemCommand(turnId: string): void {
+    const pending = this.pendingSystemCommands.get(turnId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingSystemCommands.delete(turnId);
+    pending.resolve();
+  }
+
   private scheduleReconnect(): void {
+    this.clearRunStatusesForReconnect();
     this.setStatus("reconnecting");
     const attempt = this.reconnectAttempts++;
     // Exponential backoff: 0.5s, 1s, 2s, 4s, capped.

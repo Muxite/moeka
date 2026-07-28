@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nanobot.agent.loop import AgentLoop, TurnContext, TurnState
+from nanobot.agent.loop import AgentLoop, TurnContext, TurnKind
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ChannelsConfig
@@ -27,7 +27,7 @@ def _make_loop(tmp_path: Path, channels_config: ChannelsConfig | None = None) ->
 
 
 @pytest.mark.asyncio
-async def test_state_restore_extracts_documents_by_default(
+async def test_restore_turn_extracts_documents_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -42,20 +42,23 @@ async def test_state_restore_extracts_documents_by_default(
 
     monkeypatch.setattr("nanobot.agent.loop.extract_documents", fake_extract_documents)
 
+    msg = InboundMessage(
+        channel="cli",
+        sender_id="u",
+        chat_id="c",
+        content="summarize",
+        media=[str(doc_path)],
+    )
     ctx = TurnContext(
-        msg=InboundMessage(
-            channel="cli",
-            sender_id="u",
-            chat_id="c",
-            content="summarize",
-            media=[str(doc_path)],
-        ),
+        msg=msg,
         session_key="cli:c",
-        state=TurnState.RESTORE,
         turn_id="turn-1",
+        runtime=loop.llm_runtime(),
+        kind=TurnKind.USER,
+        delivery=loop.turn_delivery_factory.create(msg, "cli:c"),
     )
 
-    assert await loop._state_restore(ctx) == "ok"
+    await loop._restore_turn(ctx)
 
     assert calls == [("summarize", [str(doc_path)])]
     assert "Quarterly revenue" in ctx.msg.content
@@ -63,7 +66,7 @@ async def test_state_restore_extracts_documents_by_default(
 
 
 @pytest.mark.asyncio
-async def test_state_restore_references_documents_when_extraction_disabled(
+async def test_restore_turn_references_documents_when_extraction_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -76,20 +79,23 @@ async def test_state_restore_references_documents_when_extraction_disabled(
 
     monkeypatch.setattr("nanobot.agent.loop.extract_documents", fail_extract_documents)
 
+    msg = InboundMessage(
+        channel="cli",
+        sender_id="u",
+        chat_id="c",
+        content="summarize",
+        media=[str(doc_path)],
+    )
     ctx = TurnContext(
-        msg=InboundMessage(
-            channel="cli",
-            sender_id="u",
-            chat_id="c",
-            content="summarize",
-            media=[str(doc_path)],
-        ),
+        msg=msg,
         session_key="cli:c",
-        state=TurnState.RESTORE,
         turn_id="turn-1",
+        runtime=loop.llm_runtime(),
+        kind=TurnKind.USER,
+        delivery=loop.turn_delivery_factory.create(msg, "cli:c"),
     )
 
-    assert await loop._state_restore(ctx) == "ok"
+    await loop._restore_turn(ctx)
 
     assert "Quarterly revenue" not in ctx.msg.content
     assert f"[Attachment: {doc_path}]" in ctx.msg.content
@@ -133,6 +139,7 @@ async def test_pending_followup_references_documents_when_extraction_disabled(
 
     final_content, _, _, _, had_injections = await loop._run_agent_loop(
         [{"role": "user", "content": "hello"}],
+        runtime=loop.llm_runtime(),
         channel="cli",
         chat_id="c",
         pending_queue=pending_queue,

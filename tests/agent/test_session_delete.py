@@ -60,3 +60,18 @@ def test_safe_key_is_filename_safe(tmp_path: Path) -> None:
     key = "telegram:abc/def"
     stem = SessionManager.safe_key(key)
     assert "/" not in stem and ":" not in stem
+
+
+def test_delete_session_prevents_legacy_revival(tmp_path: Path) -> None:
+    """After delete_session, a subsequent get_or_create must not resurrect history.
+
+    Unlike upstream's per-file jsonl store, moeka's SQLite-backed manager only
+    imports legacy jsonl files once at construction time (not on every
+    get_or_create), so there is no separate "legacy path" to race with the
+    primary store within one SessionManager instance's lifetime.
+    """
+    sm = _seed(tmp_path, "telegram:no-revival")
+    assert sm.delete_session("telegram:no-revival") is True
+
+    fresh = sm.get_or_create("telegram:no-revival")
+    assert fresh.messages == []

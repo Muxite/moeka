@@ -8,7 +8,8 @@ from typing import Any
 
 import pytest
 
-from nanobot.agent.runner import AgentRunner, AgentRunSpec, RunnerLimits
+from agent.runner_helpers import make_run_spec
+from nanobot.agent.runner import AgentRunner, RunnerLimits
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 
@@ -71,13 +72,15 @@ def _tool_call(name="flaky", call_id="tc-1"):
             "type": "function",
             "function": {"name": name, "arguments": "{}"},
         },
+        has_valid_name=lambda: isinstance(name, str) and bool(name),
     )
 
 
 def _spec(provider_responses, *, limits=None, tools=None):
     registry = tools or ToolRegistry()
     provider = _ScriptedProvider(provider_responses)
-    spec = AgentRunSpec(
+    spec = make_run_spec(
+        provider,
         initial_messages=[{"role": "user", "content": "do the thing"}],
         tools=registry,
         model="test/model",
@@ -85,7 +88,7 @@ def _spec(provider_responses, *, limits=None, tools=None):
         max_tool_result_chars=4000,
         limits=limits or RunnerLimits(),
     )
-    return AgentRunner(provider), spec, provider
+    return AgentRunner(), spec, provider
 
 
 # ---------------------------------------------------------------------------
