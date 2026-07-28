@@ -135,6 +135,15 @@ dev = [
     "python-pptx>=1.0.0,<2.0.0",
     "python-socketio>=5.16.0,<6.0.0",
     "msgpack>=1.1.0,<2.0.0",
+    # Channel runtimes are lazily pip-installed per nanobot/channels/*/manifest.py
+    # (see optional_features.ensure_enabled_channel_dependencies) and intentionally
+    # excluded from the base install. moeka's `nanobot channels enable/disable` CLI
+    # tests use telegram as their reference channel, so pin its runtime deps here
+    # (must match nanobot/channels/telegram/manifest.py) to keep it importable for
+    # the dev/test environment.
+    "python-telegram-bot[socks,webhooks]>=22.6,<23.0",
+    "socksio>=1.0.0,<2.0.0",
+    "python-socks[asyncio]>=2.8.0,<3.0.0; sys_platform != 'win32'",
 ]
 
 [project.scripts]

@@ -2145,17 +2145,15 @@ async def test_start_loop_exits_when_app_goes_none(monkeypatch) -> None:
         if iteration >= 1:
             channel._app = None  # cleared externally
 
-    import nanobot.channels.telegram as tg_mod
     import asyncio as _asyncio
-
-    original_sleep = _asyncio.sleep
 
     # Patch at the module level so the while loop uses our fake
     monkeypatch.setattr("asyncio.sleep", _fake_sleep)
 
     # Minimal fake app — just enough to pass the first guard
-    from types import SimpleNamespace as SN
-    channel._app = SN()
+    from types import SimpleNamespace
+
+    channel._app = SimpleNamespace()
 
     # Run the keep-alive loop directly (not the full start)
     async def _run_loop():
