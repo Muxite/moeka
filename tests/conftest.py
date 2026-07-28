@@ -7,6 +7,20 @@ import os
 
 import pytest
 
+# Prime the lazy forward-ref rebuild at conftest import time (before test
+# modules are collected). moeka keeps Config/ToolsConfig forward refs resolved
+# lazily to survive circular-import order at runtime; several upstream tests
+# import tool-config classes (e.g. WebSearchConfig, ImageGenerationToolConfig)
+# directly from nanobot.config.schema at module top-level, which only works
+# once the rebuild has run. Triggering it here makes that import order safe for
+# the whole test session without disturbing the runtime lazy path.
+try:
+    from nanobot.config.schema import _resolve_tool_config_refs
+
+    _resolve_tool_config_refs()
+except Exception:
+    pass
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _cleanup_mock_path_artifacts():
