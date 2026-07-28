@@ -25,8 +25,8 @@ from nanobot.utils.helpers import (
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
-    from nanobot.agent.vec_store import VecStore
     from nanobot.config.schema import VecConfig
+    from nanobot.core.vec_store import VecStore
 
 
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -69,6 +69,7 @@ class ContextBuilder:
         workspace: Path,
         timezone: str | None = None,
         disabled_skills: list[str] | None = None,
+        allowed_skills: list[str] | None = None,
         vec_store: VecStore | None = None,
         vec_config: VecConfig | None = None,
     ):
@@ -77,7 +78,11 @@ class ContextBuilder:
         self.vec_store = vec_store
         self.vec_config = vec_config
         self.memory = MemoryStore(workspace, vec_store=vec_store)
-        self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
+        self.skills = SkillsLoader(
+            workspace,
+            disabled_skills=set(disabled_skills) if disabled_skills else None,
+            allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
+        )
 
     def build_system_prompt(
         self,
@@ -172,9 +177,11 @@ class ContextBuilder:
             {e["cursor"]: e for e in (semantic_entries + recent)}.values(),
             key=lambda e: e["cursor"],
         )
-        return "# Recent History\n\n" + "\n".join(
+        history_text = "\n".join(
             f"- [{e['timestamp']}] {e['content']}" for e in combined
         )
+        history_text = truncate_text(history_text, self._MAX_HISTORY_CHARS)
+        return "# Recent History\n\n" + history_text
 
     @staticmethod
     def _behavioral_guidelines() -> str:

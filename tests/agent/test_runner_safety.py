@@ -20,7 +20,7 @@ async def test_runner_does_not_abort_on_workspace_violation_anymore():
     we now hand the error back to the LLM as a recoverable tool result and
     rely on ``repeated_workspace_violation_error`` to throttle bypass loops.
     """
-    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+    from nanobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     provider.chat_with_retry = AsyncMock(side_effect=[
@@ -88,7 +88,7 @@ def test_is_ssrf_violation_recognizes_private_url_blocks():
 @pytest.mark.asyncio
 async def test_runner_returns_non_retryable_hint_on_ssrf_violation():
     """SSRF stays blocked, but the runtime gives the LLM a final chance to recover."""
-    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+    from nanobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     provider.chat_with_retry = AsyncMock(side_effect=[
@@ -141,7 +141,7 @@ async def test_runner_lets_llm_recover_from_shell_guard_path_outside():
     turn (silent hang on Telegram per #3605); now the LLM gets the soft
     error back and can finalize on the next iteration.
     """
-    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+    from nanobot.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock()
     captured_second_call: list[dict] = []
@@ -195,7 +195,7 @@ async def test_runner_throttles_repeated_workspace_bypass_attempts():
     the runner replaces the tool result with a hard "stop trying" message
     so the model finally gives up and surfaces the boundary to the user.
     """
-    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+    from nanobot.agent.runner import AgentRunner, AgentRunSpec
 
     bypass_attempts = [
         ToolCallRequest(
@@ -241,4 +241,68 @@ async def test_runner_throttles_repeated_workspace_bypass_attempts():
     assert escalated, (
         "expected at least one escalated workspace_violation event, got: "
         f"{result.tool_events}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_throttles_repeated_exec_allowlist_denials():
+    """Misconfigured tools.exec.allow_patterns (whitelist-only mode) must not
+    burn the whole iteration budget.
+
+    Real incident: allow_patterns held disk-formatting patterns, so EVERY
+    normal command (du, ps, audit.sh) was denied. The LLM retried a
+    *different* command each time, so per-target throttling never tripped and
+    each heartbeat run exhausted all 200 iterations. The throttle now keys on
+    the denial class and escalates after the retry budget.
+    """
+    from nanobot.agent.runner import AgentRunner, AgentRunSpec
+
+    denied_commands = ["du -sh /", "ps aux", "bash audit.sh", "find / -size +1G"]
+    responses: list[LLMResponse] = [
+        LLMResponse(
+            content=f"try {i}",
+            tool_calls=[ToolCallRequest(id=f"c{i}", name="exec", arguments={"command": cmd})],
+        )
+        for i, cmd in enumerate(denied_commands)
+    ]
+    responses.append(LLMResponse(content="reporting blocker to user", tool_calls=[]))
+
+    provider = MagicMock()
+    provider.chat_with_retry = AsyncMock(side_effect=responses)
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(
+        return_value=(
+            "Error: Command blocked by allowlist filter. exec is in "
+            "whitelist-only mode: tools.exec.allow_patterns is non-empty."
+        )
+    )
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=10,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert result.stop_reason != "tool_error"
+    assert result.error is None
+    assert result.final_content == "reporting blocker to user"
+    # Third+ denials must escalate even though every command differed.
+    escalated = [
+        ev for ev in result.tool_events
+        if ev["status"] == "error"
+        and ev["detail"].startswith("exec_guard_denial_escalated:")
+    ]
+    assert escalated, (
+        "expected at least one escalated exec_guard_denial event, got: "
+        f"{result.tool_events}"
+    )
+    # The model must receive the hard "stop retrying" payload.
+    tool_messages = [m for m in result.messages if m.get("role") == "tool"]
+    assert any(
+        "refusing repeated exec attempts" in str(m.get("content", ""))
+        for m in tool_messages
     )

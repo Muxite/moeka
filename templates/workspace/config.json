@@ -57,13 +57,6 @@
       "workingEmoji": "🔧",
       "workingEmojiDelay": 2.0,
       "streaming": true
-    },
-    "canvas": {
-      "enabled": false,
-      "apiUrl": "${CANVAS_API_URL}",
-      "apiToken": "${CANVAS_API_TOKEN}",
-      "pollIntervalSeconds": 60,
-      "allowFrom": ["*"]
     }
   },
   "providers": {

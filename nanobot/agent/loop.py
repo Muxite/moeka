@@ -52,6 +52,7 @@ from nanobot.session.goal_state import (
     sustained_goal_active,
 )
 from nanobot.session.manager import Session, SessionManager
+from nanobot.utils.background import log_task_exceptions
 from nanobot.utils.document import extract_documents, reference_non_image_attachments
 from nanobot.utils.helpers import image_placeholder_text
 from nanobot.utils.helpers import truncate_text as truncate_text_fn
@@ -200,6 +201,11 @@ class AgentLoop:
         hooks: list[AgentHook] | None = None,
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
+        allowed_skills: list[str] | None = None,
+        tools_allow: list[str] | None = None,
+        tools_deny: list[str] | None = None,
+        planning: bool = False,
+        runner_limits=None,
         tools_config: ToolsConfig | None = None,
         image_generation_provider_config: ProviderConfig | None = None,
         image_generation_provider_configs: dict[str, ProviderConfig] | None = None,
@@ -267,12 +273,19 @@ class AgentLoop:
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
+        self.tools_allow = list(tools_allow) if tools_allow is not None else None
+        self.tools_deny = list(tools_deny) if tools_deny else []
+        self.planning = planning
+        from nanobot.agent.runner import RunnerLimits
+        self.runner_limits = runner_limits or RunnerLimits()
+
         self.vec_config = vec_config
         self.vec_store = vec_store
         self.context = ContextBuilder(
             workspace,
             timezone=timezone,
             disabled_skills=disabled_skills,
+            allowed_skills=allowed_skills,
             vec_store=vec_store,
             vec_config=vec_config,
         )
@@ -293,6 +306,8 @@ class AgentLoop:
             disabled_skills=disabled_skills,
             max_iterations=self.max_iterations,
             max_concurrent_subagents=max_concurrent_subagents,
+            tools_allow=self.tools_allow,
+            tools_deny=self.tools_deny,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
         )
         self._unified_session = unified_session
@@ -385,6 +400,11 @@ class AgentLoop:
             timezone=defaults.timezone,
             unified_session=defaults.unified_session,
             disabled_skills=defaults.disabled_skills,
+            allowed_skills=defaults.allowed_skills,
+            tools_allow=defaults.tools_allow,
+            tools_deny=defaults.tools_deny,
+            planning=defaults.planning,
+            runner_limits=defaults.limits,
             session_ttl_minutes=defaults.session_ttl_minutes,
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
@@ -497,10 +517,14 @@ class AgentLoop:
             runtime_events=self.runtime_events,
         )
         loader = ToolLoader()
-        registered = loader.load(ctx, self.tools)
+        registered = loader.load(ctx, self.tools, allow=self.tools_allow, deny=self.tools_deny)
 
         # MyTool needs runtime state reference — manual registration
-        if self.tools_config.my.enable:
+        # (still subject to the same allow/deny scope as discovered tools)
+        my_allowed = (self.tools_allow is None or "my" in self.tools_allow) and (
+            "my" not in self.tools_deny
+        )
+        if self.tools_config.my.enable and my_allowed:
             self.tools.register(
                 MyTool(runtime_state=self, modify_allowed=self.tools_config.my.allow_set)
             )
@@ -796,6 +820,8 @@ class AgentLoop:
             "or call complete_goal if the work is truly finished."
         ) if _goal_lines else SUSTAINED_GOAL_CONTINUE_PROMPT
         session_metadata = session.metadata if session is not None else None
+        if self.planning:
+            await self._maybe_plan(initial_messages)
         try:
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=initial_messages,
@@ -816,6 +842,7 @@ class AgentLoop:
                 retry_wait_callback=on_retry_wait,
                 checkpoint_callback=_checkpoint,
                 injection_callback=_drain_pending,
+                limits=self.runner_limits,
                 # Sustained goals may legitimately exceed NANOBOT_LLM_TIMEOUT_S; idle stall
                 # is still capped by NANOBOT_STREAM_IDLE_TIMEOUT_S in streaming providers.
                 llm_timeout_s=runner_wall_llm_timeout_s(
@@ -1089,7 +1116,18 @@ class AgentLoop:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
-        task.add_done_callback(self._background_tasks.remove)
+        log_done = log_task_exceptions(name="agent-background")
+
+        def _on_done(t: asyncio.Task) -> None:
+            # list.remove raises ValueError if the task was already removed;
+            # asyncio swallows that and we'd lose the original task exception.
+            try:
+                self._background_tasks.remove(t)
+            except ValueError:
+                pass
+            log_done(t)
+
+        task.add_done_callback(_on_done)
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -1560,6 +1598,54 @@ class AgentLoop:
             filtered.append(block)
 
         return filtered
+
+    _PLANNING_SYSTEM = (
+        "You are the planning step of an agent. Produce a short execution plan "
+        "for the request below: 3-7 numbered steps, the tools you expect to use, "
+        "and a one-line success criterion. Output only the plan, no preamble."
+    )
+    _PLANNING_MIN_CHARS = 80  # trivial messages skip the extra call
+    _PLANNING_NOTE_PREFIX = (
+        "[Planning note — generated pre-execution; follow it, or revise it if "
+        "the evidence demands]\n"
+    )
+
+    async def _maybe_plan(self, initial_messages: list[dict[str, Any]]) -> None:
+        """Opt-in plan-then-execute: one small non-tool LLM call before the
+        main run whose output is appended as a planning note. No new loop
+        state — the note rides the normal message list.
+        """
+        user_text = next(
+            (
+                m.get("content")
+                for m in reversed(initial_messages)
+                if m.get("role") == "user" and isinstance(m.get("content"), str)
+            ),
+            None,
+        )
+        if not user_text or len(user_text) < self._PLANNING_MIN_CHARS:
+            return
+        try:
+            response = await asyncio.wait_for(
+                self.provider.chat_with_retry(
+                    messages=[
+                        {"role": "system", "content": self._PLANNING_SYSTEM},
+                        {"role": "user", "content": user_text},
+                    ],
+                    max_tokens=600,
+                    temperature=0.2,
+                ),
+                timeout=90,
+            )
+        except Exception:
+            logger.warning("Planning step failed; continuing without a plan")
+            return
+        plan = (response.content or "").strip()
+        if plan and response.finish_reason != "error":
+            initial_messages.append(
+                {"role": "user", "content": self._PLANNING_NOTE_PREFIX + plan}
+            )
+            logger.info("Planning note injected ({} chars)", len(plan))
 
     def _save_turn(
         self,

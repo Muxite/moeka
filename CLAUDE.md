@@ -9,7 +9,7 @@ This repo is **moeka**, a fork of [nanobot](https://github.com/HKUDS/nanobot) (H
 Moeka-specific deviations from upstream nanobot worth knowing:
 
 - **Sandbox posture is permissive by default** — `nanobot/agent/tools/shell.py` keeps only `_INTERNAL_DENY_PATTERNS` (non-tunable history.jsonl / .dream_cursor guards) and a fork-bomb in `_DEFAULT_DENY_PATTERNS`. `rm -rf`, `dd`, `mkfs`, `format`, `shutdown`, `>/dev/sd*` are *not* blocked by default. `allow_sudo` defaults to False and emits a clear opt-in message when denied.
-- **Cross-process session lock** — `nanobot/session/manager.py` wraps `save()` with `FileLock` so a stray second moeka process doesn't clobber appends.
+- **SQLite session store** — `nanobot/session/manager.py` persists sessions in `<workspace>/sessions.db` (WAL mode); SQLite's own locking replaces the old per-file FileLock for cross-process safety. Legacy per-session `.jsonl` files are imported once at startup (newer-wins) and renamed to `*.jsonl.imported`; `SessionManager.dump_jsonl(key)` exports the old format for debugging.
 - **Dispatcher watchdog** — `ChannelManager._dispatch_with_watchdog` auto-restarts the outbound dispatcher on crashes.
 - **`bg_shell` tool is gated off the auto-loader** — needs a `BackgroundProcessRegistry` wired manually; `enabled(ctx)` returns False.
 - **`nanobot channels enable/disable <name>` CLI** — atomic config flip, defined in `nanobot/cli/commands.py`.
@@ -25,6 +25,14 @@ Moeka-specific deviations from upstream nanobot worth knowing:
 # Python: run single test / lint
 pytest tests/test_openai_api.py::test_function -v
 ruff check nanobot/
+
+# Tests in Docker (preferred for full-suite runs — isolated from the live
+# moeka service and the host venv). Dockerfile.test is layered so the
+# dependency layer is keyed on pyproject.toml + uv.lock only; code edits
+# rebuild in ~2s. The vec extra (CUDA torch) is skipped by default:
+#   --build-arg NO_EXTRA= re-enables it for full CI parity.
+scripts/test-docker.sh                          # build + full suite
+scripts/test-docker.sh pytest tests/agent -v    # build + subset
 
 # WebUI: dev server (proxies API/WS to gateway :8765), build, test
 # Build outputs to ../nanobot/web/dist (bundled into the Python wheel)

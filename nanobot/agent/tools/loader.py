@@ -83,7 +83,24 @@ class ToolLoader:
         self._plugins = plugins
         return plugins
 
-    def load(self, ctx: Any, registry: ToolRegistry, *, scope: str = "core") -> list[str]:
+    def load(
+        self,
+        ctx: Any,
+        registry: ToolRegistry,
+        *,
+        scope: str = "core",
+        allow: list[str] | None = None,
+        deny: list[str] | None = None,
+    ) -> list[str]:
+        """Discover and register tools, honoring an optional allow/deny scope.
+
+        ``allow=None`` registers every discovered tool (historical behavior);
+        an explicit list registers only those names, so tools added to the
+        codebase later never silently appear in a scoped agent. ``deny``
+        always wins over ``allow``.
+        """
+        allow_set = set(allow) if allow is not None else None
+        deny_set = set(deny or ())
         registered: list[str] = []
         builtin_names: set[str] = set()
         sources = [(self.discover(), False), (self._discover_plugins().values(), True)]
@@ -96,6 +113,10 @@ class ToolLoader:
                     if not tool_cls.enabled(ctx):
                         continue
                     tool = tool_cls.create(ctx)
+                    if tool.name in deny_set or (
+                        allow_set is not None and tool.name not in allow_set
+                    ):
+                        continue
                     if registry.has(tool.name):
                         if is_plugin_source and tool.name in builtin_names:
                             logger.warning(

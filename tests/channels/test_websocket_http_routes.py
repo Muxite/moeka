@@ -483,8 +483,7 @@ async def test_session_delete_removes_file(
         token = boot.json()["token"]
         auth = {"Authorization": f"Bearer {token}"}
 
-        path = sm._get_session_path("websocket:doomed")
-        assert path.exists()
+        assert sm.read_session_file("websocket:doomed") is not None
         webui_path = tmp_path / "webui" / f"{SessionManager.safe_key('websocket:doomed')}.jsonl"
         assert webui_path.is_file()
         resp = await _http_get(
@@ -493,7 +492,7 @@ async def test_session_delete_removes_file(
         )
         assert resp.status_code == 200
         assert resp.json()["deleted"] is True
-        assert not path.exists()
+        assert sm.read_session_file("websocket:doomed") is None
         assert not webui_path.exists()
     finally:
         await channel.stop()
@@ -520,15 +519,14 @@ async def test_session_routes_accept_percent_encoded_websocket_keys(
         assert msgs.status_code == 200
         assert msgs.json()["key"] == "websocket:encoded-key"
 
-        path = sm._get_session_path("websocket:encoded-key")
-        assert path.exists()
+        assert sm.read_session_file("websocket:encoded-key") is not None
         deleted = await _http_get(
             "http://127.0.0.1:29910/api/sessions/websocket%3Aencoded-key/delete",
             headers=auth,
         )
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
-        assert not path.exists()
+        assert sm.read_session_file("websocket:encoded-key") is None
     finally:
         await channel.stop()
         await server_task
@@ -622,14 +620,13 @@ async def test_session_routes_reject_non_websocket_keys(
         )
         assert msgs.status_code == 404
 
-        doomed = sm._get_session_path("slack:C123")
-        assert doomed.exists()
+        assert sm.read_session_file("slack:C123") is not None
         deny_delete = await _http_get(
             "http://127.0.0.1:29909/api/sessions/slack:C123/delete",
             headers=auth,
         )
         assert deny_delete.status_code == 404
-        assert doomed.exists()
+        assert sm.read_session_file("slack:C123") is not None
     finally:
         await channel.stop()
         await server_task

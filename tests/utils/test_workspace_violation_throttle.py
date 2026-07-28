@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from nanobot.utils.runtime import (
+    exec_guard_violation_signature,
+    repeated_exec_guard_error,
     repeated_workspace_violation_error,
     workspace_violation_signature,
 )
@@ -118,3 +120,65 @@ def test_repeated_workspace_violation_collapses_tool_switching():
     )
     assert third is not None
     assert "refusing repeated workspace-bypass" in third
+
+
+# --- exec command-guard denials (allowlist / deny patterns) ---
+
+_ALLOWLIST_DENIAL = (
+    "Error: Command blocked by allowlist filter. exec is in whitelist-only mode: "
+    "tools.exec.allow_patterns is non-empty (5 pattern(s)), so ONLY commands "
+    "matching those patterns may run."
+)
+_DENYGUARD_DENIAL = (
+    "Error: Command blocked by safety guard (dangerous pattern detected). "
+    "Matched '\\\\b(mkfs|diskpart)\\\\b'. "
+    "Adjust tools.exec.deny_patterns in config to permit it."
+)
+
+
+def test_exec_guard_signature_classifies_allowlist_and_denyguard():
+    assert exec_guard_violation_signature(_ALLOWLIST_DENIAL) == "violation:exec-allowlist"
+    assert exec_guard_violation_signature(_DENYGUARD_DENIAL) == "violation:exec-denyguard"
+
+
+def test_exec_guard_signature_is_none_for_unrelated_errors():
+    assert exec_guard_violation_signature("") is None
+    assert exec_guard_violation_signature("Error: command not found: foo") is None
+    assert exec_guard_violation_signature(
+        "Error: Path is outside the configured workspace"
+    ) is None
+
+
+def test_repeated_exec_guard_escalates_after_third_denial():
+    """The LLM retries a *different* command each time, so the throttle must
+    key on the denial class, not the command/path."""
+    counts: dict[str, int] = {}
+
+    assert repeated_exec_guard_error(_ALLOWLIST_DENIAL, counts) is None
+    assert repeated_exec_guard_error(_ALLOWLIST_DENIAL, counts) is None
+    third = repeated_exec_guard_error(_ALLOWLIST_DENIAL, counts)
+
+    assert third is not None
+    assert "refusing repeated exec attempts" in third
+    assert "allow_patterns" in third
+    assert "Stop retrying" in third
+
+
+def test_repeated_exec_guard_denyguard_message_names_deny_patterns():
+    counts: dict[str, int] = {}
+
+    repeated_exec_guard_error(_DENYGUARD_DENIAL, counts)
+    repeated_exec_guard_error(_DENYGUARD_DENIAL, counts)
+    third = repeated_exec_guard_error(_DENYGUARD_DENIAL, counts)
+
+    assert third is not None
+    assert "deny_patterns" in third
+
+
+def test_repeated_exec_guard_independent_budgets_per_class():
+    counts: dict[str, int] = {}
+
+    repeated_exec_guard_error(_ALLOWLIST_DENIAL, counts)
+    repeated_exec_guard_error(_ALLOWLIST_DENIAL, counts)
+    # Different denial class, fresh budget.
+    assert repeated_exec_guard_error(_DENYGUARD_DENIAL, counts) is None

@@ -5,12 +5,14 @@ from __future__ import annotations
 from nanobot.agent.tools.shell import ExecTool
 
 
-def test_deny_patterns_block_rm_rf():
-    """Baseline: rm -rf is blocked by default deny list."""
+def test_default_posture_is_permissive():
+    """Moeka baseline: rm -rf is NOT blocked by default (server-management
+    posture — only the fork bomb stays in the default deny list)."""
     tool = ExecTool()
-    result = tool._guard_command("rm -rf /tmp/build", "/tmp")
+    assert tool._guard_command("rm -rf /tmp/build", "/tmp") is None
+    result = tool._guard_command(":(){ :|:& };:", "/tmp")
     assert result is not None
-    assert "deny pattern filter" in result.lower()
+    assert "blocked by safety guard" in result.lower()
 
 
 def test_allow_patterns_bypass_deny():
@@ -21,20 +23,22 @@ def test_allow_patterns_bypass_deny():
 
 
 def test_allow_patterns_must_match_to_bypass():
-    """Non-matching allow_patterns do NOT bypass deny."""
+    """Non-matching commands are blocked by whitelist-only mode."""
     tool = ExecTool(allow_patterns=[r"rm\s+-rf\s+/opt/"])
     result = tool._guard_command("rm -rf /tmp/build", "/tmp")
     assert result is not None
-    assert "deny pattern filter" in result.lower()
+    assert "allowlist" in result.lower()
 
 
 def test_extra_deny_patterns_from_config():
-    """User-supplied deny patterns are appended to built-in list."""
+    """User deny patterns replace the default layer; internal guards persist."""
     tool = ExecTool(deny_patterns=[r"\bping\b"])
-    # ping is blocked by extra deny
+    # ping is blocked by the user deny layer
     assert tool._guard_command("ping example.com", "/tmp") is not None
-    # rm -rf still blocked by built-in deny
-    assert tool._guard_command("rm -rf /tmp/x", "/tmp") is not None
+    # replacing the user layer drops the default fork-bomb guard
+    assert tool._guard_command(":(){ :|:& };:", "/tmp") is None
+    # non-tunable internal guards (session history) still apply
+    assert tool._guard_command("echo x > history.jsonl", "/tmp") is not None
 
 
 def test_allow_patterns_bypass_extra_deny():

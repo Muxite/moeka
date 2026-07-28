@@ -13,6 +13,10 @@ Example valid usage:
 { "providers": { "openrouter": { "apiKey": "${OPENROUTER_KEY}" } } }
 ```
 
+## `tools.exec.allowPatterns` Is Whitelist-Only Mode
+
+A **non-empty** `tools.exec.allowPatterns` flips `ExecTool` into whitelist-only mode: every command not matching a pattern is denied — it is not a "extra allowances on top of deny patterns" list. Left behind after a one-off task, this silently blocks all normal exec usage (real incident: heartbeat runs burned 200 iterations/hour retrying denied commands). Mitigations now in place: a startup `logger.warning` in `shell.py`, an explicit denial message, and class-keyed denial throttling in `utils/runtime.py` (`repeated_exec_guard_error`) that escalates after repeated blocks. Clear `allowPatterns` when the task is done.
+
 ## Windows Compatibility
 
 nanobot explicitly supports Windows. Key differences to keep in mind:

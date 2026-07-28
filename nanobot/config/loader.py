@@ -1,5 +1,6 @@
 """Configuration loading utilities."""
 
+import contextvars
 import json
 import os
 import re
@@ -10,7 +11,15 @@ import pydantic
 from loguru import logger
 from pydantic import BaseModel
 
+from nanobot.config.paths import get_state_home  # noqa: F401 — re-export for back-compat
 from nanobot.config.schema import Config
+
+# Tracks the dotted field path during `_resolve_in_place` recursion so the
+# env-var warning can tell the user *where* in config.json the missing
+# `${VAR}` reference lives (e.g. `providers.openrouter.apiKey`).
+_RESOLVE_PATH: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "_RESOLVE_PATH", default=(),
+)
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
@@ -21,45 +30,6 @@ def set_config_path(path: Path) -> None:
     """Set the current config path (used to derive data directory)."""
     global _current_config_path
     _current_config_path = path
-
-
-_DEPRECATED_MOEKA_STATE_WARNED = False
-
-
-def get_state_home() -> Path:
-    """
-    Return the unified Moeka instance directory.
-
-    As of v0.1.5 the former split between a "state" dir and a separate
-    "workspace" dir is gone — both now live at the same path. The default
-    is ``~/.nanobot`` for upstream-nanobot compatibility; ``MOEKA_WORKSPACE``
-    overrides it. Legacy names are accepted for back-compat.
-
-    Resolution order:
-      1. ``MOEKA_WORKSPACE`` env var (preferred).
-      2. ``MOEKA_STATE`` env var (deprecated — warns once).
-      3. ``NANOBOT_HOME`` env var (forward-compat).
-      4. Default: ``~/.nanobot``.
-
-    :returns: Expanded absolute path (directory not guaranteed to exist).
-    """
-    global _DEPRECATED_MOEKA_STATE_WARNED
-    override = os.environ.get("MOEKA_WORKSPACE")
-    if not override:
-        legacy = os.environ.get("MOEKA_STATE")
-        if legacy:
-            if not _DEPRECATED_MOEKA_STATE_WARNED:
-                logger.warning(
-                    "MOEKA_STATE is deprecated; rename to MOEKA_WORKSPACE "
-                    "(state and workspace are one directory now)."
-                )
-                _DEPRECATED_MOEKA_STATE_WARNED = True
-            override = legacy
-    if not override:
-        override = os.environ.get("NANOBOT_HOME")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".nanobot"
 
 
 def get_config_path() -> Path:
@@ -109,6 +79,60 @@ def load_config(config_path: Path | None = None) -> Config:
 
     _apply_ssrf_whitelist(config)
     return config
+
+
+def config_from_sources(
+    *,
+    config: Config | None = None,
+    config_dict: dict | None = None,
+    config_path: Path | str | None = None,
+) -> tuple[Config, bool]:
+    """Resolve a :class:`Config` from at most one source — files optional.
+
+    This is the shared file→data adapter used by the embedding entry points
+    (``MoekaCore``, ``acomplete``). Whatever the host has — a pydantic object, a
+    plain dict, a file path, or nothing — becomes a single resolved ``Config``.
+    ``${VAR}`` placeholders are resolved from the environment in every case.
+
+    Args:
+        config: A pre-built :class:`Config` (pure data).
+        config_dict: A plain dict (e.g. parsed JSON) validated into a ``Config``.
+        config_path: Path to a ``config.json`` to read.
+        (none): discover ``~/.nanobot/config.json`` as the gateway does.
+
+    Returns:
+        ``(config, from_file)`` — ``from_file`` is True when the config came from
+        a file or default discovery (so the caller may trust
+        ``config.workspace_path``), False for purely in-memory inputs.
+
+    Raises:
+        ValueError: more than one source supplied.
+        FileNotFoundError: ``config_path`` given but missing.
+    """
+    sources = [s for s in (config, config_dict, config_path) if s is not None]
+    if len(sources) > 1:
+        raise ValueError("Pass at most one of config=, config_dict=, config_path=.")
+
+    # Resolve forward refs before any in-memory model_validate (load_config does
+    # this itself; the data routes need it too).
+    from nanobot.config.schema import _resolve_tool_config_refs
+    try:
+        _resolve_tool_config_refs()
+    except Exception:
+        pass
+
+    if config is not None:
+        return resolve_config_env_vars(config), False
+    if config_dict is not None:
+        cfg = Config.model_validate(_migrate_config(dict(config_dict)))
+        return resolve_config_env_vars(cfg), False
+
+    resolved = None
+    if config_path is not None:
+        resolved = Path(config_path).expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Config not found: {resolved}")
+    return resolve_config_env_vars(load_config(resolved)), True
 
 
 def _apply_ssrf_whitelist(config: Config) -> None:
@@ -161,15 +185,26 @@ def _resolve_in_place(obj: Any) -> Any:
         return new if new != obj else obj
     if isinstance(obj, BaseModel):
         updates: dict[str, Any] = {}
+        base_path = _RESOLVE_PATH.get()
         for name in type(obj).model_fields:
             old = getattr(obj, name)
-            new = _resolve_in_place(old)
+            token = _RESOLVE_PATH.set(base_path + (name,))
+            try:
+                new = _resolve_in_place(old)
+            finally:
+                _RESOLVE_PATH.reset(token)
             if new is not old:
                 updates[name] = new
         extras = obj.__pydantic_extra__
         new_extras: dict[str, Any] | None = None
         if extras:
-            resolved = {k: _resolve_in_place(v) for k, v in extras.items()}
+            resolved: dict[str, Any] = {}
+            for k, v in extras.items():
+                token = _RESOLVE_PATH.set(base_path + (k,))
+                try:
+                    resolved[k] = _resolve_in_place(v)
+                finally:
+                    _RESOLVE_PATH.reset(token)
             if any(resolved[k] is not extras[k] for k in extras):
                 new_extras = resolved
         if not updates and new_extras is None:
@@ -179,11 +214,25 @@ def _resolve_in_place(obj: Any) -> Any:
             copy.__pydantic_extra__ = new_extras
         return copy
     if isinstance(obj, dict):
-        resolved = {k: _resolve_in_place(v) for k, v in obj.items()}
-        return resolved if any(resolved[k] is not obj[k] for k in obj) else obj
+        base_path = _RESOLVE_PATH.get()
+        resolved_dict: dict[Any, Any] = {}
+        for k, v in obj.items():
+            token = _RESOLVE_PATH.set(base_path + (str(k),))
+            try:
+                resolved_dict[k] = _resolve_in_place(v)
+            finally:
+                _RESOLVE_PATH.reset(token)
+        return resolved_dict if any(resolved_dict[k] is not obj[k] for k in obj) else obj
     if isinstance(obj, list):
-        resolved = [_resolve_in_place(v) for v in obj]
-        return resolved if any(nv is not ov for nv, ov in zip(resolved, obj)) else obj
+        base_path = _RESOLVE_PATH.get()
+        resolved_list: list[Any] = []
+        for i, v in enumerate(obj):
+            token = _RESOLVE_PATH.set(base_path + (f"[{i}]",))
+            try:
+                resolved_list.append(_resolve_in_place(v))
+            finally:
+                _RESOLVE_PATH.reset(token)
+        return resolved_list if any(nv is not ov for nv, ov in zip(resolved_list, obj)) else obj
     return obj
 
 
@@ -202,10 +251,12 @@ def _env_replace(match: re.Match[str]) -> str:
     name = match.group(1)
     value = os.environ.get(name)
     if value is None:
+        path = _RESOLVE_PATH.get()
+        location = ".".join(path) if path else "<unknown>"
         logger.warning(
-            "Environment variable '{}' referenced in config is not set; "
+            "Environment variable '{}' referenced in config at {} is not set; "
             "leaving placeholder unreplaced — dependent features will be unavailable",
-            name,
+            name, location,
         )
         return match.group(0)
     return value

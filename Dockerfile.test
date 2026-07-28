@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1.7
+# Test image for moeka. Layered for cache efficiency:
+#   1. apt layer        — system libs (changes ~never)
+#   2. dependency layer — keyed on pyproject.toml + uv.lock only
+#   3. source layer     — code/tests copied last; only the project itself reinstalls
+#
+# Build:  docker build -f Dockerfile.test -t moeka-test .
+# Run:    docker run --rm moeka-test                          # full suite
+#         docker run --rm moeka-test pytest tests/agent -v    # subset
+# (or use scripts/test-docker.sh, which does both.)
+#
+# The `vec` extra (sentence-transformers -> CUDA torch, multiple GB) is excluded
+# by default; the vec tests importorskip. For full CI parity build with:
+#         docker build -f Dockerfile.test --build-arg NO_EXTRA= -t moeka-test .
+
+FROM python:3.13-slim
+
+# System deps mirror .github/workflows/ci.yml: libolm for matrix-nio[e2e],
+# build-essential for native wheels (cffi/python-olm). git is shelled out to
+# by tests/utils/test_gitstore.py.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libolm-dev git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /usr/local/bin/
+
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# --- dependency layer: invalidated only when the manifests change ------------
+# --no-install-project defers installing moeka itself to the source layer, so
+# code edits never re-resolve dependencies. The cache mount keeps downloaded
+# wheels across builds even when this layer is invalidated.
+ARG NO_EXTRA="vec"
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}} --no-install-project
+
+# --- source layer: code last so edits only rebuild from here -----------------
+# bridge/ is force-included in the wheel (pyproject.toml), so the project
+# install needs it present.
+COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
+COPY bridge/ bridge/
+COPY nanobot/ nanobot/
+COPY tests/ tests/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}}
+
+ENTRYPOINT ["uv", "run", "--no-sync"]
+CMD ["pytest", "tests/"]

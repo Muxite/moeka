@@ -2,22 +2,22 @@
 # Moeka — nanobot for server management.
 #
 # Usage:
-#   ./moeka.sh start            # start the gateway in the background (terminal-safe)
-#   ./moeka.sh stop             # stop the running instance
-#   ./moeka.sh restart          # stop + start
-#   ./moeka.sh status           # show service/process status, port, channels, recent logs
-#   ./moeka.sh logs [-f] [-n N] # show last N lines (default 100), or tail -f
-#   ./moeka.sh shell            # drop into the moeka venv
-#   ./moeka.sh exec -- CMD ...  # run a command inside the venv
-#   ./moeka.sh install          # install Python deps into .venv, show version
-#   ./moeka.sh version          # print installed moeka version
-#   ./moeka.sh doctor           # sanity check: runtime, config, api keys, service state
-#   ./moeka.sh enable           # install + enable systemd user service
-#   ./moeka.sh disable          # stop + disable systemd user service
-#   ./moeka.sh export [--out F] # bundle workspace into a portable archive
-#   ./moeka.sh import FILE      # extract a workspace archive into MOEKA_WORKSPACE
-#   ./moeka.sh new NAME         # scaffold a fresh-identity workspace at ~/.moeka-NAME
-#   ./moeka.sh telegram-pair    # pair a Telegram bot token + auto-capture user id
+#   ./bin/moeka.sh start            # start the gateway in the background (terminal-safe)
+#   ./bin/moeka.sh stop             # stop the running instance
+#   ./bin/moeka.sh restart          # stop + start
+#   ./bin/moeka.sh status           # show service/process status, port, channels, recent logs
+#   ./bin/moeka.sh logs [-f] [-n N] # show last N lines (default 100), or tail -f
+#   ./bin/moeka.sh shell            # drop into the moeka venv
+#   ./bin/moeka.sh exec -- CMD ...  # run a command inside the venv
+#   ./bin/moeka.sh install          # install Python deps into .venv, show version
+#   ./bin/moeka.sh version          # print installed moeka version
+#   ./bin/moeka.sh doctor           # sanity check: runtime, config, api keys, service state
+#   ./bin/moeka.sh enable           # install + enable systemd user service
+#   ./bin/moeka.sh disable          # stop + disable systemd user service
+#   ./bin/moeka.sh export [--out F] # bundle workspace into a portable archive
+#   ./bin/moeka.sh import FILE      # extract a workspace archive into MOEKA_WORKSPACE
+#   ./bin/moeka.sh new NAME         # scaffold a fresh-identity workspace at ~/.moeka-NAME
+#   ./bin/moeka.sh telegram-pair    # pair a Telegram bot token + auto-capture user id
 #
 # Flags (anywhere on the command line):
 #   --config PATH       override the config file path
@@ -26,7 +26,10 @@
 set -euo pipefail
 
 # ---------- paths & constants -----------------------------------------------
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# This script lives in bin/; SCRIPT_DIR is the *repo root* (its parent) so
+# every ${SCRIPT_DIR}/... path below (.venv, .env, keys.env, templates/,
+# scripts/) keeps resolving against the project root regardless of cwd.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
 cd "$SCRIPT_DIR"
 
 VENV_DIR="${SCRIPT_DIR}/.venv"
@@ -82,6 +85,15 @@ fi
 : "${MOEKA_WORKSPACE:=$HOME/.nanobot}"
 export MOEKA_WORKSPACE
 MOEKA_WORKSPACE_EXPANDED="${MOEKA_WORKSPACE/#\~/$HOME}"
+# Guard the root-cause of the stray literal `${MOEKA_WORKSPACE}/` directory: if
+# the value still carries an unexpanded ${...} (e.g. a bad .env), fall back to
+# the default instead of creating a literal-name dir under cwd. Mirrors the same
+# guard in Config.workspace_path on the Python side.
+if [[ "$MOEKA_WORKSPACE_EXPANDED" == *'${'* ]]; then
+    warn "MOEKA_WORKSPACE has an unexpanded variable ('$MOEKA_WORKSPACE_EXPANDED'); using ~/.nanobot"
+    MOEKA_WORKSPACE_EXPANDED="$HOME/.nanobot"
+    export MOEKA_WORKSPACE="$HOME/.nanobot"
+fi
 
 _load_env_file "${SCRIPT_DIR}/.env"
 _load_env_file "${SCRIPT_DIR}/keys.env"
@@ -115,7 +127,7 @@ _nanobot_bin() {
     elif command -v nanobot >/dev/null 2>&1; then
         command -v nanobot
     else
-        err "nanobot binary not found; run ./moeka.sh install"
+        err "nanobot binary not found; run ./bin/moeka.sh install"
         exit 1
     fi
 }
@@ -364,7 +376,7 @@ cmd_exec() {
 
 cmd_enable() {
     _ensure_venv
-    bash "${SCRIPT_DIR}/install-service.sh"
+    bash "${SCRIPT_DIR}/scripts/install-service.sh"
 }
 
 cmd_disable() {
@@ -404,7 +416,7 @@ cmd_doctor() {
         printf 'moeka version : %s%s%s\n' "$_C_GREEN" "$moeka_ver" "$_C_RESET"
         printf 'nanobot bin   : %s\n' "$VENV_DIR/bin/nanobot"
     else
-        printf 'venv nanobot  : %snot built%s (run ./moeka.sh install)\n' "$_C_RED" "$_C_RESET"
+        printf 'venv nanobot  : %snot built%s (run ./bin/moeka.sh install)\n' "$_C_RED" "$_C_RESET"
     fi
 
     printf '\n%s=== Workspace ===%s\n' "$_C_BLUE" "$_C_RESET"
@@ -463,7 +475,7 @@ PYEOF
         svc_state="${svc_state:-unknown}"
         printf 'systemd       : %senabled%s (%s)\n' "$_C_GREEN" "$_C_RESET" "$svc_state"
     else
-        printf 'systemd       : not enabled (run ./moeka.sh enable)\n'
+        printf 'systemd       : not enabled (run ./bin/moeka.sh enable)\n'
     fi
     local linger_state; linger_state="$(loginctl show-user "$USER" 2>/dev/null | sed -n 's/^Linger=//p')"
     if [[ "$linger_state" == "yes" ]]; then
@@ -624,7 +636,7 @@ PY
 )"
         if [[ -n "$missing" ]]; then
             warn "config references env vars not currently set: $missing"
-            warn "add them to keys.env before starting, or run ./moeka.sh telegram-pair / edit keys.env"
+            warn "add them to keys.env before starting, or run ./bin/moeka.sh telegram-pair / edit keys.env"
         fi
     fi
 
@@ -632,8 +644,8 @@ PY
 
 Next steps:
   1. Edit keys.env to set provider keys and bot tokens.
-  2. ./moeka.sh telegram-pair    # if using Telegram (captures token + user id)
-  3. ./moeka.sh start            # or ./moeka.sh enable for boot autostart
+  2. ./bin/moeka.sh telegram-pair    # if using Telegram (captures token + user id)
+  3. ./bin/moeka.sh start            # or ./bin/moeka.sh enable for boot autostart
 EOF
 }
 
@@ -674,8 +686,8 @@ cmd_new() {
 
 To use this instance:
   export MOEKA_WORKSPACE=$ws
-  ./moeka.sh telegram-pair    # wire up Telegram (optional)
-  ./moeka.sh start
+  ./bin/moeka.sh telegram-pair    # wire up Telegram (optional)
+  ./bin/moeka.sh start
 
 Edit $ws/SOUL.md to define this agent's personality.
 Edit $ws/USER.md to describe the user.
@@ -686,14 +698,14 @@ cmd_telegram_pair() {
     _ensure_venv
     local cfg="${MOEKA_CONFIG:-${MOEKA_WORKSPACE_EXPANDED}/config.json}"
     local keys="${SCRIPT_DIR}/keys.env"
-    [[ -f "$cfg" ]] || { err "config.json not found: $cfg (run ./moeka.sh new or onboard first)"; exit 1; }
+    [[ -f "$cfg" ]] || { err "config.json not found: $cfg (run ./bin/moeka.sh new or onboard first)"; exit 1; }
     info "pairing Telegram bot"
     info "  config : $cfg"
     info "  keys   : $keys"
     "$VENV_DIR/bin/python" "${SCRIPT_DIR}/scripts/telegram_pair.py" "$keys" "$cfg" "$@"
     local rc=$?
     if (( rc == 0 )); then
-        ok "telegram paired — restart moeka to apply: ./moeka.sh restart"
+        ok "telegram paired — restart moeka to apply: ./bin/moeka.sh restart"
     fi
     return $rc
 }

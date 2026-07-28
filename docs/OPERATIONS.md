@@ -10,29 +10,29 @@ cp keys.env.example keys.env
 $EDITOR keys.env          # DO NOT commit keys.env
 
 # 2. Install dependencies (creates ./.venv)
-./moeka.sh install
+./bin/moeka.sh install
 
 # 3. Verify
-./moeka.sh doctor
+./bin/moeka.sh doctor
 ```
 
 ## Day-to-day
 
 ```sh
-./moeka.sh start          # run the gateway
-./moeka.sh status         # workspace, config, running PID
-./moeka.sh logs -f        # tail output
-./moeka.sh restart
-./moeka.sh stop
-./moeka.sh shell          # drop into the venv
-./moeka.sh exec -- <cmd>  # run a nanobot subcommand
+./bin/moeka.sh start          # run the gateway
+./bin/moeka.sh status         # workspace, config, running PID
+./bin/moeka.sh logs -f        # tail output
+./bin/moeka.sh restart
+./bin/moeka.sh stop
+./bin/moeka.sh shell          # drop into the venv
+./bin/moeka.sh exec -- <cmd>  # run a nanobot subcommand
 ```
 
 ## Boot setup
 
 ```sh
-./moeka.sh enable         # install + enable systemd user service
-./moeka.sh disable        # stop + disable service
+./bin/moeka.sh enable         # install + enable systemd user service
+./bin/moeka.sh disable        # stop + disable service
 
 # For headless servers (keep service running after logout):
 loginctl enable-linger "$USER"
@@ -55,16 +55,16 @@ state, and media all live under `$MOEKA_WORKSPACE` (default `~/.nanobot`).
 | `~/.nanobot/tool-results/`    | Persisted overflow from big tool outputs                      |
 | `./keys.env`                  | Secrets (gitignored). Source of truth for `${VAR}` in config. |
 | `./.env`                      | Non-secret per-host overrides (also gitignored)               |
-| `./moeka.sh`                  | Universal entrypoint                                          |
-| `./moeka.service`             | systemd user unit                                             |
+| `./bin/moeka.sh`                  | Universal launcher (`bin/moeka.sh`)         |
+| `./scripts/moeka.service`     | systemd user unit                                            |
 
 ## Multiple agents
 
 Each agent is a single directory. Name two paths and you get two agents:
 
 ```sh
-MOEKA_WORKSPACE=~/agents/alice ./moeka.sh start
-MOEKA_WORKSPACE=~/agents/bob   ./moeka.sh start   # different terminal
+MOEKA_WORKSPACE=~/agents/alice ./bin/moeka.sh start
+MOEKA_WORKSPACE=~/agents/bob   ./bin/moeka.sh start   # different terminal
 ```
 
 The directory may itself be a git repo. Typical allowlist: `config.json`,
@@ -106,12 +106,12 @@ error. When enabled, sudo commands run directly through the normal exec safety
 guards: dangerous command patterns, workspace restrictions, sandbox wrapping,
 internal URL blocking, timeouts, and output limits.
 
-Check status with `./moeka.sh doctor`.
+Check status with `./bin/moeka.sh doctor`.
 
 ## systemd
 
-See [SYSTEMD.md](./SYSTEMD.md). `./moeka.sh enable` installs and starts
-the service. `./moeka.sh disable` stops and disables it.
+See [SYSTEMD.md](./SYSTEMD.md). `./bin/moeka.sh enable` installs and starts
+the service. `./bin/moeka.sh disable` stops and disables it.
 
 ## Portability (export / import / new)
 
@@ -121,11 +121,11 @@ the full lifecycle of moving or duplicating an instance.
 ### Export
 
 ```sh
-./moeka.sh export                 # default: identity + skills + memory
-./moeka.sh export --with-sessions # also include per-channel chat history
-./moeka.sh export --with-media    # also include media/ (attachments)
-./moeka.sh export --anonymize     # wipe USER.md + allowFrom (for seeding others)
-./moeka.sh export --out /tmp/x.tar.gz
+./bin/moeka.sh export                 # default: identity + skills + memory
+./bin/moeka.sh export --with-sessions # also include per-channel chat history
+./bin/moeka.sh export --with-media    # also include media/ (attachments)
+./bin/moeka.sh export --anonymize     # wipe USER.md + allowFrom (for seeding others)
+./bin/moeka.sh export --out /tmp/x.tar.gz
 ```
 
 Always included: `SOUL.md`, `USER.md`, `AGENTS.md`, `HEARTBEAT.md`,
@@ -138,8 +138,8 @@ Always excluded: `keys.env`, `.env`, `*.log`, `moeka.pid`, `gateway.lock`,
 ### Import
 
 ```sh
-./moeka.sh import moeka-export-host-20260516.tar.gz
-./moeka.sh import x.tar.gz --workspace ~/.moeka-staging --force
+./bin/moeka.sh import moeka-export-host-20260516.tar.gz
+./bin/moeka.sh import x.tar.gz --workspace ~/.moeka-staging --force
 ```
 
 Refuses to overwrite a non-empty workspace unless `--force`. Warns if
@@ -149,19 +149,19 @@ environment / `keys.env`.
 ### New identity
 
 ```sh
-./moeka.sh new alice                  # -> ~/.moeka-alice
-./moeka.sh new bob --workspace /srv/bob
+./bin/moeka.sh new alice                  # -> ~/.moeka-alice
+./bin/moeka.sh new bob --workspace /srv/bob
 ```
 
 Copies the templates under `templates/workspace/` into the target,
 substituting `{{NAME}}` placeholders in `SOUL.md` / `USER.md`. All
 channels start disabled with empty `allowFrom` — wire them up via
-`./moeka.sh telegram-pair` or by editing `config.json`.
+`./bin/moeka.sh telegram-pair` or by editing `config.json`.
 
 ### Telegram pairing
 
 ```sh
-./moeka.sh telegram-pair
+./bin/moeka.sh telegram-pair
 ```
 
 Prompts for a bot token, validates via `getMe`, writes
@@ -172,7 +172,7 @@ Use any time tokens change.
 
 ## Bootstrap on a new Ubuntu 24.04 host
 
-`./bootstrap.sh` runs the full first-time setup interactively: installs
+`./bin/bootstrap.sh` runs the full first-time setup interactively: installs
 `uv` if absent, builds the venv, seeds `keys.env`, prompts for workspace
 mode (import / new / onboard), offers Telegram pairing, and offers
 systemd enable. Idempotent — re-running on an already-set-up host skips

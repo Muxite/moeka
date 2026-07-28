@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
+from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
@@ -47,8 +49,11 @@ from nanobot.utils.runtime import (
     build_finalization_retry_message,
     build_goal_continue_message,
     build_length_recovery_message,
+    build_tool_failure_reflection_message,
     ensure_nonempty_tool_result,
+    exec_guard_violation_signature,
     is_blank_text,
+    repeated_exec_guard_error,
     repeated_external_lookup_error,
     repeated_workspace_violation_error,
 )
@@ -77,6 +82,25 @@ _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 # Backward-compatible module attribute for tests/extensions that monkeypatch
 # the former single-file tracker hook. Runtime uses prepare_file_edit_trackers.
 prepare_file_edit_tracker = _prepare_file_edit_tracker
+
+class RunnerLimits(BaseModel):
+    """Tunable retry/injection/compaction thresholds for one agent execution.
+
+    Defaults preserve the historical module-constant behavior. Override via
+    ``agents.defaults.limits`` in config or per agent profile.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    max_empty_retries: int = _MAX_EMPTY_RETRIES
+    max_length_recoveries: int = _MAX_LENGTH_RECOVERIES
+    max_injections_per_turn: int = _MAX_INJECTIONS_PER_TURN
+    max_injection_cycles: int = _MAX_INJECTION_CYCLES
+    microcompact_keep_recent: int = _MICROCOMPACT_KEEP_RECENT
+    microcompact_min_chars: int = _MICROCOMPACT_MIN_CHARS
+    # After this many consecutive iterations where every tool call failed,
+    # inject one "stop and reassess" reflection note (0 = disabled).
+    tool_failure_reflection_threshold: int = 3
 
 
 @dataclass(slots=True)
@@ -109,6 +133,7 @@ class AgentRunSpec:
     llm_timeout_s: float | None = None
     goal_active_predicate: Callable[[], bool] | None = None
     goal_continue_message: str | None = None
+    limits: RunnerLimits = field(default_factory=RunnerLimits)
 
 
 @dataclass(slots=True)
@@ -183,14 +208,15 @@ class AgentRunner:
     ) -> tuple[bool, int]:
         """Drain pending injections. Returns (should_continue, updated_cycles).
 
-        If injections are found and we haven't exceeded _MAX_INJECTION_CYCLES,
-        append them to *messages* (and emit a checkpoint if *assistant_message*
-        and *iteration* are both provided) and return (True, cycles+1) so the
-        caller continues the iteration loop.  Otherwise return (False, cycles).
+        If injections are found and we haven't exceeded the injection-cycle
+        limit, append them to *messages* (and emit a checkpoint if
+        *assistant_message* and *iteration* are both provided) and return
+        (True, cycles+1) so the caller continues the iteration loop.
+        Otherwise return (False, cycles).
         """
         injections: list[dict[str, Any]] = []
         real_injection = False
-        if injection_cycles < _MAX_INJECTION_CYCLES:
+        if injection_cycles < spec.limits.max_injection_cycles:
             injections = await self._drain_injections(spec)
             real_injection = bool(injections)
         if not injections and allow_goal_continue and assistant_message is not None:
@@ -219,7 +245,7 @@ class AgentRunner:
         if real_injection:
             logger.info(
                 "Injected {} follow-up message(s) {} ({}/{})",
-                len(injections), phase, injection_cycles, _MAX_INJECTION_CYCLES,
+                len(injections), phase, injection_cycles, spec.limits.max_injection_cycles,
             )
         else:
             logger.info("Injected sustained-goal continuation {}", phase)
@@ -229,7 +255,7 @@ class AgentRunner:
         """Drain pending user messages via the injection callback.
 
         Returns normalized user messages (capped by
-        ``_MAX_INJECTIONS_PER_TURN``), or an empty list when there is
+        ``spec.limits.max_injections_per_turn``), or an empty list when there is
         nothing to inject. Messages beyond the cap are logged so they
         are not silently lost.
         """
@@ -245,7 +271,7 @@ class AgentRunner:
                 )
             )
             if accepts_limit:
-                items = await spec.injection_callback(limit=_MAX_INJECTIONS_PER_TURN)
+                items = await spec.injection_callback(limit=spec.limits.max_injections_per_turn)
             else:
                 items = await spec.injection_callback()
         except Exception:
@@ -261,13 +287,14 @@ class AgentRunner:
             text = getattr(item, "content", str(item))
             if text.strip():
                 injected_messages.append({"role": "user", "content": text})
-        if len(injected_messages) > _MAX_INJECTIONS_PER_TURN:
-            dropped = len(injected_messages) - _MAX_INJECTIONS_PER_TURN
+        cap = spec.limits.max_injections_per_turn
+        if len(injected_messages) > cap:
+            dropped = len(injected_messages) - cap
             logger.warning(
                 "Injection callback returned {} messages, capping to {} ({} dropped)",
-                len(injected_messages), _MAX_INJECTIONS_PER_TURN, dropped,
+                len(injected_messages), cap, dropped,
             )
-            injected_messages = injected_messages[:_MAX_INJECTIONS_PER_TURN]
+            injected_messages = injected_messages[:cap]
         return injected_messages
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
@@ -286,6 +313,8 @@ class AgentRunner:
         length_recovery_count = 0
         had_injections = False
         injection_cycles = 0
+        consecutive_failed_tool_iterations = 0
+        reflection_injected = False
 
         for iteration in range(spec.max_iterations):
             try:
@@ -295,7 +324,7 @@ class AgentRunner:
                 # later when the caller saves only the new turn.
                 messages_for_model = self._drop_orphan_tool_results(messages)
                 messages_for_model = self._backfill_missing_tool_results(messages_for_model)
-                messages_for_model = self._microcompact(messages_for_model)
+                messages_for_model = self._microcompact(messages_for_model, spec.limits)
                 messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
                 messages_for_model = self._snip_history(spec, messages_for_model)
                 # Snipping may have created new orphans; clean them up.
@@ -327,6 +356,11 @@ class AgentRunner:
                 response.content,
             )
             response.content = cleaned_content
+            # Inline <think>-tag reasoning is stripped from content above; copy
+            # it into reasoning_content so it persists to session history like
+            # native reasoning does (otherwise it vanishes after display).
+            if reasoning_text and not response.reasoning_content and not response.thinking_blocks:
+                response.reasoning_content = reasoning_text
             if reasoning_text and not context.streamed_reasoning:
                 await hook.emit_reasoning(reasoning_text)
                 await hook.emit_reasoning_end()
@@ -428,6 +462,31 @@ class AgentRunner:
                 )
                 empty_content_retries = 0
                 length_recovery_count = 0
+
+                # Tool-failure reflection: after N consecutive iterations where
+                # every tool call failed, inject one "stop and reassess" note.
+                if new_events and all(e.get("status") == "error" for e in new_events):
+                    consecutive_failed_tool_iterations += 1
+                else:
+                    consecutive_failed_tool_iterations = 0
+                threshold = spec.limits.tool_failure_reflection_threshold
+                if (
+                    threshold > 0
+                    and not reflection_injected
+                    and consecutive_failed_tool_iterations >= threshold
+                ):
+                    messages.append(
+                        build_tool_failure_reflection_message(
+                            consecutive_failed_tool_iterations
+                        )
+                    )
+                    reflection_injected = True
+                    logger.info(
+                        "Injected tool-failure reflection after {} failed iterations for {}",
+                        consecutive_failed_tool_iterations,
+                        spec.session_key or "default",
+                    )
+
                 # Checkpoint 1: drain injections after tools, before next LLM call
                 _drained, injection_cycles = await self._try_drain_injections(
                     spec, messages, None, injection_cycles,
@@ -448,13 +507,13 @@ class AgentRunner:
             clean = hook.finalize_content(context, response.content)
             if response.finish_reason != "error" and is_blank_text(clean):
                 empty_content_retries += 1
-                if empty_content_retries < _MAX_EMPTY_RETRIES:
+                if empty_content_retries < spec.limits.max_empty_retries:
                     logger.warning(
                         "Empty response on turn {} for {} ({}/{}); retrying",
                         iteration,
                         spec.session_key or "default",
                         empty_content_retries,
-                        _MAX_EMPTY_RETRIES,
+                        spec.limits.max_empty_retries,
                     )
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=False)
@@ -479,13 +538,13 @@ class AgentRunner:
 
             if response.finish_reason == "length" and not is_blank_text(clean):
                 length_recovery_count += 1
-                if length_recovery_count <= _MAX_LENGTH_RECOVERIES:
+                if length_recovery_count <= spec.limits.max_length_recoveries:
                     logger.info(
                         "Output truncated on turn {} for {} ({}/{}); continuing",
                         iteration,
                         spec.session_key or "default",
                         length_recovery_count,
-                        _MAX_LENGTH_RECOVERIES,
+                        spec.limits.max_length_recoveries,
                     )
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=True)
@@ -1073,6 +1132,27 @@ class AgentRunner:
             event["detail"] = self._event_detail("ssrf_violation: ", raw_text)
             return self._ssrf_soft_payload(raw_text), event, None
 
+        if exec_guard_violation_signature(raw_text) is not None:
+            # Allowlist / deny-pattern denials: the model retries different
+            # commands, so throttle on the denial class to avoid burning the
+            # whole iteration budget against a config-level block.
+            escalation = repeated_exec_guard_error(raw_text, workspace_violation_counts)
+            event["detail"] = self._event_detail("exec_guard_denial: ", raw_text)
+            if escalation is not None:
+                logger.warning(
+                    "Tool {} blocked repeatedly by exec command guard; escalating hint",
+                    tool_call.name,
+                )
+                event["detail"] = self._event_detail(
+                    "exec_guard_denial_escalated: ",
+                    raw_text,
+                )
+                return escalation, event, None
+            # Return the denial verbatim — the generic "try a different
+            # approach" retry hint in soft_payload contradicts the guard's
+            # "retrying will not help" instruction.
+            return raw_text, event, None
+
         if self._is_workspace_violation(raw_text):
             escalation = repeated_workspace_violation_error(
                 tool_call.name,
@@ -1231,22 +1311,26 @@ class AgentRunner:
         return updated
 
     @staticmethod
-    def _microcompact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _microcompact(
+        messages: list[dict[str, Any]],
+        limits: RunnerLimits | None = None,
+    ) -> list[dict[str, Any]]:
         """Replace old compactable tool results with one-line summaries."""
+        limits = limits or RunnerLimits()
         compactable_indices: list[int] = []
         for idx, msg in enumerate(messages):
             if msg.get("role") == "tool" and msg.get("name") in _COMPACTABLE_TOOLS:
                 compactable_indices.append(idx)
 
-        if len(compactable_indices) <= _MICROCOMPACT_KEEP_RECENT:
+        if len(compactable_indices) <= limits.microcompact_keep_recent:
             return messages
 
-        stale = compactable_indices[: len(compactable_indices) - _MICROCOMPACT_KEEP_RECENT]
+        stale = compactable_indices[: len(compactable_indices) - limits.microcompact_keep_recent]
         updated: list[dict[str, Any]] | None = None
         for idx in stale:
             msg = messages[idx]
             content = msg.get("content")
-            if not isinstance(content, str) or len(content) < _MICROCOMPACT_MIN_CHARS:
+            if not isinstance(content, str) or len(content) < limits.microcompact_min_chars:
                 continue
             name = msg.get("name", "tool")
             summary = f"[{name} result omitted from context]"

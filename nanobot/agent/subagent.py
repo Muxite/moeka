@@ -86,6 +86,8 @@ class SubagentManager:
         disabled_skills: list[str] | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
+        tools_allow: list[str] | None = None,
+        tools_deny: list[str] | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
     ):
         defaults = AgentDefaults()
@@ -97,6 +99,8 @@ class SubagentManager:
         self.max_tool_result_chars = max_tool_result_chars
         self.restrict_to_workspace = restrict_to_workspace
         self.disabled_skills = set(disabled_skills or [])
+        self.tools_allow = list(tools_allow) if tools_allow is not None else None
+        self.tools_deny = list(tools_deny) if tools_deny else []
         self.max_iterations = (
             max_iterations
             if max_iterations is not None
@@ -139,7 +143,10 @@ class SubagentManager:
                 workspace=root,
             ),
         )
-        ToolLoader().load(ctx, registry, scope="subagent")
+        ToolLoader().load(
+            ctx, registry, scope="subagent",
+            allow=self.tools_allow, deny=self.tools_deny,
+        )
         return registry
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:

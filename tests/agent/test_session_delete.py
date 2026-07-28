@@ -14,16 +14,14 @@ def _seed(workspace: Path, key: str = "telegram:abc") -> SessionManager:
     return sm
 
 
-def test_delete_session_removes_file_and_invalidates_cache(tmp_path: Path) -> None:
+def test_delete_session_removes_rows_and_invalidates_cache(tmp_path: Path) -> None:
     sm = _seed(tmp_path, "telegram:abc")
-    file_path = sm._get_session_path("telegram:abc")
-    assert file_path.exists()
     # Populate cache as a real consumer would.
     cached = sm.get_or_create("telegram:abc")
     assert cached.messages
 
     assert sm.delete_session("telegram:abc") is True
-    assert not file_path.exists()
+    assert sm.read_session_file("telegram:abc") is None
     # Subsequent get_or_create returns a fresh, empty Session (no stale cache).
     fresh = sm.get_or_create("telegram:abc")
     assert fresh.messages == []
@@ -58,8 +56,7 @@ def test_read_session_file_missing(tmp_path: Path) -> None:
     assert sm.read_session_file("nope:none") is None
 
 
-def test_safe_key_matches_internal_path(tmp_path: Path) -> None:
-    sm = SessionManager(tmp_path)
+def test_safe_key_is_filename_safe(tmp_path: Path) -> None:
     key = "telegram:abc/def"
-    expected = sm._get_session_path(key).name
-    assert SessionManager.safe_key(key) + ".jsonl" == expected
+    stem = SessionManager.safe_key(key)
+    assert "/" not in stem and ":" not in stem

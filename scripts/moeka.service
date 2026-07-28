@@ -10,7 +10,7 @@ Type=simple
 WorkingDirectory=%h/projects/moeka
 # 'run' starts the gateway in the foreground so systemd owns the PID.
 # Do NOT use 'start' here — that backgrounds the process and breaks restart.
-ExecStart=%h/projects/moeka/moeka.sh run
+ExecStart=%h/projects/moeka/bin/moeka.sh run
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 # Exponential backoff: 5s → ~10s → ~20s → ~40s → ~80s → 5min (cap).
