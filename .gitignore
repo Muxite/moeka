@@ -14,6 +14,9 @@ moeka.log
 # Claude / AI assistant artifacts
 docs/superpowers/
 docs/plans/
+# Agent-created git worktrees live here — full repo checkouts, never commit them.
+.claude/worktrees/
+.claude/settings.local.json
 
 # webui (monorepo frontend)
 webui/node_modules/
