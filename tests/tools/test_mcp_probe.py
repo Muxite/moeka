@@ -1,13 +1,14 @@
 """Tests for MCP HTTP probe guard (prevents event-loop crash on unreachable servers)."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from contextlib import suppress
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from nanobot.agent.tools.mcp import _probe_http_url, connect_mcp_servers
 from nanobot.agent.tools.registry import ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # _probe_http_url unit tests
@@ -16,9 +17,17 @@ from nanobot.agent.tools.registry import ToolRegistry
 @pytest.mark.asyncio
 async def test_probe_returns_true_for_open_port(tmp_path):
     """Start a trivial TCP server, probe should return True."""
-    server = await asyncio.start_server(
-        lambda r, w: None, "127.0.0.1", 0,
-    )
+
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # The handler MUST close its side of the connection. Since Python 3.12,
+        # ``Server.wait_closed()`` waits for every accepted connection to be
+        # closed by the server; a no-op handler leaves the transport open and
+        # the cleanup below hangs forever.
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     try:
         assert await _probe_http_url(f"http://127.0.0.1:{port}/mcp") is True
@@ -101,6 +110,3 @@ async def test_probe_not_called_for_stdio():
         await connect_mcp_servers({"s": cfg}, registry)
 
     assert not called, "probe should not be called for stdio transport"
-
-
-import asyncio
