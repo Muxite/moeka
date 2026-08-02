@@ -16,6 +16,27 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 
 @pytest.fixture(autouse=True)
+def _restore_os_environ():
+    """Snapshot/restore ``os.environ`` around every test.
+
+    Building a provider has a global side effect: ``OpenAICompatProvider.
+    _setup_env`` writes the resolved api key into ``os.environ`` (and for
+    *gateway* specs like OpenRouter it **overwrites** an existing value —
+    see ``nanobot/providers/openai_compat_provider.py``). So any test that
+    constructs a provider from a config with a placeholder key such as
+    ``"sk-test-key"`` silently replaces the real ``OPENROUTER_API_KEY`` that
+    ``tests/core/test_integration_real.py`` loaded from ``keys.env`` at
+    collection time — making the live tests pass alone and fail in a full run.
+
+    Restoring the environment per test keeps the suite order-independent.
+    """
+    saved = os.environ.copy()
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
 def _reenable_nanobot_logging():
     """Undo loguru ``logger.disable("nanobot")`` leaking across tests.
 
