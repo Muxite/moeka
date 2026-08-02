@@ -19,16 +19,23 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 def _restore_os_environ():
     """Snapshot/restore ``os.environ`` around every test.
 
-    Building a provider has a global side effect: ``OpenAICompatProvider.
-    _setup_env`` writes the resolved api key into ``os.environ`` (and for
-    *gateway* specs like OpenRouter it **overwrites** an existing value —
-    see ``nanobot/providers/openai_compat_provider.py``). So any test that
-    constructs a provider from a config with a placeholder key such as
-    ``"sk-test-key"`` silently replaces the real ``OPENROUTER_API_KEY`` that
-    ``tests/core/test_integration_real.py`` loaded from ``keys.env`` at
-    collection time — making the live tests pass alone and fail in a full run.
+    Originally added for a specific leak: ``OpenAICompatProvider._setup_env``
+    wrote the resolved api key into ``os.environ`` and, for *gateway* specs like
+    OpenRouter, **overwrote** an existing value. A test constructing a provider
+    with a placeholder key such as ``"sk-test-key"`` therefore replaced the real
+    ``OPENROUTER_API_KEY`` that ``tests/core/test_integration_real.py`` loads
+    from ``keys.env`` at collection time — so the live tests passed alone and
+    failed in a full run.
 
-    Restoring the environment per test keeps the suite order-independent.
+    **That leak is fixed at the source**: ``_setup_env`` has been removed and
+    ``tests/providers/test_no_env_mutation.py`` guards its return. This fixture
+    is kept anyway, as general isolation — several tests still write env vars
+    directly, and a per-test restore is what keeps the suite order-independent
+    regardless of which future code path leaks next.
+
+    Caveat worth knowing: this is function-scoped, so it cannot undo writes that
+    happen at *collection* time (``test_integration_real.py`` calls
+    ``_load_keys_env()`` at module import, before any fixture runs).
     """
     saved = os.environ.copy()
     yield

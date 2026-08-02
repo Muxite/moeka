@@ -22,22 +22,26 @@ from pydantic.alias_generators import to_snake
 class ProviderSpec:
     """One LLM provider's metadata. See PROVIDERS below for real examples.
 
-    Placeholders in env_extras values:
-      {api_key}  — the user's API key
-      {api_base} — api_base from config, or this spec's default_api_base
+    NOTE: ``env_key`` and ``env_extras`` are **declarative only** — they name the
+    conventional environment variable for a provider, for onboarding hints and
+    diagnostics. Nothing writes them into ``os.environ``. Provider construction
+    used to do exactly that (see the removal of ``_setup_env``), which mutated
+    the host process on behalf of a library and, for gateway specs, *overwrote*
+    keys the operator had set. Do not reintroduce a write here: every provider
+    receives its ``api_key`` explicitly from the factory.
     """
 
     # identity
     name: str  # config field name, e.g. "dashscope"
     keywords: tuple[str, ...]  # model-name keywords for matching (lowercase)
-    env_key: str  # env var for API key, e.g. "DASHSCOPE_API_KEY"
+    env_key: str  # conventional env var name, e.g. "DASHSCOPE_API_KEY" (never written)
     display_name: str = ""  # shown in `nanobot status`
 
     # which provider implementation to use
     # "openai_compat" | "anthropic" | "azure_openai" | "openai_codex" | "github_copilot" | "bedrock"
     backend: str = "openai_compat"
 
-    # extra env vars, e.g. (("ZHIPUAI_API_KEY", "{api_key}"),)
+    # extra conventional env var names, e.g. (("ZHIPUAI_API_KEY", "{api_key}"),)
     env_extras: tuple[tuple[str, str], ...] = ()
 
     # gateway / local detection
