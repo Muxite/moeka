@@ -51,7 +51,16 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)
             return int(next_dt.timestamp() * 1000)
-        except Exception:
+        except Exception as e:
+            # A job whose expression cannot be parsed has next_run_at_ms=None
+            # forever, so the scheduler never wakes for it and it is silently
+            # inert. Returning None is the correct value; swallowing it without
+            # a word is what made that undetectable.
+            logger.warning(
+                "Cron: cannot compute next run for expr '{}' ({}); job will never fire",
+                schedule.expr,
+                e,
+            )
             return None
 
     return None
@@ -70,6 +79,21 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
         except Exception:
             raise ValueError(f"unknown timezone '{schedule.tz}'") from None
 
+    if schedule.kind == "cron":
+        if not schedule.expr:
+            raise ValueError("cron schedules require an 'expr'")
+        from croniter import croniter
+
+        # Only the timezone was validated before, so any unparseable expression
+        # was accepted and produced a job that could never fire while still
+        # reporting success to the caller. croniter rejects the shorthand forms
+        # (@reboot, @daily, ...) that look plausible but are not supported here.
+        if not croniter.is_valid(schedule.expr):
+            raise ValueError(
+                f"invalid cron expression '{schedule.expr}': expected 5-7 space-separated "
+                "fields (shorthands like '@reboot' or '@daily' are not supported)"
+            )
+
 
 class CronService:
     """Service for managing and executing scheduled jobs."""
@@ -81,6 +105,7 @@ class CronService:
         store_path: Path,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
         max_sleep_ms: int = 300_000,  # 5 minutes
+        job_timeout_s: float = 1800.0,  # 30 minutes
     ):
         self.store_path = store_path
         self._action_path = store_path.parent / "action.jsonl"
@@ -91,6 +116,10 @@ class CronService:
         self._running = False
         self._timer_active = False
         self.max_sleep_ms = max_sleep_ms
+        # The timer task is the only scheduler, and it awaits each job inline, so
+        # one wedged job (a hung LLM call or MCP tool) stalls every other job
+        # indefinitely. Generous by default because jobs are full agent turns.
+        self.job_timeout_s = job_timeout_s
 
     def _load_jobs(self) -> tuple[list[CronJob], int] | None:
         """Load jobs from disk.
@@ -369,8 +398,22 @@ class CronService:
 
     def _arm_timer(self) -> None:
         """Schedule the next timer tick."""
-        if self._timer_task:
-            self._timer_task.cancel()
+        # _on_timer runs *inside* self._timer_task and re-arms at the end, and so
+        # does anything that mutates jobs mid-turn — cron(action="remove") is
+        # reachable from a job's own agent turn. Cancelling the task we are
+        # currently running in throws CancelledError into the middle of that turn.
+        # On the normal path it only fails to do so by luck, because tick() has no
+        # further await after _on_timer returns. Never cancel ourselves.
+        if self._timer_task is not None:
+            # register_system_job() and friends are sync and run before the loop
+            # exists, where current_task() raises RuntimeError; there is nothing
+            # to cancel in that case anyway.
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if self._timer_task is not current:
+                self._timer_task.cancel()
 
         if not self._running:
             return
@@ -418,7 +461,12 @@ class CronService:
             for job in due_jobs:
                 await self._execute_job(job)
 
-            self._save_store()
+            # Only persist when a job actually ran. This used to save on every
+            # tick, rewriting jobs.json every <=5 minutes even when nothing
+            # changed — which is what clobbered hand edits landing inside the
+            # window where _load_store skips its reload (_timer_active).
+            if due_jobs:
+                self._save_store()
         finally:
             self._timer_active = False
         self._arm_timer()
@@ -430,12 +478,22 @@ class CronService:
 
         try:
             if self.on_job:
-                await self.on_job(job)
+                # Bounded: the timer task is the only scheduler and awaits jobs
+                # inline, so an unbounded job blocks every other job forever.
+                await asyncio.wait_for(self.on_job(job), timeout=self.job_timeout_s)
 
             job.state.last_status = "ok"
             job.state.last_error = None
             logger.info("Cron: job '{}' completed", job.name)
 
+        except asyncio.TimeoutError:
+            job.state.last_status = "error"
+            job.state.last_error = f"timed out after {self.job_timeout_s}s"
+            logger.error(
+                "Cron: job '{}' timed out after {}s; scheduler released",
+                job.name,
+                self.job_timeout_s,
+            )
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
@@ -526,12 +584,35 @@ class CronService:
         return job
 
     def register_system_job(self, job: CronJob) -> CronJob:
-        """Register an internal system job (idempotent on restart)."""
+        """Register an internal system job (idempotent on restart).
+
+        "Idempotent" means the job *definition* is reconciled while its observed
+        *history* survives. This used to rebuild ``job.state`` unconditionally,
+        which reset ``last_run_at_ms``/``last_status``/``run_history`` on every
+        gateway start — so a job could execute correctly for months and still
+        report that it had never run. ``created_at_ms`` was likewise stamped with
+        the restart time rather than the real creation time.
+        """
         store = self._load_store()
+        if store is None:
+            logger.warning(
+                "Cron: cannot register system job '{}' — store unavailable", job.name
+            )
+            return job
+
         now = _now_ms()
-        job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
-        job.created_at_ms = now
+        existing = next((j for j in store.jobs if j.id == job.id), None)
+        if existing is not None:
+            # Carry observed history forward; only the next wake is re-derived,
+            # since the schedule in code is authoritative over the stored copy.
+            job.state = existing.state
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+            job.created_at_ms = existing.created_at_ms
+        else:
+            job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
+            job.created_at_ms = now
         job.updated_at_ms = now
+
         store.jobs = [j for j in store.jobs if j.id != job.id]
         store.jobs.append(job)
         self._save_store()
