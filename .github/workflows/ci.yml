@@ -39,11 +39,39 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libolm-dev build-essential
 
+      # ~90MB of sentence-transformers weights are downloaded on first use by
+      # the vec tests (nanobot/core/vec_store.py). Nothing in the repo sets
+      # HF_HUB_OFFLINE, so without this every leg hits huggingface.co and a
+      # rate-limited runner fails the build for reasons unrelated to the change.
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-all-MiniLM-L6-v2
+
       - name: Install dependencies
         run: uv sync --all-extras
 
-      - name: Lint with ruff
-        run: uv run ruff check nanobot --select F
+      # `--select` on the command line REPLACES the select list in
+      # pyproject.toml, so the previous `--select F` silently disabled E, I, N
+      # and W everywhere despite them being configured. Plain `ruff check` uses
+      # the configured ruleset (with its per-file-ignores).
+      - name: Lint nanobot with ruff
+        run: uv run ruff check nanobot
 
+      # tests/ was never linted at all — 69k lines with zero coverage. That is
+      # how a stray bottom-of-file import and a duplicated test class (whose
+      # tests therefore never ran) both survived. F-rules only for now; the
+      # style backlog is tracked in pyproject's per-file-ignores.
+      - name: Lint tests with ruff
+        run: uv run ruff check tests --select F
+
+      # NANOBOT_MIN_TESTS: ~380 tests sit behind module-level importorskip for
+      # optional channel extras. If uv fails to resolve one of them, those files
+      # vanish from collection and the build goes GREEN with hundreds fewer
+      # tests. The floor turns that silent false-pass into a hard failure.
+      # Raise it as the suite grows; never lower it to make a red build green.
       - name: Run tests
+        env:
+          NANOBOT_MIN_TESTS: "3400"
         run: uv run pytest tests/

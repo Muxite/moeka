@@ -7,10 +7,8 @@ temp files and process environment variables.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
-import pytest
 
 from nanobot.config.loader import (
     load_config,

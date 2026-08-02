@@ -12,14 +12,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider
 
 
 def _make_provider():

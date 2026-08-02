@@ -132,9 +132,13 @@ pdf = [
 dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
+    "pytest-timeout>=2.3.0,<3.0.0",
     "aiohttp>=3.9.0,<4.0.0",
     "pytest-cov>=6.0.0,<7.0.0",
-    "ruff>=0.1.0",
+    # Upper bound deliberate: ruff gates CI, and an unbounded range meant any
+    # release that changed rule behaviour could redden the build with no repo
+    # change. This was ">=0.1.0", spanning ~0.1 to 0.14 of rule churn.
+    "ruff>=0.1.0,<0.15.0",
     "pymupdf>=1.25.0",
 ]
 
@@ -188,9 +192,39 @@ target-version = "py311"
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# E402 (import not at top) is correct-by-design in these two files:
+#   cli/commands.py reconfigures sys.stdout/stderr to UTF-8 before importing
+#   typer and loguru, which must happen first for emoji/multilingual output
+#   (see .agent/gotchas.md, "Windows Compatibility").
+#   __init__.py exposes a lazy __getattr__ module map to keep import cost down.
+"nanobot/cli/commands.py" = ["E402"]
+"nanobot/__init__.py" = ["E402"]
+# Renaming the public exception FileSizeExceeded to satisfy N818's "...Error"
+# convention would be a breaking API change for anything that catches it.
+"nanobot/utils/media_decode.py" = ["N818"]
+# tests/ is linted under --select F in CI (see .github/workflows/ci.yml), which
+# catches the rules that indicate real defects: F401 unused imports, F811
+# redefinition (a shadowed test class means its tests never run — there was one),
+# and F821 undefined names. F841 (assigned-but-never-used local) is DEFERRED, not
+# endorsed: 12 remain, all sampled ones benign (the assertion is on another
+# object, or the value documents fixture state). Worth a separate cleanup pass;
+# do not treat this line as permission to add more.
+"tests/**" = ["F841"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# -ra: summarise skips/xfails. ~380 tests sit behind module-level importorskip
+# for channel extras, and without a reason summary a dependency that silently
+# failed to install is indistinguishable from a healthy run.
+addopts = "-ra"
+# A hung test used to burn the entire 20-minute job with no attribution: an
+# asyncio server whose handler never closed the writer made Server.wait_closed()
+# block forever on 3.12+. Per-test timeouts turn that into one named failure.
+# Generous — the whole suite runs in ~170s, so nothing legitimate is near this.
+timeout = 300
+timeout_method = "thread"
 
 [tool.coverage.run]
 source = ["nanobot"]
@@ -206,8 +240,14 @@ exclude_lines = [
 ]
 
 [dependency-groups]
+# Keep in step with [project.optional-dependencies].dev above. These two lists
+# both exist and drifted: this one lacked ruff, so a plain `uv sync` produced an
+# environment where the CI lint command could not run at all — it only worked
+# because CI passes --all-extras and picks up the *extra* instead.
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
+    "pytest-timeout>=2.3.0",
     "pytest-cov>=6.3.0",
+    "ruff>=0.1.0,<0.15.0",
 ]

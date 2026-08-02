@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.providers.openai_responses.converters import (
     convert_messages,
     convert_tools,

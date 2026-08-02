@@ -5,7 +5,6 @@ from dataclasses import fields
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
 
 from nanobot.agent.tools.base import Tool
 

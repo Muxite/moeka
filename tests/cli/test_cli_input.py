@@ -1,4 +1,3 @@
-import asyncio
 from contextlib import nullcontext
 from io import StringIO
 from unittest.mock import AsyncMock, MagicMock, call, patch

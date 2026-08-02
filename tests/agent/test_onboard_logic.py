@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import pytest
 from pydantic import BaseModel, Field
 
 from nanobot.cli import onboard as onboard_wizard
@@ -829,7 +828,6 @@ class TestMainMenuUpdate:
 
     def test_main_menu_dispatch_includes_channel_common(self):
         """Main menu dispatch should route [H] to Channel Common."""
-        from nanobot.cli.onboard import run_onboard
 
         # We verify by checking the dispatch table is set up correctly
         # The menu items are defined inline in run_onboard, so we test
@@ -1015,7 +1013,6 @@ class TestConfigurePydanticModelEmptyString:
     def test_optional_str_empty_string_becomes_none(self, monkeypatch):
         """Entering '' for an optional str field should set it to None."""
         from pydantic import BaseModel
-        from nanobot.cli.onboard import _is_str_or_none
 
         class M(BaseModel):
             api_key: str | None = None

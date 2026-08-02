@@ -15,6 +15,38 @@ import pytest
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Fail the run if far fewer tests were collected than expected.
+
+    Roughly 380 tests — about 11% of the suite — sit behind module-level
+    ``importorskip`` / ``pytest.skip(allow_module_level=True)`` guards for
+    optional channel extras (telegram, matrix, discord, feishu, msteams, wecom,
+    slack, dingtalk, qq, and the sqlite_vec / sentence_transformers pair).
+
+    That is the right behaviour for a contributor without those extras. It is a
+    silent disaster in CI: if ``uv sync --all-extras`` fails to resolve one of
+    the low-maintenance channel packages on a new Python, every test in that
+    module vanishes and the build goes **green** with hundreds fewer tests. A
+    dependency failure becomes a false pass, which is worse than a red build.
+
+    Opt-in by design (see .agent/design.md, "explicit over magical") so that
+    running a subset locally — ``pytest tests/cron`` — never trips it. CI sets
+    ``NANOBOT_MIN_TESTS``; nothing else does.
+    """
+    floor = os.environ.get("NANOBOT_MIN_TESTS")
+    if not floor:
+        return
+    collected = len(session.items)
+    if collected < int(floor):
+        raise pytest.UsageError(
+            f"Collected only {collected} tests, expected at least {floor}. "
+            "This usually means an optional dependency failed to install and a "
+            "module-level skip silently dropped its whole file — check the "
+            "install step and the -ra skip summary rather than lowering this "
+            "floor."
+        )
+
+
 @pytest.fixture(autouse=True)
 def _restore_os_environ():
     """Snapshot/restore ``os.environ`` around every test.

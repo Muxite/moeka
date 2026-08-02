@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 
 from nanobot.config.paths import (
     get_bridge_install_dir,
@@ -14,7 +13,7 @@ from nanobot.config.paths import (
     get_workspace_path,
     is_default_workspace,
 )
-from nanobot.config.schema import AgentDefaults, AgentsConfig, Config
+from nanobot.config.schema import Config
 
 
 def test_runtime_dirs_follow_config_path(monkeypatch, tmp_path: Path) -> None:

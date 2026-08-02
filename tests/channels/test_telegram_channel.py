@@ -1663,7 +1663,6 @@ async def test_start_loop_exits_when_app_goes_none(monkeypatch) -> None:
         if iteration >= 1:
             channel._app = None  # cleared externally
 
-    import nanobot.channels.telegram as tg_mod
     import asyncio as _asyncio
 
     original_sleep = _asyncio.sleep

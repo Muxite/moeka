@@ -1,6 +1,5 @@
 import json
 
-import pytest
 
 from nanobot.config.loader import (
     _resolve_env_vars,
