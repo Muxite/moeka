@@ -14,7 +14,7 @@ Built on [nanobot](https://github.com/HKUDS/nanobot) by HKUDS, with a CS/server-
 - **Sustained goals (`/goal`)** — multi-step missions tracked across turns via `long_task` / `complete_goal`.
 - **Subagents** — `spawn` a focused worker with its own tool registry; results re-injected via system inbound.
 - **Dream two-phase memory consolidation** — automatic summarization with `/dream`, `/dream_log`, `/dream_restore`.
-- **Cross-process FileLock on session save** — safe even if a stray second moeka process starts alongside the systemd one.
+- **SQLite WAL session store** — conversations persist to `sessions.db` (WAL mode) instead of per-session `.jsonl` files; SQLite's native locking replaces the old cross-process `FileLock`, so it stays safe even if a stray second moeka process starts alongside the systemd one. Legacy `.jsonl` sessions are imported once at startup ("newer wins") and renamed `*.jsonl.imported`; `dump_jsonl()` still exports the old format for debugging.
 - **Dispatcher watchdog** — outbound queue auto-restarts on unexpected crashes.
 
 ### Chat channels
@@ -55,10 +55,12 @@ Filesystem (read/write/edit/list, hash-deduped reads), `exec` shell, web search/
 - `./bin/moeka.sh export` / `import` — portable workspace archives.
 
 ### Embeddable core (moeka-core)
-- **`from nanobot.core import MoekaCore`** — drop the agent/RAG engine into your own Python with no channels, gateway, or WebUI. The import boundary is enforced by a test, so it pulls no chat-runtime dependencies.
+- **`from nanobot.core import MoekaCore`** — drop the agent/RAG engine into your own Python with no channels, gateway, or WebUI. The import boundary is enforced by a test (`tests/core/test_import_boundary.py`), so it pulls no chat-runtime dependencies.
 - **Data, not files** — build from an in-memory `config_dict` / `Config` (or a `config_path`); `${VAR}` placeholders resolve from the environment (the same `keys.env` pattern). With no workspace it runs in a throwaway temp dir instead of touching `~/.nanobot`.
-- **Host actions + documents** — register plain Python functions as tools with `@core.action`, ingest docs for retrieval, and run a multi-step tool-calling loop. One-shot `complete()` / `acomplete()` skip the loop entirely.
-- Minimal install: `pip install moeka[core]` (add `[vec]` for semantic RAG). See [Embedding the core](#embedding-the-core-moeka-core) below.
+- **Agent profiles & scoping** — `MoekaCore.create(profile=...)` / `MoekaCore.scoped(profile=...)` apply a named or inline `AgentProfileConfig` (model preset, persona, tool allow/deny list, skill allow/deny list, memory on/off, `RunnerLimits`) so one host process can run several differently-permissioned agent personas against the same core, each with a guaranteed-cleaned-up workspace.
+- **Host actions + documents** — register plain Python functions as tools with `@core.action`, ingest docs for retrieval (`core.ingest` / `core.ingest_text`), and run a multi-step tool-calling loop (`core.run` / `core.think`). One-shot `complete()` / `acomplete()` (and streaming `complete_stream()` / `acomplete_stream()`) skip the loop entirely.
+- **Hybrid FTS5 + vector RAG** — `core.retrieve(mode="vec" | "keyword" | "hybrid")` searches a SQLite store (`nanobot/core/vec_store.py`) with reciprocal-rank fusion of BM25 keyword search and sqlite-vec KNN; filter by `tags`/`since`/`collection`. Degrades gracefully to keyword-only (or fully inert) when `moeka[vec]` isn't installed.
+- Minimal install: `pip install moeka[core]` (add `[vec]` for semantic RAG). See [Embedding the core](#embedding-the-core-moeka-core) below and [`docs/core-architecture.md`](docs/core-architecture.md) for the full subsystem design.
 
 ---
 
@@ -237,8 +239,9 @@ moeka/                    ← this repo
 ├── USER.md               ← user profile
 ├── AGENTS.md             ← agent instructions
 ├── memory/MEMORY.md      ← long-term memory
+├── memory/vec.db         ← hybrid FTS5 + vector RAG store (semantic memory, host documents)
 ├── skills/               ← custom skills
-├── sessions/             ← per-channel conversation state
+├── sessions.db           ← SQLite WAL conversation session store
 └── moeka.log             ← runtime log
 ```
 
@@ -337,6 +340,53 @@ is the pure `(Config, workspace) → core` data seam. The one-shot
 `config_path=` inputs, so neither the loop nor a single completion ever requires a
 file on disk. Install the minimal dependency surface with the `core` extra
 (`pip install moeka[core]`); add `[vec]` for semantic RAG.
+
+### Agent profiles & scoping
+
+`MoekaCore.scoped()` context-manages a core whose (possibly ephemeral) workspace
+is always cleaned up, and applies a profile — a named entry in `config.profiles`,
+an `AgentProfileConfig`, or a plain dict:
+
+```python
+from nanobot.core import MoekaCore
+
+with MoekaCore.scoped(
+    profile={
+        "system_prompt": "You are a terse release-notes editor.",
+        "tools_allow": ["read_file", "web_search"],
+        "planning": True,
+    },
+    config_path="~/.nanobot/config.json",
+) as core:
+    result = await core.run("Draft release notes for v2.3.")
+```
+
+A profile can set `model_preset`, `system_prompt` / `system_prompt_file`,
+`tools_allow` / `tools_deny`, `skills_include` / `skills_exclude`,
+`skills_inline`, `memory_enabled`, `planning`, and `limits` (a `RunnerLimits`
+override for retry/injection/compaction budgets). `tools_allow` is a hard
+allowlist applied at tool-discovery time, so tools added to moeka later never
+silently appear in a scoped agent.
+
+The persona flows **in memory** — a profile never writes `AGENTS.md` into the
+host's workspace. `system_prompt_file` is read once at `create()`; from then on
+the core only sees content, and the profile persona wins over any pre-existing
+workspace `AGENTS.md`. Hosts can push their own sections the same way with
+`bootstrap={"AGENTS.md": ..., "USER.md": ...}` (or `core.set_bootstrap(name,
+content)` at runtime), and define skills in code with `skills=[InlineSkillConfig(...)]`
+/ `core.add_skill()` instead of writing `SKILL.md` files to disk.
+
+### Planning & reflection
+
+Two opt-in agent-loop behaviors, independent of the embeddable core:
+
+- **Planning** (`agents.defaults.planning` or a profile's `planning: true`) —
+  one pre-run LLM call produces a short execution plan before the main turn,
+  injected as a plan note.
+- **Reflection** — after `limits.tool_failure_reflection_threshold`
+  (default 3) consecutive iterations where every tool call failed, the runner
+  injects a "stop and reassess" reflection note instead of continuing to
+  retry blindly. Set the threshold to `0` to disable.
 
 ---
 

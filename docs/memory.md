@@ -12,12 +12,70 @@ nanobot does not treat memory as one giant file.
 
 It separates memory into layers, because different kinds of remembering deserve different tools:
 
-- `session.messages` holds the living short-term conversation.
+- `session.messages` holds the living short-term conversation, persisted to `sessions.db` (see [Session storage](#session-storage-sessionsdb) below).
 - `memory/history.jsonl` is the running archive of compressed past turns.
 - `SOUL.md`, `USER.md`, and `memory/MEMORY.md` are the durable knowledge files.
+- `memory/vec.db` is the optional hybrid FTS5 + vector store — semantic recall over `MEMORY.md`, `history.jsonl`, skills, and any host-ingested documents (see [Semantic & hybrid retrieval](#semantic--hybrid-retrieval-vecdb) below).
 - `GitStore` records how those durable files change over time.
 
 This keeps the system light in the moment, but reflective over time.
+
+## Session storage (`sessions.db`)
+
+Short-term conversation state no longer lives in per-session `.jsonl` files.
+As of the 2026-06 overhaul, `nanobot/session/manager.py` persists every
+session to a single SQLite database, `<workspace>/sessions.db`, opened in
+**WAL mode**. SQLite's own locking replaces the old bespoke cross-process
+`FileLock` — safe even if a stray second moeka process starts alongside the
+systemd-managed one.
+
+- On first startup against an existing workspace, any legacy `sessions/*.jsonl`
+  files are imported once ("newer wins" on conflicting keys) and renamed to
+  `*.jsonl.imported` so the import doesn't repeat.
+- `SessionManager.dump_jsonl(session_key)` still exports a session back to the
+  old flat-file format for debugging or manual inspection.
+- This only affects `session.messages` (the live conversation window); the
+  Consolidator/Dream layers below (`history.jsonl`, `MEMORY.md`, `SOUL.md`,
+  `USER.md`) are unaffected and still plain files under `memory/`.
+
+## Semantic & hybrid retrieval (`vec.db`)
+
+Alongside the file-based durable memory above, moeka can also index content
+into a SQLite-backed semantic store at `<workspace>/memory/vec.db`
+(`nanobot/core/vec_store.py`, enabled via `agents.defaults.vec.enable`). It
+holds four logical stores:
+
+- `memory_chunks` — `MEMORY.md` split by section headers
+- `history_entries` — `history.jsonl` entries
+- `skills` — skill definitions (indexed at startup, used to keep large skill
+  lists within context)
+- `documents` — host-supplied text ingested via `MoekaCore.ingest()` /
+  `ingest_text()` (see [`docs/python-sdk.md`](python-sdk.md)), optionally split
+  into named collections
+
+Each document chunk carries metadata (`source`, `tags`, `created_at`) and
+supports three retrieval modes:
+
+- **`vec`** — semantic k-nearest-neighbor search over sentence-transformer
+  embeddings (needs the `moeka[vec]` extra)
+- **`keyword`** — SQLite FTS5 / BM25 keyword search, works with stock
+  `sqlite3`, no embeddings required
+- **`hybrid`** — reciprocal-rank fusion of both, degrading gracefully to
+  keyword-only when `moeka[vec]` isn't installed
+
+Schema changes are versioned via `PRAGMA user_version`; a `meta` table records
+the active embedding model + dimension, so switching `embeddingModel`
+triggers an automatic re-embed of all four stores from their stored text. An
+opt-in retrieval-audit log (`vec.log_retrievals`) records every search
+(query, store, returned chunks) to a `retrieval_log` table for observability.
+All public `VecStore` methods degrade to empty/no-op — never raise — when
+sqlite-vec or sentence-transformers are unavailable.
+
+This is distinct from the Dream/Consolidator flow below: Dream curates
+*durable* memory files by editing them; the vec store makes those same files
+(plus host documents) *semantically searchable* without waiting for a Dream
+pass. See [`docs/core-architecture.md`](core-architecture.md) for the full
+design of `nanobot/core/`.
 
 ## The Flow
 

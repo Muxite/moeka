@@ -1,5 +1,16 @@
 # Moeka conversion plan: Docker -> UV + venv
 
+> **STATUS: DONE.** This migration is complete and has been the live setup for
+> some time. The repo has no `Dockerfile`, `docker-compose.yml`, or
+> `entrypoint.sh`; `moeka.sh` is venv-only; the systemd unit and
+> `./bin/moeka.sh enable/disable` flow described in "New architecture" below
+> are what's actually running. This document is kept as a historical record of
+> the migration design and rollback commits, not as an active plan — for
+> current setup instructions see [`README.md`](../README.md) and
+> [`docs/SYSTEMD.md`](SYSTEMD.md). `Dockerfile.test` still exists, but only for
+> running the test suite in isolation (`scripts/test-docker.sh`), not for
+> deployment.
+
 ## Why
 
 Moeka is being repositioned as **"the nanobot for server management"** — a native agent for managing homelabs, Docker infrastructure, and Linux servers. Running moeka *inside* Docker to manage Docker on the host created unnecessary complexity (nsenter host-bridge, capability escalation, PID namespace sharing). Moeka should run directly on the host where it has natural access to everything it needs to manage.
