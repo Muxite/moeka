@@ -112,7 +112,7 @@ jobs:
       - name: Run tests with coverage
         if: matrix.coverage
         env:
-          NANOBOT_MIN_TESTS: "3400"
+          NANOBOT_MIN_TESTS: "5400"
         run: >-
           uv run --no-sync python -m pytest
           --cov=nanobot --cov-report=term-missing:skip-covered
@@ -121,7 +121,7 @@ jobs:
       - name: Run compatibility tests
         if: ${{ !matrix.coverage }}
         env:
-          NANOBOT_MIN_TESTS: "3400"
+          NANOBOT_MIN_TESTS: "5400"
         run: >-
           uv run --no-sync python -m pytest
           --durations=25 --durations-min=1.0

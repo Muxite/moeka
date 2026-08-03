@@ -695,9 +695,23 @@ class VecStore:
             try:
                 import sqlite_vec
 
-                sqlite_vec.load(conn)
+                # sqlite_vec.load() calls conn.load_extension() directly, which
+                # raises OperationalError("not authorized") unless extension
+                # loading is enabled first. Python 3.12 / SQLite 3.45 happened to
+                # permit it; 3.13 / SQLite 3.50 does not, so the vec store
+                # silently reported available=False on newer runtimes — and
+                # upstream's CI matrix includes 3.14. Re-disabled immediately:
+                # leaving extension loading on widens the attack surface of every
+                # subsequent query on this connection.
+                conn.enable_load_extension(True)
+                try:
+                    sqlite_vec.load(conn)
+                finally:
+                    conn.enable_load_extension(False)
                 self._vec_loaded = True
-            except ImportError:
+            except (ImportError, AttributeError):
+                # AttributeError: some Python builds ship without extension
+                # support, in which case keyword search still works.
                 self._vec_loaded = False
             self._conn = conn
         return self._conn

@@ -38,9 +38,9 @@ def _make_loop(tmp_path):
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
-         patch("nanobot.agent.loop.SubagentManager") as MockSubMgr:
-        MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
-        MockSubMgr.return_value.close = AsyncMock()
+         patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
+        mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
+        mock_sub_mgr.return_value.close = AsyncMock()
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
     return loop
 
@@ -1047,7 +1047,8 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     # User messages are annotated with a "[Message Time: ...]" prefix during
     # replay; strip it for content comparison.
     import re as _re
-    _strip_ts = lambda s: _re.sub(r"^\[Message Time: [^\]]+\]\n?", "", s) if isinstance(s, str) else s
+    def _strip_ts(s):
+        return _re.sub(r"^\[Message Time: [^\]]+\]\n?", "", s) if isinstance(s, str) else s
     assert non_system[0]["role"] == "user"
     assert _strip_ts(non_system[0]["content"]) == "first question"
     assert non_system[1] == {

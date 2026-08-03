@@ -115,7 +115,11 @@ def test_migration_adds_collection_column_to_legacy_db(tmp_path):
 
     db = tmp_path / "vec.db"
     conn = sqlite3.connect(str(db))
+    # Extension loading must be enabled explicitly on SQLite >= 3.50
+    # (Python 3.13+); 3.45 happened to permit it without this.
+    conn.enable_load_extension(True)
     sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
     conn.executescript("""
         CREATE TABLE memory_chunks_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL);

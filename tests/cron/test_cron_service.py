@@ -718,11 +718,17 @@ def test_add_job_rejects_unparseable_cron_expression(tmp_path) -> None:
             message="x",
         )
 
-    # A valid expression still works.
+    # A valid expression still works. session_key is required as of upstream's
+    # "always require bound automation sessions" change: an agent payload with no
+    # bound session is deliberately created disabled with next_run_at_ms=None, so
+    # omitting it here would fail for a reason unrelated to expression parsing.
     job = service.add_job(
         name="fine",
         schedule=CronSchedule(kind="cron", expr="0 */2 * * *"),
         message="x",
+        session_key="telegram:1",
+        channel="telegram",
+        to="1",
     )
     assert job.state.next_run_at_ms is not None
 

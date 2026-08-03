@@ -13,7 +13,6 @@ import pytest
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 
-
 # ---------------------------------------------------------------------------
 # inbound
 # ---------------------------------------------------------------------------
