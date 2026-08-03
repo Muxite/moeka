@@ -61,9 +61,14 @@ htmlcov/
 coverage.xml
 *.cover
 
-# Lock files (project policy)
+# Lock files
+# uv.lock IS tracked as of 2026-08-03. The previous "ignore all lock files"
+# policy contradicted the rest of the repo: CI ran an unpinned
+# `uv sync --all-extras`, so any upstream release could redden the build with no
+# repo change, while Dockerfile.test did `COPY pyproject.toml uv.lock` +
+# `uv sync --locked` — meaning the documented full-suite path
+# (scripts/test-docker.sh, see CLAUDE.md) could not build from a clean clone at all.
 poetry.lock
-uv.lock
 
 # Jupyter
 .ipynb_checkpoints/

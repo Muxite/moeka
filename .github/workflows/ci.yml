@@ -49,8 +49,11 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-all-MiniLM-L6-v2
 
+      # --locked: fail if uv.lock is stale rather than silently re-resolving.
+      # Previously this resolved every dependency against live PyPI on each run,
+      # so an upstream release could break CI with no change to this repo.
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --locked --all-extras
 
       # `--select` on the command line REPLACES the select list in
       # pyproject.toml, so the previous `--select F` silently disabled E, I, N
