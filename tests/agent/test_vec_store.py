@@ -100,7 +100,6 @@ def test_returns_k_or_fewer_results(tmp_path):
 
 def test_graceful_import_error(monkeypatch, tmp_path):
     """VecStore.available is False when dependencies are missing."""
-    import importlib
     import sys
 
     # Hide sqlite_vec so _try_init fails

@@ -2217,6 +2217,13 @@ def _run_gateway(
                 flushed = agent.sessions.flush_all()
                 if flushed:
                     logger.info("Shutdown: flushed {} session(s) to disk", flushed)
+                # Then close the store, which checkpoints the WAL unconditionally.
+                # flush_all() only walks *cached* sessions and the checkpoint rides
+                # on save(fsync=True), so a run that touched no session checkpointed
+                # nothing -- which is how a 5.7MB WAL survived restart after restart
+                # against a 1.8MB database.
+                with suppress(Exception):
+                    agent.sessions.close()
             finally:
                 restore_shutdown_handlers()
 

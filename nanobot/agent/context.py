@@ -77,16 +77,22 @@ class ContextBuilder:
         allowed_skills: list[str] | None = None,
         vec_store: VecStore | None = None,
         vec_config: VecConfig | None = None,
+        bootstrap_overrides: Mapping[str, str] | None = None,
+        inline_skills: Sequence[Any] | None = None,
     ):
         self.workspace = workspace
         self.timezone = timezone
         self.vec_store = vec_store
         self.vec_config = vec_config
+        # In-memory bootstrap sections (name -> content). A key matching one of
+        # BOOTSTRAP_FILES shadows the workspace file; other keys are appended.
+        self.bootstrap_overrides: dict[str, str] = dict(bootstrap_overrides or {})
         self.memory = MemoryStore(workspace, vec_store=vec_store)
         self.skills = SkillsLoader(
             workspace,
             disabled_skills=set(disabled_skills) if disabled_skills else None,
             allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
+            inline_skills=inline_skills,
         )
 
     def build_system_prompt(
@@ -273,7 +279,15 @@ class ContextBuilder:
         return _to_blocks(left) + _to_blocks(right)
 
     def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
-        """Load project instructions plus the agent's global profile files."""
+        """Load project instructions plus the agent's global profile files.
+
+        moeka: an in-memory ``bootstrap_overrides`` entry shadows the on-disk file
+        of the same name, and any override with no corresponding source is
+        appended. That is the embedding-host surface behind
+        ``MoekaCore.set_bootstrap()``; ``nanobot/core/core.py`` passes it through
+        ``AgentLoop.from_config``, so removing it here would make ``MoekaCore``
+        raise TypeError at runtime while the merge stayed clean.
+        """
         parts = []
         project_root = workspace or self.workspace
         sources = [
@@ -283,6 +297,16 @@ class ContextBuilder:
         ]
 
         for filename, root in sources:
+            # An in-memory override replaces the file entirely. Checked first so
+            # a host can shadow a name that also exists on disk; the template
+            # detection below is about *default* on-disk content and would be
+            # wrong to apply to content the host supplied deliberately.
+            override = self.bootstrap_overrides.get(filename)
+            if override is not None:
+                if override.strip():
+                    parts.append(f"## {filename}\n\n{override}")
+                continue
+
             file_path = root / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
@@ -298,6 +322,12 @@ class ContextBuilder:
                 ):
                     continue
                 parts.append(f"## {filename}\n\n{content}")
+
+        # Overrides naming something that is not a bootstrap source at all.
+        known = {filename for filename, _ in sources}
+        for name, content in self.bootstrap_overrides.items():
+            if name not in known:
+                parts.append(f"## {name}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
 

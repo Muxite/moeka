@@ -78,6 +78,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # The vec tests download ~90MB of sentence-transformers weights on first
+      # use and nothing sets HF_HUB_OFFLINE, so without this every leg hits
+      # huggingface.co and a rate-limited runner fails for unrelated reasons.
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-all-MiniLM-L6-v2
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
@@ -86,7 +95,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libolm-dev build-essential
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --locked --all-extras --dev
 
       - name: Install channel dependencies
         run: uv run --no-sync python -m scripts.install_channel_dependencies --all-channels
@@ -97,8 +106,13 @@ jobs:
         if: matrix.coverage
         run: uv run --no-sync ruff check nanobot tests conftest.py
 
+      # NANOBOT_MIN_TESTS: if an optional channel extra fails to resolve, its
+      # whole test file vanishes from collection and CI would pass with
+      # hundreds fewer tests. Raise as the suite grows; never lower it.
       - name: Run tests with coverage
         if: matrix.coverage
+        env:
+          NANOBOT_MIN_TESTS: "3400"
         run: >-
           uv run --no-sync python -m pytest
           --cov=nanobot --cov-report=term-missing:skip-covered
@@ -106,6 +120,8 @@ jobs:
 
       - name: Run compatibility tests
         if: ${{ !matrix.coverage }}
+        env:
+          NANOBOT_MIN_TESTS: "3400"
         run: >-
           uv run --no-sync python -m pytest
           --durations=25 --durations-min=1.0

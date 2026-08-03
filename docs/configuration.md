@@ -2253,6 +2253,138 @@ Disabled skills are excluded from the main agent's skill summary, from always-on
 |--------|---------|-------------|
 | `agents.defaults.disabledSkills` | `[]` | List of skill directory names to exclude from loading. Applies to both built-in skills and workspace skills. |
 
+## Semantic Memory & Hybrid RAG (`agents.defaults.vec`)
+
+`agents.defaults.vec` configures the hybrid FTS5 + vector store
+(`<workspace>/memory/vec.db`, `nanobot/core/vec_store.py`) used for semantic
+recall over `MEMORY.md`, `history.jsonl`, skills, and any host-ingested
+documents (via `MoekaCore.ingest()` — see [`docs/python-sdk.md`](python-sdk.md)
+and [`docs/memory.md`](memory.md)):
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "vec": {
+        "enable": true,
+        "embeddingModel": "all-MiniLM-L6-v2",
+        "memorySemanticThreshold": 2048,
+        "historyRecentK": 15,
+        "historySemanticK": 10,
+        "skillsTopK": 10,
+        "memoryTopK": 10,
+        "logRetrievals": false
+      }
+    }
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enable` | `true` | Enable the vector/hybrid store. When `false` (or `moeka[vec]` isn't installed), retrieval degrades to no-op / keyword-only. |
+| `embeddingModel` | `"all-MiniLM-L6-v2"` | Sentence-transformer model used for `vec` and `hybrid` search. Changing this triggers an automatic re-embed of all stores on next use. |
+| `memorySemanticThreshold` | `2048` | Chars above which `MEMORY.md` is retrieved semantically instead of injected in full. |
+| `historyRecentK` | `15` | Always include this many most-recent history entries as a recency anchor. |
+| `historySemanticK` | `10` | Additional semantically-relevant history entries pulled from older history. |
+| `skillsTopK` | `10` | Max skills surfaced by semantic relevance when the skill list is long. |
+| `memoryTopK` | `10` | Memory chunks pulled per semantic query. |
+| `logRetrievals` | `false` | Record every search (query, store, returned chunks) to a `retrieval_log` table in `vec.db`, for observability. |
+
+Retrieval modes (used by `MoekaCore.retrieve(mode=...)` and internally by the
+agent loop): `"vec"` (semantic KNN, needs `moeka[vec]`), `"keyword"` (FTS5/BM25,
+works with stock `sqlite3`), `"hybrid"` (reciprocal-rank fusion of both,
+degrades to keyword-only without `moeka[vec]`).
+
+## Session Storage
+
+Conversation sessions persist to `<workspace>/sessions.db`, a SQLite database
+opened in **WAL mode** (`nanobot/session/manager.py`), replacing the older
+per-session `sessions/<key>.jsonl` files. No configuration is needed — this is
+a transparent storage-layer change. Legacy `.jsonl` sessions are imported once
+at startup and renamed `*.jsonl.imported`. See [`docs/memory.md`](memory.md#session-storage-sessionsdb)
+for details.
+
+## Agent Profiles (`profiles`)
+
+`profiles` is a top-level config object mapping a name to an
+`AgentProfileConfig` — a scoping bundle of model preset, persona, tool
+allow/deny list, skill allow/deny list, memory toggle, planning, and runner
+limits. Profiles are resolved by embedding hosts via
+`MoekaCore.create(profile="research")` or `MoekaCore.scoped(profile="research")`
+(see [`docs/python-sdk.md`](python-sdk.md#scoped-agent-profiles)); they are not
+applied to the chat-bot gateway's own agent, which always uses
+`agents.defaults` directly.
+
+```json
+{
+  "profiles": {
+    "research": {
+      "modelPreset": "deep",
+      "systemPrompt": "You are a careful research assistant. Cite sources.",
+      "toolsAllow": ["web_search", "web_fetch", "read_file"],
+      "skillsExclude": ["github"],
+      "memoryEnabled": true,
+      "planning": true,
+      "limits": { "toolFailureReflectionThreshold": 2 }
+    }
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|--------------|
+| `modelPreset` | `null` | Named preset from `modelPresets` to use for this profile. |
+| `systemPrompt` / `systemPromptFile` | `null` | Inline persona text (or a file read once at `create()`). Applied **in memory** as the `AGENTS.md` bootstrap section — nothing is written to the workspace, and the profile persona shadows any existing workspace `AGENTS.md`. |
+| `toolsAllow` | `null` (all tools) | Hard allowlist applied at tool-discovery time; tools added to moeka later never silently appear in a scoped agent. `[]` means no tools. |
+| `toolsDeny` | `[]` | Tool names never registered for this profile. |
+| `skillsInclude` | `null` (all skills) | Allowlist of skill directory names. |
+| `skillsExclude` | `[]` | Skill directory names excluded for this profile. |
+| `skillsInline` | `[]` | Skills defined in code (`InlineSkillConfig`: `name`, `content`, `description`, `metadata`) rather than as a `SKILL.md` on disk. They shadow workspace/builtin skills of the same name and bypass `skillsInclude`, but still honor `skillsExclude`. |
+| `memoryEnabled` | `true` | `false` disables semantic vec memory for this profile. |
+| `vecCollections` | `[]` | Document collections this profile draws on. |
+| `planning` | `false` | Plan-then-execute for this profile (see below). |
+| `limits` | `null` (inherits `agents.defaults.limits`) | A `RunnerLimits` override — see [Runner limits](#runner-limits) below. |
+
+## Planning & Reflection
+
+Two opt-in `agents.defaults` behaviors (also settable per-profile — see
+above) added in the 2026-06 overhaul:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "planning": false,
+      "limits": {
+        "toolFailureReflectionThreshold": 3
+      }
+    }
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `agents.defaults.planning` | `false` | Plan-then-execute mode: one extra LLM call runs before the main turn and produces a short execution plan, injected as a plan note. |
+| `agents.defaults.limits.toolFailureReflectionThreshold` | `3` | After this many consecutive iterations where every tool call in the turn failed, inject a "stop and reassess" reflection note instead of continuing to retry blindly. `0` disables reflection. |
+
+### Runner limits
+
+`agents.defaults.limits` (and the per-profile `limits` override) accepts a
+`RunnerLimits` object tuning retry/injection/compaction thresholds for one
+agent execution:
+
+| Field | Description |
+|-------|-------------|
+| `maxEmptyRetries` | Retries for an empty/blank model response. |
+| `maxLengthRecoveries` | Recovery attempts when a response is truncated by length. |
+| `maxInjectionsPerTurn` | Max system-injected messages (reflection, plan notes, etc.) in one turn. |
+| `maxInjectionCycles` | Max cycles of injection + re-prompt before giving up. |
+| `microcompactKeepRecent` | Messages kept verbatim during in-turn microcompaction. |
+| `microcompactMinChars` | Minimum size before microcompaction triggers. |
+| `toolFailureReflectionThreshold` | See Planning & Reflection above. |
+
 ## Tool Hint Max Length
 
 Tool hints are the short progress messages shown when the agent calls tools (e.g. `$ cd …/project && npm test`). By default, these are truncated at 40 characters, which can make long commands hard to read.

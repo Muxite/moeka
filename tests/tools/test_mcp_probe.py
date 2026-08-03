@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from contextlib import suppress
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,7 +20,6 @@ def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (*_PROXY_ENV_VARS, "NO_PROXY", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
 
-
 # ---------------------------------------------------------------------------
 # _probe_http_url unit tests
 # ---------------------------------------------------------------------------
@@ -27,11 +27,17 @@ def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_probe_returns_true_for_open_port(tmp_path):
     """Start a trivial TCP server, probe should return True."""
-    async def _close_connection(_reader, writer):
-        writer.close()
-        await writer.wait_closed()
 
-    server = await asyncio.start_server(_close_connection, "127.0.0.1", 0)
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # The handler MUST close its side of the connection. Since Python 3.12,
+        # ``Server.wait_closed()`` waits for every accepted connection to be
+        # closed by the server; a no-op handler leaves the transport open and
+        # the cleanup below hangs forever.
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     configure_ssrf_whitelist(["127.0.0.1/32"])
     try:

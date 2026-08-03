@@ -5,7 +5,7 @@ import time
 import pytest
 
 from nanobot.cron.service import CronJobSkippedError, CronService
-from nanobot.cron.types import CronJob, CronPayload, CronSchedule
+from nanobot.cron.types import CronJob, CronPayload, CronRunRecord, CronSchedule
 
 
 async def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01) -> None:
@@ -633,6 +633,98 @@ def test_remove_job_refuses_system_jobs(tmp_path) -> None:
 
     assert result == "protected"
     assert service.get_job("dream") is not None
+
+
+def _dream_job() -> CronJob:
+    return CronJob(
+        id="dream",
+        name="dream",
+        schedule=CronSchedule(kind="cron", expr="0 */2 * * *", tz="UTC"),
+        payload=CronPayload(kind="system_event"),
+    )
+
+
+def test_register_system_job_preserves_run_history_across_restart(tmp_path) -> None:
+    """A restart must not erase what the job already did.
+
+    register_system_job() rebuilt job.state unconditionally, so every gateway
+    start reset last_run_at_ms/last_status/run_history. The job kept running
+    correctly and permanently reported that it had never run.
+    """
+    store = tmp_path / "cron" / "jobs.json"
+
+    first = CronService(store)
+    first.register_system_job(_dream_job())
+
+    # Simulate a completed run being recorded.
+    job = first.get_job("dream")
+    job.state.last_run_at_ms = 1_700_000_000_000
+    job.state.last_status = "ok"
+    job.state.run_history.append(
+        CronRunRecord(run_at_ms=1_700_000_000_000, status="ok", duration_ms=1234)
+    )
+    created_at = job.created_at_ms
+    first._save_store()
+
+    # Restart: a fresh service re-registers the same system job.
+    second = CronService(store)
+    second.register_system_job(_dream_job())
+
+    reloaded = second.get_job("dream")
+    assert reloaded.state.last_run_at_ms == 1_700_000_000_000
+    assert reloaded.state.last_status == "ok"
+    assert len(reloaded.state.run_history) == 1
+    assert reloaded.created_at_ms == created_at
+    # The next wake is still re-derived from the schedule in code.
+    assert reloaded.state.next_run_at_ms is not None
+
+
+def test_register_system_job_reconciles_schedule_changes(tmp_path) -> None:
+    """Preserving history must not freeze a stale schedule."""
+    store = tmp_path / "cron" / "jobs.json"
+
+    first = CronService(store)
+    first.register_system_job(_dream_job())
+
+    changed = _dream_job()
+    changed.schedule = CronSchedule(kind="every", every_ms=60_000)
+    second = CronService(store)
+    second.register_system_job(changed)
+
+    reloaded = second.get_job("dream")
+    assert reloaded.schedule.kind == "every"
+    assert reloaded.schedule.every_ms == 60_000
+
+
+def test_add_job_rejects_unparseable_cron_expression(tmp_path) -> None:
+    """'@reboot' is accepted by nothing here, so it must not be accepted quietly.
+
+    Only the timezone was validated, so an unsupported expression produced a job
+    whose next_run_at_ms stayed None forever — inert, while reporting success.
+    """
+    service = CronService(tmp_path / "cron" / "jobs.json")
+
+    with pytest.raises(ValueError, match="invalid cron expression"):
+        service.add_job(
+            name="reboot-recovery",
+            schedule=CronSchedule(kind="cron", expr="@reboot"),
+            message="recover",
+        )
+
+    with pytest.raises(ValueError, match="invalid cron expression"):
+        service.add_job(
+            name="nonsense",
+            schedule=CronSchedule(kind="cron", expr="not a cron expr"),
+            message="x",
+        )
+
+    # A valid expression still works.
+    job = service.add_job(
+        name="fine",
+        schedule=CronSchedule(kind="cron", expr="0 */2 * * *"),
+        message="x",
+    )
+    assert job.state.next_run_at_ms is not None
 
 
 @pytest.mark.asyncio

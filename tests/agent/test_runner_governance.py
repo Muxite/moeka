@@ -16,7 +16,7 @@ from nanobot.agent.context_governance import (
 )
 from nanobot.agent.runner import AgentRunSpec
 from nanobot.config.schema import AgentDefaults
-from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMResponse
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -677,8 +678,20 @@ class VecStore:
     def _connection(self) -> sqlite3.Connection:
         if self._conn is None:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            # timeout + busy_timeout + WAL mirror SessionManager._conn() in
+            # nanobot/session/manager.py, which had them from the start. This
+            # opened with check_same_thread=False and *no* pragmas and no lock,
+            # so a concurrent writer raised "database is locked" immediately
+            # instead of waiting — and because every query here is wrapped in a
+            # catch-all that returns [], a locked database was indistinguishable
+            # from "no results", i.e. silently empty RAG context.
+            conn = sqlite3.connect(
+                str(self._db_path), check_same_thread=False, timeout=30.0,
+            )
             conn.row_factory = sqlite3.Row
+            with suppress(sqlite3.DatabaseError):
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=10000")
             try:
                 import sqlite_vec
 
@@ -688,6 +701,34 @@ class VecStore:
                 self._vec_loaded = False
             self._conn = conn
         return self._conn
+
+    def close(self) -> None:
+        """Checkpoint the WAL and release the connection.
+
+        There was no teardown path at all: no close(), no __exit__, no __del__.
+        MoekaCore.cleanup() rmtree's its workspace while leaving this connection
+        and a SentenceTransformer alive, so a host creating many scoped cores
+        leaked both per core. The visible symptom on jifan was a **13 MB
+        vec.db-wal against a 1.7 MB database**, orphaned since 2026-05-15 by a
+        process that exited without ever checkpointing.
+
+        Idempotent, and safe on a store that never opened a connection.
+        """
+        conn, self._conn = self._conn, None
+        if conn is None:
+            return
+        try:
+            with suppress(sqlite3.Error):
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            with suppress(sqlite3.Error):
+                conn.close()
+
+    def __enter__(self) -> "VecStore":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         if self._vec_loaded:

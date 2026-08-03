@@ -99,6 +99,7 @@ class SubagentManager:
         tools_deny: list[str] | None = None,
         fail_on_tool_error: bool | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
+        inline_skills: list | None = None,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -131,6 +132,7 @@ class SubagentManager:
         self.max_tool_result_chars = max_tool_result_chars
         self.restrict_to_workspace = restrict_to_workspace
         self.disabled_skills = set(disabled_skills or [])
+        self.inline_skills = list(inline_skills) if inline_skills else None
         self.tools_allow = list(tools_allow) if tools_allow is not None else None
         self.tools_deny = list(tools_deny) if tools_deny else []
         self.max_iterations = (
@@ -532,6 +534,7 @@ class SubagentManager:
         skills_summary = SkillsLoader(
             self.workspace,
             disabled_skills=self.disabled_skills,
+            inline_skills=self.inline_skills,
         ).build_skills_summary()
         return render_template(
             "agent/subagent_system.md",

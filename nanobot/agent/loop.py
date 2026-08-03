@@ -279,6 +279,12 @@ class AgentLoop:
         restart_mode: str = "auto",
         local_trigger_store: Any | None = None,
         idle_compact_check_interval_seconds: int = 0,
+        # moeka: the in-memory bootstrap/inline-skills surface for embedding
+        # hosts (6f513ee4). MoekaCore.from_config passes both, so dropping them
+        # here makes MoekaCore.from_* raise TypeError at runtime while the merge
+        # stays clean and ruff stays green. Keep with context.py and skills.py.
+        bootstrap_overrides: dict[str, str] | None = None,
+        inline_skills: list | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -374,6 +380,8 @@ class AgentLoop:
             allowed_skills=allowed_skills,
             vec_store=vec_store,
             vec_config=vec_config,
+            bootstrap_overrides=bootstrap_overrides,
+            inline_skills=inline_skills,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
@@ -396,6 +404,7 @@ class AgentLoop:
             tools_deny=self.tools_deny,
             fail_on_tool_error=fail_on_tool_error,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
+            inline_skills=inline_skills,
         )
         self._unified_session = unified_session
         self._running = False
