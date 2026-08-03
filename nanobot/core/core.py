@@ -30,6 +30,8 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.loop import AgentLoop
 from nanobot.core.function_tool import FunctionTool
@@ -348,10 +350,29 @@ class MoekaCore:
         return self._loop.workspace
 
     def cleanup(self) -> None:
-        """Remove the ephemeral workspace, if :meth:`create` allocated one.
+        """Close the stores, then remove the ephemeral workspace if we made one.
 
-        No-op when the host supplied its own workspace (nothing to clean up).
+        The store teardown runs **unconditionally**, including when the host
+        supplied its own workspace. Previously this only rmtree'd the ephemeral
+        directory, so every core leaked an open SQLite connection for
+        ``sessions.db`` and another for ``vec.db`` (plus the loaded
+        SentenceTransformer). A host creating many scoped cores accumulated one
+        pair each, and the unclosed vec.db connection is why an orphaned 13 MB
+        WAL survived on jifan against a 1.7 MB database — nothing ever
+        checkpointed it.
+
+        Order matters: close before rmtree, or the ephemeral case unlinks files
+        out from under live connections.
         """
+        for store_name in ("vec_store", "sessions"):
+            store = getattr(self._loop, store_name, None)
+            closer = getattr(store, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # never let teardown mask the caller's error
+                    logger.exception("MoekaCore.cleanup: failed to close %s", store_name)
+
         ws = self._ephemeral_workspace
         if ws is None:
             return

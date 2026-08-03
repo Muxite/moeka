@@ -334,6 +334,31 @@ class SessionManager:
             self._conn_obj = conn
         return self._conn_obj
 
+    def close(self) -> None:
+        """Checkpoint the WAL and release the connection.
+
+        Without this the only checkpoint was ``save(fsync=True)``, reached solely
+        via ``flush_all()`` at graceful shutdown — so a SIGKILL, an OOM or a
+        TimeoutStopSec expiry left the WAL untruncated, and an embedding host
+        creating many short-lived managers leaked one SQLite connection each.
+        Idempotent, and safe to call on an already-closed manager.
+        """
+        conn, self._conn_obj = self._conn_obj, None
+        if conn is None:
+            return
+        try:
+            with suppress(sqlite3.OperationalError):
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            with suppress(sqlite3.Error):
+                conn.close()
+
+    def __enter__(self) -> "SessionManager":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
     def _ensure_schema(self) -> None:
         conn = self._conn()
         conn.executescript(f"""
@@ -633,27 +658,43 @@ class SessionManager:
         return sessions
 
     def _preview(self, key: str) -> str:
-        """First user message preview (assistant fallback), like the old file scan."""
+        """First user message preview (assistant fallback), like the old file scan.
+
+        The rows are materialised with ``fetchall()`` *before* scanning them, and
+        that is load-bearing rather than stylistic. Iterating the cursor directly
+        and ``return``-ing from inside the loop — which is what this did — leaves
+        an un-exhausted statement on the long-lived shared connection, and SQLite
+        keeps a read transaction open for exactly as long as that statement is
+        live. An open read transaction blocks WAL checkpointing, so the WAL grows
+        without bound: on jifan it reached 5.7 MB against a 1.8 MB database, well
+        past the 1000-page auto-checkpoint threshold that should have capped it.
+
+        ``list_sessions()`` calls this once per session, so the leak recurred on
+        every listing. The LIMIT keeps the materialised set small.
+        """
         fallback = ""
         try:
-            for (data,) in self._conn().execute(
+            rows = self._conn().execute(
                 "SELECT data FROM messages WHERE session_key = ?"
                 " ORDER BY seq LIMIT 100",
                 (key,),
-            ):
-                try:
-                    item = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                text = _message_preview_text(item)
-                if not text:
-                    continue
-                if item.get("role") == "user":
-                    return text
-                if not fallback and item.get("role") == "assistant":
-                    fallback = text
+            ).fetchall()
         except Exception:
             logger.exception("Failed to build preview for session {}", key)
+            return fallback
+
+        for (data,) in rows:
+            try:
+                item = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            text = _message_preview_text(item)
+            if not text:
+                continue
+            if item.get("role") == "user":
+                return text
+            if not fallback and item.get("role") == "assistant":
+                fallback = text
         return fallback
 
     def dump_jsonl(self, key: str) -> str | None:
