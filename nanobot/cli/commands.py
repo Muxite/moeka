@@ -1016,6 +1016,36 @@ def _run_gateway(
             console.print(f"[yellow]Could not open browser ({e}); visit {open_browser_url}[/yellow]")
 
     async def run():
+        # SIGTERM is how systemd stops this service, and nothing here handled it:
+        # the handlers in `agent()` belong to a different command, so the default
+        # disposition terminated the process outright and the `finally` below
+        # never ran. Consequence: in seven days of restarts "Shutdown: flushed"
+        # was logged exactly zero times -- sessions were never durably flushed and
+        # the WAL was never checkpointed, so it grew by ~4KB every restart and
+        # only ever shrank when something checkpointed it by hand.
+        #
+        # add_signal_handler (rather than signal.signal) so the callback runs on
+        # the event loop: cancelling the gather unwinds into `finally` normally.
+        stopping = False
+
+        def _request_stop(signame: str) -> None:
+            nonlocal stopping
+            if stopping:  # a second signal means "stop waiting" -- let it kill us
+                return
+            stopping = True
+            logger.info("Received {}, shutting down gracefully...", signame)
+            for task in asyncio.all_tasks():
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        loop = asyncio.get_running_loop()
+        for signame in ("SIGTERM", "SIGINT"):
+            sig = getattr(signal, signame, None)
+            if sig is None:
+                continue
+            with suppress(NotImplementedError):  # not supported on Windows
+                loop.add_signal_handler(sig, _request_stop, signame)
+
         try:
             await cron.start()
             await heartbeat.start()
@@ -1027,7 +1057,7 @@ def _run_gateway(
             if open_browser_url:
                 tasks.append(_open_browser_when_ready())
             await asyncio.gather(*tasks)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             console.print("\nShutting down...")
         except Exception:
             import traceback
@@ -1046,6 +1076,13 @@ def _run_gateway(
             flushed = agent.sessions.flush_all()
             if flushed:
                 logger.info("Shutdown: flushed {} session(s) to disk", flushed)
+            # Then close the store, which checkpoints the WAL unconditionally.
+            # flush_all() only walks *cached* sessions and the checkpoint rides
+            # on save(fsync=True), so a run that touched no session checkpointed
+            # nothing -- which is how a 5.7 MB WAL survived restart after
+            # restart against a 1.8 MB database.
+            with suppress(Exception):
+                agent.sessions.close()
 
     asyncio.run(run())
 
