@@ -198,9 +198,183 @@ batch wants to make moeka's SQLite store implement that Protocol (a
 genuinely good "plugin abstraction" fit), start there — the method
 surface already matches 1:1 as of this checkpoint.
 
-## Next steps for batch 2
-Base off `merge/upstream-main-2026-08-05` (this branch) or off a fresh
-branch from its tip; merge checkpoint `0c684c5a99ff9cfa6f33b1a6172b5a189741f249`
-(2026-08-12, 102 more commits). Re-check whether the `SessionStore`
-Protocol split gets built on further upstream — if later commits start
-consuming it elsewhere, the "defer" decision here should be revisited.
+## Batch 2 — complete, STOPPED after this batch (owner review needed)
+
+Merge commit `f7257d0e` (+ post-merge fixup `277e367b`), checkpoint
+`0c684c5a99ff9cfa6f33b1a6172b5a189741f249` (2026-08-12, 102 commits).
+Worked in worktree `/home/muk/projects/moeka-sync` on branch
+`merge/upstream-main-2026-08-05`; `/home/muk/projects/moeka` stayed on
+`main` throughout (verified after every step).
+
+### Conflicts resolved (9 files)
+- `README.md` — kept moeka's (ours), branding identity.
+- `docker-compose.yml` — kept deleted (moeka runs natively via uv, no
+  containers).
+- `docs/configuration.md` — additive: moeka's semantic-memory/session-
+  storage docs + upstream's new "Agent Plugins v1" docs section, both kept.
+- `nanobot/agent/context.py` — gated moeka's semantic memory retrieval
+  behind upstream's new `include_memory` flag (used by ephemeral/
+  non-persisted sessions).
+- `nanobot/agent/loop.py` — kept moeka's `MyTool` allow/deny scoping,
+  folded in upstream's comment simplification.
+- `nanobot/agent/skills.py` (3 hunks) — integrated upstream's new **Agent
+  Plugins v1** skill discovery (`nanobot/agent/plugins.py`,
+  `enabled_agent_plugin_skills()`) alongside moeka's inline-skills support;
+  delegated frontmatter parsing to upstream's extracted
+  `parse_skill_metadata()` helper (kept moeka's inline-skill shortcut on
+  top). Agent Plugins v1 (installable `plugin.json` packages under
+  `<workspace>/plugins/`, with `mcp.json`/`skills/` and progressive
+  loading) is itself worth a closer look in a later batch — it's a real
+  plugin-abstraction feature, currently just wired through unchanged.
+- `nanobot/channels/websocket/tests/test_websocket_http_routes.py`
+  (6 hunks) — mixed resolution: kept moeka's REST-GET-with-bearer-token
+  test style where it covers something upstream's `_webui_mutate` RPC
+  helper doesn't (extra `/messages` 404-boundary and encoded-key checks);
+  took upstream's `_webui_mutate` style elsewhere. Both test helpers
+  exercise the same underlying `_handle_session_delete` route.
+- `nanobot/nanobot.py` — additive: upstream's `ToolRegistry`/`MCPProvider`
+  wiring alongside moeka's `defaults` var (used for `vec_config`).
+- `nanobot/session/manager.py` — again the big one (see below).
+- `webui/bun.lock` — regenerated via `bun install`.
+
+### `nanobot/session/manager.py` — the recurring architectural conflict
+
+Upstream (2026-08-12) kept building out the `SessionStore` Protocol /
+`JsonlSessionStore` split from batch 1 (1174→1699 lines). Reconfirmed the
+batch-1 decision: kept moeka's single SQLite-backed `SessionManager`, did
+**not** reshape it into the Protocol. But — unlike batch 1, where the only
+things riding along were self-contained (`provider_state`) — this
+checkpoint's split carries genuinely new, **backend-independent** features
+that other already-merged, unconflicted code now calls unconditionally.
+Ported all of them onto moeka's SQLite implementation:
+- `Session.policy: SessionPolicy` (`persist`, `log_content`,
+  `disabled_tools`) — brand new dataclass, didn't exist in moeka at all.
+  `nanobot/agent/loop.py` and the new `nanobot/webui/temporary_chats.py`
+  (WebUI "Temporary Chat" ephemeral sessions) reference
+  `session.policy.*` unconditionally; without this the merge wouldn't
+  even import.
+- `SessionManager.get_or_create_transient()` — used by Temporary Chats to
+  get a fresh, never-persisted `Session` without touching the DB.
+  `SessionManager.save()` now no-ops when `policy.persist` is False.
+- `Session.get_history()` — ported upstream's compaction-boundary
+  continuity fix verbatim (keep a small raw suffix near
+  `last_consolidated` so replay doesn't jump straight from a summary to
+  mid-turn content); added the `MIN_COMPACTED_REPLAY_MESSAGES` constant
+  it and `nanobot/agent/memory.py` both need.
+- `SessionManager.get_cached()` — public alias moeka was already missing
+  (should have been added in batch 1; `nanobot/sdk/clients.py` calls it
+  unconditionally — this is why 6 SDK-facing tests only started failing
+  once other batch-2 code paths exercised it more).
+- `retain_recent_legal_suffix()` — **found via test failure, not via the
+  conflict itself** (this region wasn't marked conflicting — "ours" was
+  silently kept and turned out to already be missing a fix): upstream
+  commits `60282d15`/`8dfce4c1` fix a real bug where a proactive
+  `_channel_delivery` message (e.g. a heartbeat-triggered reminder) gets
+  dropped during hard-cap or extend-to-user trimming because it isn't a
+  `user`-role message itself. Ported the two-line fix verbatim; see the
+  post-merge fixup commit.
+- `restore_sessions_to_workspace()` / `SessionRestoreResult` — new
+  `nanobot sessions restore-workspace` CLI command (downgrade helper)
+  calls this unconditionally. Implemented a moeka-appropriate version
+  (jsonl-exports every session via the existing `dump_jsonl()`) since
+  moeka has no jsonl-store rollback concept to replicate.
+- `get_runtime_subdir` re-imported (unused internally, `# noqa: F401`) —
+  `tests/conftest.py`'s autouse `_isolate_sessions_root` fixture patches
+  this module attribute unconditionally for ADR-0001 test isolation; the
+  name has to resolve even though moeka's default session location
+  doesn't use it.
+- Added an **opt-in** `sessions_root` constructor param (SQLite db file
+  location only — defaults to the pre-existing in-workspace path, so the
+  live service's on-disk layout is unchanged) and, separately, deleted
+  `tests/session/test_session_location.py` (14 new tests) wholesale — see
+  next section for why.
+
+### ⚠️ Needs human review — ADR-0001 NOT adopted (this is why I stopped)
+
+Upstream introduced **ADR-0001**: sessions are stored **outside the agent
+workspace by default** (a per-workspace `.nanobot/workspace-id` identity
+marker inside the workspace maps to session storage under the instance
+data root), specifically so a workspace-scoped shell/file tool can never
+read or tamper with its own conversation history. `tests/conftest.py`'s
+own new autouse fixture assumes this is universal ("Session storage lives
+under the active runtime data root... per ADR-0001, so without
+redirection tests would write into the real home").
+
+I did **not** adopt the default-relocation behavior. What's in this merge
+is opt-in only (`sessions_root=` param, unused unless a caller passes it
+explicitly) — moeka's live gateway path (`nanobot/cli/gateway_runtime.py`)
+still constructs `SessionManager(config.workspace_path)` with no
+`sessions_root`, so **the live service's session storage location is
+unchanged** (`<workspace>/sessions.db`, same as before this whole sync
+effort started).
+
+This is a deliberate, conservative choice, not an oversight — but it
+means moeka does **not** get this security improvement automatically, and
+I think that's a real gap worth closing: moeka's shell sandbox is
+deliberately permissive (`rm -rf`, `dd`, etc. are not blocked by default),
+which makes "the agent's own tools can read/delete its own session
+history" a *more* serious concern for moeka than for stock nanobot's more
+locked-down default posture. Adopting ADR-0001 for real would mean:
+- Relocating the live service's `sessions.db` out of `~/.nanobot` (moeka's
+  flat workspace==state-home layout makes "outside the workspace" a
+  bigger structural change than it is for upstream's nested layout).
+  Every existing moeka install would need a migration path.
+  - This is explicitly a "changes runtime behavior of the live service"
+  judgment call per the coordinator's stop criteria — not something to
+  guess at mid-merge.
+- Rewriting `tests/session/test_session_location.py` (deleted here, 14
+  tests) against moeka's SQLite store instead of `JsonlSessionStore`.
+
+**Recommendation for the owner:** decide whether moeka should adopt
+ADR-0001's out-of-workspace-by-default posture (likely yes, given the
+permissive shell sandbox), and if so, decide the migration story for
+`~/.nanobot/sessions.db` before any batch attempts it. Until then, future
+batches should keep treating `sessions_root` as opt-in only, matching what
+this batch shipped.
+
+### Docker test results
+Full suite: **5326 passed, 4 failed, 16 skipped** (was 5130/3/16 at the
+end of batch 1). All 4 failures are the same two pre-existing environment
+artifacts as batch 1 (no DNS/network egress in this sandbox; no
+`npx`/playwright on PATH in the test image) — one more test in each
+family now exists in this batch's new test coverage and hits the same
+known limits. No new failure *categories*. Two Docker/test infra gaps
+fixed along the way (both pre-existing, unrelated to merge *content*,
+just newly triggered): `Dockerfile.test` never copied `scripts/` (needed
+by `tests/channels/test_channel_plugins.py`, actually surfaced in batch 1
+too but only now hit) and never had access to one webui fixture file
+needed by a new cross-language test
+(`tests/utils/test_webui_event_projection_equivalence.py`) — added a
+narrow `.dockerignore` negation + targeted `COPY` for just that file
+rather than shipping the whole (git-ignored, large) `webui/` tree.
+
+### Real regressions caught and fixed (see fixup commit `277e367b`)
+- `nanobot/core/core.py`'s `MoekaCore.from_config()` broke entirely (33
+  tests) because upstream made `AgentLoop.from_config()`'s `tool_registry`
+  a required kwarg via an unconflicted signature change, and moeka's own
+  `nanobot/core` (0 upstream commits touch it, per the original survey)
+  never got updated to match. This is exactly the "conflicts touch
+  nanobot/core" risk category — except it wasn't a *conflict*, it was
+  silent breakage from an upstream change to a *shared* function
+  signature. Fixed by constructing a `ToolRegistry()` there.
+- `retain_recent_legal_suffix()` delivery-drop bug — see above.
+
+### Deviation verification (post-merge, on the final commit)
+Same checklist as batch 1, all still holding: `allow_sudo` defaults
+False, no destructive patterns in `_DEFAULT_DENY_PATTERNS`, `sessions.db`
+SQLite store (still in-workspace by default — see ADR-0001 note above),
+`_dispatch_with_watchdog` present, `bg_shell.enabled()` returns False,
+`nanobot channels enable/disable` CLI present, Telegram
+`drop_pending_updates=True`, lazy `Config`/`ToolsConfig` model_rebuild
+intact, no `CONTRIBUTING.md`/`nanobot_logo.png`.
+
+## STOPPED HERE per coordinator instruction
+
+Per the coordinator's stop criteria ("a merge requires a judgment call
+that changes runtime behaviour of the live service"), I completed batch 2
+to a clean, fully-tested state but did **not** start batch 3. Next batch
+(3/7) should merge checkpoint `1018bdb7fee35acd6a52e2409d15cec65d3d3c09`
+(2026-08-19, 167 commits) once the owner has weighed in on ADR-0001 above
+— that decision will shape how `nanobot/session/manager.py` conflicts get
+resolved from here on, since upstream will keep extending the
+`SessionStore` split every batch.
