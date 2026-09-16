@@ -124,12 +124,14 @@ class ContextBuilder:
         parts.append(render_template("agent/tool_contract.md"))
 
         vc = self.vec_config
+        raw_memory = self.memory.read_memory()
         memory = self.memory.get_memory_context(
             query=query,
             semantic_threshold=vc.memory_semantic_threshold if vc else 2048,
             memory_top_k=vc.memory_top_k if vc else 10,
+            long_term=raw_memory,
         )
-        if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
+        if memory and not self._is_template_content(raw_memory, "memory/MEMORY.md"):
             parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
         active_skills = self.skills.get_always_skills()

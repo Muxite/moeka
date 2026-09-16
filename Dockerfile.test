@@ -41,11 +41,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}} --no-install-project
 
 # --- source layer: code last so edits only rebuild from here -----------------
-# bridge/ is force-included in the wheel (pyproject.toml), so the project
-# install needs it present.
-COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
-COPY bridge/ bridge/
+# scripts/ is imported directly by tests/channels/test_channel_plugins.py
+# (as `scripts.install_channel_dependencies`), not just shelled out to.
+COPY README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 COPY nanobot/ nanobot/
+COPY scripts/ scripts/
 COPY tests/ tests/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}}

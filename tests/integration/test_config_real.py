@@ -58,7 +58,7 @@ class TestLoadConfigReal:
         to defaults (which could mask a real config problem)."""
         cfg_file = tmp_path / "bad.json"
         cfg_file.write_text("{ this is not json }", encoding="utf-8")
-        with pytest.raises(ValueError, match="Failed to load config"):
+        with pytest.raises(ValueError, match="JSON syntax error"):
             load_config(cfg_file)
 
     def test_loads_channels_enabled_flag(self, tmp_path: Path) -> None:

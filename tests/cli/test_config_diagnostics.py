@@ -223,6 +223,13 @@ def test_status_reports_field_without_exposing_secret(tmp_path) -> None:
 
 
 def test_status_reports_missing_env_var_at_field(tmp_path, monkeypatch) -> None:
+    """moeka deviation: upstream surfaces the field path from a raised
+    ConfigLoadError here; moeka never raises for a missing ${VAR} (it warns
+    at load time — see nanobot/config/loader.py:resolve_config_env_vars),
+    so `status` just falls through to reporting the provider as not
+    configured rather than showing the field path in its own output."""
+    from loguru import logger as loguru_logger
+
     name = "NANOBOT_TEST_STATUS_MISSING"
     monkeypatch.delenv(name, raising=False)
     config_path = tmp_path / "config.json"
@@ -231,13 +238,17 @@ def test_status_reports_missing_env_var_at_field(tmp_path, monkeypatch) -> None:
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["status", "--config", str(config_path)])
+    records: list[str] = []
+    handler_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
+    try:
+        result = runner.invoke(app, ["status", "--config", str(config_path)])
+    finally:
+        loguru_logger.remove(handler_id)
 
     assert result.exit_code == 0
-    assert "providers.openrouter.apiKey" in result.stdout
-    assert name in result.stdout
     assert "OpenRouter: not set" in result.stdout
     assert "OpenRouter: ✓" not in result.stdout
+    assert any(name in r and "providers.openrouter.api_key" in r for r in records)
 
 
 def test_webui_reports_malformed_environment_config_without_traceback(

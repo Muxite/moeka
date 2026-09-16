@@ -1,4 +1,4 @@
-"""Integration test for AgentLoop._schedule_background.
+"""Integration test for AgentLoop.schedule_background.
 
 Confirms that fire-and-forget background coros emit a structured failure
 log when they raise (previously the exception was silently dropped at
@@ -54,7 +54,7 @@ async def test_schedule_background_logs_exception():
 
     records, handler_id = _capture()
     try:
-        loop._schedule_background(boom())
+        loop.schedule_background(boom())
         # Drain the background task list.
         if loop._background_tasks:
             await asyncio.gather(*loop._background_tasks, return_exceptions=True)
@@ -78,7 +78,7 @@ async def test_schedule_background_removes_task_safely():
     async def quick():
         return "ok"
 
-    loop._schedule_background(quick())
+    loop.schedule_background(quick())
     tasks = list(loop._background_tasks)
     loop._background_tasks.clear()
     for t in tasks:

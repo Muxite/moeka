@@ -1,5 +1,4 @@
 import json
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -8,7 +7,7 @@ from nanobot.security.workspace_access import (
     WorkspaceScopeError,
     default_workspace_scope,
 )
-from nanobot.session.manager import SessionManager, SessionStore
+from nanobot.session.manager import SessionManager
 from nanobot.webui.workspaces import (
     WebUIWorkspaceController,
     read_webui_default_access_mode,
@@ -218,6 +217,9 @@ def test_scope_for_session_key_reads_metadata_without_full_history(
 
 
 def test_scope_for_session_key_always_reads_the_active_store(tmp_path, monkeypatch) -> None:
+    """No mock store needed: moeka's SQLite-backed SessionManager has no
+    metadata cache of its own, so re-reading after a save is inherently
+    live — this just proves a second lookup observes the updated scope."""
     monkeypatch.setattr("nanobot.webui.workspaces.get_webui_dir", lambda: tmp_path / "webui")
     default = tmp_path / "default"
     project = tmp_path / "project"
@@ -227,27 +229,11 @@ def test_scope_for_session_key_always_reads_the_active_store(tmp_path, monkeypat
     full_scope = default_workspace_scope(project, restrict_to_workspace=False)
     restricted_scope = default_workspace_scope(project, restrict_to_workspace=True)
 
-    residual_sessions = SessionManager(workspace)
-    residual = residual_sessions.get_or_create("websocket:cached")
-    residual.metadata[WORKSPACE_SCOPE_METADATA_KEY] = full_scope.metadata()
-    residual_sessions.save(residual)
+    sessions = SessionManager(workspace)
+    session = sessions.get_or_create("websocket:cached")
+    session.metadata[WORKSPACE_SCOPE_METADATA_KEY] = full_scope.metadata()
+    sessions.save(session)
 
-    store = MagicMock(spec=SessionStore)
-    store.read_metadata.side_effect = [
-        {
-            "key": "websocket:cached",
-            "created_at": None,
-            "updated_at": None,
-            "metadata": {WORKSPACE_SCOPE_METADATA_KEY: full_scope.metadata()},
-        },
-        {
-            "key": "websocket:cached",
-            "created_at": None,
-            "updated_at": None,
-            "metadata": {WORKSPACE_SCOPE_METADATA_KEY: restricted_scope.metadata()},
-        },
-    ]
-    sessions = SessionManager(workspace, store=store)
     controller = WebUIWorkspaceController(
         session_manager=sessions,
         default_workspace=default,
@@ -255,13 +241,16 @@ def test_scope_for_session_key_always_reads_the_active_store(tmp_path, monkeypat
     )
 
     first = controller.scope_for_session_key("websocket:cached")
+
+    session.metadata[WORKSPACE_SCOPE_METADATA_KEY] = restricted_scope.metadata()
+    sessions.save(session)
+
     second = controller.scope_for_session_key("websocket:cached")
 
     assert first.project_path == project.resolve()
     assert first.access_mode == "full"
     assert second.project_path == project.resolve()
     assert second.access_mode == "restricted"
-    assert store.read_metadata.call_count == 2
 
 
 def test_remote_existing_chat_can_reduce_its_workspace_access(tmp_path, monkeypatch) -> None:

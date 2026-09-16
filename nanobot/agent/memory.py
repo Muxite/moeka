@@ -283,6 +283,8 @@ class MemoryStore:
         query: str | None = None,
         semantic_threshold: int = 2048,
         memory_top_k: int = 10,
+        *,
+        long_term: str | None = None,
     ) -> str:
         """Return memory context for injection into the system prompt.
 
@@ -290,8 +292,13 @@ class MemoryStore:
         semantic retrieval is used to pull only the most relevant chunks instead
         of the full file.  Falls back to full injection when VecStore is unavailable
         or the file is small enough to fit comfortably.
+
+        *long_term* lets a caller that already has the raw MEMORY.md contents
+        (e.g. for a template-content check) pass it through instead of
+        triggering a second ``read_memory()`` disk read.
         """
-        long_term = self.read_memory()
+        if long_term is None:
+            long_term = self.read_memory()
         if not long_term:
             return ""
         if (

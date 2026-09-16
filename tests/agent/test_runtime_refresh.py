@@ -9,7 +9,6 @@ import pytest
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeModelChanged
-from nanobot.config.errors import ConfigLoadError
 from nanobot.config.loader import save_config
 from nanobot.config.schema import Config, ModelPresetConfig
 from nanobot.providers.base import GenerationSettings
@@ -133,6 +132,12 @@ def test_provider_snapshot_missing_env_reports_explicit_config_path(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """moeka deviation: upstream raises ConfigLoadError here; moeka warns and
+    continues with the placeholder unresolved (see
+    nanobot/config/loader.py:resolve_config_env_vars and
+    tests/config/test_env_var_warnings.py)."""
+    from loguru import logger as loguru_logger
+
     name = "NANOBOT_TEST_REFRESH_MISSING_KEY"
     monkeypatch.delenv(name, raising=False)
     config_path = tmp_path / "custom.json"
@@ -141,10 +146,15 @@ def test_provider_snapshot_missing_env_reports_explicit_config_path(
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigLoadError) as exc_info:
-        load_provider_snapshot(config_path)
+    records: list[str] = []
+    handler_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
+    try:
+        snapshot = load_provider_snapshot(config_path)
+    finally:
+        loguru_logger.remove(handler_id)
 
-    assert exc_info.value.path == config_path
+    assert snapshot is not None
+    assert any(name in r and "providers.openrouter.api_key" in r for r in records)
 
 
 def test_same_snapshot_default_clears_preset_and_publishes_update(tmp_path: Path) -> None:

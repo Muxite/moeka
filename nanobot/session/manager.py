@@ -418,6 +418,11 @@ class Session:
         self.messages = retained
         self.last_consolidated = new_lc
         self.updated_at = datetime.now()
+        if dropped:
+            # A provider continuation state describes the exact turn sequence
+            # it was issued for; once any of that history is dropped the
+            # state no longer matches and must not be resumed.
+            self.provider_state = None
         return RetentionResult(
             dropped=dropped,
             already_consolidated_count=already_consolidated,
@@ -511,6 +516,10 @@ class SessionManager:
         if session is not None:
             self._remember(session)
         return session
+
+    def get_cached(self, key: str) -> Session | None:
+        """Return a cached session without creating or loading one from disk."""
+        return self._cached(key)
 
     def set_file_cap_archiver(self, archiver: Callable[..., None]) -> None:
         """Archive unconsolidated overflow whenever a session is persisted."""

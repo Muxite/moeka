@@ -59,6 +59,8 @@ def _response(content="", tool_calls=(), reasoning_content=None,
         finish_reason=finish_reason,
         usage=None,
         error_type=None,
+        provider_state=None,
+        preserve_provider_state_on_error=None,
     )
 
 

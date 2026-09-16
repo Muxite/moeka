@@ -74,11 +74,15 @@ def test_from_config_missing_file():
         Nanobot.from_config("/nonexistent/config.json")
 
 
-def test_from_config_missing_env_reports_explicit_config_path(
+def test_from_config_missing_env_is_non_fatal(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from nanobot.config.errors import ConfigLoadError
+    """moeka deviation: upstream raises ConfigLoadError here; moeka warns and
+    continues with the placeholder unresolved (see
+    nanobot/config/loader.py:resolve_config_env_vars and
+    tests/config/test_env_var_warnings.py)."""
+    from loguru import logger as loguru_logger
 
     name = "NANOBOT_TEST_SDK_MISSING_KEY"
     monkeypatch.delenv(name, raising=False)
@@ -88,10 +92,15 @@ def test_from_config_missing_env_reports_explicit_config_path(
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigLoadError) as exc_info:
-        Nanobot.from_config(config_path)
+    records: list[str] = []
+    handler_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
+    try:
+        bot = Nanobot.from_config(config_path, workspace=tmp_path)
+    finally:
+        loguru_logger.remove(handler_id)
 
-    assert exc_info.value.path == config_path.resolve()
+    assert bot._loop is not None
+    assert any(name in r and "providers.openrouter.api_key" in r for r in records)
 
 
 def test_from_config_creates_instance(tmp_path):

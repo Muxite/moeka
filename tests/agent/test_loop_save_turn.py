@@ -812,8 +812,12 @@ async def test_runtime_checkpoint_keeps_provider_state_out_of_public_metadata(
     public_payload = loop.sessions.read_session_file(session.key)
     assert public_payload is not None
     assert "private-checkpoint-blob" not in json.dumps(public_payload)
-    raw = loop.sessions._get_session_path(session.key).read_text(encoding="utf-8")
-    assert "private-checkpoint-blob" in raw
+    # The blob does persist, just outside the public payload: in the
+    # sessions.metadata column, under the reserved provider_state key.
+    row = loop.sessions._conn().execute(
+        "SELECT metadata FROM sessions WHERE key = ?", (session.key,)
+    ).fetchone()
+    assert "private-checkpoint-blob" in row[0]
 
 
 @pytest.mark.asyncio

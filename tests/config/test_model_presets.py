@@ -8,7 +8,6 @@ import warnings
 import pytest
 
 from nanobot.agent.model_presets import load_model_preset_catalog
-from nanobot.config.errors import ConfigLoadError
 from nanobot.config.schema import Config
 
 
@@ -23,10 +22,16 @@ def test_resolve_preset_returns_defaults_when_no_preset() -> None:
     assert resolved.reasoning_effort == config.agents.defaults.reasoning_effort
 
 
-def test_model_preset_catalog_missing_env_reports_explicit_config_path(
+def test_model_preset_catalog_missing_env_is_non_fatal(
     tmp_path,
     monkeypatch,
 ) -> None:
+    """moeka deviation: upstream raises ConfigLoadError here; moeka warns and
+    continues with the placeholder unresolved (see
+    nanobot/config/loader.py:resolve_config_env_vars and
+    tests/config/test_env_var_warnings.py)."""
+    from loguru import logger as loguru_logger
+
     name = "NANOBOT_TEST_CATALOG_MISSING_KEY"
     monkeypatch.delenv(name, raising=False)
     config_path = tmp_path / "custom.json"
@@ -35,10 +40,15 @@ def test_model_preset_catalog_missing_env_reports_explicit_config_path(
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigLoadError) as exc_info:
-        load_model_preset_catalog(config_path)
+    records: list[str] = []
+    handler_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
+    try:
+        catalog = load_model_preset_catalog(config_path)
+    finally:
+        loguru_logger.remove(handler_id)
 
-    assert exc_info.value.path == config_path
+    assert catalog is not None
+    assert any(name in r and "providers.openrouter.api_key" in r for r in records)
 
 
 def test_agent_timezone_rejects_unknown_iana_name() -> None:
