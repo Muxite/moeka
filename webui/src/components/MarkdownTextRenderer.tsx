@@ -17,6 +17,10 @@ import { Streamdown, type Components, type StreamdownProps } from "streamdown";
 import { AttachmentTile } from "@/components/AttachmentTile";
 import { CodeBlock } from "@/components/CodeBlock";
 import {
+  INLINE_TOKEN_HIGHLIGHT_COLOR,
+  InlineTokenHighlight,
+} from "@/components/InlineTokenHighlight";
+import {
   useFilePreviewAvailabilityResolver,
   type FilePreviewAvailabilityResolver,
 } from "@/components/FilePreviewAvailabilityContext";
@@ -237,11 +241,48 @@ function remarkSafeHtmlSubset() {
   };
 }
 
+// Recover a common model-output edge case that CommonMark leaves as literal
+// text: `**结论。**如果`, with no separator after the closing delimiter.
+const CJK_AFTER_STRONG =
+  /(?<!\\)\*\*([^*\r\n]+?)(?<!\\)\*\*(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu;
+
+function normalizeCjkStrongBoundaries(node: MarkdownAstNode): void {
+  if (!node.children) return;
+  node.children = node.children.flatMap((child) => {
+    if (child.type !== "text" || !child.value?.includes("**")) {
+      normalizeCjkStrongBoundaries(child);
+      return [child];
+    }
+
+    const replacement: MarkdownAstNode[] = [];
+    let cursor = 0;
+    for (const match of child.value.matchAll(CJK_AFTER_STRONG)) {
+      const start = match.index;
+      if (start > cursor) replacement.push(safeText(child.value.slice(cursor, start)));
+      replacement.push({
+        type: "strong",
+        children: [safeText(match[1])],
+      });
+      cursor = start + match[0].length;
+    }
+    if (cursor === 0) return [child];
+    if (cursor < child.value.length) replacement.push(safeText(child.value.slice(cursor)));
+    return replacement;
+  });
+}
+
+function remarkCjkStrongBoundaries() {
+  return (tree: MarkdownAstNode) => {
+    normalizeCjkStrongBoundaries(tree);
+  };
+}
+
 const remarkPlugins: NonNullable<StreamdownProps["remarkPlugins"]> = [
   remarkBreaks,
   remarkGfm,
   [remarkMath, { singleDollarTextMath: false }],
   remarkTexMath,
+  remarkCjkStrongBoundaries,
   remarkSafeHtmlSubset,
 ];
 const rehypePlugins: NonNullable<StreamdownProps["rehypePlugins"]> = [rehypeKatex];
@@ -311,6 +352,22 @@ function fileReferenceFromLink(href: string | undefined): string | null {
   return isPreviewableFileTarget(target) ? target : null;
 }
 
+function sessionReferenceHref(href: string): string | null {
+  const prefix = href.startsWith("#session/")
+    ? "#session/"
+    : href.startsWith("#/chat/")
+      ? "#/chat/"
+      : null;
+  if (!prefix) return null;
+  try {
+    const sessionKey = decodeURIComponent(href.slice(prefix.length)).trim();
+    if (!sessionKey.startsWith("websocket:") || sessionKey === "websocket:") return null;
+    return `#/chat/${encodeURIComponent(sessionKey)}`;
+  } catch {
+    return null;
+  }
+}
+
 function linkPreviewParts(value: ReactNode): { text: string; href?: string } {
   let text = "";
   let href: string | undefined;
@@ -374,6 +431,7 @@ function inlineLinkPreviewFromChildren(children: ReactNode): InlineLinkPreview |
 }
 
 function InlineLinkPreviewRow({ link }: { link: InlineLinkPreview }) {
+  const { t } = useTranslation();
   const { favicon, onFaviconError, onFaviconLoad } = useFaviconFallback(link.host);
   const label = link.prefix
     ? `${link.prefix} — ${link.title}`
@@ -384,7 +442,7 @@ function InlineLinkPreviewRow({ link }: { link: InlineLinkPreview }) {
       href={link.href}
       target="_blank"
       rel="noreferrer noopener"
-      aria-label={`Open link: ${label}`}
+      aria-label={t("message.openLink", { label })}
       className={cn(
         "not-prose inline-flex max-w-full items-center gap-2 align-baseline",
         "text-blue-500 no-underline underline-offset-2 hover:underline dark:text-blue-300",
@@ -554,6 +612,23 @@ export default function MarkdownTextRenderer({
         if (href === "streamdown:incomplete-link") {
           return <>{markdownChildren}</>;
         }
+        const sessionHref = sessionReferenceHref(href);
+        if (sessionHref) {
+          return (
+            <a
+              href={sessionHref}
+              className="rounded-sm underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+              style={{ textDecorationColor: INLINE_TOKEN_HIGHLIGHT_COLOR }}
+            >
+              <InlineTokenHighlight color={INLINE_TOKEN_HIGHLIGHT_COLOR}>
+                {markdownChildren}
+              </InlineTokenHighlight>
+            </a>
+          );
+        }
+        if (href.startsWith("#/chat/") || href.startsWith("#session/")) {
+          return <>{markdownChildren}</>;
+        }
         const filePath = fileReferenceFromLink(href);
         if (filePath) {
           const label = nodeText(markdownChildren).trim();
@@ -642,7 +717,9 @@ export default function MarkdownTextRenderer({
           <li
             className={cn(
               itemClassName,
-              taskItem && "flex min-w-0 items-start gap-2 text-[13px] leading-5 [&>p]:m-0",
+              taskItem
+                ? "flex min-w-0 items-start gap-2 text-[13px] leading-5 [&>p]:m-0"
+                : "[&>p]:inline",
             )}
           >
             {markdownChildren}

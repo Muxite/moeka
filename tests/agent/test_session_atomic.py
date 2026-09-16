@@ -2,9 +2,11 @@
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
-from nanobot.session.manager import SessionManager
+from nanobot.providers.base import ProviderConversationState
+from nanobot.session.manager import Session, SessionManager
 
 
 class TestSqliteRoundtrip:
@@ -87,6 +89,132 @@ class TestSqliteRoundtrip:
         assert loaded is not None
         # offset 5 exceeds the single loaded message; reset to avoid hiding history.
         assert loaded.last_consolidated == 0
+
+    def test_provider_state_round_trips_in_private_record_only(self, tmp_path: Path):
+        mgr = SessionManager(tmp_path)
+        secret = "encrypted-reasoning-blob"
+        session = Session(
+            key="test:provider-state",
+            provider_state=ProviderConversationState(
+                kind="openai_responses",
+                provider="openai:https://api.openai.com/v1",
+                model="gpt-5.6",
+                version=1,
+                payload={
+                    "items": [
+                        {
+                            "type": "reasoning",
+                            "encrypted_content": secret,
+                        }
+                    ]
+                },
+                pending_messages=[{"role": "user", "content": "continue"}],
+            ),
+        )
+        session.add_message("user", "hello")
+        mgr.save(session)
+
+        # provider_state rides along in the sessions.metadata column under a
+        # reserved key rather than a dedicated jsonl-style sidecar record.
+        row = mgr._conn().execute(
+            "SELECT metadata FROM sessions WHERE key = ?", (session.key,)
+        ).fetchone()
+        stored_metadata = json.loads(row[0])
+        assert secret in stored_metadata["_provider_state"]["payload"]["items"][0][
+            "encrypted_content"
+        ]
+        message_rows = mgr._conn().execute(
+            "SELECT data FROM messages WHERE session_key = ?", (session.key,)
+        ).fetchall()
+        assert secret not in "".join(data for (data,) in message_rows)
+
+        mgr.invalidate(session.key)
+        loaded = mgr.get_or_create(session.key)
+        assert loaded.provider_state is not None
+        assert loaded.provider_state.to_private_record() == session.provider_state.to_private_record()
+
+        public_payload = mgr.read_session_file(session.key)
+        assert public_payload is not None
+        assert public_payload["messages"] == [session.messages[0]]
+        assert secret not in json.dumps(public_payload)
+        assert secret not in json.dumps(mgr.list_sessions())
+
+    def test_provider_state_does_not_consume_list_preview_budget(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        import nanobot.session.manager as session_manager
+
+        monkeypatch.setattr(session_manager, "_SESSION_LIST_PREVIEW_MAX_CHARS", 100)
+        mgr = SessionManager(tmp_path)
+        session = Session(
+            key="test:provider-state-preview",
+            provider_state=ProviderConversationState(
+                kind="openai_responses",
+                provider="openai:test",
+                model="test-model",
+                version=1,
+                payload={"items": [{"encrypted_content": "x" * 200}]},
+            ),
+        )
+        session.add_message("user", "visible preview")
+        mgr.save(session)
+
+        assert mgr.list_sessions()[0]["preview"] == "visible preview"
+
+    def test_clear_and_fork_discard_provider_state(self, tmp_path: Path):
+        mgr = SessionManager(tmp_path)
+        state = ProviderConversationState(
+            kind="openai_responses",
+            provider="openai:test",
+            model="gpt-5.6",
+            version=1,
+            payload={"items": []},
+        )
+        source = Session(key="test:state-source", provider_state=state)
+        source.add_message("user", "hello")
+        mgr.save(source)
+
+        fork = mgr.fork_session_before_user_index(
+            source.key,
+            "test:state-fork",
+            1,
+        )
+        assert fork is not None
+        assert fork.provider_state is None
+
+        source.clear()
+        assert source.provider_state is None
+
+    def test_invalid_provider_state_record_is_not_public_history(self, tmp_path: Path):
+        """A malformed ``_provider_state`` blob (missing required fields) must be
+        dropped by ``from_private_record`` rather than surfacing as a message."""
+        mgr = SessionManager(tmp_path)
+        key = "test:bad-provider-state"
+        now = datetime.now().isoformat()
+        conn = mgr._conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO sessions(key, created_at, updated_at, metadata,"
+                " last_consolidated) VALUES (?, ?, ?, ?, 0)",
+                (
+                    key,
+                    now,
+                    now,
+                    json.dumps({"_provider_state": {"kind": "openai_responses"}}),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO messages(session_key, seq, role, created_at, data)"
+                " VALUES (?, 0, 'user', ?, ?)",
+                (key, now, json.dumps({"role": "user", "content": "safe"})),
+            )
+
+        loaded = mgr._load(key)
+        assert loaded is not None
+        assert loaded.provider_state is None
+        assert loaded.messages == [{"role": "user", "content": "safe"}]
 
 
 class TestLegacyJsonlImport:

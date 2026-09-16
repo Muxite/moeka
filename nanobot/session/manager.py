@@ -10,12 +10,13 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 from weakref import WeakValueDictionary
 
 from loguru import logger
 
 from nanobot.config.paths import get_legacy_sessions_dir
+from nanobot.providers.base import ProviderConversationState
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
     public_history_message,
@@ -138,6 +139,10 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # Number of messages already consolidated to files
+    # Opaque provider-owned continuation state (e.g. OpenAI Responses API
+    # encrypted reasoning items). Never part of public history; persisted
+    # alongside metadata in the sessions.db row (see SessionManager.save).
+    provider_state: ProviderConversationState | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.metadata, dict):
@@ -149,6 +154,8 @@ class Session:
             or not 0 <= self.last_consolidated <= len(self.messages)
         ):
             self.last_consolidated = 0
+        if not isinstance(cast(object, self.provider_state), ProviderConversationState):
+            self.provider_state = None
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -319,6 +326,7 @@ class Session:
         self.last_consolidated = 0
         self.updated_at = datetime.now()
         self.metadata.pop("_last_summary", None)
+        self.provider_state = None
 
     def retain_recent_legal_suffix(
         self,
@@ -449,6 +457,18 @@ class SessionManager:
     row so heterogeneous message dicts round-trip exactly. Legacy per-session
     ``.jsonl`` files are imported once on startup (then renamed to
     ``*.jsonl.imported`` as a backup).
+
+    moeka note: upstream (as of the 2026-08-05 checkpoint) split this into a
+    ``SessionStore`` Protocol + pluggable ``JsonlSessionStore`` /
+    ``SessionManager`` wrapper, presumably groundwork for alternate backends.
+    Nothing else in that checkpoint's tree consumes the Protocol yet, so this
+    merge keeps moeka's single SQLite-backed ``SessionManager`` as-is rather
+    than reshaping it to fit the new interface. Worth revisiting later:
+    making moeka's store implement ``SessionStore`` would fit the "everything
+    is a plugin abstraction" framing better than carrying this divergence
+    forever — but the method surface already matches 1:1 (verified against
+    the 2026-08-05 checkpoint), so nothing is currently broken by deferring
+    it.
     """
 
     _SCHEMA_VERSION = 1
@@ -707,6 +727,11 @@ class SessionManager:
                 metadata = json.loads(row[2]) if row[2] else {}
             except json.JSONDecodeError:
                 metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            provider_state = ProviderConversationState.from_private_record(
+                metadata.pop("_provider_state", None)
+            )
             return Session(
                 key=key,
                 messages=messages,
@@ -714,6 +739,7 @@ class SessionManager:
                 updated_at=updated_at or datetime.now(),
                 metadata=metadata,
                 last_consolidated=row[3] or 0,
+                provider_state=provider_state,
             )
         except _SESSION_DATA_ERRORS as e:
             logger.warning("Failed to load session {}: {}", key, e)
@@ -755,6 +781,14 @@ class SessionManager:
                 msg.get("timestamp"),
                 json.dumps(msg, ensure_ascii=False),
             ))
+        # provider_state rides along in the metadata blob under a reserved key
+        # rather than a dedicated column, so it survives the same atomic
+        # replace as the rest of the row without a schema migration.
+        metadata_to_store = dict(session.metadata)
+        if session.provider_state is not None:
+            metadata_to_store["_provider_state"] = session.provider_state.to_private_record()
+        else:
+            metadata_to_store.pop("_provider_state", None)
         with self._write_lock:
             with conn:  # one transaction
                 conn.execute(
@@ -769,7 +803,7 @@ class SessionManager:
                         session.key,
                         session.created_at.isoformat(),
                         session.updated_at.isoformat(),
-                        json.dumps(session.metadata, ensure_ascii=False),
+                        json.dumps(metadata_to_store, ensure_ascii=False),
                         session.last_consolidated,
                     ),
                 )
@@ -910,11 +944,16 @@ class SessionManager:
                 metadata = json.loads(row[3]) if row[3] else {}
             except json.JSONDecodeError:
                 metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            # Never surface the provider-private continuation blob (may hold
+            # encrypted reasoning items) through the WebUI metadata route.
+            metadata.pop("_provider_state", None)
             return {
                 "key": row[0] or key,
                 "created_at": row[1],
                 "updated_at": row[2],
-                "metadata": metadata if isinstance(metadata, dict) else {},
+                "metadata": metadata,
             }
         except _SESSION_DATA_ERRORS as e:
             logger.warning("Failed to read session metadata {}: {}", key, e)

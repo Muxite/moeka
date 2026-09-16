@@ -39,6 +39,23 @@ Run nanobot online without managing a server. The blueprint deploys the gateway 
 
 [Review the deployment blueprint](../render.yaml)
 
+### First Deployment
+
+1. Click **Deploy to Render**, sign in, and review the Blueprint. It creates one Starter web service and a 1 GB persistent disk.
+2. Enter your `ANTHROPIC_API_KEY`. Set `NANOBOT_WEB_TOKEN` to a new random value and save it in your password manager; this is the password for the public WebUI.
+3. Create the Blueprint and wait for the service status to become **Live**. The first build can take several minutes.
+4. Open the generated `onrender.com` URL. The **Authentication required** page means the gateway is running: enter the same `NANOBOT_WEB_TOKEN` value to open the WebUI.
+
+The model API key is used by nanobot to call Anthropic. The Web token only protects access to this deployment; do not share it in issues, screenshots, or chat.
+
+### Updates and Data
+
+The Blueprint disables automatic deploys so upstream repository changes do not unexpectedly restart your agent. To update, open the service in the Render Dashboard and choose **Manual Deploy → Deploy latest commit**.
+
+The persistent disk keeps `config.json`, sessions, memory, WebUI history, cron state, media, and logs across restarts and updates. The deployment initializes `config.json` only when it does not already exist, so settings changed later in the WebUI are not replaced on every boot.
+
+If deployment fails, open the service **Logs** page first. A missing model key fails provider requests after startup, while an incorrect Web token leaves you on the authentication page.
+
 ## Docker
 
 > [!TIP]
@@ -50,7 +67,7 @@ Run nanobot online without managing a server. The blueprint deploys the gateway 
 > Official Docker usage currently means building from this repository with the included `Dockerfile`. Docker Hub images under third-party namespaces are not maintained or verified by HKUDS/nanobot; do not mount API keys or bot tokens into them unless you trust the publisher.
 
 > [!IMPORTANT]
-> The gateway and WebSocket channel default to `host: "127.0.0.1"` in `config.json` (set in `nanobot/config/schema.py`). Docker `-p` port forwarding cannot reach a container's loopback interface, so for the host or LAN to reach the exposed ports you must set both binds to `0.0.0.0` in `~/.nanobot/config.json` before starting the container. To serve the bundled WebUI from Docker, bind the WebSocket channel externally and protect bootstrap with a secret:
+> The gateway and WebSocket channel default to `host: "127.0.0.1"` in `config.json` (set in `nanobot/config/schema.py`). Docker `-p` port forwarding cannot reach a container's loopback interface, so for the host or LAN to reach the exposed ports you must set both binds to `0.0.0.0` in `~/.nanobot/config.json` before starting the container. To serve the bundled WebUI from Docker, bind the WebSocket channel externally and protect bootstrap with `tokenIssueSecret`:
 >
 > ```json
 > {
@@ -65,12 +82,53 @@ Run nanobot online without managing a server. The blueprint deploys the gateway 
 > }
 > ```
 >
-> When the WebSocket `host` is `0.0.0.0`, the channel refuses to start unless `token` or `tokenIssueSecret` is also configured. See [`webui.md#lan-access`](./webui.md#lan-access) for details.
+> When the WebSocket `host` is `0.0.0.0`, the channel refuses to start unless `token`, `tokenIssueSecret`, or a fully configured `trustedProxyAuth` is also configured. See [`webui.md#lan-access`](./webui.md#lan-access) for details.
 > The gateway health route itself is intentionally minimal and unauthenticated. When the
 > container binds it to `0.0.0.0`, publish port `18790` to host loopback only; place any
 > remotely monitored health endpoint behind a firewall or reverse proxy. If another host
 > must probe it directly, replace `127.0.0.1` in the port mapping with a trusted host
 > interface and restrict inbound traffic to the monitoring system.
+
+### Cloudflare Tunnel + Cloudflare Access
+
+For a local `cloudflared` process in front of nanobot, Cloudflare Access can
+authenticate the user before forwarding the request and add
+`Cf-Access-Jwt-Assertion`. Opt in to trusted-proxy no-token mode only when the
+direct TCP peer is the tunnel process and the assertion is non-empty:
+
+```json
+{
+  "gateway": { "host": "127.0.0.1" },
+  "channels": {
+    "websocket": {
+      "host": "127.0.0.1",
+      "port": 8765,
+      "publicWsUrl": "wss://nanobot.example.com/",
+      "trustedProxyAuth": {
+        "trustedPeerCidrs": ["127.0.0.1/32", "::1/128"],
+        "assertionHeader": "Cf-Access-Jwt-Assertion"
+      }
+    }
+  }
+}
+```
+
+This is two-part authorization: a trusted direct loopback peer **and** a
+non-empty Cloudflare Access assertion. A trusted CIDR alone is not a bypass.
+For this flow `/webui/bootstrap` returns connection metadata without a
+bootstrap token or REST API token; the proxy assertion authorizes the WebSocket
+handshake and REST requests directly.
+
+Set `publicWsUrl` to the browser-facing `wss://` endpoint when the tunnel sends
+the origin host header (such as `127.0.0.1:8765`); otherwise the WebUI could
+attempt to open its WebSocket directly against the loopback address.
+The assertion header must be generated
+by Cloudflare Access after authentication; routing/client metadata headers such
+as `Host`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, and `CF-Connecting-IP`
+are rejected as `assertionHeader` values. Nanobot trusts the assertion but does
+not cryptographically validate the JWT, so configure the tunnel and Access
+policy carefully and do not expose the nanobot listener directly to untrusted
+clients. Forwarded client headers do not establish proxy trust.
 
 ### Docker Compose
 

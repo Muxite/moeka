@@ -272,14 +272,12 @@ def test_channels_config_has_no_per_channel_fields():
     assert cfg.send_tool_hints is True
     assert cfg.extract_document_text is True
 
-    opted_out = ChannelsConfig.model_validate({"sendToolHints": False})
+    opted_out = ChannelsConfig.model_validate({
+        "sendToolHints": False,
+        "extractDocumentText": False,
+    })
     assert opted_out.send_tool_hints is False
-
-
-def test_channels_config_extract_document_text_accepts_camel_alias():
-    cfg = ChannelsConfig.model_validate({"extractDocumentText": False})
-
-    assert cfg.extract_document_text is False
+    assert opted_out.extract_document_text is False
 
 
 @pytest.mark.parametrize(
@@ -1219,6 +1217,7 @@ def test_channels_login_uses_discovered_plugin_class(monkeypatch):
         async def login(self, force: bool = False) -> bool:
             seen["force"] = force
             seen["config"] = self.config
+            seen["bus"] = self.bus
             return True
 
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda config_path=None: Config())
@@ -1231,6 +1230,7 @@ def test_channels_login_uses_discovered_plugin_class(monkeypatch):
 
     assert result.exit_code == 0
     assert seen["force"] is True
+    assert isinstance(seen["bus"], MessageBus)
 
 
 def test_channels_login_sets_custom_config_path(monkeypatch, tmp_path):
@@ -1494,12 +1494,197 @@ def test_repository_dependency_installer_selects_all_channel_manifests(monkeypat
     monkeypatch.setattr(dependencies, "discover_plugins", lambda: plugins)
     monkeypatch.setattr(
         dependencies,
-        "ensure_enabled_channel_dependencies",
+        "ensure_repository_channel_dependencies",
         lambda names, discovered: prepared.append((names, discovered)) or {},
     )
 
     assert dependencies.main(["--all-channels"]) == 0
     assert prepared == [(set(plugins), plugins)]
+
+
+def test_repository_dependency_installer_batches_missing_manifests(monkeypatch):
+    from nanobot.optional_features import InstallResult
+    from scripts import install_channel_dependencies as dependencies
+
+    plugins = {
+        "second": ChannelPlugin(
+            name="second",
+            display_name="Second",
+            runtime="missing.second.runtime:SecondChannel",
+            dependencies=("shared-sdk>=1", "second-sdk>=2"),
+        ),
+        "first": ChannelPlugin(
+            name="first",
+            display_name="First",
+            runtime="missing.first.runtime:FirstChannel",
+            dependencies=("first-sdk>=1", "shared-sdk>=1"),
+        ),
+        "ready": ChannelPlugin(
+            name="ready",
+            display_name="Ready",
+            runtime="missing.ready.runtime:ReadyChannel",
+            dependencies=("ready-sdk>=1",),
+        ),
+    }
+    batch_installed = False
+    installs: list[tuple[str, list[str]]] = []
+
+    def extra_installed(name: str, _requirements: list[str]) -> bool:
+        return name == "ready" or batch_installed
+
+    def install_extra(name: str, requirements: list[str]) -> InstallResult:
+        nonlocal batch_installed
+        installs.append((name, requirements))
+        batch_installed = True
+        return InstallResult(True, name, ["pip"])
+
+    monkeypatch.setattr(dependencies, "extra_installed", extra_installed)
+    monkeypatch.setattr(dependencies, "install_extra", install_extra)
+    monkeypatch.setattr(
+        dependencies,
+        "ensure_enabled_channel_dependencies",
+        lambda _names, _plugins: pytest.fail("verified batch must not use the fallback"),
+    )
+
+    failures = dependencies.ensure_repository_channel_dependencies(set(plugins), plugins)
+
+    assert failures == {}
+    assert installs == [
+        (
+            "channel-dependencies",
+            ["first-sdk>=1", "shared-sdk>=1", "second-sdk>=2"],
+        )
+    ]
+
+
+def test_repository_dependency_installer_falls_back_after_batch_failure(monkeypatch):
+    from nanobot.optional_features import InstallResult
+    from scripts import install_channel_dependencies as dependencies
+
+    plugins = {
+        name: ChannelPlugin(
+            name=name,
+            display_name=name.title(),
+            runtime=f"missing.{name}.runtime:Channel",
+            dependencies=(f"{name}-sdk>=1",),
+        )
+        for name in ("first", "second")
+    }
+    fallbacks: list[set[str]] = []
+    fallback_finished = False
+
+    def extra_installed(name: str, _requirements: list[str]) -> bool:
+        return fallback_finished and name == "first"
+
+    def fallback(names: set[str], _plugins: dict[str, ChannelPlugin]) -> dict[str, str]:
+        nonlocal fallback_finished
+        fallbacks.append(names)
+        fallback_finished = True
+        return {"second": "install failed"}
+
+    monkeypatch.setattr(dependencies, "extra_installed", extra_installed)
+    monkeypatch.setattr(
+        dependencies,
+        "install_extra",
+        lambda name, _requirements: InstallResult(False, name, ["pip"]),
+    )
+    monkeypatch.setattr(
+        dependencies,
+        "ensure_enabled_channel_dependencies",
+        fallback,
+    )
+
+    failures = dependencies.ensure_repository_channel_dependencies(set(plugins), plugins)
+
+    assert failures == {"second": "install failed"}
+    assert fallbacks == [set(plugins)]
+
+
+def test_repository_dependency_installer_rechecks_each_channel_after_batch(monkeypatch):
+    from nanobot.optional_features import InstallResult
+    from scripts import install_channel_dependencies as dependencies
+
+    plugins = {
+        name: ChannelPlugin(
+            name=name,
+            display_name=name.title(),
+            runtime=f"missing.{name}.runtime:Channel",
+            dependencies=(f"{name}-sdk>=1",),
+        )
+        for name in ("first", "second")
+    }
+    batch_finished = False
+    fallback_finished = False
+    fallbacks: list[set[str]] = []
+
+    def extra_installed(name: str, _requirements: list[str]) -> bool:
+        if fallback_finished:
+            return True
+        if batch_finished:
+            return name == "second"
+        return name == "first"
+
+    def install_extra(name: str, _requirements: list[str]) -> InstallResult:
+        nonlocal batch_finished
+        batch_finished = True
+        return InstallResult(True, name, ["pip"])
+
+    def fallback(names: set[str], _plugins: dict[str, ChannelPlugin]) -> dict[str, str]:
+        nonlocal fallback_finished
+        fallbacks.append(names)
+        fallback_finished = True
+        return {}
+
+    monkeypatch.setattr(dependencies, "extra_installed", extra_installed)
+    monkeypatch.setattr(dependencies, "install_extra", install_extra)
+    monkeypatch.setattr(
+        dependencies,
+        "ensure_enabled_channel_dependencies",
+        fallback,
+    )
+
+    failures = dependencies.ensure_repository_channel_dependencies(set(plugins), plugins)
+
+    assert failures == {}
+    assert fallbacks == [{"first"}]
+
+
+def test_repository_dependency_installer_reports_conflict_after_fallback(monkeypatch):
+    from nanobot.optional_features import InstallResult
+    from scripts import install_channel_dependencies as dependencies
+
+    plugins = {
+        name: ChannelPlugin(
+            name=name,
+            display_name=name.title(),
+            runtime=f"missing.{name}.runtime:Channel",
+            dependencies=(f"{name}-sdk>=1",),
+        )
+        for name in ("first", "second")
+    }
+    fallback_finished = False
+
+    def extra_installed(name: str, _requirements: list[str]) -> bool:
+        return fallback_finished and name == "second"
+
+    def fallback(_names: set[str], _plugins: dict[str, ChannelPlugin]) -> dict[str, str]:
+        nonlocal fallback_finished
+        fallback_finished = True
+        return {}
+
+    monkeypatch.setattr(dependencies, "extra_installed", extra_installed)
+    monkeypatch.setattr(
+        dependencies,
+        "install_extra",
+        lambda name, _requirements: InstallResult(False, name, ["pip"]),
+    )
+    monkeypatch.setattr(dependencies, "ensure_enabled_channel_dependencies", fallback)
+
+    failures = dependencies.ensure_repository_channel_dependencies(set(plugins), plugins)
+
+    assert failures == {
+        "first": "Channel dependencies could not be installed. Check gateway logs."
+    }
 
 
 def test_repository_dependency_installer_rejects_unknown_channel(monkeypatch, capsys):
@@ -1522,7 +1707,7 @@ def test_repository_dependency_installer_propagates_install_failure(monkeypatch,
     monkeypatch.setattr(dependencies, "discover_plugins", lambda: {"demo": plugin})
     monkeypatch.setattr(
         dependencies,
-        "ensure_enabled_channel_dependencies",
+        "ensure_repository_channel_dependencies",
         lambda _names, _plugins: {"demo": "dependency install failed"},
     )
 
@@ -2294,6 +2479,69 @@ def test_optional_features_payload_preserves_legacy_flat_feishu_config(monkeypat
     assert "instances" not in saved
 
 
+@pytest.mark.parametrize(
+    "index_url",
+    [
+        "",
+        "https://mirror.example/simple",
+    ],
+)
+def test_enable_uses_uv_when_tool_environment_has_no_pip(
+    monkeypatch,
+    index_url,
+):
+    from nanobot import optional_features
+
+    calls: list[list[str]] = []
+    call_envs: list[dict[str, str] | None] = []
+
+    def _run(
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        call_envs.append(env)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No module named pip")
+        if argv[0] == "uv":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="",
+            stderr="No module named ensurepip",
+        )
+
+    monkeypatch.setattr("shutil.which", lambda name: "uv" if name == "uv" else None)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    monkeypatch.delenv("UV_INDEX_URL", raising=False)
+    if index_url:
+        monkeypatch.setenv("PIP_INDEX_URL", index_url)
+    else:
+        monkeypatch.delenv("PIP_INDEX_URL", raising=False)
+
+    assert optional_features.install_extra("feishu", ["lark-oapi>=1.5.0"], runner=_run).ok is True
+    assert calls == [
+        [sys.executable, "-m", "pip", "install", "lark-oapi>=1.5.0"],
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "lark-oapi>=1.5.0",
+        ],
+    ]
+    assert call_envs[0] is None
+    assert call_envs[1] is not None
+    assert call_envs[1]["HTTPS_PROXY"] == "http://proxy.example:8080"
+    if index_url:
+        assert call_envs[1]["UV_INDEX_URL"] == index_url
+    else:
+        assert "UV_INDEX_URL" not in call_envs[1]
+
+
 def test_enable_bootstraps_pip_with_ensurepip(monkeypatch):
     from nanobot import optional_features
 
@@ -2304,6 +2552,8 @@ def test_enable_bootstraps_pip_with_ensurepip(monkeypatch):
         if len(calls) == 1:
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No module named pip")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
 
     assert optional_features.install_extra("bedrock", None, runner=_run).ok is True
     assert calls == [
@@ -2373,7 +2623,7 @@ def test_optional_dependency_metadata_for_enable():
     ):
         assert not any(dep.startswith(dep_name) for dep in required)
     for dependency in (
-        "tzdata>=2025.2; sys_platform == 'win32'",
+        "tzdata>=2025.2",
         "defusedxml>=0.7.1,<1.0.0",
         "pypdf>=5.0.0,<6.0.0",
         "python-docx>=1.1.0,<2.0.0",
@@ -2390,6 +2640,12 @@ def test_optional_dependency_metadata_for_enable():
     ]
     assert deps["pdf"] == ["pypdf>=5.0.0,<6.0.0"]
     assert deps["langfuse"] == ["langfuse>=3.0.0,<4.0.0"]
+    assert deps["olostep"] == ["olostep>=0.1.0; python_version < '3.14'"]
+    expected_olostep_args = [] if sys.version_info >= (3, 14) else ["olostep>=0.1.0"]
+    assert optional_features.install_args_for_extra("olostep", deps["olostep"]) == (
+        expected_olostep_args,
+        "olostep support",
+    )
     channel_names = {
         "dingtalk",
         "discord",

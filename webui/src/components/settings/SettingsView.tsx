@@ -65,6 +65,10 @@ import { useTranslation } from "react-i18next";
 
 import { channelUiPresentation } from "@/channel-plugins/registry";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import {
+  SIDEBAR_SELECTION_ITEM_CLASS,
+  SidebarSelectionHighlight,
+} from "@/components/SidebarSelectionHighlight";
 import { SkillsCatalogSettings } from "@/components/settings/SkillsCatalogSettings";
 import { TokenUsageHeatmap } from "@/components/settings/TokenUsageHeatmap";
 import { ToggleButton } from "@/components/settings/ToggleButton";
@@ -81,6 +85,10 @@ import {
 } from "@/components/settings/channels/ChannelSetupPanel";
 import { Button } from "@/components/ui/button";
 import {
+  ComboboxOption,
+  useComboboxNavigation,
+} from "@/components/ui/combobox";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -96,6 +104,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
 import { isLoopbackHost } from "@/lib/network";
 import {
@@ -131,7 +145,6 @@ import {
   updateModelConfiguration,
   updateNetworkSafetySettings,
   updateProviderSettings,
-  updateSettings,
   updateTranscriptionSettings,
   updateWebSearchSettings,
 } from "@/lib/api";
@@ -230,8 +243,6 @@ interface AgentSettingsDraft {
   temperature: number;
   reasoningEffort: string;
   timezone: string;
-  botName: string;
-  botIcon: string;
   toolHintMaxLength: number;
 }
 
@@ -265,6 +276,52 @@ type CustomMcpTransport = "stdio" | "streamableHttp" | "sse";
 
 const CONTEXT_WINDOW_TOKEN_OPTIONS = [65_536, 200_000, 262_144, 500_000, 1_048_576] as const;
 const OAUTH_PROXY_PROVIDERS = new Set(["openai_codex", "xai_grok"]);
+type ProviderRequestOption = {
+  kind: "priority" | "hosted_tool";
+  titleKey: string;
+  title: string;
+  helpKey: string;
+  help: string;
+  toolType?: "web_search" | "x_search";
+  defaultEnabled?: boolean;
+  forceResponses?: boolean;
+};
+const PROVIDER_REQUEST_OPTIONS: Partial<Record<string, ProviderRequestOption[]>> = {
+  openai_codex: [{
+    kind: "priority",
+    titleKey: "settings.providers.capabilityFastMode",
+    title: "Fast mode",
+    helpKey: "settings.providers.capabilityFastModeHelp",
+    help: "Use OpenAI's priority service tier for faster responses. This consumes credits faster.",
+  }],
+  openai: [{
+    kind: "hosted_tool",
+    titleKey: "settings.providers.capabilityOpenAISearch",
+    title: "OpenAI web search",
+    helpKey: "settings.providers.capabilityOpenAISearchHelp",
+    help: "Allow compatible Responses API models to search the web. Search activity appears in chat.",
+    toolType: "web_search",
+    forceResponses: true,
+  }],
+  deepseek: [{
+    kind: "hosted_tool",
+    titleKey: "settings.providers.capabilityDeepSeekSearch",
+    title: "DeepSeek web search",
+    helpKey: "settings.providers.capabilityDeepSeekSearchHelp",
+    help: "Let DeepSeek V4 Flash search the web through its Responses API. Search activity appears in chat.",
+    toolType: "web_search",
+    defaultEnabled: true,
+  }],
+  xai_grok: [{
+    kind: "hosted_tool",
+    titleKey: "settings.providers.capabilityXSearch",
+    title: "X Search",
+    helpKey: "settings.providers.capabilityXSearchHelp",
+    help: "Allow supported Grok models to use xAI-hosted X Search. Search activity appears in chat.",
+    toolType: "x_search",
+    defaultEnabled: true,
+  }],
+};
 const CUSTOM_PROVIDER_CREATION_KEY = "__custom_provider__";
 const CUSTOM_PROVIDER_ADVANCED_FIELDS: ProviderAdvancedField[] = [
   "extra_headers",
@@ -293,6 +350,70 @@ const DEFERRED_MODEL_LIST_PROVIDERS = new Set([
 
 function providerJsonValue(value: Record<string, unknown> | null | undefined): string {
   return value && Object.keys(value).length > 0 ? JSON.stringify(value, null, 2) : "";
+}
+
+function parseProviderExtraBody(value: string): Record<string, unknown> | null {
+  if (!value.trim()) return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isHostedSearchTool(tool: unknown, toolType: "web_search" | "x_search"): boolean {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return false;
+  const configuredType = (tool as Record<string, unknown>).type;
+  if (typeof configuredType !== "string") return false;
+  return configuredType === toolType
+    || (toolType === "web_search" && configuredType.startsWith("web_search_"));
+}
+
+function hasHostedSearchTool(value: unknown, toolType: "web_search" | "x_search"): boolean {
+  return Array.isArray(value) && value.some((tool) => isHostedSearchTool(tool, toolType));
+}
+
+function providerRequestOptionEnabled(
+  option: ProviderRequestOption,
+  extraBody: Record<string, unknown>,
+): boolean {
+  if (option.kind === "priority") return extraBody.service_tier === "priority";
+  if (Object.prototype.hasOwnProperty.call(extraBody, "tools")) {
+    return hasHostedSearchTool(extraBody.tools, option.toolType!);
+  }
+  return option.defaultEnabled === true;
+}
+
+function updateProviderRequestOption(
+  option: ProviderRequestOption,
+  enabled: boolean,
+  form: ProviderForm,
+): Partial<ProviderForm> {
+  const extraBody = { ...(parseProviderExtraBody(form.extraBody) ?? {}) };
+  if (option.kind === "priority") {
+    if (enabled) extraBody.service_tier = "priority";
+    else if (extraBody.service_tier === "priority") delete extraBody.service_tier;
+  } else {
+    const toolType = option.toolType!;
+    const tools = Array.isArray(extraBody.tools)
+      ? extraBody.tools.filter((tool) => !isHostedSearchTool(tool, toolType))
+      : [];
+    if (enabled) tools.push({ type: toolType });
+    if (tools.length || option.defaultEnabled) {
+      extraBody.tools = tools;
+    } else {
+      delete extraBody.tools;
+    }
+  }
+  return {
+    extraBody: providerJsonValue(extraBody),
+    ...(option.forceResponses && enabled
+      ? { apiType: "responses" as const }
+      : {}),
+  };
 }
 
 function providerFormFromRow(
@@ -337,30 +458,6 @@ const SETTINGS_SEARCH_INPUT_CLASS = cn(
   "focus-visible:border-border/70 focus-visible:bg-background",
   "focus-visible:ring-0 focus-visible:ring-offset-0",
 );
-
-const FALLBACK_TIMEZONES = [
-  "UTC",
-  "Asia/Shanghai",
-  "Asia/Hong_Kong",
-  "Asia/Tokyo",
-  "Asia/Seoul",
-  "Asia/Singapore",
-  "Asia/Taipei",
-  "Asia/Dubai",
-  "Asia/Kolkata",
-  "Europe/London",
-  "Europe/Paris",
-  "Europe/Berlin",
-  "Europe/Amsterdam",
-  "America/New_York",
-  "America/Chicago",
-  "America/Denver",
-  "America/Los_Angeles",
-  "America/Toronto",
-  "America/Sao_Paulo",
-  "Australia/Sydney",
-  "Pacific/Auckland",
-];
 
 interface CustomMcpForm {
   name: string;
@@ -415,7 +512,6 @@ interface SettingsViewProps {
   onModelNameChange: (modelName: string | null) => void;
   onSettingsChange?: (payload: SettingsPayload) => void;
   skills?: SkillSummary[];
-  onWorkspaceSettingsChange?: () => void | Promise<void>;
   onSectionChange?: (section: SettingsSectionKey) => void;
   onLogout?: () => void;
   onRestart?: () => void;
@@ -471,8 +567,6 @@ const DEFAULT_AGENT_SETTINGS_DRAFT: AgentSettingsDraft = {
   temperature: 0.1,
   reasoningEffort: "",
   timezone: "UTC",
-  botName: "nanobot",
-  botIcon: "",
   toolHintMaxLength: 40,
 };
 
@@ -540,8 +634,6 @@ function agentDraftFromPayload(
     temperature: activePreset?.temperature ?? payload.agent.temperature,
     reasoningEffort: activePreset?.reasoning_effort ?? "",
     timezone: payload.agent.timezone,
-    botName: payload.agent.bot_name,
-    botIcon: payload.agent.bot_icon,
     toolHintMaxLength: payload.agent.tool_hint_max_length,
   };
 }
@@ -624,7 +716,6 @@ export function SettingsView({
   onModelNameChange,
   onSettingsChange,
   skills = [],
-  onWorkspaceSettingsChange,
   onSectionChange,
   onLogout,
   onRestart,
@@ -633,7 +724,7 @@ export function SettingsView({
   hostChromeInset = false,
 }: SettingsViewProps) {
   const { t } = useTranslation();
-  const { token } = useClient();
+  const { getToken, token } = useClient();
   const pageVisible = usePageVisibility();
   const remoteBrowserAccess =
     typeof window !== "undefined" && !isLoopbackHost(window.location.hostname);
@@ -661,11 +752,12 @@ export function SettingsView({
   const [nanobotFeatureConfirm, setNanobotFeatureConfirm] = useState<NanobotFeatureInfo | null>(null);
   const [mcpPresetAction, setMcpPresetAction] = useState<string | null>(null);
   const [providerSaving, setProviderSaving] = useState<string | null>(null);
-  const [xaiOAuthFlow, setXaiOAuthFlow] =
+  const [providerOAuthFlow, setProviderOAuthFlow] =
     useState<ProviderOAuthAuthorizationRequired | null>(null);
-  const xaiOAuthFlowRef = useRef<ProviderOAuthAuthorizationRequired | null>(null);
-  const [xaiOAuthCode, setXaiOAuthCode] = useState("");
-  const [xaiOAuthCompleting, setXaiOAuthCompleting] = useState(false);
+  const providerOAuthFlowRef = useRef<ProviderOAuthAuthorizationRequired | null>(null);
+  const [providerOAuthResponse, setProviderOAuthResponse] = useState("");
+  const [providerOAuthCompleting, setProviderOAuthCompleting] = useState(false);
+  const [providerOAuthDialogError, setProviderOAuthDialogError] = useState<string | null>(null);
   const [webSearchSaving, setWebSearchSaving] = useState(false);
   const [imageGenerationSaving, setImageGenerationSaving] = useState(false);
   const [transcriptionSaving, setTranscriptionSaving] = useState(false);
@@ -765,37 +857,44 @@ export function SettingsView({
     [onSettingsChange],
   );
 
-  const closeXaiOAuthFlow = useCallback(() => {
-    xaiOAuthFlowRef.current = null;
-    setXaiOAuthFlow(null);
-    setXaiOAuthCode("");
-    setXaiOAuthCompleting(false);
+  const closeProviderOAuthFlow = useCallback(() => {
+    providerOAuthFlowRef.current = null;
+    setProviderOAuthFlow(null);
+    setProviderOAuthResponse("");
+    setProviderOAuthCompleting(false);
+    setProviderOAuthDialogError(null);
   }, []);
 
   useEffect(() => {
-    if (!xaiOAuthFlow) return;
+    if (!providerOAuthFlow) return;
     let cancelled = false;
     let timer: number | null = null;
     const poll = async () => {
       try {
         const payload = await completeProviderOAuth(
-          token,
-          xaiOAuthFlow.provider,
-          xaiOAuthFlow.flow_id,
+          getToken(),
+          providerOAuthFlow.provider,
+          providerOAuthFlow.flow_id,
         );
-        if (cancelled || xaiOAuthFlowRef.current?.flow_id !== xaiOAuthFlow.flow_id) return;
+        if (
+          cancelled
+          || providerOAuthFlowRef.current?.flow_id !== providerOAuthFlow.flow_id
+        ) return;
         if (isProviderOAuthPending(payload)) {
           timer = window.setTimeout(() => void poll(), 1000);
           return;
         }
         applyPayload(payload);
-        setExpandedProvider(xaiOAuthFlow.provider);
+        setExpandedProvider(providerOAuthFlow.provider);
         setError(null);
-        closeXaiOAuthFlow();
+        closeProviderOAuthFlow();
       } catch (err) {
-        if (cancelled || xaiOAuthFlowRef.current?.flow_id !== xaiOAuthFlow.flow_id) return;
+        if (
+          cancelled
+          || providerOAuthFlowRef.current?.flow_id !== providerOAuthFlow.flow_id
+        ) return;
         setError((err as Error).message);
-        closeXaiOAuthFlow();
+        closeProviderOAuthFlow();
       }
     };
     timer = window.setTimeout(() => void poll(), 1000);
@@ -803,7 +902,7 @@ export function SettingsView({
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [applyPayload, closeXaiOAuthFlow, token, xaiOAuthFlow]);
+  }, [applyPayload, closeProviderOAuthFlow, getToken, providerOAuthFlow]);
 
   useEffect(() => {
     if (!initialSettings || settings !== null) return;
@@ -815,7 +914,7 @@ export function SettingsView({
     let cancelled = false;
     const showLoading = settings === null;
     if (showLoading) setLoading(true);
-    fetchSettings(token)
+    fetchSettings(getToken())
       .then((payload) => {
         if (!cancelled) {
           applyPayload(payload);
@@ -826,35 +925,44 @@ export function SettingsView({
         if (!cancelled && showLoading) setError((err as Error).message);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [applyPayload, token]);
+  }, [applyPayload, getToken]);
 
   const hasSettings = settings !== null;
   useEffect(() => {
     if (activeSection !== "overview" || !hasSettings || !pageVisible) return;
     let cancelled = false;
-    const refresh = () => {
-      fetchSettingsUsage(token)
-        .then((usage) => {
-          if (cancelled) return;
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const usage = await fetchSettingsUsage(getToken());
+        if (!cancelled) {
           setSettings((current) => (current ? { ...current, usage } : current));
-        })
-        .catch(() => {});
+        }
+      } catch {
+        // Usage is best-effort telemetry; the settings snapshot remains usable.
+      } finally {
+        refreshing = false;
+      }
     };
     void refresh();
-    const interval = window.setInterval(refresh, 5000);
-    const onFocus = () => refresh();
+    const interval = window.setInterval(() => void refresh(), 5000);
+    const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
     };
-  }, [activeSection, hasSettings, pageVisible, token]);
+  }, [activeSection, getToken, hasSettings, pageVisible]);
 
   useEffect(() => {
     if (activeSection !== "apps") return;
@@ -863,7 +971,7 @@ export function SettingsView({
     let retryCount = 0;
     const loadCliApps = (showLoading: boolean) => {
       if (showLoading) setCliAppsLoading(true);
-      fetchCliApps(token)
+      fetchCliApps(getToken())
         .then((payload) => {
           if (cancelled) return;
           if (payload.catalog_refresh_pending && retryCount < CLI_APPS_REFRESH_MAX_RETRIES) {
@@ -889,15 +997,23 @@ export function SettingsView({
       cancelled = true;
       if (retry !== null) window.clearTimeout(retry);
     };
-  }, [activeSection, token]);
+  }, [activeSection, getToken]);
 
   useEffect(() => {
-    if (!["channels", "models", "browser", "runtime"].includes(activeSection)) return;
+    if (
+      !pageVisible
+      || !["channels", "models", "browser", "runtime"].includes(activeSection)
+    ) {
+      return;
+    }
     let cancelled = false;
-    const refresh = async (showLoading = false) => {
+    let refreshing = false;
+    const refresh = async (showLoading = false): Promise<void> => {
+      if (refreshing) return;
+      refreshing = true;
       if (showLoading) setNanobotFeaturesLoading(true);
       try {
-        const payload = await fetchNanobotFeatures(token);
+        const payload = await fetchNanobotFeatures(getToken());
         if (!cancelled) {
           setNanobotFeatures(payload);
           setNanobotFeaturesError(null);
@@ -906,6 +1022,7 @@ export function SettingsView({
         const message = (err as Error).message;
         if (!cancelled && message !== "HTTP 404") setNanobotFeaturesError(message);
       } finally {
+        refreshing = false;
         if (!cancelled && showLoading) setNanobotFeaturesLoading(false);
       }
     };
@@ -926,13 +1043,13 @@ export function SettingsView({
       window.removeEventListener("focus", refreshOnFocus);
       document.removeEventListener("visibilitychange", refreshOnFocus);
     };
-  }, [activeSection, token]);
+  }, [activeSection, getToken, pageVisible]);
 
   useEffect(() => {
     if (activeSection !== "runtime") return;
     let cancelled = false;
     setApiServiceLoading(true);
-    fetchApiService(token)
+    fetchApiService(getToken())
       .then((payload) => {
         if (!cancelled) {
           setApiService(payload);
@@ -948,13 +1065,13 @@ export function SettingsView({
     return () => {
       cancelled = true;
     };
-  }, [activeSection, token]);
+  }, [activeSection, getToken]);
 
   useEffect(() => {
     if (activeSection !== "apps") return;
     let cancelled = false;
     setMcpPresetsLoading(true);
-    fetchMcpPresets(token)
+    fetchMcpPresets(getToken())
       .then((payload) => {
         if (!cancelled) {
           setMcpPresets(payload);
@@ -970,13 +1087,13 @@ export function SettingsView({
     return () => {
       cancelled = true;
     };
-  }, [activeSection, token]);
+  }, [activeSection, getToken]);
 
   const refreshAutomations = useCallback(
     async (showLoading = false) => {
       if (showLoading) setAutomationsLoading(true);
       try {
-        const payload = await fetchAutomations(token);
+        const payload = await fetchAutomations(getToken());
         setAutomations(payload);
         setAutomationsError(null);
       } catch (err) {
@@ -985,23 +1102,26 @@ export function SettingsView({
         if (showLoading) setAutomationsLoading(false);
       }
     },
-    [token],
+    [getToken],
   );
 
   useEffect(() => {
     if (activeSection !== "automations" || !pageVisible) return;
     let cancelled = false;
+    let refreshing = false;
     const refresh = async (showLoading = false) => {
-      if (cancelled) return;
+      if (cancelled || refreshing) return;
+      refreshing = true;
       if (showLoading) setAutomationsLoading(true);
       try {
-        const payload = await fetchAutomations(token);
+        const payload = await fetchAutomations(getToken());
         if (cancelled) return;
         setAutomations(payload);
         setAutomationsError(null);
       } catch (err) {
         if (!cancelled) setAutomationsError((err as Error).message);
       } finally {
+        refreshing = false;
         if (!cancelled && showLoading) setAutomationsLoading(false);
       }
     };
@@ -1014,7 +1134,7 @@ export function SettingsView({
       window.clearInterval(interval);
       window.removeEventListener("focus", refreshOnFocus);
     };
-  }, [activeSection, pageVisible, token]);
+  }, [activeSection, getToken, pageVisible]);
 
   useEffect(() => {
     writeLocalPreferences(localPrefs);
@@ -1045,15 +1165,6 @@ export function SettingsView({
       form.temperature !== selectedPreset.temperature ||
       form.reasoningEffort !== (selectedPreset.reasoning_effort ?? "") ||
       form.presetLabel.trim() !== selectedPreset.label
-    );
-  }, [form, settings]);
-
-  const runtimeDirty = useMemo(() => {
-    if (!settings) return false;
-    return (
-      form.timezone !== settings.agent.timezone ||
-      form.botName !== settings.agent.bot_name ||
-      form.botIcon !== settings.agent.bot_icon
     );
   }, [form, settings]);
 
@@ -1369,29 +1480,6 @@ export function SettingsView({
     }
   };
 
-  const saveRuntimeSettings = async () => {
-    if (!settings || !runtimeDirty || saving) return;
-    setSaving(true);
-    try {
-      const payload = await updateSettings(token, {
-        timezone: form.timezone,
-        botName: form.botName,
-        botIcon: form.botIcon,
-      });
-      applyPayload(payload);
-      if (payload.requires_restart) {
-        setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
-      }
-      await onWorkspaceSettingsChange?.();
-      await maybeRestartHostEngine(payload);
-      setError(null);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const saveImageGenerationSettings = async () => {
     if (!settings || !imageGenerationDirty || imageGenerationSaving) return;
     setImageGenerationSaving(true);
@@ -1593,7 +1681,11 @@ export function SettingsView({
   const runProviderOAuth = async (providerName: string, action: "login" | "logout") => {
     if (providerSaving) return;
     let popup: Window | null = null;
-    if (action === "login" && providerName === "xai_grok" && !remoteBrowserAccess) {
+    if (
+      action === "login"
+      && providerName === "xai_grok"
+      && !remoteBrowserAccess
+    ) {
       try {
         popup = window.open("about:blank", "_blank");
         if (popup) popup.opener = null;
@@ -1605,7 +1697,12 @@ export function SettingsView({
     try {
       const payload =
         action === "login"
-          ? await loginProviderOAuth(token, providerName)
+          ? await loginProviderOAuth(
+              token,
+              providerName,
+              "",
+              providerName === "openai_codex" && remoteBrowserAccess,
+            )
           : await logoutProviderOAuth(token, providerName);
       if (isProviderOAuthAuthorizationRequired(payload)) {
         try {
@@ -1613,15 +1710,16 @@ export function SettingsView({
         } catch {
           // The dialog keeps the authorization link available when the popup was closed.
         }
-        xaiOAuthFlowRef.current = payload;
-        setXaiOAuthFlow(payload);
-        setXaiOAuthCode("");
+        providerOAuthFlowRef.current = payload;
+        setProviderOAuthFlow(payload);
+        setProviderOAuthResponse("");
+        setProviderOAuthDialogError(null);
         setExpandedProvider(providerName);
         setError(null);
         return;
       }
       popup?.close();
-      closeXaiOAuthFlow();
+      closeProviderOAuthFlow();
       applyPayload(payload);
       setExpandedProvider(providerName);
       setError(null);
@@ -1633,31 +1731,31 @@ export function SettingsView({
     }
   };
 
-  const completeXaiOAuth = async () => {
-    const flow = xaiOAuthFlowRef.current;
-    const authorizationCode = xaiOAuthCode.trim();
-    if (!flow || !authorizationCode || xaiOAuthCompleting) return;
-    setXaiOAuthCompleting(true);
+  const completeProviderOAuthResponse = async () => {
+    const flow = providerOAuthFlowRef.current;
+    const authorizationResponse = providerOAuthResponse.trim();
+    if (!flow || !authorizationResponse || providerOAuthCompleting) return;
+    setProviderOAuthCompleting(true);
+    setProviderOAuthDialogError(null);
     try {
       const payload = await completeProviderOAuth(
         token,
         flow.provider,
         flow.flow_id,
-        authorizationCode,
+        authorizationResponse,
       );
-      if (xaiOAuthFlowRef.current?.flow_id !== flow.flow_id) return;
+      if (providerOAuthFlowRef.current?.flow_id !== flow.flow_id) return;
       if (isProviderOAuthPending(payload)) return;
       applyPayload(payload);
       setExpandedProvider(flow.provider);
       setError(null);
-      closeXaiOAuthFlow();
+      closeProviderOAuthFlow();
     } catch (err) {
-      if (xaiOAuthFlowRef.current?.flow_id === flow.flow_id) {
-        setError((err as Error).message);
-        closeXaiOAuthFlow();
+      if (providerOAuthFlowRef.current?.flow_id === flow.flow_id) {
+        setProviderOAuthDialogError((err as Error).message);
       }
     } finally {
-      setXaiOAuthCompleting(false);
+      setProviderOAuthCompleting(false);
     }
   };
 
@@ -2238,11 +2336,7 @@ export function SettingsView({
         return (
           <RuntimeSettings
             form={form}
-            setForm={setForm}
             settings={settings}
-            dirty={runtimeDirty}
-            saving={saving}
-            onSave={saveRuntimeSettings}
             onRestart={restartViaSettingsSurface}
             isRestarting={isRestarting || hostEngineApplying}
             requiresRestartPending={pendingRestartSections.runtime}
@@ -2298,19 +2392,33 @@ export function SettingsView({
         onConfirm={handleDeleteModelConfiguration}
       />
 
-      <XaiOAuthLoginDialog
-        flow={xaiOAuthFlow}
-        authorizationCode={xaiOAuthCode}
-        completing={xaiOAuthCompleting}
+      <ProviderOAuthLoginDialog
+        flow={providerOAuthFlow}
+        providerLabel={
+          providerOAuthFlow
+            ? settings?.providers.find((provider) => provider.name === providerOAuthFlow.provider)
+              ?.label ?? providerOAuthFlow.provider
+            : ""
+        }
+        authorizationResponse={providerOAuthResponse}
+        completing={providerOAuthCompleting}
+        error={providerOAuthDialogError}
         remoteBrowserAccess={remoteBrowserAccess}
-        onAuthorizationCodeChange={setXaiOAuthCode}
+        onAuthorizationResponseChange={(value) => {
+          setProviderOAuthResponse(value);
+          setProviderOAuthDialogError(null);
+        }}
         onOpenAuthorization={() => {
-          if (!xaiOAuthFlow) return;
-          const opened = window.open(xaiOAuthFlow.authorization_url, "_blank", "noopener,noreferrer");
+          if (!providerOAuthFlow) return;
+          const opened = window.open(
+            providerOAuthFlow.authorization_url,
+            "_blank",
+            "noopener,noreferrer",
+          );
           if (opened) opened.opener = null;
         }}
-        onComplete={() => void completeXaiOAuth()}
-        onClose={closeXaiOAuthFlow}
+        onComplete={() => void completeProviderOAuthResponse()}
+        onClose={closeProviderOAuthFlow}
       />
 
       <NanobotFeatureInstallDialog
@@ -2347,8 +2455,12 @@ export function SettingsView({
         )}
       >
         <div
+          key={activeSection}
+          data-testid="settings-section-transition"
+          data-settings-section={activeSection}
           className={cn(
-            "mx-auto w-full px-4 py-6 sm:px-8 sm:py-8 lg:py-12",
+            "mx-auto w-full animate-in fade-in-0 slide-in-from-bottom-1 px-4 py-6 duration-200 ease-out",
+            "motion-reduce:animate-none sm:px-8 sm:py-8 lg:py-12",
             activeSection === "channels" ? "max-w-[1240px] xl:px-10" : "max-w-[920px]",
             activeSection === "channels" && "flex min-h-full flex-col xl:h-full xl:min-h-0",
             hostChromeInset && "pt-[4.25rem] sm:pt-[4.25rem] lg:pt-[4.75rem]",
@@ -2442,6 +2554,7 @@ function SettingsSidebar({
   hostChromeInset?: boolean;
 }) {
   const { t } = useTranslation();
+  const activeNavItemRef = useRef<HTMLButtonElement>(null);
   const activeItem = SETTINGS_NAV_ITEMS.find((item) => item.key === activeSection)
     ?? SETTINGS_NAV_ITEMS[0];
   const ActiveIcon = activeItem.icon;
@@ -2489,7 +2602,7 @@ function SettingsSidebar({
           <DropdownMenuContent
             align="start"
             sideOffset={6}
-            className="w-[var(--radix-dropdown-menu-trigger-width)] max-w-[calc(100vw-1.5rem)] rounded-[16px] p-1.5"
+            className="w-[var(--radix-dropdown-menu-trigger-width)] max-w-[calc(100vw-1.5rem)]"
           >
             {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
               const active = key === activeSection;
@@ -2499,7 +2612,7 @@ function SettingsSidebar({
                   aria-current={active ? "page" : undefined}
                   onSelect={() => onSelectSection(key)}
                   className={cn(
-                    "flex h-10 cursor-default items-center gap-2.5 rounded-[11px] px-2.5 text-[13px] font-medium",
+                    "flex h-10 cursor-default items-center gap-2.5 px-2.5 text-[13px] font-medium",
                     active && "bg-sidebar-accent text-foreground focus:bg-sidebar-accent",
                   )}
                 >
@@ -2514,19 +2627,26 @@ function SettingsSidebar({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <div className="hidden space-y-1 lg:block">
+        <SidebarSelectionHighlight
+          targetRef={activeNavItemRef}
+          activeId={activeSection}
+          scope="settings"
+          className="relative hidden space-y-1 lg:block"
+        >
           {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
             const active = key === activeSection;
             return (
               <button
+                ref={active ? activeNavItemRef : undefined}
                 key={key}
                 type="button"
                 aria-current={active ? "page" : undefined}
                 onClick={() => onSelectSection(key)}
                 className={cn(
-                  "touch-target flex h-9 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-medium transition-colors",
+                  "touch-target flex h-9 w-full items-center gap-2 rounded-xl px-2.5 text-left text-[13px] font-medium",
+                  SIDEBAR_SELECTION_ITEM_CLASS,
                   active
-                    ? "bg-sidebar-accent text-foreground"
+                    ? "text-sidebar-accent-foreground"
                     : "text-muted-foreground/78 hover:bg-muted/45 hover:text-foreground",
                 )}
               >
@@ -2537,7 +2657,7 @@ function SettingsSidebar({
               </button>
             );
           })}
-        </div>
+        </SidebarSelectionHighlight>
       </nav>
 
       <div className="hidden lg:mt-auto lg:block lg:pt-4">
@@ -2838,10 +2958,7 @@ function AppearanceSettings({
       <section>
         <SettingsSectionTitle>{t("settings.sections.interface")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={t("settings.rows.theme")}
-            description={t("settings.help.theme")}
-          >
+          <SettingsRow title={t("settings.rows.theme")}>
             <button
               type="button"
               onClick={onToggleTheme}
@@ -2868,10 +2985,7 @@ function AppearanceSettings({
             </button>
           </SettingsRow>
 
-          <SettingsRow
-            title={t("settings.rows.language")}
-            description={t("settings.help.language")}
-          >
+          <SettingsRow title={t("settings.rows.language")}>
             <LanguageSwitcher />
           </SettingsRow>
         </SettingsGroup>
@@ -2880,10 +2994,7 @@ function AppearanceSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.localPreferences", "Local preferences")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.density", "Density")}
-            description={tx("settings.help.density", "Stored only in this browser.")}
-          >
+          <SettingsRow title={tx("settings.rows.density", "Density")}>
             <SegmentedControl
               value={localPrefs.density}
               options={[
@@ -2895,10 +3006,7 @@ function AppearanceSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.activityMode", "Activity detail")}
-            description={tx("settings.help.activityMode", "Choose how much agent activity chrome to show by default.")}
-          >
+          <SettingsRow title={tx("settings.rows.activityMode", "Activity detail")}>
             <SegmentedControl
               value={localPrefs.activityMode}
               options={[
@@ -2910,10 +3018,7 @@ function AppearanceSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.fileEditDisplay", "File edit display")}
-            description={tx("settings.help.fileEditDisplay", "Choose whether file edit activity opens as line counts or a diff.")}
-          >
+          <SettingsRow title={tx("settings.rows.fileEditDisplay", "File edit display")}>
             <SegmentedControl
               value={localPrefs.fileEditDisplayMode}
               options={[
@@ -2929,10 +3034,7 @@ function AppearanceSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.codeWrap", "Code wrapping")}
-            description={tx("settings.help.codeWrap", "Keep long code lines readable on smaller screens.")}
-          >
+          <SettingsRow title={tx("settings.rows.codeWrap", "Code wrapping")}>
             <ToggleButton
               checked={localPrefs.codeWrap}
               onChange={(codeWrap) => onChangeLocalPrefs((prev) => ({ ...prev, codeWrap }))}
@@ -2940,10 +3042,7 @@ function AppearanceSettings({
               label={localPrefs.codeWrap ? tx("settings.values.on", "On") : tx("settings.values.off", "Off")}
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.brandLogos", "Brand logos")}
-            description={tx("settings.help.brandLogos", "Show third-party provider and CLI logos in Settings.")}
-          >
+          <SettingsRow title={tx("settings.rows.brandLogos", "Brand logos")}>
             <ToggleButton
               checked={localPrefs.brandLogos}
               onChange={(brandLogos) => onChangeLocalPrefs((prev) => ({ ...prev, brandLogos }))}
@@ -2957,26 +3056,35 @@ function AppearanceSettings({
   );
 }
 
-function XaiOAuthLoginDialog({
+function ProviderOAuthLoginDialog({
   flow,
-  authorizationCode,
+  providerLabel,
+  authorizationResponse,
   completing,
+  error,
   remoteBrowserAccess,
-  onAuthorizationCodeChange,
+  onAuthorizationResponseChange,
   onOpenAuthorization,
   onComplete,
   onClose,
 }: {
   flow: ProviderOAuthAuthorizationRequired | null;
-  authorizationCode: string;
+  providerLabel: string;
+  authorizationResponse: string;
   completing: boolean;
+  error: string | null;
   remoteBrowserAccess: boolean;
-  onAuthorizationCodeChange: (value: string) => void;
+  onAuthorizationResponseChange: (value: string) => void;
   onOpenAuthorization: () => void;
   onComplete: () => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const expectsCallbackUrl = flow?.completion_input === "callback_url";
+  const inputId = expectsCallbackUrl ? "provider-oauth-callback" : "provider-oauth-code";
+  const inputLabel = expectsCallbackUrl
+    ? t("settings.oauth.callbackUrl")
+    : t("settings.oauth.authorizationCode");
 
   return (
     <Dialog
@@ -2994,36 +3102,75 @@ function XaiOAuthLoginDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>xAI Grok</DialogTitle>
+            <DialogTitle>{providerLabel}</DialogTitle>
             <DialogDescription>
-              {remoteBrowserAccess
-                ? t("settings.oauth.remoteCodeHelp")
-                : t("settings.oauth.localCodeHelp")}
+              {expectsCallbackUrl
+                ? remoteBrowserAccess
+                  ? t("settings.oauth.remoteCallbackHelp")
+                  : t("settings.oauth.localCallbackHelp")
+                : remoteBrowserAccess
+                  ? t("settings.oauth.remoteCodeHelp")
+                  : t("settings.oauth.localCodeHelp")}
             </DialogDescription>
           </DialogHeader>
+          <div className="flex items-center gap-2 rounded-[14px] border border-border/45 bg-muted/35 px-3 py-2.5 text-[12px] text-muted-foreground">
+            {expectsCallbackUrl && remoteBrowserAccess ? (
+              <Clipboard className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            ) : (
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+            )}
+            <span>
+              {expectsCallbackUrl && remoteBrowserAccess
+                ? t("settings.oauth.pasteCallbackToContinue")
+                : t("settings.oauth.waitingForCallback")}
+            </span>
+          </div>
           <div className="space-y-2">
             <label
-              htmlFor="xai-oauth-code"
+              htmlFor={inputId}
               className="block text-xs font-medium text-foreground"
             >
-              {t("settings.oauth.authorizationCode")}
+              {inputLabel}
             </label>
-            <Input
-              id="xai-oauth-code"
-              value={authorizationCode}
-              onChange={(event) => onAuthorizationCodeChange(event.target.value)}
-              placeholder={t("settings.oauth.authorizationCode")}
-              aria-label={t("settings.oauth.authorizationCode")}
-              autoComplete="off"
-              spellCheck={false}
-            />
+            {expectsCallbackUrl ? (
+              <Textarea
+                id={inputId}
+                value={authorizationResponse}
+                onChange={(event) => onAuthorizationResponseChange(event.target.value)}
+                placeholder={t("settings.oauth.callbackUrlPlaceholder")}
+                aria-label={inputLabel}
+                autoComplete="off"
+                spellCheck={false}
+                className="min-h-[88px] resize-none break-all font-mono text-[12px] leading-5"
+              />
+            ) : (
+              <Input
+                id={inputId}
+                value={authorizationResponse}
+                onChange={(event) => onAuthorizationResponseChange(event.target.value)}
+                placeholder={inputLabel}
+                aria-label={inputLabel}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            )}
           </div>
+          {error ? (
+            <p
+              role="alert"
+              className="rounded-[14px] border border-destructive/20 bg-destructive/5 px-3 py-2.5 text-[12px] text-destructive"
+            >
+              {error}
+            </p>
+          ) : null}
           <DialogFooter className="gap-2 sm:space-x-0">
             <Button type="button" variant="outline" onClick={onOpenAuthorization}>
               <ExternalLink className="mr-2 h-4 w-4" aria-hidden />
-              {t("settings.oauth.signIn")}
+              {expectsCallbackUrl
+                ? t("settings.oauth.openChatGPT")
+                : t("settings.oauth.signIn")}
             </Button>
-            <Button type="submit" disabled={!authorizationCode.trim() || completing}>
+            <Button type="submit" disabled={!authorizationResponse.trim() || completing}>
               {completing ? t("settings.oauth.signingIn") : t("settings.oauth.finishSignIn")}
             </Button>
           </DialogFooter>
@@ -3815,6 +3962,62 @@ function ModelAdvancedFields({
   );
 }
 
+function ProviderRequestOptions({
+  providerName,
+  form,
+  onChange,
+}: {
+  providerName: string;
+  form: ProviderForm;
+  onChange: (value: Partial<ProviderForm>) => void;
+}) {
+  const { t } = useTranslation();
+  const options = PROVIDER_REQUEST_OPTIONS[providerName] ?? [];
+  if (options.length === 0) return null;
+  const extraBody = parseProviderExtraBody(form.extraBody) ?? {};
+
+  const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
+
+  return (
+    <div className="overflow-hidden rounded-[18px] border border-border/45 bg-background/75">
+      {options.map((option, index) => {
+        const title = tx(option.titleKey, option.title);
+        const Icon = option.kind === "priority" ? Zap : Globe2;
+        const checked = providerRequestOptionEnabled(option, extraBody);
+        return (
+          <div
+            key={option.titleKey}
+            className={cn(
+              "flex items-center justify-between gap-4 px-4 py-3",
+              index > 0 && "border-t border-border/45",
+            )}
+          >
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground">
+                <Icon className="h-4 w-4" aria-hidden />
+              </span>
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold text-foreground">{title}</p>
+                <p className="mt-0.5 text-[12px] leading-5 text-muted-foreground">
+                  {tx(option.helpKey, option.help)}
+                </p>
+              </div>
+            </div>
+            <ToggleButton
+              checked={checked}
+              onChange={(enabled) => onChange(
+                updateProviderRequestOption(option, enabled, form),
+              )}
+              ariaLabel={title}
+              label={checked ? tx("settings.values.on", "On") : tx("settings.values.off", "Off")}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ProviderAdvancedOptions({
   fields,
   form,
@@ -4028,11 +4231,11 @@ function ProviderAdvancedOptions({
               </label>
             ) : null}
           </div>
-          {footer ? (
-            <div className="mt-3 flex items-center justify-end gap-2 border-t border-border/45 pt-3">
-              {footer}
-            </div>
-          ) : null}
+        </div>
+      ) : null}
+      {footer ? (
+        <div className="flex items-center justify-end gap-2 border-t border-border/45 py-3">
+          {footer}
         </div>
       ) : null}
     </div>
@@ -4232,7 +4435,12 @@ function ProvidersSettings({
                             account: provider.oauth_account || provider.label,
                             defaultValue: "Signed in as {{account}}",
                           })
-                        : provider.name === "xai_grok" && remoteBrowserAccess
+                        : provider.name === "openai_codex" && remoteBrowserAccess
+                          ? tx(
+                              "settings.oauth.codexRemoteSignInHelp",
+                              "Sign in through this browser, then paste the full localhost callback URL back into nanobot.",
+                            )
+                          : provider.name === "xai_grok" && remoteBrowserAccess
                           ? tx(
                               "settings.oauth.remoteSignInHelp",
                               "Select Sign in to open xAI on your computer, then paste the authorization code shown after login.",
@@ -4278,6 +4486,11 @@ function ProvidersSettings({
                     </Button>
                   </div>
                 </div>
+                <ProviderRequestOptions
+                  providerName={provider.name}
+                  form={form}
+                  onChange={(value) => onChangeProviderForm(provider.name, value)}
+                />
                 {supportsOauthAdvancedSettings ? (
                   <ProviderAdvancedOptions
                     fields={advancedFields}
@@ -4403,6 +4616,11 @@ function ProvidersSettings({
                     className="h-9 rounded-full text-[13px]"
                   />
                 </label>
+                <ProviderRequestOptions
+                  providerName={provider.name}
+                  form={form}
+                  onChange={(value) => onChangeProviderForm(provider.name, value)}
+                />
                 <ProviderAdvancedOptions
                   fields={advancedFields}
                   form={form}
@@ -4640,11 +4858,11 @@ function ProvidersSettings({
               <DropdownMenuContent
                 align="end"
                 sideOffset={8}
-                className="max-h-[24rem] w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-[20px] border-border bg-popover p-1.5 shadow-none scrollbar-thin scrollbar-track-transparent"
+                className="max-h-[24rem] w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto scrollbar-thin scrollbar-track-transparent"
               >
                 <DropdownMenuItem
                   onSelect={beginCustomProviderCreation}
-                  className="flex min-h-[54px] cursor-default items-center gap-3 rounded-[14px] px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
+                  className="flex min-h-[54px] cursor-default items-center gap-3 px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
                 >
                   <ProviderIcon provider="custom" showBrandLogos={showBrandLogos} />
                   <span className="truncate text-[13px] font-medium">
@@ -4661,7 +4879,7 @@ function ProvidersSettings({
                         onToggleProvider(provider.name);
                       }
                     }}
-                    className="flex min-h-[54px] cursor-default items-center gap-3 rounded-[14px] px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
+                    className="flex min-h-[54px] cursor-default items-center gap-3 px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
                   >
                     <ProviderIcon
                       provider={provider.name}
@@ -4737,10 +4955,7 @@ function ImageGenerationSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.imageGeneration", "Image generation")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.imageGeneration", "Image generation")}
-            description={tx("settings.help.imageGeneration", "Expose generate_image in chats when a configured image provider is available.")}
-          >
+          <SettingsRow title={tx("settings.rows.imageGeneration", "Image generation")}>
             <ToggleButton
               checked={form.enabled}
               onChange={(enabled) => onChangeForm((prev) => ({ ...prev, enabled }))}
@@ -4748,10 +4963,7 @@ function ImageGenerationSettings({
               label={form.enabled ? tx("settings.values.on", "On") : tx("settings.values.off", "Off")}
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.imageProvider", "Image provider")}
-            description={tx("settings.help.imageProvider", "Choose the registry provider used by generate_image.")}
-          >
+          <SettingsRow title={tx("settings.rows.imageProvider", "Image provider")}>
             <ProviderPicker
               providers={settings.image_generation.providers}
               value={form.provider}
@@ -4788,10 +5000,7 @@ function ImageGenerationSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.imageDefaults", "Defaults")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.imageModel", "Image model")}
-            description={tx("settings.help.imageModel", "Model name sent to the selected image provider.")}
-          >
+          <SettingsRow title={tx("settings.rows.imageModel", "Image model")}>
             <ModelIdPicker
               token={token}
               settings={settings}
@@ -4811,10 +5020,7 @@ function ImageGenerationSettings({
               onChange={(model) => onChangeForm((prev) => ({ ...prev, model }))}
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.defaultAspectRatio", "Default aspect")}
-            description={tx("settings.help.defaultAspectRatio", "Used when the prompt does not choose an aspect ratio.")}
-          >
+          <SettingsRow title={tx("settings.rows.defaultAspectRatio", "Default aspect")}>
             <ProviderPicker
               providers={aspectOptions}
               value={form.defaultAspectRatio}
@@ -4824,10 +5030,7 @@ function ImageGenerationSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.defaultImageSize", "Default size")}
-            description={tx("settings.help.defaultImageSize", "Size hint sent to providers that support it.")}
-          >
+          <SettingsRow title={tx("settings.rows.defaultImageSize", "Default size")}>
             <ProviderPicker
               providers={sizeOptions}
               value={form.defaultImageSize}
@@ -4837,10 +5040,7 @@ function ImageGenerationSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.maxImagesPerTurn", "Max images per turn")}
-            description={tx("settings.help.maxImagesPerTurn", "Upper bound for one generate_image request.")}
-          >
+          <SettingsRow title={tx("settings.rows.maxImagesPerTurn", "Max images per turn")}>
             <NumberInput
               value={form.maxImagesPerTurn}
               min={1}
@@ -4921,10 +5121,7 @@ function TranscriptionSettings({
             label={form.enabled ? tx("settings.values.on", "On") : tx("settings.values.off", "Off")}
           />
         </SettingsRow>
-        <SettingsRow
-          title={tx("settings.rows.transcriptionProvider", "Provider")}
-          description={tx("settings.help.transcriptionProvider", "Uses the matching provider credentials from Providers.")}
-        >
+        <SettingsRow title={tx("settings.rows.transcriptionProvider", "Provider")}>
           <ProviderPicker
             providers={transcription.providers}
             value={form.provider}
@@ -5091,10 +5288,7 @@ function WebSettings({
           <p className="mb-3 text-[12px] text-destructive">{capabilityError}</p>
         ) : null}
         <SettingsGroup>
-          <SettingsRow
-            title={t("settings.byok.webSearch.provider")}
-            description={t("settings.byok.webSearch.providerHelp")}
-          >
+          <SettingsRow title={t("settings.byok.webSearch.provider")}>
             <ProviderPicker
               providers={settings.web_search.providers}
               value={form.provider}
@@ -5105,10 +5299,7 @@ function WebSettings({
           </SettingsRow>
 
           {selectedProvider?.credential === "none" ? (
-            <SettingsRow
-              title={t("settings.byok.webSearch.credentials")}
-              description={t("settings.byok.webSearch.noCredentialHelp")}
-            >
+            <SettingsRow title={t("settings.byok.webSearch.credentials")}>
               <StatusPill tone="success">{t("settings.byok.webSearch.noCredentialRequired")}</StatusPill>
             </SettingsRow>
           ) : null}
@@ -5193,10 +5384,7 @@ function WebSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.webBehavior", "Behavior")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.maxResults", "Max results")}
-            description={tx("settings.help.maxResults", "Results returned by each web_search call.")}
-          >
+          <SettingsRow title={tx("settings.rows.maxResults", "Max results")}>
             <NumberInput
               value={form.maxResults ?? settings.web_search.max_results}
               min={1}
@@ -5204,10 +5392,7 @@ function WebSettings({
               onChange={(maxResults) => onChangeForm((prev) => ({ ...prev, maxResults }))}
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.timeout", "Timeout")}
-            description={tx("settings.help.timeout", "Seconds before a search provider request times out.")}
-          >
+          <SettingsRow title={tx("settings.rows.timeout", "Timeout")}>
             <NumberInput
               value={form.timeout ?? settings.web_search.timeout}
               min={1}
@@ -6170,7 +6355,7 @@ function NanobotFeatureInstallDialog({
     <Dialog open={Boolean(feature)} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="w-[min(calc(100vw-2rem),24rem)] gap-0 rounded-[28px] border border-white/70 bg-card/95 p-5 text-center shadow-[0_24px_80px_rgba(15,23,42,0.20)] backdrop-blur-xl sm:rounded-[28px]"
+        className="w-[min(calc(100vw-2rem),24rem)] gap-0 p-5 text-center"
       >
         <DialogHeader className="items-center space-y-0 text-center">
           <DialogTitle className="text-center text-[20px] font-semibold leading-tight tracking-[-0.02em] text-foreground">
@@ -6957,23 +7142,6 @@ function ChannelsSettings({
     >
       {!showingCompactDetail ? (
         <section className="shrink-0 space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <p className="max-w-[680px] text-[13px] leading-5 text-muted-foreground">
-              {tx(
-                "settings.channels.description",
-                "Connect chat apps, email, and WebUI to nanobot.",
-              )}
-            </p>
-            <div className="flex flex-wrap gap-2 text-[12px] font-medium text-muted-foreground">
-              <span className="rounded-full bg-muted/70 px-2.5 py-1">
-                {t("settings.channels.caption", {
-                  enabled: enabledCount,
-                  total: allChannels.length,
-                  defaultValue: "{{enabled}} enabled · {{total}} channels",
-                })}
-              </span>
-            </div>
-          </div>
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
             <div className="relative min-w-0 flex-1">
               <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
@@ -7198,24 +7366,9 @@ function AppsCatalogSettings({
     mcpError ||
     (!focusedApp ? cliMessage || mcpMessage : null);
   const statusIsError = Boolean(cliError || mcpError);
-  const readyCount = (cliApps?.installed_count ?? 0) + (mcpPresets?.installed_count ?? 0);
-  const caption = t("settings.apps.enabledSummary", {
-    count: readyCount,
-    defaultValue: "{{count}} ready",
-  });
-
   return (
     <div className="space-y-7">
       <section className="space-y-4">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <p className="max-w-[680px] text-[13px] leading-5 text-muted-foreground">
-            {tx(
-              "settings.apps.description",
-              "Add tools to nanobot, then @ them in chat.",
-            )}
-          </p>
-          <span className="text-[12px] font-medium text-muted-foreground">{caption}</span>
-        </div>
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
@@ -7364,15 +7517,19 @@ function CliAppsCatalogRow({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem disabled={busy} onClick={() => onAction("test", app.name)}>
-                  <PlayCircle className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <PlayCircle aria-hidden />
                   {tx("settings.cliApps.test", "Test CLI")}
                 </DropdownMenuItem>
                 <DropdownMenuItem disabled={busy} onClick={() => onAction("update", app.name)}>
-                  <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <RotateCcw aria-hidden />
                   {tx("settings.cliApps.update", "Update CLI")}
                 </DropdownMenuItem>
-                <DropdownMenuItem disabled={busy} onClick={() => onAction("uninstall", app.name)}>
-                  <Trash2 className="mr-2 h-3.5 w-3.5" aria-hidden />
+                <DropdownMenuItem
+                  tone="destructive"
+                  disabled={busy}
+                  onClick={() => onAction("uninstall", app.name)}
+                >
+                  <Trash2 aria-hidden />
                   {tx("settings.cliApps.uninstall", "Uninstall CLI")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -7496,17 +7653,21 @@ function McpAppsCatalogRow({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem disabled={busy} onClick={() => onAction("test", preset.name)}>
-                    <PlayCircle className="mr-2 h-3.5 w-3.5" aria-hidden />
+                    <PlayCircle aria-hidden />
                     {tx("settings.mcp.test", "Test")}
                   </DropdownMenuItem>
                   {toolNames.length ? (
                     <DropdownMenuItem disabled={busy} onClick={() => setToolsOpen((open) => !open)}>
-                      <SlidersHorizontal className="mr-2 h-3.5 w-3.5" aria-hidden />
+                      <SlidersHorizontal aria-hidden />
                       {tx("settings.mcp.toolScope", "Tools")}
                     </DropdownMenuItem>
                   ) : null}
-                  <DropdownMenuItem disabled={busy} onClick={() => onAction("remove", preset.name)}>
-                    <Trash2 className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <DropdownMenuItem
+                    tone="destructive"
+                    disabled={busy}
+                    onClick={() => onAction("remove", preset.name)}
+                  >
+                    <Trash2 aria-hidden />
                     {tx("settings.mcp.remove", "Remove")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -7570,7 +7731,7 @@ function McpAppsCatalogRow({
               onClick={() => setSetupOpen(false)}
               className="h-7 rounded-full px-2.5 text-[11.5px] font-semibold text-muted-foreground"
             >
-              {tx("actions.cancel", "Cancel")}
+              {tx("settings.actions.cancel", "Cancel")}
             </Button>
           </div>
           <div className="mt-3 grid gap-2">
@@ -8174,11 +8335,7 @@ function CliAppLogo({ app, showBrandLogos }: { app: CliAppInfo; showBrandLogos: 
 
 function RuntimeSettings({
   form,
-  setForm,
   settings,
-  dirty,
-  saving,
-  onSave,
   onRestart,
   isRestarting,
   requiresRestartPending,
@@ -8194,11 +8351,7 @@ function RuntimeSettings({
   onInstallCapability,
 }: {
   form: AgentSettingsDraft;
-  setForm: Dispatch<SetStateAction<AgentSettingsDraft>>;
   settings: SettingsPayload;
-  dirty: boolean;
-  saving: boolean;
-  onSave: () => void;
   onRestart?: () => void;
   isRestarting?: boolean;
   requiresRestartPending: boolean;
@@ -8294,50 +8447,6 @@ function RuntimeSettings({
   };
   return (
     <div className="space-y-7">
-      <section>
-        <SettingsSectionTitle>{tx("settings.sections.identity", "Identity")}</SettingsSectionTitle>
-          <SettingsGroup>
-          <SettingsRow title={tx("settings.rows.botName", "Bot name")} description={tx("settings.help.botName", "Shown wherever nanobot uses a display name.")}>
-            <Input
-              value={form.botName}
-              onChange={(event) => setForm((prev) => ({ ...prev, botName: event.target.value }))}
-              className="h-8 w-[220px] rounded-full text-[13px]"
-            />
-          </SettingsRow>
-          <SettingsRow title={tx("settings.rows.botIcon", "Bot icon")} description={tx("settings.help.botIcon", "Short emoji or text shown with the bot name.")}>
-            <Input
-              value={form.botIcon}
-              onChange={(event) => setForm((prev) => ({ ...prev, botIcon: event.target.value }))}
-              className="h-8 w-[120px] rounded-full text-center text-[13px]"
-            />
-          </SettingsRow>
-          <SettingsRow title={tx("settings.rows.timezone", "Timezone")} description={tx("settings.help.timezone", "Used for schedules and time-aware replies.")}>
-            <TimezonePicker
-              value={form.timezone}
-              onChange={(timezone) => setForm((prev) => ({ ...prev, timezone }))}
-            />
-          </SettingsRow>
-          <RestartSettingsFooter
-            dirty={dirty}
-            saving={saving}
-            pendingRestart={requiresRestartPending}
-            dirtyMessage={
-              isNativeHost
-                ? tx("settings.status.hostRestartAfterSaving", "Save changes and nanobot will restart its engine.")
-                : tx("settings.status.restartAfterSaving", "Save changes, then restart when ready.")
-            }
-            pendingMessage={
-              isNativeHost
-                ? tx("settings.status.hostRestartPending", "Saved. Restarting engine when ready.")
-                : tx("settings.status.savedRestartApply", "Saved. Restart when ready.")
-            }
-            onSave={onSave}
-            onRestart={onRestart}
-            isRestarting={isRestarting}
-          />
-        </SettingsGroup>
-      </section>
-
       {isNativeHost ? (
         <section>
           <SettingsSectionTitle>{tx("settings.sections.nativeHost", "Native host")}</SettingsSectionTitle>
@@ -8347,9 +8456,7 @@ function RuntimeSettings({
               <SettingsRow
                 title={tx("settings.rows.logs", "Logs")}
                 description={
-                  hostActionMessage?.target === "logs"
-                    ? hostActionMessage.message
-                    : tx("settings.help.logs", "Open the native engine log folder.")
+                  hostActionMessage?.target === "logs" ? hostActionMessage.message : undefined
                 }
               >
                 <Button
@@ -8378,9 +8485,7 @@ function RuntimeSettings({
                 description={
                   hostActionMessage?.target === "diagnostics"
                     ? hostActionMessage.message
-                    : diagnosticsPath
-                    ? diagnosticsPath
-                    : tx("settings.help.diagnostics", "Export a small runtime report for support.")
+                    : diagnosticsPath || undefined
                 }
               >
                 <Button
@@ -8425,7 +8530,7 @@ function RuntimeSettings({
                 ? apiServiceError
                 : apiDefaults.running
                   ? apiDefaults.endpoint
-                  : tx("settings.api.description", "Connect SDKs and agents through a local /v1 endpoint.")
+                  : undefined
             }
           >
             <div className="flex items-center justify-end gap-2">
@@ -8491,10 +8596,7 @@ function RuntimeSettings({
                   onChange={(value) => setApiHost(value === "network" ? "0.0.0.0" : "127.0.0.1")}
                 />
               </SettingsRow>
-              <SettingsRow
-                title={tx("settings.api.port", "Port")}
-                description={tx("settings.api.portHelp", "The API uses this local port.")}
-              >
+              <SettingsRow title={tx("settings.api.port", "Port")}>
                 <NumberInput value={apiPort} min={1} max={65535} onChange={setApiPort} />
               </SettingsRow>
               {apiNetworkAccess ? (
@@ -8530,11 +8632,6 @@ function RuntimeSettings({
             </>
           ) : null}
         </SettingsGroup>
-        {!apiDefaults.installed && !apiDefaults.running ? (
-          <p className="mt-2 text-[11.5px] text-muted-foreground">
-            {tx("settings.api.autoInstall", "API support will be installed automatically when you start it.")}
-          </p>
-        ) : null}
       </section>
 
       <section>
@@ -8544,7 +8641,7 @@ function RuntimeSettings({
             title="Langfuse"
             description={
               settings.observability?.configured
-                ? tx("settings.observability.configured", "Tracing credentials are available to nanobot.")
+                ? undefined
                 : tx(
                     "settings.observability.environment",
                     "Set LANGFUSE_SECRET_KEY and LANGFUSE_PUBLIC_KEY, then restart nanobot.",
@@ -8591,10 +8688,15 @@ function RuntimeSettings({
           ) : null}
           <ReadOnlyRow title={t("settings.rows.configPath")} value={settings.runtime.config_path} />
           <ReadOnlyRow title={tx("settings.rows.workspacePath", "Default workspace")} value={settings.runtime.workspace_path} />
-          {onRestart && !requiresRestartPending ? (
+          <ReadOnlyRow title={tx("settings.rows.timezone", "Timezone")} value={form.timezone} />
+          {onRestart ? (
             <SettingsRow
               title={t("settings.rows.restart")}
-              description={t("app.system.restartHint")}
+              description={
+                requiresRestartPending
+                  ? tx("settings.status.savedRestartApply", "Saved. Restart when ready.")
+                  : undefined
+              }
             >
               <Button
                 size="sm"
@@ -8712,89 +8814,6 @@ function AdvancedSettings({
   );
 }
 
-function TimezonePicker({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (timezone: string) => void;
-}) {
-  const { t } = useTranslation();
-  const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
-  const [query, setQuery] = useState("");
-  const options = useMemo(() => timezoneOptions(value), [value]);
-  const filteredOptions = useMemo(() => filterTimezoneOptions(options, query), [options, query]);
-
-  return (
-    <DropdownMenu onOpenChange={(open) => !open && setQuery("")}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          className={cn(
-            "h-8 w-[220px] justify-between rounded-full border-input bg-background px-3 text-[13px] font-normal shadow-none",
-            "hover:bg-accent/55 focus-visible:ring-2 focus-visible:ring-ring",
-          )}
-        >
-          <span className="truncate">{value || tx("settings.timezone.select", "Select timezone")}</span>
-          <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        className="w-[340px] max-w-[calc(100vw-2rem)]"
-      >
-        <div className="sticky top-0 z-10 bg-popover px-1 pb-1">
-          <div className="flex h-9 items-center gap-2 rounded-full border border-input bg-background px-3">
-            <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-            <Input
-              autoFocus
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => event.stopPropagation()}
-              placeholder={tx("settings.timezone.search", "Search timezone")}
-              className="h-7 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
-            />
-          </div>
-        </div>
-        <div
-          className="mt-1 max-h-[18rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent"
-          data-testid="timezone-picker-list"
-        >
-          {filteredOptions.length ? (
-            filteredOptions.map((option) => {
-              const selected = option.name === value;
-              return (
-                <DropdownMenuItem
-                  key={option.name}
-                  onSelect={() => onChange(option.name)}
-                  className={cn(
-                    "flex h-9 cursor-default items-center justify-between gap-3 rounded-[12px] px-2.5 text-[13px]",
-                    "focus:bg-muted/85 focus:text-foreground",
-                    selected && "bg-muted/80 text-foreground focus:bg-muted",
-                  )}
-                >
-                  <span className="min-w-0 truncate font-medium text-foreground">{option.name}</span>
-                  <span className="ml-auto flex shrink-0 items-center gap-2">
-                    <span className="text-[11.5px] font-medium text-muted-foreground/80">
-                      {option.offset}
-                    </span>
-                    {selected ? <Check className="h-3.5 w-3.5 shrink-0" aria-hidden /> : null}
-                  </span>
-                </DropdownMenuItem>
-              );
-            })
-          ) : (
-            <div className="px-3 py-5 text-center text-[12px] text-muted-foreground">
-              {tx("settings.timezone.empty", "No matching timezones.")}
-            </div>
-          )}
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 function ProviderPicker({
   providers,
   value,
@@ -8847,8 +8866,7 @@ function ProviderPicker({
               key={provider.name}
               onSelect={() => onChange(provider.name)}
               className={cn(
-                "flex cursor-default items-center justify-between gap-2 rounded-[12px] px-2.5 py-2 text-[13px]",
-                "focus:bg-muted/85 focus:text-foreground",
+                "flex cursor-default items-center justify-between gap-2 text-[13px]",
                 selected && "bg-muted/80 text-foreground focus:bg-muted",
               )}
             >
@@ -8895,6 +8913,8 @@ function ModelIdPicker({
 }) {
   const { t } = useTranslation();
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [payload, setPayload] = useState<ProviderModelsPayload | null>(null);
@@ -8919,16 +8939,22 @@ function ModelIdPicker({
     !hasStaticModels &&
     hasConcreteProvider && providerConfigured && !providerUsesManualModelIds;
   const normalizedQuery = query.trim().toLowerCase();
-  const providerModels: ProviderModelsPayload["models"] = hasStaticModels
-    ? (models?.map((id) => ({ id })) ?? [])
-    : (payload?.models ?? []);
-  const visibleModels = providerModels
-    .filter((model) => {
-      if (!normalizedQuery) return true;
-      return [model.id, model.label ?? "", model.description ?? "", model.owned_by ?? ""]
-        .some((field) => field.toLowerCase().includes(normalizedQuery));
-    })
-    .slice(0, 80);
+  const providerModels: ProviderModelsPayload["models"] = useMemo(
+    () => hasStaticModels
+      ? (models?.map((id) => ({ id })) ?? [])
+      : (payload?.models ?? []),
+    [hasStaticModels, models, payload?.models],
+  );
+  const visibleModels = useMemo(
+    () => providerModels
+      .filter((model) => {
+        if (!normalizedQuery) return true;
+        return [model.id, model.label ?? "", model.description ?? "", model.owned_by ?? ""]
+          .some((field) => field.toLowerCase().includes(normalizedQuery));
+      })
+      .slice(0, 80),
+    [normalizedQuery, providerModels],
+  );
   const isCatalog = payload?.catalog_kind === "catalog";
   const defersModelList = DEFERRED_MODEL_LIST_PROVIDERS.has(effectiveProvider);
   const hasDeferredSearchQuery =
@@ -8944,6 +8970,9 @@ function ModelIdPicker({
   const customCandidate = query.trim();
   const allowCustomModel = !providerRequiresConfiguration;
   const exactQueryMatch = providerModels.some((model) => model.id === customCandidate);
+  const showCustomModel = Boolean(
+    allowCustomModel && customCandidate && !exactQueryMatch && customCandidate !== value,
+  );
   const providerModelCount = payload?.model_count ?? providerModels.length;
   const modelUnconfigured = !value.trim() || !providerConfigured;
 
@@ -8963,7 +8992,7 @@ function ModelIdPicker({
     setPayload(null);
     setError(null);
     setLoading(true);
-    fetchProviderModels(token, effectiveProvider)
+    fetchProviderModels(tokenRef.current, effectiveProvider)
       .then((nextPayload) => {
         if (!cancelled) setPayload(nextPayload);
       })
@@ -8976,24 +9005,37 @@ function ModelIdPicker({
     return () => {
       cancelled = true;
     };
-  }, [effectiveProvider, open, shouldFetchModels, token]);
+  }, [effectiveProvider, open, shouldFetchModels]);
 
   const selectModel = (model: string) => {
     onChange(model);
     setOpen(false);
   };
+  const navigationValues = useMemo(
+    () => [
+      ...(showModels ? visibleModels.map((model) => model.id) : []),
+      ...(showCustomModel ? [customCandidate] : []),
+    ],
+    [customCandidate, showCustomModel, showModels, visibleModels],
+  );
+  const navigation = useComboboxNavigation({
+    open,
+    values: navigationValues,
+    selectedValue: value,
+    onSelect: selectModel,
+    onClose: () => setOpen(false),
+  });
 
   const renderModelRow = (
     model: ProviderModelsPayload["models"][number],
     options: { selected?: boolean } = {},
   ) => (
-    <DropdownMenuItem
+    <ComboboxOption
       key={model.id}
-      onSelect={() => selectModel(model.id)}
+      {...navigation.getOptionProps(model.id)}
       className={cn(
         "flex cursor-default items-center justify-between gap-2 rounded-[12px] px-2 py-1.5 text-[12px]",
-        "focus:bg-muted/85 focus:text-foreground",
-        options.selected && "bg-muted/80 text-foreground focus:bg-muted",
+        options.selected && "text-foreground",
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
@@ -9019,12 +9061,12 @@ function ModelIdPicker({
         {model.context_window ? <span>{formatContextWindow(model.context_window)}</span> : null}
         {options.selected ? <Check className="h-3.5 w-3.5 text-foreground" aria-hidden /> : null}
       </span>
-    </DropdownMenuItem>
+    </ComboboxOption>
   );
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
         <Button
           type="button"
           variant="outline"
@@ -9050,8 +9092,8 @@ function ModelIdPicker({
           </span>
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
+      </PopoverTrigger>
+      <PopoverContent
         align="end"
         className="w-[360px] max-w-[calc(100vw-2rem)] p-1.5"
       >
@@ -9064,13 +9106,7 @@ function ModelIdPicker({
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => {
-                event.stopPropagation();
-                if (event.key === "Enter" && allowCustomModel && customCandidate) {
-                  event.preventDefault();
-                  selectModel(customCandidate);
-                }
-              }}
+              {...navigation.inputProps}
               placeholder={
                 searchPlaceholder || tx("settings.models.searchModels", "Search or type model ID")
               }
@@ -9126,11 +9162,36 @@ function ModelIdPicker({
           </div>
         ) : null}
 
-        {showModels && visibleModels.length ? (
-          <div className="max-h-[16rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent">
-            {visibleModels.map((model) =>
-              renderModelRow(model, { selected: model.id === value }),
-            )}
+        {navigationValues.length ? (
+          <div
+            {...navigation.listProps}
+            aria-label={searchPlaceholder || tx("settings.models.selectModel", "Select model")}
+            className="max-h-[16rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent"
+          >
+            {showModels
+              ? visibleModels.map((model) =>
+                renderModelRow(model, { selected: model.id === value }),
+              )
+              : null}
+            {showCustomModel ? (
+              <>
+                {showModels && visibleModels.length ? (
+                  <div role="separator" className="-mx-1.5 my-1.5 h-px bg-border/50" />
+                ) : null}
+                <ComboboxOption
+                  {...navigation.getOptionProps(customCandidate)}
+                  className="flex cursor-default items-center gap-2 rounded-[12px] px-2 py-1.5 text-[12px]"
+                >
+                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-muted/80 text-muted-foreground">
+                    <Pencil className="h-3 w-3" aria-hidden />
+                  </span>
+                  <span className="min-w-0 truncate">
+                    {tx("settings.models.useCustomModel", "Use")}{" "}
+                    <span className="font-medium text-foreground">“{customCandidate}”</span>
+                  </span>
+                </ComboboxOption>
+              </>
+            ) : null}
           </div>
         ) : showModels ? (
           <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
@@ -9138,25 +9199,8 @@ function ModelIdPicker({
           </div>
         ) : null}
 
-        {allowCustomModel && customCandidate && !exactQueryMatch && customCandidate !== value ? (
-          <>
-            {showModels ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuItem
-              onSelect={() => selectModel(customCandidate)}
-              className="flex cursor-default items-center gap-2 rounded-[12px] px-2 py-1.5 text-[12px] focus:bg-muted/85"
-            >
-              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-muted/80 text-muted-foreground">
-                <Pencil className="h-3 w-3" aria-hidden />
-              </span>
-              <span className="min-w-0 truncate">
-                {tx("settings.models.useCustomModel", "Use")}{" "}
-                <span className="font-medium text-foreground">“{customCandidate}”</span>
-              </span>
-            </DropdownMenuItem>
-          </>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -9287,62 +9331,6 @@ function providerVisibilityRank(provider: SettingsPayload["providers"][number]):
   if (localRank !== undefined) return localRank;
   if ((provider.api_key_required ?? true) === false) return 100;
   return 200;
-}
-
-interface TimezoneOption {
-  name: string;
-  offset: string;
-  searchText: string;
-}
-
-function timezoneOptions(current: string): TimezoneOption[] {
-  return timezonesWithCurrent(current).map((name) => {
-    const offset = timezoneOffset(name);
-    return {
-      name,
-      offset,
-      searchText: `${name} ${name.replace(/_/g, " ")} ${offset}`.toLowerCase(),
-    };
-  });
-}
-
-function timezonesWithCurrent(current: string): string[] {
-  const intl = Intl as typeof Intl & {
-    supportedValuesOf?: (key: "timeZone") => string[];
-  };
-  let values: string[];
-  try {
-    values = intl.supportedValuesOf?.("timeZone") ?? [];
-  } catch {
-    values = [];
-  }
-  const deduped = new Set([...FALLBACK_TIMEZONES, ...values, current].filter(Boolean));
-  return Array.from(deduped).sort((left, right) => {
-    if (left === "UTC") return -1;
-    if (right === "UTC") return 1;
-    return left.localeCompare(right);
-  });
-}
-
-function filterTimezoneOptions(options: TimezoneOption[], query: string): TimezoneOption[] {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return options;
-  return options.filter((option) => option.searchText.includes(normalized));
-}
-
-function timezoneOffset(timezone: string): string {
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      timeZoneName: "shortOffset",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).formatToParts(new Date());
-    const value = parts.find((part) => part.type === "timeZoneName")?.value;
-    return value ? value.replace(/^GMT$/, "UTC").replace(/^GMT/, "UTC") : "UTC";
-  } catch {
-    return "Custom timezone";
-  }
 }
 
 function optionRowsWithCurrent(
@@ -9758,36 +9746,6 @@ function StatusPill({
     >
       <span className="truncate">{children}</span>
     </span>
-  );
-}
-
-function SegmentedControl({
-  value,
-  options,
-  onChange,
-}: {
-  value: string;
-  options: Array<{ value: string; label: string }>;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="inline-flex h-8 items-center rounded-full bg-muted p-0.5 text-[12px] font-medium text-muted-foreground">
-      {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          aria-pressed={value === option.value}
-          onClick={() => onChange(option.value)}
-          className={cn(
-            "rounded-full px-3 py-1 transition-colors",
-            value === option.value &&
-              "bg-background text-foreground ring-1 ring-inset ring-border/45",
-          )}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
   );
 }
 

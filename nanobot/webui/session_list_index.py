@@ -14,14 +14,64 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from nanobot.config.paths import get_webui_dir
+from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.history_visibility import is_hidden_history_message
 from nanobot.session.manager import SessionManager
 
 _MODEL_PRESET_FIELD = "model_preset"
 _VISIBLE_TRANSCRIPT_ROLES = {"user", "assistant"}
+
+# moeka: upstream (2026-08-05 checkpoint) added a persistent
+# ``.webui_session_index.json`` cache here to avoid re-scanning per-session
+# jsonl files on every sidebar load. moeka's SessionManager already answers
+# that query in one SQLite statement (see module docstring), so the cache
+# itself is dropped — but these field names/helpers are still a real public
+# contract consumed by nanobot/webui/ws_http.py, so they're kept, computed
+# directly from metadata instead of from a cached index row.
+_WORKSPACE_SCOPE_PRESENT_FIELD = "_workspace_scope_present"
+_WORKSPACE_SCOPE_VALUE_FIELD = "_workspace_scope_value"
+WEBUI_SESSION_INDEX_INTERNAL_FIELDS = frozenset(
+    {_WORKSPACE_SCOPE_PRESENT_FIELD, _WORKSPACE_SCOPE_VALUE_FIELD}
+)
+_INDEXED_WORKSPACE_SCOPE_KEYS = ("project_path", "path", "access_mode")
+_MAX_INDEXED_WORKSPACE_SCOPE_BYTES = 4096
+
+
+def indexed_workspace_scope(row: dict[str, Any]) -> tuple[bool, object]:
+    """Return the workspace-scope value carried on a session row."""
+    return (
+        row.get(_WORKSPACE_SCOPE_PRESENT_FIELD) is True,
+        cast(object, row.get(_WORKSPACE_SCOPE_VALUE_FIELD)),
+    )
+
+
+def _indexed_workspace_scope_fields(metadata: object) -> dict[str, object]:
+    if not isinstance(metadata, dict):
+        return {_WORKSPACE_SCOPE_PRESENT_FIELD: False, _WORKSPACE_SCOPE_VALUE_FIELD: None}
+    metadata_data = cast(dict[str, Any], metadata)
+    if WORKSPACE_SCOPE_METADATA_KEY not in metadata_data:
+        return {_WORKSPACE_SCOPE_PRESENT_FIELD: False, _WORKSPACE_SCOPE_VALUE_FIELD: None}
+
+    raw_scope = metadata_data.get(WORKSPACE_SCOPE_METADATA_KEY)
+    indexed_scope: object = False
+    if raw_scope is None:
+        indexed_scope = None
+    elif isinstance(raw_scope, dict):
+        scope_data = cast(dict[object, object], raw_scope)
+        recognized = {
+            key: scope_data[key] for key in _INDEXED_WORKSPACE_SCOPE_KEYS if key in scope_data
+        }
+        try:
+            encoded = json.dumps(recognized, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if len(encoded.encode("utf-8")) <= _MAX_INDEXED_WORKSPACE_SCOPE_BYTES:
+                indexed_scope = cast(object, json.loads(encoded))
+    return {_WORKSPACE_SCOPE_PRESENT_FIELD: True, _WORKSPACE_SCOPE_VALUE_FIELD: indexed_scope}
 
 
 def list_webui_sessions(session_manager: SessionManager) -> list[dict[str, Any]]:
@@ -36,7 +86,9 @@ def _public_row(session_manager: SessionManager, row: dict[str, Any]) -> dict[st
     activity_signature = _webui_activity_signature(str(key)) if key else _EMPTY_ACTIVITY
     activity_updated_at = _webui_activity_updated_at(activity_signature)
     visible_message_at = _last_visible_message_at(session_manager, key) if key else None
-    return {
+    metadata_record = session_manager.read_session_metadata(key) if key else None
+    metadata = metadata_record.get("metadata") if metadata_record else None
+    public_row: dict[str, Any] = {
         "key": key,
         "created_at": row.get("created_at"),
         "updated_at": _visible_activity_updated_at(
@@ -49,6 +101,8 @@ def _public_row(session_manager: SessionManager, row: dict[str, Any]) -> dict[st
         _MODEL_PRESET_FIELD: row.get(_MODEL_PRESET_FIELD),
         "path": row.get("path"),
     }
+    public_row.update(_indexed_workspace_scope_fields(metadata))
+    return public_row
 
 
 _EMPTY_ACTIVITY: dict[str, int] = {"webui_activity_mtime_ns": 0, "webui_activity_size": 0}

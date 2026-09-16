@@ -1,9 +1,12 @@
 import json
 
+import pytest
+
 from nanobot.config.loader import (
     _resolve_env_vars,
     load_config,
     resolve_config_env_vars,
+    resolve_env_refs,
     save_config,
 )
 from nanobot.config.schema import Config
@@ -47,6 +50,12 @@ class TestResolveEnvVars:
         assert result == "${DOES_NOT_EXIST}"
 
 
+class TestResolveSingleEnvRefs:
+    @pytest.mark.parametrize("value", [None, 42, True, {"key": "value"}])
+    def test_non_string_values_pass_through_unchanged(self, value):
+        assert resolve_env_refs(value) is value
+
+
 class TestResolveConfig:
     def test_resolves_env_vars_in_config(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TEST_API_KEY", "resolved-key")
@@ -63,6 +72,22 @@ class TestResolveConfig:
 
         resolved = resolve_config_env_vars(raw)
         assert resolved.providers.groq.api_key == "resolved-key"
+
+    def test_missing_env_var_is_non_fatal(self, tmp_path, monkeypatch):
+        """moeka deviation: upstream raises ConfigLoadError(kind="missing_env")
+        here; moeka leaves the placeholder unreplaced and only warns, since
+        keys.env injects secrets at process start and one missing var
+        shouldn't block boot. See tests/config/test_env_var_warnings.py."""
+        name = "NANOBOT_TEST_MISSING_PROVIDER_KEY"
+        monkeypatch.delenv(name, raising=False)
+        config_path = tmp_path / "config.json"
+        config = Config.model_validate(
+            {"providers": {"openrouter": {"apiKey": f"${{{name}}}"}}}
+        )
+
+        resolved = resolve_config_env_vars(config, config_path=config_path)
+
+        assert resolved.providers.openrouter.api_key == f"${{{name}}}"
 
     def test_save_preserves_templates(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MY_TOKEN", "real-token")

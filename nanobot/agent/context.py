@@ -6,7 +6,7 @@ import base64
 import mimetypes
 import platform
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from loguru import logger
 
@@ -14,6 +14,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.agent.tools import image_generation as image_generation_tools
 from nanobot.agent.tools import mcp as mcp_tools
+from nanobot.agent.tools import sessions as session_tools
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.apps.cli import utils as cli_app_utils
 from nanobot.bus.events import InboundMessage
@@ -38,7 +39,11 @@ if TYPE_CHECKING:
 
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return persisted kwargs for turn-attached capabilities."""
-    return cli_app_utils.session_extra(metadata) | mcp_tools.session_extra(metadata)
+    return (
+        cli_app_utils.session_extra(metadata)
+        | mcp_tools.session_extra(metadata)
+        | session_tools.session_extra(metadata)
+    )
 
 
 async def connect_mcp(state: Any, tools: ToolRegistry) -> None:
@@ -98,6 +103,7 @@ class ContextBuilder:
     def build_system_prompt(
         self,
         *,
+        active_skill_names: Sequence[str] | None = None,
         channel: str | None = None,
         query: str | None = None,
         session_summary: str | None = None,
@@ -124,15 +130,20 @@ class ContextBuilder:
             memory_top_k=vc.memory_top_k if vc else 10,
         )
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
-            parts.append(f"# Memory\n\n{memory}")
+            parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
-        always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+        active_skills = self.skills.get_always_skills()
+        active_skills.extend(
+            name
+            for name in (active_skill_names or ())
+            if name not in active_skills
+        )
+        if active_skills:
+            active_content = self.skills.load_skills_for_context(active_skills)
+            if active_content:
+                parts.append(f"# Active Skills\n\n{active_content}")
 
-        skills_summary = self.skills.build_skills_summary(exclude=set(always_skills))
+        skills_summary = self.skills.build_skills_summary(exclude=set(active_skills))
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
@@ -271,7 +282,12 @@ class ContextBuilder:
 
         def _to_blocks(value: Any) -> list[dict[str, Any]]:
             if isinstance(value, list):
-                return [item if isinstance(item, dict) else {"type": "text", "text": str(item)} for item in value]
+                return [
+                    cast(dict[str, Any], item)
+                    if isinstance(item, dict)
+                    else {"type": "text", "text": str(item)}
+                    for item in cast(list[Any], value)
+                ]
             if value is None:
                 return []
             return [{"type": "text", "text": str(value)}]
@@ -288,7 +304,7 @@ class ContextBuilder:
         ``AgentLoop.from_config``, so removing it here would make ``MoekaCore``
         raise TypeError at runtime while the merge stayed clean.
         """
-        parts = []
+        parts: list[str] = []
         project_root = workspace or self.workspace
         sources = [
             ("AGENTS.md", project_root),
@@ -356,13 +372,16 @@ class ContextBuilder:
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         root = workspace or self.workspace
-        user_content = self._build_user_content(current_message, media)
-        blocks = list(runtime_context_blocks or ()) if current_role == "user" else []
-        merged, runtime_context_meta = append_runtime_context(user_content, blocks)
-        messages = [
+        active_skill_names = (
+            self.skills.get_explicitly_invoked_skills(current_message)
+            if current_role == "user"
+            else []
+        )
+        messages: list[dict[str, Any]] = [
             {
                 "role": "system",
                 "content": self.build_system_prompt(
+                    active_skill_names=active_skill_names,
                     channel=channel,
                     query=current_message or None,
                     session_summary=session_summary,
@@ -374,42 +393,74 @@ class ContextBuilder:
             },
             *history,
         ]
+        current = self.build_current_message(
+            current_message,
+            media=media,
+            current_role=current_role,
+            runtime_context_blocks=runtime_context_blocks,
+        )
         if messages[-1].get("role") == current_role:
             last = dict(messages[-1])
-            last["content"] = self._merge_message_content(last.get("content"), merged)
-            if current_role == "user" and runtime_context_meta is not None:
+            last["content"] = self._merge_message_content(
+                last.get("content"),
+                current.get("content"),
+            )
+            current_meta = current.get("_meta")
+            if current_role == "user" and isinstance(current_meta, dict):
                 internal_meta = dict(last.get("_meta") or {})
-                internal_meta[RUNTIME_CONTEXT_MESSAGE_META] = runtime_context_meta
+                internal_meta.update(cast(dict[str, Any], current_meta))
                 last["_meta"] = internal_meta
             messages[-1] = last
             return messages
-        current = {"role": current_role, "content": merged}
-        if current_role == "user" and runtime_context_meta is not None:
-            current["_meta"] = {RUNTIME_CONTEXT_MESSAGE_META: runtime_context_meta}
         messages.append(current)
         return messages
 
-    def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
-        if not media:
+    def build_current_message(
+        self,
+        current_message: str,
+        *,
+        media: list[str] | None = None,
+        current_role: str = "user",
+        runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
+    ) -> dict[str, Any]:
+        """Build only the fresh turn message without merging it into history."""
+        content = self.build_user_content(current_message, image_paths=media)
+        blocks = list(runtime_context_blocks or ()) if current_role == "user" else []
+        merged, runtime_context_meta = append_runtime_context(content, blocks)
+        current: dict[str, Any] = {"role": current_role, "content": merged}
+        if current_role == "user" and runtime_context_meta is not None:
+            current["_meta"] = {
+                RUNTIME_CONTEXT_MESSAGE_META: runtime_context_meta,
+            }
+        return current
+
+    def build_user_content(
+        self,
+        text: str,
+        image_paths: list[str] | None,
+    ) -> str | list[dict[str, Any]]:
+        """Build user message content from prefiltered image paths."""
+        if not image_paths:
             return text
 
-        images = []
-        for path in media:
+        image_blocks: list[dict[str, Any]] = []
+        for path in image_paths:
             p = Path(path)
             if not p.is_file():
                 continue
             raw = p.read_bytes()
+            # Re-detect from the bytes used for the request: the file may have
+            # changed since attachment routing, and the data URL needs its MIME.
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
             if not mime or not mime.startswith("image/"):
                 continue
             b64 = base64.b64encode(raw).decode()
-            images.append({
+            image_blocks.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
                 "_meta": {"path": str(p)},
             })
 
-        if not images:
+        if not image_blocks:
             return text
-        return images + [{"type": "text", "text": text}]
+        return image_blocks + [{"type": "text", "text": text}]

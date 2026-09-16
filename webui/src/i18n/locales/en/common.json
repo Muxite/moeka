@@ -38,6 +38,15 @@
     },
     "meta": {
       "description": "nanobot web UI — chat with your nanobot workspace."
+    },
+    "pairing": {
+      "title": "Pair a chat user",
+      "description": "Enter the pairing code shown in the chat.",
+      "code": "Pairing code",
+      "matched": "Matched {{channel}}. Connecting...",
+      "expiresInline": "Code expires {{expires}}.",
+      "queueCount": "{{count}} pending",
+      "noMatch": "No pending request matches this code."
     }
   },
   "sidebar": {
@@ -99,7 +108,7 @@
       "webBehavior": "Behavior",
       "cliApps": "CLI apps",
       "mcp": "MCP services",
-      "identity": "Identity",
+      "regional": "Regional",
       "webuiSafety": "Web safety",
       "capabilities": "Capabilities",
       "apps": "Apps",
@@ -190,8 +199,6 @@
       "defaultImageSize": "Default size",
       "maxImagesPerTurn": "Max images per turn",
       "imageSaveDir": "Save directory",
-      "botName": "Bot name",
-      "botIcon": "Bot icon",
       "timezone": "Timezone",
       "workspacePath": "Default workspace",
       "localServiceAccess": "Local services",
@@ -235,8 +242,6 @@
       "defaultAspectRatio": "Used when the prompt does not choose an aspect ratio.",
       "defaultImageSize": "Size hint sent to providers that support it.",
       "maxImagesPerTurn": "Upper bound for one generate_image request.",
-      "botName": "Shown wherever nanobot uses a display name.",
-      "botIcon": "Short emoji or text shown with the bot name.",
       "timezone": "Used for schedules and time-aware replies.",
       "cliAppsCatalog": "Install only the app-specific CLI adapters nanobot can run locally; native apps stay untouched.",
       "cliAppsFilter": "Search by app, category, or capability.",
@@ -344,6 +349,7 @@
       "statusMissingCredentials": "Needs key",
       "statusMissingDependency": "Needs dependency",
       "statusComingSoon": "Coming soon",
+      "comingSoon": "Coming soon",
       "statusNotInstalled": "Not enabled",
       "toolScope": "Tools",
       "allTools": "All",
@@ -376,7 +382,10 @@
       "configured": "Configured",
       "notConfigured": "Not configured",
       "pending": "Pending",
-      "restartingEngine": "Restarting"
+      "restartingEngine": "Restarting",
+      "checking": "Checking",
+      "running": "Running",
+      "needsSetup": "Needs setup"
     },
     "status": {
       "loading": "Loading settings...",
@@ -404,6 +413,7 @@
       "delete": "Delete",
       "deleting": "Deleting...",
       "cancel": "Cancel",
+      "dismiss": "Dismiss",
       "open": "Open",
       "export": "Export",
       "opening": "Opening...",
@@ -504,7 +514,15 @@
       "profile": "Profile",
       "extraHeaders": "Extra headers",
       "extraBody": "Extra body",
-      "extraQuery": "Extra query"
+      "extraQuery": "Extra query",
+      "capabilityFastMode": "Fast mode",
+      "capabilityFastModeHelp": "Use OpenAI's priority service tier for faster responses. This consumes credits faster.",
+      "capabilityDeepSeekSearch": "DeepSeek web search",
+      "capabilityDeepSeekSearchHelp": "Let DeepSeek V4 Flash search the web through its Responses API. Search activity appears in chat.",
+      "capabilityXSearch": "X Search",
+      "capabilityXSearchHelp": "Allow supported Grok models to use xAI-hosted X Search. Search activity appears in chat.",
+      "capabilityOpenAISearch": "OpenAI web search",
+      "capabilityOpenAISearchHelp": "Allow compatible Responses API models to search the web. Search activity appears in chat."
     },
     "legal": {
       "thirdPartyBrands": "Product names, logos, and brands are property of their respective owners. Use is for identification only and does not imply endorsement."
@@ -513,8 +531,18 @@
       "selectProvider": "Select provider",
       "selectAspect": "Select aspect",
       "selectSize": "Select size",
+      "selectModel": "Select image model",
+      "searchOrTypeModel": "Search or type model ID",
+      "typeModelId": "Type the model ID supported by this provider.",
       "configureProvider": "Configure provider",
       "missingCredential": "Configure this provider before enabling image generation."
+    },
+    "capabilities": {
+      "providerSupport": "Provider support",
+      "providerInstallOnSave": "Required support will be installed automatically when you save this provider.",
+      "searchSupport": "Search provider support",
+      "searchInstallOnSave": "Olostep support will be installed automatically when you save.",
+      "installing": "Installing support..."
     },
     "api": {
       "title": "API server",
@@ -583,6 +611,8 @@
       "advanced": "Advanced",
       "checkAndEnable": "Check and enable",
       "checkConnection": "Check connection",
+      "connectionChecks": "Connection checks",
+      "open": "Open",
       "checkedAndEnabled": "Checked and enabled.",
       "checking": "Checking...",
       "checkOnly": "Check only",
@@ -678,6 +708,8 @@
       "protected": "Protected",
       "editTitle": "Edit automation",
       "save": "Save",
+      "commandCopied": "Copied",
+      "copyCommand": "Copy",
       "deleteTitle": "Delete automation",
       "deleteDescription": "This removes {{name}} from the cron store. Past chat messages stay in the session.",
       "cancel": "Cancel",
@@ -737,6 +769,7 @@
       "fields": {
         "name": "Name",
         "message": "Message",
+        "command": "Command",
         "scheduleType": "Schedule type",
         "every": "Every",
         "unit": "Unit",
@@ -773,6 +806,7 @@
       "signedInAs": "Signed in as {{account}}",
       "signInHelp": "Sign in from this device; no API key is stored in config.",
       "remoteSignInHelp": "Select Sign in to open xAI on your computer, then paste the authorization code shown after login.",
+      "codexRemoteSignInHelp": "Sign in through this browser, then paste the full localhost callback URL back into nanobot.",
       "signInRequired": "Sign in required",
       "signInBeforeSaving": "Sign in before saving this provider in the preset.",
       "signedIn": "Signed in",
@@ -782,12 +816,77 @@
       "saveProxy": "Save proxy",
       "localCodeHelp": "Complete sign-in in your browser. Nanobot usually finishes automatically; if it does not, paste the authorization code below.",
       "remoteCodeHelp": "Select Sign in to open xAI on your computer. After signing in, paste the authorization code shown by xAI below.",
+      "localCallbackHelp": "Complete sign-in in your browser. Nanobot usually finishes automatically; if it does not, copy the full localhost callback URL from the address bar and paste it below.",
+      "remoteCallbackHelp": "Open ChatGPT in this browser and finish signing in. When the localhost page fails to load, copy the full URL from the address bar and paste it below.",
       "authorizationCode": "Authorization code",
+      "callbackUrl": "Full callback URL",
+      "callbackUrlPlaceholder": "http://localhost:1455/auth/callback?code=…&state=…",
+      "openChatGPT": "Open ChatGPT",
+      "pasteCallbackToContinue": "Paste the callback URL to continue.",
+      "waitingForCallback": "Waiting for the browser callback…",
       "finishSignIn": "Finish sign-in"
     },
     "skills": {
       "description": "Review the instruction skills this agent can load during a conversation.",
       "caption": "{{available}} available · {{total}} total",
+      "views": "Skills views",
+      "installedTab": "Installed",
+      "discoverTab": "Discover",
+      "customGroup": "Custom",
+      "builtinGroup": "Built-in",
+      "otherGroup": "Other",
+      "searchInstalled": "Search installed skills",
+      "filterAll": "All",
+      "filterEnabled": "Enabled",
+      "filterDisabled": "Disabled",
+      "noMatching": "No matching skills.",
+      "statusDisabled": "Disabled",
+      "statusEnabled": "Enabled",
+      "statusNeedsSetup": "Needs setup",
+      "showLess": "Show less",
+      "showMore": "Show more",
+      "enabledControl": "Use this skill",
+      "enabledDescription": "Allow the agent to load this skill when its requirements are ready.",
+      "enableSkill": "Enable {{name}}",
+      "disableSkill": "Disable {{name}}",
+      "updateFailed": "Could not update this skill.",
+      "deleteTitle": "Delete skill",
+      "deleteDescription": "Remove this skill from the current workspace.",
+      "deleteAction": "Delete",
+      "deleteFailed": "Could not delete this skill.",
+      "deleteConfirmTitle": "Delete {{name}}?",
+      "deleteConfirmDescription": "This removes the skill files from the current workspace. This action cannot be undone.",
+      "deleteConfirmAction": "Delete skill",
+      "instructionsTitle": "Skill instructions",
+      "setupRequired": "Setup required",
+      "setupDescription": "Install the missing dependency on the machine running nanobot, then check again.",
+      "copySetupCommand": "Copy setup command",
+      "checkAgain": "Check again",
+      "marketplaceSearchFailed": "Could not search skill marketplaces.",
+      "marketplaceInstallFailed": "Could not install this skill.",
+      "marketplaceSearchPlaceholder": "Search skills",
+      "marketplaceSearchLabel": "Search skills",
+      "marketplaceSearching": "Searching",
+      "marketplaceProviderFilter": "Skill source",
+      "marketplaceProviderAll": "All",
+      "marketplaceTrendingTitle": "Trending by marketplace",
+      "marketplaceTrendingDescription": "Each marketplace keeps its own ranking and install metrics.",
+      "marketplaceViewAll": "View all",
+      "marketplaceTrendingUnavailable": "Trending skills are temporarily unavailable.",
+      "marketplaceEmpty": "No skills found for “{{query}}”.",
+      "marketplaceConfirmTitle": "Install {{name}}?",
+      "marketplaceConfirmDescription": "This third-party skill comes from {{provider}} ({{source}}) and may include instructions or executable scripts.",
+      "marketplaceConfirmInstall": "Install skill",
+      "marketplaceOpen": "Open {{name}} on {{provider}}",
+      "marketplaceOpenProvider": "Open {{provider}}",
+      "marketplaceInstalls24h": "{{formattedCount}} installs / 24h",
+      "marketplaceInstalls": "{{formattedCount}} installs",
+      "marketplaceNpxRequired": "Node.js with npx is required",
+      "marketplaceInstalling": "Installing",
+      "marketplaceInstalled": "Installed",
+      "marketplaceInstall": "Install",
+      "marketplaceNoTrend": "No trend yet",
+      "marketplaceTrendLabel": "8-week install trend",
       "featured": "Agent skills",
       "empty": "No skills are available.",
       "sourceWorkspace": "Custom",
@@ -1124,14 +1223,19 @@
         }
       },
       "mentions": {
-        "ariaLabel": "Apps",
+        "ariaLabel": "Mentions",
         "label": "Apps",
         "cliGroup": "CLI apps",
         "mcpGroup": "MCP services",
+        "sessionGroup": "Nanobot conversations",
         "cliBadge": "CLI",
         "mcpBadge": "MCP",
         "cliDescription": "Use @{{name}} as a local CLI app",
-        "mcpDescription": "Use @{{name}} as an MCP server"
+        "mcpDescription": "Use @{{name}} as an MCP server",
+        "cliTitle": "CLI app: {{name}}",
+        "mcpTitle": "MCP server: {{name}}",
+        "sessionBadge": "Nanobot conversation",
+        "sessionDescription": "Reference @{{name}} as a previous chat"
       },
       "encoding": "Encoding…",
       "remove": "Remove attachment",
@@ -1167,11 +1271,16 @@
       "title": "Prompts",
       "search": "Search prompts",
       "noResults": "No matching prompts.",
-      "jumpTo": "Jump to prompt: {{label}}"
+      "jumpTo": "Jump to prompt: {{label}}",
+      "railAria": "User prompt navigation"
     }
   },
   "message": {
     "streaming": "streaming",
+    "delivery": {
+      "sending": "Sending…",
+      "failed": "Not sent"
+    },
     "assistantTyping": "Assistant is typing",
     "toolSingle": "Using a tool",
     "toolMany": "Used {{count}} tools",
@@ -1202,6 +1311,14 @@
     "cliRunRan": "Used",
     "cliRunFailed": "Failed",
     "imageAttachment": "Image attachment",
+    "videoAttachment": "Video attachment",
+    "fileAttachment": "File attachment",
+    "attachmentUnavailable": "Attachment unavailable",
+    "dataTable": "Data table",
+    "fileEditPreparing": "Preparing file edit…",
+    "openLink": "Open link: {{label}}",
+    "openAttachment": "Open {{name}}",
+    "skill": "Skill: {{name}}",
     "automationSourceFallback": "Automation",
     "automationTriggered": "Triggered automatically",
     "askAboutSelection": "Ask about this",
@@ -1227,6 +1344,7 @@
   },
   "filePreview": {
     "aria": "File preview",
+    "breadcrumb": "File path",
     "close": "Close file preview",
     "loading": "Loading preview...",
     "failed": "Could not preview this file.",
@@ -1241,7 +1359,10 @@
     "copied": "Copied"
   },
   "common": {
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "close": "Close",
+    "current": "Current",
+    "cancel": "Cancel"
   },
   "errors": {
     "messageTooBig": {
@@ -1251,6 +1372,10 @@
     "workspaceScopeRejected": {
       "title": "Workspace was not changed",
       "body": "Nanobot kept the previous workspace because the requested project or access mode was rejected by the gateway."
+    },
+    "turnRejected": {
+      "title": "Message was not sent",
+      "body": "The gateway rejected this message. Review its text or attachments, then try again."
     }
   },
   "workspace": {

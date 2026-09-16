@@ -8,6 +8,8 @@ import pytest
 
 import nanobot.webui.session_list_index as session_list_index
 from nanobot.cron.session_turns import CRON_HISTORY_META
+from nanobot.providers.base import ProviderConversationState
+from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.automation_turns import AUTOMATION_HISTORY_META
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META
 from nanobot.session.manager import SessionManager
@@ -33,6 +35,52 @@ def test_webui_session_list_reuses_valid_index_without_scanning_files(
     assert rows[0]["key"] == "websocket:indexed"
     assert rows[0]["preview"] == "indexed preview"
     assert rows[0]["model_preset"] == "fast"
+
+
+def test_webui_session_list_indexes_workspace_scope_and_preserves_null(
+    tmp_path: Path,
+) -> None:
+    manager = SessionManager(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+
+    scoped = manager.get_or_create("websocket:scoped")
+    scoped.metadata[WORKSPACE_SCOPE_METADATA_KEY] = {
+        "project_path": str(project),
+        "access_mode": "full",
+        "future_extension": "x" * 5000,
+    }
+    manager.save(scoped)
+    explicit_null = manager.get_or_create("websocket:null")
+    explicit_null.metadata[WORKSPACE_SCOPE_METADATA_KEY] = None
+    manager.save(explicit_null)
+    manager.save(manager.get_or_create("websocket:missing"))
+
+    rows = {row["key"]: row for row in list_webui_sessions(manager)}
+
+    assert session_list_index.indexed_workspace_scope(rows["websocket:scoped"]) == (
+        True,
+        {"project_path": str(project), "access_mode": "full"},
+    )
+    assert session_list_index.indexed_workspace_scope(rows["websocket:null"]) == (True, None)
+    assert session_list_index.indexed_workspace_scope(rows["websocket:missing"]) == (False, None)
+
+    scoped.metadata[WORKSPACE_SCOPE_METADATA_KEY]["access_mode"] = "restricted"
+    manager.save(scoped)
+
+    refreshed = {row["key"]: row for row in list_webui_sessions(manager)}
+    assert session_list_index.indexed_workspace_scope(refreshed["websocket:scoped"])[1] == {
+        "project_path": str(project),
+        "access_mode": "restricted",
+    }
+
+
+# moeka: upstream's `test_webui_session_list_does_not_cache_old_snapshot_with_new_signature`
+# exercised a race between its jsonl-file-scan cache and a concurrent writer
+# (racing `open()` mid-read). moeka's SQLite store has no such file-read
+# race — every read is one atomic SQL query — so that scenario doesn't
+# apply; `indexed_workspace_scope`'s return shape is already covered by
+# `test_webui_session_list_indexes_workspace_scope_and_preserves_null` above.
 
 
 def test_webui_session_list_rejects_invalid_internal_model_preset_metadata(
@@ -71,6 +119,26 @@ def test_webui_session_list_rescans_only_changed_file(tmp_path: Path) -> None:
     rows = list_webui_sessions(manager)
 
     assert {row["preview"] for row in rows} == {"first", "second after"}
+
+
+def test_webui_session_list_skips_provider_state_before_preview_budget(
+    tmp_path: Path,
+) -> None:
+    """provider_state lives in the metadata column, never the messages table,
+    so it can never be mistaken for preview content regardless of budget."""
+    manager = SessionManager(tmp_path)
+    session = manager.get_or_create("websocket:private-state")
+    session.provider_state = ProviderConversationState(
+        kind="openai_responses",
+        provider="openai:test",
+        model="test-model",
+        version=1,
+        payload={"items": [{"encrypted_content": "x" * 200}]},
+    )
+    session.add_message("user", "visible preview")
+    manager.save(session)
+
+    assert list_webui_sessions(manager)[0]["preview"] == "visible preview"
 
 
 def test_webui_session_list_drops_deleted_index_rows(tmp_path: Path) -> None:

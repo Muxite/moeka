@@ -102,7 +102,7 @@ def _default_workspace() -> Path:
     return get_state_home()
 
 
-def get_workspace_path(workspace: str | None = None) -> Path:
+def get_workspace_path(workspace: str | Path | None = None) -> Path:
     """Resolve and ensure the agent workspace path."""
     path = Path(workspace).expanduser() if workspace else _default_workspace()
     return ensure_dir(path)

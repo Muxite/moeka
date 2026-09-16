@@ -90,7 +90,9 @@ Instead of storing secrets directly in `config.json`, you can use `${VAR_NAME}` 
 
 Any string value in `config.json` can use `${VAR_NAME}`. Resolution runs once at startup, in memory only — resolved values are never written back to disk, so editing config through `nanobot onboard` or the WebUI preserves the placeholder.
 
-If a referenced variable is unset, nanobot fails fast at startup with `ValueError: Environment variable 'NAME' referenced in config is not set`.
+If a referenced variable is unset, nanobot fails fast and reports the exact config field
+and variable name without echoing the field value. Run `nanobot status` with the same
+`--config` path to inspect the problem.
 
 ### More examples
 
@@ -266,6 +268,7 @@ Tracing covers the providers that go through nanobot's OpenAI-compatible client 
 |----------|---------|-------------|
 | `custom` | Any OpenAI-compatible endpoint | — |
 | `openrouter` | LLM gateway for hosted model families + Voice transcription (STT models) | [openrouter.ai](https://openrouter.ai) |
+| `edenai` | LLM gateway for Eden AI's OpenAI-compatible model catalog | [app.edenai.run](https://app.edenai.run/) |
 | `opencode` | LLM gateway (OpenCode Zen coding-agent models) | [opencode.ai/docs/zen](https://opencode.ai/docs/zen/) |
 | `opencode_zen` | LLM gateway (legacy alias for OpenCode Zen) | [opencode.ai/docs/zen](https://opencode.ai/docs/zen/) |
 | `opencode_go` | LLM gateway (OpenCode Go low-cost coding models) | [opencode.ai/docs/go](https://opencode.ai/docs/go/) |
@@ -344,7 +347,50 @@ Valid `apiType` values are exactly `auto`, `chat_completions`, and `responses`.
 }
 ```
 
+The WebUI's OpenAI web-search switch writes the corresponding `apiType` and `extraBody.tools`
+fields. A hosted search tool replaces nanobot's same-name local `web_search` function for that
+request, while other tools such as `web_fetch` remain available.
+
 </details>
+
+<details>
+<summary><b>DeepSeek native web search</b></summary>
+
+DeepSeek V4 Flash uses DeepSeek's native Responses API. Its provider-hosted web search is
+enabled by default because it does not require a separate paid add-on. Turn it off from the
+WebUI provider settings, or with:
+
+```json
+{
+  "providers": {
+    "deepseek": {
+      "apiKey": "${DEEPSEEK_API_KEY}",
+      "extraBody": {
+        "tools": []
+      }
+    }
+  }
+}
+```
+
+The switch applies to `deepseek-v4-flash`; DeepSeek models that remain on Chat Completions
+cannot use this Responses tool. Native search calls appear in the WebUI activity stream, and
+their opaque output items are preserved for multi-turn Responses state replay.
+
+</details>
+
+<a id="responses-state-and-compaction"></a>
+
+### Responses conversation state and compaction
+
+Providers that use the Responses API can keep reasoning context across a
+conversation, which helps with multi-step tasks. Supported providers can also
+compact long conversations automatically.
+
+nanobot preserves Responses conversation state automatically for OpenAI Responses, OpenAI Codex, Azure OpenAI, DeepSeek V4 Flash, and compatible GitHub Copilot models.
+Native compaction is also automatic when the provider supports it. The
+threshold is derived from the active model's context window and reserved output
+headroom; no provider configuration is required.
 
 <details>
 <summary><b>Azure OpenAI</b></summary>
@@ -679,7 +725,7 @@ Then run:
 nanobot agent -m "Hello!"
 ```
 
-To opt in to Codex Fast mode, merge this provider setting into `config.json`:
+Codex Fast mode can be enabled from the WebUI provider settings, or with:
 
 ```json
 {
@@ -693,9 +739,9 @@ To opt in to Codex Fast mode, merge this provider setting into `config.json`:
 }
 ```
 
-`priority` is the Responses API request value used by Codex Fast mode. The setting only works
-for models and accounts that support Fast mode; remove `service_tier` to return to standard
-processing. Fast mode consumes Codex credits at a higher rate. See the
+The switch sends the Responses API `service_tier: "priority"` value. It only works for models
+and accounts that support Fast mode; turn the switch off to return to standard processing.
+Fast mode consumes Codex credits at a higher rate. See the
 [OpenAI Codex rate card](https://help.openai.com/en/articles/20001106) for current details.
 
 For proxy, remote/headless login, model-name, or config-key errors, see [`troubleshooting.md`](./troubleshooting.md#provider-and-model-problems).
@@ -719,6 +765,8 @@ The provider reads xAI's model catalog and includes the server-hosted `x_search`
 tool only when the selected model advertises `supportsBackendSearch`. Models
 without that capability continue normally without hosted X Search. When enabled,
 searches run inside xAI's Responses API and citations arrive as inline links.
+Hosted X Search is on by default to preserve this behavior. It can be turned off in the
+WebUI provider settings or with `providers.xaiGrok.extraBody.tools: []`.
 
 This is xAI subscription OAuth, not X Developer OAuth. nanobot follows the
 public OAuth client and proxy contract used by
@@ -1556,7 +1604,6 @@ Global settings that apply to all channels. Configure under the `channels` secti
   "channels": {
     "sendProgress": true,
     "sendToolHints": true,
-    "extractDocumentText": true,
     "sendMaxRetries": 3,
     "telegram": {
       "enabled": false
@@ -1570,8 +1617,14 @@ Global settings that apply to all channels. Configure under the `channels` secti
 | `sendProgress` | `true` | Stream agent's text progress to the channel |
 | `sendToolHints` | `true` | Stream tool-call hints (e.g. `read_file("…")`) |
 | `showReasoning` | `true` | Allow channels to surface model reasoning/thinking content (DeepSeek-R1 `reasoning_content`, Anthropic `thinking_blocks`, inline `<think>` tags). Reasoning flows as a dedicated stream with `_reasoning_delta` / `_reasoning_end` markers — channels override `send_reasoning_delta` / `send_reasoning_end` to render in-place updates. Even with `true`, channels without those overrides stay no-op silently. Currently surfaced on CLI and WebSocket/WebUI (italic shimmer header, auto-collapses after the stream ends); Telegram / Slack / Discord / Feishu / WeChat / Matrix / Mattermost keep the base no-op until their bubble UI is adapted. Independent of `sendProgress`. |
-| `extractDocumentText` | `true` | Extract supported document/text attachments into the model prompt. PDF, DOCX, XLSX, and PPTX readers are included in the standard installation. Set to `false` to keep document content out of the prompt and include attachment path references instead. |
 | `sendMaxRetries` | `3` | Max delivery attempts per outbound message, including the initial send (0-10 configured, minimum 1 actual attempt) |
+
+Non-image attachments are included in the user message as local path references, without
+injecting their contents into the model prompt. When file tools are enabled, the agent
+can inspect supported text, PDF, DOCX, XLSX, and PPTX files on demand with `read_file`,
+or pass the original path to another tool when exact file bytes are required. The deprecated
+`channels.extractDocumentText` setting is accepted for compatibility but ignored.
+Normal tool workspace and media access rules still apply to attachment paths.
 
 `channels.transcriptionProvider` and `channels.transcriptionLanguage` are deprecated compatibility fields. They remain as a read-only fallback for older configs, but new configuration should use top-level `transcription.provider` and `transcription.language`.
 

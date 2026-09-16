@@ -10,6 +10,8 @@ interface ThinkingReasoningShellProps {
   children: ReactNode;
   viewportRef: Ref<HTMLDivElement>;
   contentRef: Ref<HTMLDivElement>;
+  fadeTop: boolean;
+  fadeBottom: boolean;
   onToggle: () => void;
   onScroll: () => void;
 }
@@ -21,6 +23,8 @@ export function ThinkingReasoningShell({
   children,
   viewportRef,
   contentRef,
+  fadeTop,
+  fadeBottom,
   onToggle,
   onScroll,
 }: ThinkingReasoningShellProps) {
@@ -45,20 +49,27 @@ export function ThinkingReasoningShell({
         >
           {label}
         </span>
-        <ChevronDown
+        <span
           className={cn(
-            "h-3 w-3 shrink-0 text-muted-foreground/60 transition-[transform,color] duration-200",
-            "group-hover:text-muted-foreground motion-reduce:transition-none",
+            "inline-flex shrink-0 transition-transform [transition-duration:600ms] ease-out",
+            "motion-reduce:[transition-duration:220ms]",
             expanded && "rotate-180",
           )}
-          strokeWidth={1.8}
-          aria-hidden
-        />
+        >
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 text-muted-foreground/60 transition-colors duration-200",
+              "group-hover:text-muted-foreground motion-reduce:transition-none",
+            )}
+            strokeWidth={1.8}
+            aria-hidden
+          />
+        </span>
       </button>
 
       <div
         className={cn(
-          "grid transition-[grid-template-rows,opacity] duration-300 motion-reduce:transition-none",
+          "grid transition-[grid-template-rows,opacity] [transition-duration:600ms] ease-out motion-reduce:[transition-duration:220ms]",
           expanded
             ? "grid-rows-[1fr] opacity-100"
             : "pointer-events-none grid-rows-[0fr] opacity-0",
@@ -68,8 +79,10 @@ export function ThinkingReasoningShell({
           <div
             ref={viewportRef}
             data-testid={expanded ? "agent-activity-scroll" : undefined}
+            data-fade-top={fadeTop}
+            data-fade-bottom={fadeBottom}
             onScroll={onScroll}
-            className="mt-1.5 max-h-[180px] overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            className="activity-scroll-fade mt-1.5 max-h-[180px] overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
             aria-hidden={!expanded}
           >
             <div ref={contentRef} className="flex flex-col gap-0.5">
