@@ -25,7 +25,8 @@ def test_sessions_restore_workspace_command_prepares_downgrade(
 
     assert result.exit_code == 0, result.output
     assert "Restored 1 session file(s)" in result.output
-    restored = workspace / "sessions" / manager._get_session_path(session.key).name
+    restored = workspace / "sessions" / f"{manager.safe_key(session.key)}.jsonl"
     assert restored.exists()
     assert "restore-me" in restored.read_text(encoding="utf-8")
-    assert manager._get_session_path(session.key).exists()
+    # The SQLite store itself (sessions_root, not the workspace) still has it.
+    assert manager._load(session.key) is not None

@@ -47,6 +47,10 @@ COPY README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 COPY nanobot/ nanobot/
 COPY scripts/ scripts/
 COPY tests/ tests/
+# webui/ itself is git-ignored here (Python tests don't need the frontend
+# source), but tests/utils/test_webui_event_projection_equivalence.py reads
+# this one fixture directly to cross-check Python/TS event-projection parity.
+COPY webui/src/tests/fixtures/live-replay-event-projection.json webui/src/tests/fixtures/live-replay-event-projection.json
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}}
 

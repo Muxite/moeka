@@ -13,8 +13,11 @@ keys.env
 keys.env.example
 .env
 
-# Frontend (not needed for Python tests)
+# Frontend (not needed for Python tests) — except the one fixture
+# tests/utils/test_webui_event_projection_equivalence.py cross-checks
+# Python/TS event-projection parity against.
 webui
+!webui/src/tests/fixtures/live-replay-event-projection.json
 
 # Local runtime artifacts
 nohup.out

@@ -34,6 +34,7 @@ from loguru import logger
 
 from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.core.function_tool import FunctionTool
 from nanobot.core.vec import RetrievedChunk
 from nanobot.nanobot import RunResult
@@ -310,7 +311,7 @@ class MoekaCore:
         if model is not None:
             extra["model"] = model
 
-        loop = AgentLoop.from_config(config, **extra)
+        loop = AgentLoop.from_config(config, tool_registry=ToolRegistry(), **extra)
         return cls(loop)
 
     @staticmethod
