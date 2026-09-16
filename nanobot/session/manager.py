@@ -10,12 +10,17 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Collection, cast
 from weakref import WeakValueDictionary
 
 from loguru import logger
 
-from nanobot.config.paths import get_legacy_sessions_dir
+# get_runtime_subdir is not called internally (moeka's SessionManager
+# defaults sessions_root to the workspace, not this — see the ADR-0001 note
+# on SessionManager below), but tests/conftest.py's autouse
+# _isolate_sessions_root fixture patches this module attribute
+# unconditionally, so the name must resolve.
+from nanobot.config.paths import get_legacy_sessions_dir, get_runtime_subdir  # noqa: F401
 from nanobot.providers.base import ProviderConversationState
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
@@ -37,6 +42,10 @@ from nanobot.utils.subagent_channel_display import scrub_subagent_announce_body
 FILE_MAX_MESSAGES = 2000
 SESSION_CACHE_MAX_SIZE = 128
 MIN_REPLAY_MAX_MESSAGES = 120
+# Small raw suffix kept for continuity across the last_consolidated
+# compaction boundary in Session.get_history() (also imported directly by
+# nanobot/agent/memory.py's consolidation logic).
+MIN_COMPACTED_REPLAY_MESSAGES = 8
 REPLAY_TOKENS_PER_MESSAGE = 100
 _MESSAGE_TIME_PREFIX_RE = re.compile(r"^\[Message Time: [^\]]+\]\n?")
 _LOCAL_IMAGE_BREADCRUMB_RE = re.compile(r"^\[image: (?:/|~)[^\]]+\]\s*$")
@@ -130,6 +139,22 @@ class RetentionResult:
 
 
 @dataclass
+class SessionRestoreResult:
+    restored: int
+    unchanged: int
+    conflicts: tuple[Path, ...]
+
+
+@dataclass
+class SessionPolicy:
+    """Runtime rules that do not belong in durable session data."""
+
+    persist: bool = True
+    log_content: bool = True
+    disabled_tools: frozenset[str] = frozenset()
+
+
+@dataclass
 class Session:
     """A conversation session."""
 
@@ -143,6 +168,7 @@ class Session:
     # encrypted reasoning items). Never part of public history; persisted
     # alongside metadata in the sessions.db row (see SessionManager.save).
     provider_state: ProviderConversationState | None = field(default=None, repr=False)
+    policy: SessionPolicy = field(default_factory=SessionPolicy, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.metadata, dict):
@@ -176,19 +202,37 @@ class Session:
         extend_to_user: bool = False,
         include_runtime_context: bool = True,
     ) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input.
+        """Return recent replayable messages for LLM input.
 
         History is sliced by message count first (``max_messages``), then by
         token budget from the tail (``max_tokens``) when provided.
         """
-        unconsolidated = self.messages[self.last_consolidated:]
+        replay_start = self.last_consolidated
+        if replay_start:
+            # ``last_consolidated`` is archive progress, not a replay boundary.
+            # Keep a small raw suffix for continuity, extending back to the user
+            # that started an assistant/tool sequence when necessary.
+            recent_start = recent_message_start_index(
+                self.messages,
+                MIN_COMPACTED_REPLAY_MESSAGES,
+                extend_to_user=True,
+            )
+            replay_start = min(replay_start, recent_start)
+
+        replayable = self.messages[replay_start:]
         max_messages = max_messages if max_messages > 0 else FILE_MAX_MESSAGES
-        start_idx = recent_message_start_index(
-            unconsolidated,
-            max_messages,
-            extend_to_user=extend_to_user,
-        )
-        sliced = unconsolidated[start_idx:]
+        unarchived_count = len(self.messages) - self.last_consolidated
+        if replay_start < self.last_consolidated and unarchived_count < max_messages:
+            # The archived replay suffix can exceed the nominal count when one
+            # tool-heavy turn spans the boundary. Preserve that complete turn.
+            start_idx = 0
+        else:
+            start_idx = recent_message_start_index(
+                replayable,
+                max_messages,
+                extend_to_user=extend_to_user,
+            )
+        sliced = replayable[start_idx:]
 
         # Avoid starting mid-turn when possible, except for proactive
         # assistant deliveries that the user may be replying to.
@@ -465,24 +509,34 @@ class SessionManager:
 
     moeka note: upstream (as of the 2026-08-05 checkpoint) split this into a
     ``SessionStore`` Protocol + pluggable ``JsonlSessionStore`` /
-    ``SessionManager`` wrapper, presumably groundwork for alternate backends.
-    Nothing else in that checkpoint's tree consumes the Protocol yet, so this
-    merge keeps moeka's single SQLite-backed ``SessionManager`` as-is rather
-    than reshaping it to fit the new interface. Worth revisiting later:
-    making moeka's store implement ``SessionStore`` would fit the "everything
-    is a plugin abstraction" framing better than carrying this divergence
-    forever — but the method surface already matches 1:1 (verified against
-    the 2026-08-05 checkpoint), so nothing is currently broken by deferring
-    it.
+    ``SessionManager`` wrapper, presumably groundwork for alternate backends,
+    and (2026-08-12) kept building that split out further. Nothing else in
+    the tree consumes the Protocol itself, so this merge keeps moeka's single
+    SQLite-backed ``SessionManager`` as-is rather than reshaping it to fit
+    the new interface — but genuinely new, backend-independent features
+    introduced alongside it (``sessions_root``, ``SessionPolicy`` /
+    ``get_or_create_transient`` for ephemeral WebUI Temporary Chats) are
+    ported forward each time, since other already-merged call sites depend
+    on them unconditionally. Worth revisiting later: making moeka's store
+    implement ``SessionStore`` would fit the "everything is a plugin
+    abstraction" framing better than carrying this divergence forever.
     """
 
     _SCHEMA_VERSION = 1
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, *, sessions_root: Path | None = None):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
-        self.db_path = self.workspace / "sessions.db"
+        # sessions_root lets the caller (AgentLoop.from_config, via
+        # Config.runtime_data_dir) put sessions.db outside the agent's own
+        # workspace, so shell/file tools running inside that workspace can
+        # never read or tamper with session data. Defaults to the previous
+        # in-workspace location when not given, so existing installs are
+        # unaffected.
+        db_root = Path(sessions_root).expanduser().resolve(strict=False) if sessions_root else self.workspace
+        ensure_dir(db_root)
+        self.db_path = db_root / "sessions.db"
         # LRU-style cache: strongly-referenced recent sessions in self._cache,
         # with idle overflow demoted to a WeakValueDictionary so identity is
         # preserved for any caller still holding a reference without
@@ -703,6 +757,29 @@ class SessionManager:
         self._remember(session)
         return session
 
+    def get_or_create_transient(
+        self,
+        key: str,
+        *,
+        disabled_tools: Collection[str] = (),
+    ) -> Session:
+        """Return a fresh, non-persistent session without loading history.
+
+        Used by ephemeral surfaces (e.g. WebUI Temporary Chats) that must
+        never touch ``sessions.db`` — ``save()`` is a no-op for a session
+        whose ``policy.persist`` is False.
+        """
+        policy = SessionPolicy(
+            persist=False,
+            log_content=False,
+            disabled_tools=frozenset(disabled_tools),
+        )
+        session = self.get_cached(key)
+        if session is None or session.policy != policy:
+            session = Session(key=key, policy=policy)
+            self._remember(session)
+        return session
+
     def _load(self, key: str) -> Session | None:
         """Load a session from the database."""
         try:
@@ -771,7 +848,12 @@ class SessionManager:
         other processes are serialized by SQLite's own locking (busy_timeout
         retries). When *fsync* is ``True`` the WAL is checkpointed so the
         write is durable on filesystems with write-back caching.
+
+        A session whose ``policy.persist`` is False (e.g. an ephemeral
+        WebUI Temporary Chat) is never written to disk.
         """
+        if not session.policy.persist:
+            return
         if self._file_cap_archiver is not None:
             session.enforce_file_cap(
                 on_archive=lambda messages: self._file_cap_archiver(
@@ -1066,3 +1148,44 @@ class SessionManager:
         }, ensure_ascii=False)]
         lines += [json.dumps(msg, ensure_ascii=False) for msg in session.messages]
         return "\n".join(lines) + "\n"
+
+    def restore_sessions_to_workspace(self) -> SessionRestoreResult:
+        """Export every session as legacy jsonl into ``<workspace>/sessions/``.
+
+        moeka has no in-workspace/out-of-workspace store split to roll back
+        (sessions always live in ``sessions.db``, wherever that is), so this
+        is a plain jsonl export of the current SQLite-backed store, useful
+        before downgrading to a nanobot version that predates the SQLite
+        migration. Never overwrites a file whose content already matches;
+        anything else already on disk at that path is reported as a
+        conflict rather than clobbered.
+        """
+        restored = 0
+        unchanged = 0
+        conflicts: list[Path] = []
+        for row in self.list_sessions():
+            key = row.get("key")
+            if not isinstance(key, str):
+                continue
+            dumped = self.dump_jsonl(key)
+            if dumped is None:
+                continue
+            target = self.sessions_dir / f"{self.safe_key(key)}.jsonl"
+            if target.exists():
+                try:
+                    existing = target.read_text(encoding="utf-8")
+                except OSError:
+                    existing = None
+                if existing == dumped:
+                    unchanged += 1
+                    continue
+                conflicts.append(target)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(dumped, encoding="utf-8")
+            restored += 1
+        return SessionRestoreResult(
+            restored=restored,
+            unchanged=unchanged,
+            conflicts=tuple(conflicts),
+        )

@@ -120,14 +120,14 @@ def _guard_live_workspace():
     live = (Path.home() / ".nanobot").resolve()
     orig_init = _manager.SessionManager.__init__
 
-    def guarded_init(self, workspace):
+    def guarded_init(self, workspace, **kwargs):
         ws = Path(workspace).expanduser().resolve()
         if ws == live:
             raise AssertionError(
                 "TEST LEAK: SessionManager constructed on the live ~/.nanobot "
                 "workspace — use tmp_path instead"
             )
-        orig_init(self, workspace)
+        orig_init(self, workspace, **kwargs)
 
     _manager.SessionManager.__init__ = guarded_init
     yield

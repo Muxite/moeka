@@ -104,37 +104,6 @@ export function splitCapabilityMentionSegments(
   return segments.length ? segments : [{ kind: "text", text: value }];
 }
 
-export function CliAppMentionText({
-  text,
-  cliApps,
-  mcpPresets = [],
-  sessionMentions = [],
-}: {
-  text: string;
-  cliApps: CliAppInfo[];
-  mcpPresets?: McpPresetInfo[];
-  sessionMentions?: SessionMention[];
-}) {
-  const segments = splitCapabilityMentionSegments(text, cliApps, mcpPresets, sessionMentions);
-  if (!segments.some((segment) => segment.kind !== "text")) return <>{text}</>;
-  return (
-    <>
-      {segments.map((segment, index) => {
-        if (segment.kind === "text") {
-          return <span key={`text-${index}`}>{segment.text}</span>;
-        }
-        return (
-          <CapabilityMentionToken
-            key={`${segment.kind}-${index}`}
-            segment={segment}
-            variant="message"
-          />
-        );
-      })}
-    </>
-  );
-}
-
 export function CapabilityMentionToken({
   segment,
   variant,
@@ -182,6 +151,7 @@ export function SessionMentionToken({
       testId={`${testIdPrefix}-session-mention-${mention.name}`}
       title={`Session: ${mention.title || mention.name}`}
       color={INLINE_TOKEN_HIGHLIGHT_COLOR}
+      className={variant === "composer" ? "font-normal" : undefined}
     >
       {label}
     </InlineTokenHighlight>
@@ -222,6 +192,7 @@ export function CliAppMentionToken({
       testId={`${testIdPrefix}-cli-mention-${app.name}`}
       title={t("thread.composer.mentions.cliTitle", { name: app.display_name || app.name })}
       color={color}
+      className={variant === "composer" ? "font-normal" : undefined}
     >
       <span
         className={cn("relative inline-block", showLogo && "text-transparent")}
@@ -278,6 +249,7 @@ export function McpPresetMentionToken({
       testId={`${testIdPrefix}-mcp-mention-${preset.name}`}
       title={t("thread.composer.mentions.mcpTitle", { name: preset.display_name || preset.name })}
       color={color}
+      className={variant === "composer" ? "font-normal" : undefined}
     >
       <span
         className={cn("relative inline-block", showLogo && "text-transparent")}

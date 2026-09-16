@@ -17,7 +17,11 @@ from nanobot.agent.tools import mcp as mcp_tools
 from nanobot.agent.tools import sessions as session_tools
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.apps.cli import utils as cli_app_utils
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import (
+    INBOUND_META_RUNTIME_CONTROL,
+    RUNTIME_CONTROL_SESSION_DISCARD,
+    InboundMessage,
+)
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_END,
     RUNTIME_CONTEXT_MESSAGE_META,
@@ -46,22 +50,11 @@ def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     )
 
 
-async def connect_mcp(state: Any, tools: ToolRegistry) -> None:
-    await mcp_tools.connect_missing_servers(state, tools)
-
-
-async def close_mcp(state: Any) -> None:
-    await mcp_tools.close_mcp_servers(state)
-
-
 async def handle_runtime_control(state: Any, msg: InboundMessage, tools: ToolRegistry) -> bool:
-    for handler in (
-        image_generation_tools.handle_runtime_control,
-        mcp_tools.handle_runtime_control,
-    ):
-        if await handler(state, msg, tools):
-            return True
-    return False
+    if msg.metadata.get(INBOUND_META_RUNTIME_CONTROL) == RUNTIME_CONTROL_SESSION_DISCARD:
+        await state.discard_session(msg.session_key)
+        return True
+    return await image_generation_tools.handle_runtime_control(state, msg, tools)
 
 
 class ContextBuilder:
@@ -108,6 +101,7 @@ class ContextBuilder:
         query: str | None = None,
         session_summary: str | None = None,
         workspace: Path | None = None,
+        include_memory: bool = True,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
@@ -123,16 +117,17 @@ class ContextBuilder:
         parts.append(self._behavioral_guidelines())
         parts.append(render_template("agent/tool_contract.md"))
 
-        vc = self.vec_config
-        raw_memory = self.memory.read_memory()
-        memory = self.memory.get_memory_context(
-            query=query,
-            semantic_threshold=vc.memory_semantic_threshold if vc else 2048,
-            memory_top_k=vc.memory_top_k if vc else 10,
-            long_term=raw_memory,
-        )
-        if memory and not self._is_template_content(raw_memory, "memory/MEMORY.md"):
-            parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
+        if include_memory:
+            vc = self.vec_config
+            raw_memory = self.memory.read_memory()
+            memory = self.memory.get_memory_context(
+                query=query,
+                semantic_threshold=vc.memory_semantic_threshold if vc else 2048,
+                memory_top_k=vc.memory_top_k if vc else 10,
+                long_term=raw_memory,
+            )
+            if memory and not self._is_template_content(raw_memory, "memory/MEMORY.md"):
+                parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
         active_skills = self.skills.get_always_skills()
         active_skills.extend(
@@ -368,6 +363,7 @@ class ContextBuilder:
         session_summary: str | None = None,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
         workspace: Path | None = None,
+        include_memory: bool = True,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
@@ -388,6 +384,7 @@ class ContextBuilder:
                     query=current_message or None,
                     session_summary=session_summary,
                     workspace=root,
+                    include_memory=include_memory,
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
                     unified_session=unified_session,

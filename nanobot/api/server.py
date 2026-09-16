@@ -52,6 +52,7 @@ _AGENT_LOOP_KEY = web.AppKey[Any]("agent_loop")
 _MODEL_NAME_KEY = web.AppKey[str]("model_name")
 _REQUEST_TIMEOUT_KEY = web.AppKey[float]("request_timeout")
 _SESSION_LOCKS_KEY = web.AppKey[dict[str, asyncio.Lock]]("session_locks")
+_PREPARE_AGENT_KEY = web.AppKey[Callable[[], Awaitable[None]] | None]("prepare_agent")
 _MISSING = object()
 
 
@@ -74,6 +75,17 @@ AGENT_LOOP_KEY: web.AppKey[Any] = web.AppKey("agent_loop", object)
 MODEL_NAME_KEY: web.AppKey[str] = web.AppKey("model_name", str)
 REQUEST_TIMEOUT_KEY: web.AppKey[float] = web.AppKey("request_timeout", float)
 SESSION_LOCKS_KEY: web.AppKey[dict] = web.AppKey("session_locks", dict)
+
+
+async def _prepare_agent(app: Any) -> None:
+    prepare: Callable[[], Awaitable[None]] | None = _app_value(
+        app,
+        _PREPARE_AGENT_KEY,
+        "prepare_agent",
+        None,
+    )
+    if prepare is not None:
+        await prepare()
 
 
 # ---------------------------------------------------------------------------
@@ -356,8 +368,9 @@ async def handle_chat_completions(request: web.Request) -> web.Response | web.St
             nonlocal stream_failed
             try:
                 async with session_lock:
-                    response = await asyncio.wait_for(
-                        agent_loop.process_direct(
+                    async with asyncio.timeout(timeout_s):
+                        await _prepare_agent(request.app)
+                        response = await agent_loop.process_direct(
                             content=text,
                             media=media_paths if media_paths else None,
                             session_key=session_key,
@@ -365,9 +378,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response | web.St
                             chat_id=API_CHAT_ID,
                             on_stream=_on_stream,
                             on_stream_end=_on_stream_end,
-                        ),
-                        timeout=timeout_s,
-                    )
+                        )
                     if not emitted_content:
                         response_text = _response_text(response)
                         if response_text.strip():
@@ -400,16 +411,15 @@ async def handle_chat_completions(request: web.Request) -> web.Response | web.St
     try:
         async with session_lock:
             try:
-                response = await asyncio.wait_for(
-                    agent_loop.process_direct(
+                async with asyncio.timeout(timeout_s):
+                    await _prepare_agent(request.app)
+                    response = await agent_loop.process_direct(
                         content=text,
                         media=media_paths if media_paths else None,
                         session_key=session_key,
                         channel="api",
                         chat_id=API_CHAT_ID,
-                    ),
-                    timeout=timeout_s,
-                )
+                    )
                 response_text = _response_text(response)
                 if not response_text or not response_text.strip():
                     logger.warning("Empty response for session {}, using fallback", session_key)
@@ -462,6 +472,7 @@ def create_app(
     model_name: str = "nanobot",
     request_timeout: float = 120.0,
     api_key: str = "",
+    prepare_agent: Callable[[], Awaitable[None]] | None = None,
 ) -> web.Application:
     """Create the aiohttp application.
 
@@ -470,12 +481,14 @@ def create_app(
         model_name: Model name reported in responses.
         request_timeout: Per-request timeout in seconds.
         api_key: Optional API key for Bearer-token authentication on API routes.
+        prepare_agent: Optional application-owned readiness callback run before each turn.
     """
     app = web.Application(client_max_size=20 * 1024 * 1024)  # 20MB for base64 images
     app[_AGENT_LOOP_KEY] = agent_loop
     app[_MODEL_NAME_KEY] = model_name
     app[_REQUEST_TIMEOUT_KEY] = request_timeout
     app[_SESSION_LOCKS_KEY] = {}  # per-user locks, keyed by session_key
+    app[_PREPARE_AGENT_KEY] = prepare_agent
 
     @web.middleware
     async def auth_middleware(

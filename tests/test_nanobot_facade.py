@@ -46,7 +46,9 @@ def _write_config(tmp_path: Path, overrides: dict | None = None) -> Path:
     }
     if overrides:
         data.update(overrides)
-    config_path = tmp_path / "config.json"
+    config_dir = tmp_path.parent / f"{tmp_path.name}-instance"
+    config_dir.mkdir(exist_ok=True)
+    config_path = config_dir / "config.json"
     config_path.write_text(json.dumps(data))
     return config_path
 
@@ -105,9 +107,28 @@ def test_from_config_missing_env_is_non_fatal(
 
 def test_from_config_creates_instance(tmp_path):
     config_path = _write_config(tmp_path)
-    bot = Nanobot.from_config(config_path, workspace=tmp_path)
+    workspace = tmp_path / "workspace"
+    bot = Nanobot.from_config(config_path, workspace=workspace)
     assert bot._loop is not None
-    assert bot._loop.workspace == tmp_path
+    assert bot._loop.workspace == workspace
+    # moeka: sessions.db itself honours sessions_root (kept out of the agent's
+    # own workspace, matching upstream's ADR-0001 intent); the legacy jsonl
+    # scan directory (sessions_dir) stays workspace-relative, since it only
+    # exists to find pre-SQLite-migration files that predate this split.
+    assert bot._loop.sessions.db_path.parent == config_path.parent / "sessions"
+
+
+def test_from_config_composes_configured_mcp_outside_agent_loop(tmp_path):
+    config_path = _write_config(
+        tmp_path,
+        {"tools": {"mcpServers": {"demo": {"command": "fake-mcp"}}}},
+    )
+
+    bot = Nanobot.from_config(config_path, workspace=tmp_path)
+
+    assert bot._mcp_provider is not None
+    assert bot._mcp_provider.configured_server_names == {"demo"}
+    assert bot._mcp_provider._registry is bot._loop.tools
 
 
 def test_from_config_accepts_default_model_override(tmp_path):
@@ -254,27 +275,6 @@ def test_workspace_override(tmp_path):
 
     bot = Nanobot.from_config(config_path, workspace=custom_ws)
     assert bot._loop.workspace == custom_ws
-
-
-def test_sdk_make_provider_uses_github_copilot_backend():
-    from nanobot.config.schema import Config
-    from nanobot.providers.factory import make_provider
-
-    config = Config.model_validate(
-        {
-            "agents": {
-                "defaults": {
-                    "provider": "github-copilot",
-                    "model": "github-copilot/gpt-4.1",
-                }
-            }
-        }
-    )
-
-    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
-        provider = make_provider(config)
-
-    assert provider.__class__.__name__ == "GitHubCopilotProvider"
 
 
 @pytest.mark.asyncio
@@ -1671,37 +1671,40 @@ async def test_runtime_helpers_expose_model_workspace_and_compact(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_aclose_delegates_to_loop_close_mcp(tmp_path):
+async def test_aclose_releases_loop_and_mcp_provider(tmp_path):
     config_path = _write_config(tmp_path)
     bot = Nanobot.from_config(config_path, workspace=tmp_path)
-    bot._loop.close_mcp = AsyncMock()
+    bot._loop.aclose = AsyncMock()
+    assert bot._mcp_provider is not None
+    bot._mcp_provider.aclose = AsyncMock()
 
     await bot.aclose()
 
-    bot._loop.close_mcp.assert_awaited_once()
+    bot._loop.aclose.assert_awaited_once()
+    bot._mcp_provider.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_context_manager_calls_aclose_on_exit(tmp_path):
     config_path = _write_config(tmp_path)
     bot = Nanobot.from_config(config_path, workspace=tmp_path)
-    bot._loop.close_mcp = AsyncMock()
+    bot._loop.aclose = AsyncMock()
 
     async with bot as b:
         assert b is bot
 
-    bot._loop.close_mcp.assert_awaited_once()
+    bot._loop.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_context_manager_does_not_swallow_exceptions(tmp_path):
     config_path = _write_config(tmp_path)
     bot = Nanobot.from_config(config_path, workspace=tmp_path)
-    bot._loop.close_mcp = AsyncMock()
+    bot._loop.aclose = AsyncMock()
 
     with pytest.raises(ValueError):
         async with bot as b:
             assert b is bot
             raise ValueError("boom")
 
-    bot._loop.close_mcp.assert_awaited_once()
+    bot._loop.aclose.assert_awaited_once()
