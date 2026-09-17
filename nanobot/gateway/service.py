@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from nanobot.config.paths import get_state_home
 from nanobot.gateway import GatewayStartOptions, build_gateway_command
 
 ServiceManagerKind = Literal["auto", "systemd", "launchd"]
@@ -215,13 +216,13 @@ def _platform_name() -> str:
 def _working_directory(options: GatewayStartOptions) -> Path:
     if options.workspace:
         return Path(options.workspace).expanduser()
-    return Path.home()
+    return get_state_home()
 
 
 def _working_directory_text(options: GatewayStartOptions) -> str:
     if options.workspace:
         return os.path.expanduser(options.workspace)
-    return str(Path.home())
+    return str(get_state_home())
 
 
 def _systemd_unit_name(name: str) -> str:

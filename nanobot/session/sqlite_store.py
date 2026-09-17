@@ -43,12 +43,12 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from filelock import FileLock
 from loguru import logger
 
-from nanobot.config.paths import get_legacy_sessions_dir
+from nanobot.config.paths import get_legacy_sessions_dir, get_state_home
 from nanobot.providers.base import ProviderConversationState
 from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.history_visibility import is_hidden_history_message
@@ -67,6 +67,9 @@ from nanobot.session.manager import (
 )
 from nanobot.session.model_selection import model_preset_from_metadata
 from nanobot.utils.helpers import ensure_dir, safe_filename
+
+if TYPE_CHECKING:
+    from nanobot.session.manager import SessionManager
 
 # sqlite3.Error is included so SQLite I/O failures (locked db, corrupt file,
 # etc.) are handled the same defensive way as malformed data.
@@ -868,3 +871,68 @@ def get_store(session_manager: Any) -> SqliteSessionStore:
             f"(got {type(store).__name__}); this operation is moeka-specific"
         )
     return store
+
+
+def _resolve_workspace_and_sessions_root(
+    workspace: Path | str | None, sessions_root: Path | None,
+) -> tuple[Path, Path]:
+    """Shared path resolution for the two factories below.
+
+    ``workspace`` falls back to ``get_state_home()`` (honouring the
+    ``MOEKA_WORKSPACE``/``MOEKA_STATE``/``NANOBOT_HOME`` override chain)
+    when a caller doesn't have one already resolved from config.
+    ``sessions_root`` falls back to ``default_sessions_root()`` computed
+    from that same workspace, so the two values handed to a
+    ``SqliteSessionStore`` and a ``SessionManager`` constructed together
+    can never drift apart — see the asymmetry risk documented in
+    ``.agent/upstream-sync-handover.md`` §6.
+    """
+    resolved_workspace = Path(workspace).expanduser() if workspace is not None else get_state_home()
+    resolved_root = (
+        Path(sessions_root).expanduser()
+        if sessions_root is not None
+        else default_sessions_root(resolved_workspace.expanduser().resolve(strict=False))
+    )
+    return resolved_workspace, resolved_root
+
+
+def build_sqlite_session_store(
+    workspace: Path | str | None = None, *, sessions_root: Path | None = None,
+) -> SqliteSessionStore:
+    """Single construction seam for the default ``SqliteSessionStore`` backend.
+
+    Consolidates what used to be three independent eager
+    ``SqliteSessionStore(...)`` call sites (``nanobot/cli/commands.py``'s
+    ``serve`` and ``sessions restore-workspace``, and
+    ``nanobot/cli/gateway_runtime.py``'s ``_run_gateway``) behind one
+    factory the test suite can mock in one place instead of three.
+    """
+    resolved_workspace, resolved_root = _resolve_workspace_and_sessions_root(
+        workspace, sessions_root,
+    )
+    return SqliteSessionStore(resolved_workspace, sessions_root=resolved_root)
+
+
+def build_default_session_manager(
+    workspace: Path | str | None = None, *, sessions_root: Path | None = None,
+) -> "SessionManager":
+    """Build a ``SessionManager`` wired to the default ``SqliteSessionStore``.
+
+    Guarantees the injected store and the ``SessionManager`` wrapper around
+    it are always handed the *same* resolved ``sessions_root`` — see
+    ``_resolve_workspace_and_sessions_root``.
+
+    Imports ``SessionManager`` locally (rather than at module load time) so
+    this stays consistent with the test suite's existing
+    ``monkeypatch.setattr("nanobot.session.manager.SessionManager", ...)``
+    seam, which patches the attribute on ``nanobot.session.manager`` — a
+    module-level binding here would capture the real class once at import
+    time and never see that patch.
+    """
+    from nanobot.session.manager import SessionManager
+
+    resolved_workspace, resolved_root = _resolve_workspace_and_sessions_root(
+        workspace, sessions_root,
+    )
+    store = SqliteSessionStore(resolved_workspace, sessions_root=resolved_root)
+    return SessionManager(resolved_workspace, sessions_root=resolved_root, store=store)

@@ -334,8 +334,7 @@ def serve(
     from nanobot.api.server import create_app
     from nanobot.bus.queue import MessageBus
     from nanobot.providers.image_generation import image_gen_provider_configs
-    from nanobot.session.manager import SessionManager
-    from nanobot.session.sqlite_store import SqliteSessionStore, default_sessions_root
+    from nanobot.session.sqlite_store import build_default_session_manager
 
     _set_nanobot_logs(verbose)
 
@@ -353,12 +352,7 @@ def serve(
         raise typer.Exit(1)
     sync_workspace_templates(runtime_config.workspace_path)
     bus = MessageBus()
-    _sessions_root = default_sessions_root(runtime_config.workspace_path)
-    session_manager = SessionManager(
-        runtime_config.workspace_path,
-        sessions_root=_sessions_root,
-        store=SqliteSessionStore(runtime_config.workspace_path, sessions_root=_sessions_root),
-    )
+    session_manager = build_default_session_manager(runtime_config.workspace_path)
     tools = ToolRegistry()
     mcp_provider = MCPProvider.from_config(runtime_config, tools)
     try:
@@ -461,11 +455,10 @@ def sessions_restore_workspace(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
 ) -> None:
     """Copy sessions back into the workspace before downgrading nanobot."""
-    from nanobot.session.sqlite_store import SqliteSessionStore, default_sessions_root
+    from nanobot.session.sqlite_store import build_sqlite_session_store
 
     runtime_config = _load_runtime_config(config, workspace)
-    sessions_root = default_sessions_root(runtime_config.workspace_path)
-    store = SqliteSessionStore(runtime_config.workspace_path, sessions_root=sessions_root)
+    store = build_sqlite_session_store(runtime_config.workspace_path)
     result = store.export_to_workspace()
     console.print(
         f"Restored {result.restored} session file(s) to "
