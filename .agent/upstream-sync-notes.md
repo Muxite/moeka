@@ -1737,3 +1737,449 @@ tests, etc.).
   script (if it gets built) to also diff each touched file's top-level
   `import`/`from` lines against the pre-merge checkpoint for exactly this
   class of regression.
+
+## Batch 7 — 2026-09-17 (final batch of the 7-batch plan)
+
+Merge commit `96896461` into `merge/upstream-main-2026-08-05`, checkpoint
+`2fb16593988b9e85131e02f395bb9a5108e220e7` (2026-09-16, "fix(tui): keep
+input responsive during agent output (#5791)"), 86 commits since batch 6's
+`20f115bf`. All conflict resolution, silent-breakage fixes, and
+Docker-surfaced fixups landed in this single merge commit (nothing was
+committed before every issue found by three successive full Docker runs
+was fixed) — no separate fixup commit this batch. Worked in worktree
+`/home/muk/projects/moeka-sync`; `/home/muk/projects/moeka` verified on
+`main` both before and after.
+
+This is the last batch of the original 7-batch plan (`.agent/upstream-sync-plan.md`).
+`upstream/main`'s tip has moved past this checkpoint since the plan was cut
+(current tip is past `2fb16593`) — expected, not chased.
+
+### `nanobot/session/manager.py` (rule 1)
+Auto-merged with **zero conflict markers** — the file was already
+byte-identical to upstream going into this batch (confirmed against
+batch 6's checkpoint too), and this batch's upstream commits to it (none
+touched the file at all — `git diff --stat` across the batch-6..batch-7
+upstream range shows zero touches) applied cleanly. `git diff
+2fb16593988b9e85131e02f395bb9a5108e220e7 -- nanobot/session/manager.py` —
+empty, confirmed both immediately after the merge commit and again on the
+final commit. `nanobot/session/sqlite_store.py` likewise untouched by this
+batch's upstream range (zero diff) — no Protocol-shape drift to reconcile.
+
+### Conflicts resolved (9 files)
+- `.gitignore` — pure additive merge (moeka's MagicMock-pollution guard +
+  upstream's `.playwright-cli/`); kept both.
+- `CONTRIBUTING.md` — modify/delete (upstream modified, moeka deleted);
+  kept deleted (moeka policy, always-keep).
+- `pyproject.toml` — one hunk: `[project]` name/version/description; kept
+  moeka's (`moeka`, `0.2.1`, server-management description) over upstream's
+  (`nanobot-ai`, `0.3.5`). Everything else in the file (deps,
+  optional-dependencies) auto-merged clean.
+- `tests/agent/test_runner_persistence.py` — modify/delete; kept deleted
+  (moeka policy since batch 6 — its assertions assume upstream's nested
+  `<workspace>/.nanobot/tool-results/...` layout, incompatible with
+  moeka's flat-workspace deviation; the coverage already exists,
+  flat-adapted, in `tests/agent/test_runner.py`).
+- `webui/bun.lock` — regenerated via `bun install` (network available in
+  this worktree) rather than hand-resolving the lockfile conflict markers;
+  0 conflict markers remain, `webui/package.json` had already auto-merged
+  clean with no conflicts of its own.
+- `nanobot/agent/loop.py` (1 hunk) — `SubagentManager(...)` construction:
+  kept moeka's `tools_allow`/`tools_deny`/`inline_skills` kwargs; dropped
+  the `llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(...)`
+  kwarg (see "llm_timeout_s removal" below — upstream's own feature,
+  upstream's own removal this batch, not a moeka deviation).
+- `nanobot/agent/subagent.py` (1 hunk) — same shape: kept moeka's
+  `tools_allow`/`tools_deny`/`inline_skills` constructor params, dropped
+  `llm_wall_timeout_for_session`.
+- `nanobot/agent/runner.py` (2 hunks) — see "llm_timeout_s removal" and
+  "tool-execution-boundary" below, the two substantial ones this batch.
+- `nanobot/cron/service.py` (2 hunks) — see "cron timer/job-result" below.
+
+### `llm_timeout_s` removal — upstream's own feature, upstream's own deprecation, not a moeka deviation
+This batch's `73410e02` ("fix: stream internal model calls with idle
+timeouts (#5730)") removed `AgentRunSpec.llm_timeout_s`,
+`AgentRunner._resolve_llm_timeout_s`, and the `NANOBOT_LLM_TIMEOUT_S`
+env-var-driven outer `asyncio.wait_for` wrapper entirely, replacing it with
+per-stream-event idle timeouts inside `chat_stream_with_retry` itself
+(`resolve_stream_idle_timeout_s()`, already the mechanism `NANOBOT_STREAM_IDLE_TIMEOUT_S`
+used). This also removed `nanobot.session.goal_state.runner_wall_llm_timeout_s`
+(a *previously-merged* upstream feature — commit `e804f2fd`, an earlier
+batch's checkpoint, "align LLM wall timeout with sustained goals" — not
+moeka-authored, confirmed via `git blame`/author metadata) and its
+`SubagentManager(llm_wall_timeout_for_session=...)` plumbing. Verified via
+`git diff` across the batch-6..batch-7 upstream range that `loop.py`,
+`subagent.py`, `goal_state.py`, and `runner.py` all consistently drop this
+cluster together — a clean, self-contained upstream removal, not something
+moeka needed to preserve. Took upstream's removal wholesale in the
+conflicting hunks; the non-conflicting parts of the same removal (import
+lines, the `AgentRunSpec(llm_timeout_s=...)` construction site in
+`loop.py`, `goal_state.py` itself) had already auto-merged clean. Also
+deleted the now-upstream-removed `tests/agent/test_loop_goal_wall_timeout.py`
+(upstream's own commit deleted it; not a moeka file) and its counterpart
+assertions in `tests/session/test_goal_state.py` auto-merged clean to
+upstream's trimmed version. `docs/configuration.md`'s `NANOBOT_LLM_TIMEOUT_S`
+row already documents it as "Unused" post-removal — matches.
+
+Separately, this same commit changed `AgentRunner._request_model`'s
+non-streaming path (`wants_streaming=False`) from
+`provider.chat_with_retry(...)` to `provider.chat_stream_with_retry(...)`
+— providers now bound every stream event's wait uniformly regardless of
+whether the caller wants incremental deltas. This wasn't part of any
+conflict (auto-merged clean) but broke ~40 test mocks across
+`tests/agent/test_runner.py`, `tests/agent/test_runner_safety.py`, and
+`tests/core/test_moeka_core.py` that configured `provider.chat_with_retry`
+without also configuring `provider.chat_stream_with_retry` on a bare
+`MagicMock()` — see "Silent breakage" below.
+
+### `nanobot/agent/tools/execution.py` — new upstream feature ported into runner.py's kept duplicate
+This batch's execution.py picked up a genuine, well-tested upstream
+improvement: read-result deduplication now checks not just whether a file
+is unchanged on disk, but whether the *original read's result text* is
+still actually present in the live model context (`file_read_context`/
+`FileStates.is_unchanged(..., content_hash=)`/`record_read(..., result=)`
+in `nanobot/agent/tools/file_state.py`, entirely rewritten this batch) —
+guards against provider-native compaction silently dropping a tool result
+from context while `record_read`'s in-memory cache still claims dedup is
+safe, which would previously have let a stale `[File unchanged since last
+read]` stub through even though the model could no longer see the original
+content. Per rule 2 (moeka's `_execute_tools`/`_run_tool` fork is kept for
+the `AskUserInterrupt` 3-tuple contract and `exec_guard_denial`
+classification, still no upstream equivalent), ported this feature by hand
+into the duplicate rather than switching over:
+- `_execute_tools` gained `model_messages`/`compacted_tool_results` params
+  (threaded from the call site's `messages_for_model`/
+  `request_state.compacted_tool_results`, both already in scope) and the
+  same `@cache`-memoized `read_results()` closure execution.py uses.
+- `_run_tool` gained a `read_results: Callable[[], dict[str, str]] | None`
+  param, threaded through both the concurrent (`asyncio.gather`) and serial
+  call sites in `_execute_tools`.
+- The actual tool-execute call in `_run_tool` is now wrapped in
+  `file_read_context(tool_call.id, read_results) if tool_call.name ==
+  "read_file" and read_results is not None else nullcontext()`, matching
+  execution.py's own gating exactly (`tool_call.name == "read_file"`,
+  confirmed against `ReadFileTool.name` in
+  `nanobot/agent/tools/filesystem.py`).
+- Required new imports in `runner.py`: `functools.cache`,
+  `contextlib.nullcontext`, `nanobot.agent.tools.file_state.file_read_context`.
+
+Verified via upstream's own new test file,
+`tests/agent/test_runner_file_reads.py` (16 tests, all parametrized around
+`AgentRunner().run(...)` — i.e. exercising the kept duplicate, not
+`execute_tool_calls` directly) — all 16 pass unmodified against the port,
+both locally and in Docker. `nanobot/agent/tools/filesystem.py`'s
+`ReadFileTool._read()` itself needed no changes (auto-merged clean,
+already calls `record_read(..., content_hash=..., result=result)`
+matching the new signature).
+
+The tool-execution-boundary duplication itself (flagged in batches 5-6) is
+now three batches deep with a fourth manual port required — the design
+tension (extend `execute_tool_calls()` upstream-side with an
+`AskUserInterrupt`-aware mode and delete the duplicate, vs. accept the
+duplication permanently and add a drift-detecting test) remains
+unresolved, carried forward again.
+
+### Cron timer/job-result (2 hunks in `nanobot/cron/service.py`)
+Both hunks pit a moeka-authored fix already present pre-merge (not from a
+prior batch's upstream — `git blame` traces both to moeka's own
+post-batch-6 commits on this branch) against a genuinely new,
+independently-motivated upstream simplification this batch:
+- `_arm_timer()`: moeka's pre-existing fix only guards against
+  self-cancellation (`self._timer_task is not current` before calling
+  `.cancel()`) — protects the case where `_on_timer` itself (running
+  inside the timer task) triggers a re-arm via a job's own agent turn
+  mutating the store. Upstream's new guard (`if self._active_executions:
+  return`) is broader — it skips rearming entirely (no cancel, no
+  reschedule attempt) for the *whole duration* any job is executing,
+  which also covers a case moeka's guard doesn't: `_arm_timer()` called
+  from a genuinely different task (e.g. a WebUI job edit landing while a
+  job is mid-execution) would, under moeka's guard alone, still cancel and
+  reschedule the actively-running timer task, since `current !=
+  self._timer_task` from that other task's perspective. Combined both:
+  upstream's `_active_executions` early-return runs first (handles the
+  cross-task case), moeka's never-cancel-self check kept underneath as
+  defense-in-depth for whatever edge case isn't fully covered by
+  `_active_executions` bookkeeping alone.
+- `_execute_job()`: moeka's pre-existing fix bounds `self.on_job(job)` in
+  `asyncio.wait_for(..., timeout=self.job_timeout_s)` (the timer task is
+  the only scheduler and awaits jobs inline, so an unbounded job blocks
+  every other job forever) but didn't capture the return value. Upstream's
+  side captures `result = await self.on_job(job)` (needed for
+  `CronRunRecord.run_id`) but has no timeout bound. Combined:
+  `result = await asyncio.wait_for(self.on_job(job), timeout=self.job_timeout_s)` —
+  both the bound and the capture.
+
+### Silent breakage in cleanly-merged code — hunt results
+- `git diff HEAD@{1} -- nanobot/core/` (pre-merge vs. merged): **empty** —
+  0 upstream commits touch `nanobot/core` this batch, same as every batch
+  since batch 3.
+- `nanobot/agent/context.py`: **empty diff** against pre-merge state — 0
+  upstream commits in this batch's range touch the file at all (confirmed
+  via `git diff --stat` on the raw upstream range too); the semantic
+  "# Recent History" feature (`_build_history_section`/
+  `_without_duplicate_session_summary`/`_MAX_HISTORY_TOKENS`/`session_key`/
+  `unified_session`/`include_memory_recent_history` threaded through
+  `loop.py` -> `context.py` -> `memory.py`) reconfirmed present and wired
+  end-to-end by direct grep, unchanged from batch 6.
+- `nanobot/agent/memory.py`: clean auto-merge (86 lines changed, not a
+  conflict) — entirely upstream's own Dream-archiver retry-on-erroneous-
+  tool-call improvement (`MemoryArchiver`'s new `ProviderConversationStateController`-
+  based retry loop when the model calls a tool during archival instead of
+  returning the checkpoint text) plus a `chat_with_retry` ->
+  `chat_stream_with_retry` swap matching the runner.py change above.
+  Verified moeka's SQLite-specific `prune_dream_sessions`,
+  `read_recent_history_for_prompt`, `_is_internal_history_session`,
+  `_INTERNAL_HISTORY_SESSION_KEYS`/`_PREFIXES` all still present and
+  untouched by this diff.
+- Shell command guard (`nanobot/agent/tools/shell.py`): **empty diff**
+  against pre-merge state — 0 upstream commits touch the file this batch.
+  The unconditional-guard comment/call (batch 4's fix) survived untouched,
+  reverified at line ~488.
+- `nanobot/agent/tools/registry.py`, `nanobot/agent/tools/bg_shell.py`,
+  `nanobot/session/sqlite_store.py`, `nanobot/session/manager.py`: all
+  **empty diff** against pre-merge state — 0 upstream commits touch any of
+  them this batch.
+- `nanobot/agent/turn_delivery.py`: **empty diff** — the batch-6 fix
+  (lazy, function-scoped `from nanobot.channels.notification_routes import
+  notification_metadata` inside `TurnRoute.remember_session_route()`,
+  keeping `nanobot.channels`/`nanobot.pairing` off `nanobot/agent/loop.py`'s
+  transitive import chain) untouched. Grepped every file
+  `nanobot/agent/loop.py` transitively imports for new top-level
+  `nanobot.channels`/`nanobot.pairing`/`nanobot.gateway`/`nanobot.cli`
+  imports this batch — none found; `tests/core/test_import_boundary.py::
+  test_core_import_has_no_runtime_deps` passes in Docker (also passed
+  locally once `rapidfuzz` was installed via `uv run`, confirming the
+  earlier bare-`.venv` `ModuleNotFoundError` was a local-venv artifact, not
+  a boundary leak).
+- `nanobot/agent/loop.py` and `nanobot/session/sqlite_store.py` call sites
+  against `manager.py`'s surface: `SessionManager(...)` construction in
+  both `AgentLoop.__init__`/`AgentLoop.from_config` still pass
+  `sessions_root=`/`store=`, matching `sqlite_store.py`'s unchanged
+  `SessionStore` construction — no shape drift.
+- No new `LLMResponse`/`LLMUsage`/`AgentRunResult` fields this batch
+  (`git diff` on `nanobot/providers/base.py` across the upstream range
+  shows only the `asyncio.wait_for(..., timeout=resolve_stream_idle_timeout_s())`
+  wrapping change, no new dataclass fields) — the batch-3/4/5 "stale
+  `SimpleNamespace` mock" failure class didn't recur this batch.
+- Scripted before/after `def `-name diff (the batch-5 technique) run
+  across every file this merge touched (conflicted or not): no methods
+  silently disappeared from the kept side of any resolution this batch,
+  beyond the ones intentionally removed above (`_resolve_llm_timeout_s`,
+  `runner_wall_llm_timeout_s`).
+
+### Docker-surfaced fixups (folded into the merge commit, three full runs)
+1. **First full run** (merge commit content only, before any fixups):
+   **6 failed** (2 new categories beyond the 4-failure baseline):
+   - `tests/channels/test_channel_setup.py::test_every_runtime_channel_field_has_a_webui_contract`
+     — new upstream test this batch, iterates `discover_plugins()` and
+     calls `plugin.load_channel_class()` for *every* channel, including
+     Matrix, whose `runtime.py` unconditionally imports `matrix-nio`/
+     `mistune`/`nh3`/`aiohttp` and raises `ImportError` if missing.
+     `Dockerfile.test` builds via `uv sync --all-extras`, but Matrix's
+     deps aren't a pyproject extra at all — they're declared in
+     `nanobot/channels/matrix/manifest.py`'s `ChannelPlugin.dependencies`
+     tuple, installed on demand via `nanobot plugins enable matrix` /
+     `scripts/install_channel_dependencies.py` (added upstream at an
+     earlier checkpoint, `8423cf3e`). `.github/workflows/ci.yml` already
+     runs `python -m scripts.install_channel_dependencies --all-channels`
+     as its own CI step ("Install channel dependencies") — `Dockerfile.test`
+     never wired this in. Fixed by adding the equivalent `RUN` step after
+     the source-layer `uv sync`.
+   - `tests/webui/test_settings_runtime.py::test_every_exposed_runtime_setting_has_a_frontend_use`
+     — new upstream test this batch, reads
+     `webui/src/components/settings/system/runtime-config-fields.ts`
+     directly off disk to cross-check every backend runtime setting has a
+     frontend editor field; `Dockerfile.test`/`.dockerignore` only ship
+     one unrelated `webui/src/tests/fixtures/...` file (Python tests don't
+     normally need the frontend source tree). Fixed by adding a targeted
+     `COPY`/`.dockerignore` negation for this one file, same pattern as
+     the existing fixture exception.
+2. **Second full run** (after wiring in `install_channel_dependencies`,
+   before the `tests/__init__.py`-collision investigation): the container
+   failed at collection entirely —
+   `ModuleNotFoundError: No module named 'tests._home_guard'` from
+   `conftest.py`'s own real-$HOME-guard import. Root-caused to
+   `linkpreview` (a transitive dependency of one of the newly-installed
+   channels) shipping a **top-level `tests/` package** in its sdist (a
+   packaging bug upstream of moeka — missing
+   `packages=find_packages(exclude=["tests"])`). moeka's own `tests/` has
+   no `__init__.py` (a namespace package, by design — many files under
+   `tests/agent/*` rely on bare `from agent.x import y` imports that only
+   resolve because pytest's conftest-driven `sys.path` insertion puts
+   `tests/` itself on the path, not `/app`; adding `tests/__init__.py`
+   would flip that insertion point to `/app` and break every such import
+   across the suite). Per Python's PEP 420 namespace-package resolution, a
+   **regular** package (site-packages' `tests/__init__.py`, from
+   `linkpreview`) found anywhere on `sys.path` wins outright over a
+   namespace portion found earlier, silently shadowing moeka's own
+   `tests/` entirely. Considered and rejected adding `tests/__init__.py`
+   (correct in isolation, but would have broken the bare-import pattern
+   used throughout the suite) in favor of the lower-risk fix: strip the
+   stray site-packages `tests/` directory as a one-line `rm -rf` appended
+   to the same `RUN` step that installs the channel dependencies. Verified
+   no other newly-installed dependency ships a top-level package
+   colliding with moeka's own `agent`/`tools`/`cli`/`channels`/`core`/
+   `session`/`providers` test-helper module names (scripted check across
+   every installed distribution's `RECORD`).
+3. **Third full run** (after the `tests/` collision fix, before the
+   `INTERNAL_CHANNEL_FIELDS["telegram"]` fix): **13 failed** — the
+   WebUI-contract test now actually exercised every channel's
+   `load_channel_class()` (Matrix included, no more ImportError) but
+   failed differently: `AssertionError: telegram runtime fields missing
+   from WebUI contract: ['dropPendingUpdates']` — moeka's own
+   `drop_pending_updates` deviation (`TelegramConfig.drop_pending_updates`,
+   defaults `True`) has no WebUI setup-dialog field, correctly so (it's a
+   fixed operational default, not meant to be user-configurable), but this
+   new upstream test doesn't know that. Fixed by adding
+   `"telegram": {"dropPendingUpdates"}` to `INTERNAL_CHANNEL_FIELDS`,
+   matching the existing pattern for feishu/signal/weixin/whatsapp/
+   websocket's own internal-only fields. Also surfaced, as a side effect
+   of `dingtalk-stream` now actually being installed for the first time
+   in this Docker image (previously the whole
+   `nanobot/channels/dingtalk/tests/test_dingtalk_channel.py` file was
+   skipped via `importorskip` — confirmed via the *first* Docker run's
+   log, which shows exactly one `SKIPPED ... DingTalk dependencies not
+   installed`), **8 pre-existing test failures unrelated to anything this
+   batch touched** (the file has a literal zero-line diff against the
+   batch-6 checkpoint) — see "Needs human review" below, not fixed here.
+4. **Fourth/final run** (after the `INTERNAL_CHANNEL_FIELDS` fix): **12
+   failed, 7957 passed, 56 skipped.** 4 are the long-standing known
+   baseline (`test_exec_guard_allows_public_urls` x2, no DNS/network
+   egress in this sandbox; `test_mcp_presets_api.py::test_test_mcp_preset_*`
+   x2, no npx/playwright in the test image). The other 8 are the
+   newly-surfaced (not newly-broken) dingtalk SSRF-redirect tests — see
+   below. Net vs. the batch-6 baseline (7114/4/70): +843 passed (this
+   batch's ~86 new upstream commits' worth of tests, plus dingtalk/matrix/
+   other previously-`importorskip`-skipped channel test files now
+   actually running now that their deps install), +8 failed (all traced
+   to the pre-existing DNS-egress limitation, see below), -14 skipped
+   (mostly the dingtalk file no longer skipping as a whole, offset by some
+   new `skipif`s elsewhere).
+
+### `ruff check nanobot/ tests/` — clean, no new lint.
+
+### Deviation verification (post-merge, on the final commit)
+- `allow_sudo: bool = False` — 2 occurrences, both False, `shell.py`
+  untouched by this batch (0 diff).
+- `_DEFAULT_DENY_PATTERNS` still only the fork-bomb pattern; `rm -rf`/`dd`/
+  `mkfs`/`format`/`shutdown` absent. `_INTERNAL_DENY_PATTERNS` untouched.
+- Shell command guard unconditional (`# moeka: unlike upstream, the
+  command guard always runs regardless of restrict_to_workspace` comment
+  at line ~488 intact; `shell.py` had 0 diff this batch, nothing to
+  re-apply).
+- `sessions.db` referenced 16x in `sqlite_store.py` (0 in `manager.py`,
+  expected — pure upstream `SessionStore` Protocol code).
+- `ChannelManager._dispatch_with_watchdog` present and wired
+  (`nanobot/channels/manager.py`, untouched by this batch's upstream
+  range).
+- `bg_shell`'s `enabled(ctx)` still hardcoded `return False`.
+- `nanobot channels enable/disable` CLI present in `nanobot/cli/commands.py`.
+- Telegram `drop_pending_updates: bool = True` — confirmed, and (per the
+  fixup above) now also correctly excluded from the WebUI setup contract
+  as an internal-only field.
+- No `CONTRIBUTING.md`, no `images/nanobot_logo.png`, no `SECURITY.md`, no
+  root `Dockerfile` (all absent, matching batch 6's confirmation);
+  `images/GitHub_README.png` present.
+- `.agent/*`, `CLAUDE.md`, `bin/*` launchers — untouched by this batch (no
+  upstream commits in range touch any of these paths).
+- `tools.exec.allowPatterns` whitelist-only semantics — untouched, no
+  upstream changes to `nanobot/agent/tools/shell.py` this batch.
+- Lazy `Config`/`ToolsConfig` `model_rebuild` — untouched (0 diff on
+  `nanobot/config/schema.py`/`loader.py` this batch).
+- `git diff 2fb16593988b9e85131e02f395bb9a5108e220e7 -- nanobot/session/manager.py`
+  — empty, confirmed (rule 1 success criterion), both right after the
+  merge and again on the final commit.
+
+### Final `nanobot/core/` byte-identical check (closing verification, per the sync plan)
+`git diff ea51bdd0 -- nanobot/core/` (moeka `main`'s tip immediately before
+batch 1 started, i.e. `8ba7a3db`'s first parent) against this batch's final
+commit: **not byte-identical** — one real, already-documented diff in
+`nanobot/core/core.py`:
+```
++from nanobot.agent.tools.registry import ToolRegistry
+...
+-loop = AgentLoop.from_config(config, **extra)
++loop = AgentLoop.from_config(config, tool_registry=ToolRegistry(), **extra)
+```
+This is **batch 2's own fix** (not a regression introduced by any later
+batch, and not newly discovered here) — flagged in batch 2's notes as the
+"`AgentLoop.from_config()` incident": upstream's `from_config()` classmethod
+started requiring an explicit `tool_registry` argument at some earlier
+checkpoint, and `MoekaCore.create()` needed a one-line compatibility fix to
+keep building a default `ToolRegistry()` explicitly. This is a legitimate,
+necessary, already-reviewed moeka-side adaptation to an upstream API
+change, not scope creep — the plan's own closing-verification step
+anticipated this kind of result ("if it's NOT byte-identical, that's not
+necessarily wrong... report exactly what changed and why"). No other diff
+found; the rest of `nanobot/core/` (11 other files) is untouched across
+all 7 batches.
+
+### ⚠️ Needs human review
+- **8 newly-surfaced `nanobot/channels/dingtalk/tests/test_dingtalk_channel.py`
+  failures, same root cause as the accepted DNS-egress baseline, not
+  fixed here.** All 8 exercise `DingTalkChannel._read_media_bytes`/
+  `_fetch_remote_media_bytes`/`_send_media_ref`'s SSRF-redirect guard
+  (`nanobot.security.network.validate_url_target`, which performs a real
+  DNS resolution via `socket.getaddrinfo` to check whether a URL's
+  resolved IP is private) against `https://example.com/...`-style test
+  URLs. Directly confirmed in the Docker image:
+  `socket.getaddrinfo('example.com', 443)` raises
+  `socket.gaierror: [Errno -2] Name or service not known` — this sandbox
+  has no DNS resolution at all, the identical root cause already accepted
+  for `test_exec_guard_allows_public_urls`'s 2 known failures. The
+  dingtalk file itself has a **zero-line diff** against the batch-6
+  checkpoint (confirmed via `git diff HEAD@{1}`) — nothing this batch (or
+  any conflict resolution here) touched it. It was **previously entirely
+  skipped** in every prior batch's Docker run (`SKIPPED ... DingTalk
+  dependencies not installed (dingtalk-stream)`, confirmed in this
+  batch's own first Docker run's log) because `dingtalk-stream` was never
+  installed — the `install_channel_dependencies` fixup above is what
+  first made this file's tests actually run in Docker at all, incidentally
+  surfacing a pre-existing environment-limitation exposure that was always
+  there, just never exercised. Not fixed here: giving the sandbox real DNS/
+  network egress is a bigger, riskier infra change clearly out of this
+  batch's scope, and mocking `socket.getaddrinfo` inside these specific
+  tests isn't a batch-7 merge concern (the test file predates this batch
+  entirely). Recommend either (a) accepting these as a permanent addition
+  to the "known sandbox limitation" baseline (parallel to the existing 2x
+  `test_exec_guard_allows_public_urls`), or (b) auditing whether any other
+  channel's test file was *also* silently skipped in every prior batch for
+  the same missing-dependency reason and would surface similar
+  DNS-dependent failures once `install_channel_dependencies` runs for it
+  too (a spot-check across this run's full pass count suggests no other
+  channel hit this — feishu/discord/qq/slack/wecom/weixin/whatsapp/matrix
+  all show clean full runs in the final Docker log — but this wasn't
+  exhaustively verified test-by-test).
+- **The tool-execution-boundary duplication (`runner.py`'s
+  `_execute_tools`/`_run_tool` vs. `nanobot/agent/tools/execution.py`'s
+  `execute_tool_calls`) is now four batches deep**, with this batch's
+  manual port of the read-dedup feature being the largest single port yet
+  (a new module-level closure, a new context-manager wrap, two new
+  threaded-through parameters). The design tension flagged since batch 5
+  (extend `execute_tool_calls()` with an `AskUserInterrupt`-aware mode and
+  the `exec_guard_denial` branch, then delete the duplicate; or accept the
+  duplication permanently and add an automated drift-detector) remains
+  unresolved. This was the last batch of the current plan — worth a
+  deliberate decision now rather than carrying it into whatever sync
+  cadence follows.
+- moeka's cron "only persist when a job ran" fix (`558fe35e`, dropped in
+  batch 3) remains unresolved; no upstream commits in
+  `nanobot/cron/service.py`'s conflicting hunks this batch addressed the
+  same clobbering scenario (the two hunks resolved this batch are
+  unrelated: timer-rearm guarding and job-timeout/result-capture).
+- `docs/releasing.md` (new upstream file this batch, auto-merged in
+  unconflicted) links to `../CONTRIBUTING.md#release-packaging-contract`,
+  which doesn't exist on moeka (deleted). Cosmetic — no test references
+  this file's content, and it's prose-only — but worth a follow-up doc
+  fix (either point at moeka's own release process doc, if one exists, or
+  drop the file) rather than leaving a dead link in the tree indefinitely.
+
+### Status: all 7 batches of the original plan are now merged
+`merge/upstream-main-2026-08-05` carries batches 1 through 7 of
+`.agent/upstream-sync-plan.md`'s original 744-commit survey, closing the
+gap between moeka's pre-sync `main` and `upstream/main` as of the
+2026-09-16 checkpoint (`2fb16593`). `nanobot/session/manager.py` is
+upstream-identical at every checkpoint along the way (rule 1, reverified
+this batch). `nanobot/core/` carries exactly one deliberate, previously-
+reviewed line of drift (batch 2's `ToolRegistry()` compatibility fix) and
+is otherwise untouched across all 7 batches. This branch has not been
+pushed and no PR has been opened — that's the owner's next step.
