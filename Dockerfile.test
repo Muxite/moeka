@@ -60,6 +60,10 @@ COPY tests/ tests/
 # source), but tests/utils/test_webui_event_projection_equivalence.py reads
 # this one fixture directly to cross-check Python/TS event-projection parity.
 COPY webui/src/tests/fixtures/live-replay-event-projection.json webui/src/tests/fixtures/live-replay-event-projection.json
+# tests/webui/test_settings_runtime.py reads this one frontend source file
+# directly to cross-check that every runtime setting the backend exposes has
+# a matching frontend editor field.
+COPY webui/src/components/settings/system/runtime-config-fields.ts webui/src/components/settings/system/runtime-config-fields.ts
 # packages/ and tui/ are TS/Bun sources, not Python packages, but
 # tests/webui/test_notification_contract.py reads packages/client-events/
 # fixtures.json directly and exec's tui/scripts/package-release.py as a
@@ -69,6 +73,29 @@ COPY packages/ packages/
 COPY tui/ tui/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}}
+
+# Channel manifest dependencies (e.g. matrix-nio, mistune, nh3 for Matrix) live
+# outside pyproject.toml's extras -- installed on demand via `nanobot plugins
+# enable <name>`. Mirrors .github/workflows/ci.yml's "Install channel
+# dependencies" step so tests that load every discovered channel's runtime
+# class (e.g. tests/channels/test_channel_setup.py) don't fail on a missing
+# optional plugin dependency.
+#
+# linkpreview (a transitive dependency pulled in by this step) ships a
+# top-level `tests/` package in its sdist (a packaging bug upstream of us --
+# it's missing `packages=find_packages(exclude=["tests"])`). Because our own
+# tests/ has no __init__.py (a namespace package, by design -- see
+# tests/agent/*'s bare `from agent.x import y` imports, which rely on
+# pytest's conftest-driven sys.path insertion, not a regular top-level
+# `tests` package), Python's import system prefers linkpreview's *regular*
+# site-packages `tests` package over our namespace one the moment both are on
+# sys.path, silently breaking every `from tests.x import y` (including
+# conftest.py's own real-$HOME guard). Strip the stray package rather than
+# adding tests/__init__.py, which would change pytest's rootdir-insertion
+# behavior for the whole suite.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv run --no-sync python -m scripts.install_channel_dependencies --all-channels \
+    && rm -rf /opt/venv/lib/python3.*/site-packages/tests
 
 ENTRYPOINT ["uv", "run", "--no-sync"]
 # Match pyproject.toml's [tool.pytest.ini_options] testpaths (tests/ plus

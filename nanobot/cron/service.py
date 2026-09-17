@@ -22,6 +22,7 @@ from nanobot.cron.types import (
     CronJobState,
     CronPayload,
     CronRunRecord,
+    CronRunResult,
     CronSchedule,
     CronStore,
 )
@@ -200,7 +201,7 @@ class CronService:
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        on_job: Callable[[CronJob], Coroutine[Any, Any, str | CronRunResult | None]] | None = None,
         max_sleep_ms: int = 300_000,  # 5 minutes
         job_timeout_s: float = 1800.0,  # 30 minutes
     ):
@@ -442,6 +443,7 @@ class CronService:
                                 "status": r.status,
                                 "durationMs": r.duration_ms,
                                 "error": r.error,
+                                "runId": r.run_id,
                             }
                             for r in j.state.run_history
                         ],
@@ -546,12 +548,20 @@ class CronService:
 
     def _arm_timer(self) -> None:
         """Schedule the next timer tick."""
-        # _on_timer runs *inside* self._timer_task and re-arms at the end, and so
-        # does anything that mutates jobs mid-turn — cron(action="remove") is
-        # reachable from a job's own agent turn. Cancelling the task we are
-        # currently running in throws CancelledError into the middle of that turn.
-        # On the normal path it only fails to do so by luck, because tick() has no
-        # further await after _on_timer returns. Never cancel ourselves.
+        # The timer task also owns the agent callback. Store edits during a
+        # callback — including a job's own agent turn, e.g. cron(action="remove")
+        # — must not cancel or duplicate-schedule while a job is still executing;
+        # _on_timer's own finally-block rearms once every active execution has
+        # finished, and this also covers calls to _arm_timer from unrelated tasks
+        # (e.g. a WebUI job edit) while a job is running.
+        if self._active_executions:
+            return
+        # _on_timer runs *inside* self._timer_task and re-arms at the end.
+        # Cancelling the task we are currently running in throws CancelledError
+        # into the middle of that turn. On the normal path it only fails to do
+        # so by luck, because tick() has no further await after _on_timer
+        # returns. Never cancel ourselves — kept as defense-in-depth alongside
+        # the _active_executions guard above.
         if self._timer_task is not None:
             # register_system_job() and friends are sync and run before the loop
             # exists, where current_task() raises RuntimeError; there is nothing
@@ -613,7 +623,16 @@ class CronService:
                 if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
             ]
 
-            for job in due_jobs:
+            for candidate in due_jobs:
+                # Earlier callbacks may delete, disable, or reschedule later jobs.
+                job = self.get_job(candidate.id)
+                if (
+                    job is None
+                    or not job.enabled
+                    or not job.state.next_run_at_ms
+                    or job.state.next_run_at_ms > _now_ms()
+                ):
+                    continue
                 await self._execute_job(job)
 
             self._save_store()
@@ -637,12 +656,13 @@ class CronService:
         """Execute a single job."""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
+        result: str | CronRunResult | None = None
 
         try:
             if self.on_job:
                 # Bounded: the timer task is the only scheduler and awaits jobs
                 # inline, so an unbounded job blocks every other job forever.
-                await asyncio.wait_for(self.on_job(job), timeout=self.job_timeout_s)
+                result = await asyncio.wait_for(self.on_job(job), timeout=self.job_timeout_s)
 
             job.state.last_status = "ok"
             job.state.last_error = None
@@ -684,6 +704,7 @@ class CronService:
             status=job.state.last_status,
             duration_ms=end_ms - start_ms,
             error=job.state.last_error,
+            run_id=result.run_id if isinstance(result, CronRunResult) else None,
         ))
         job.state.run_history = job.state.run_history[-self._MAX_RUN_HISTORY:]
 
@@ -895,6 +916,7 @@ class CronService:
 
         For ``channel`` and ``to``, pass an explicit value (including ``None``)
         to update; omit (sentinel ``...``) to leave unchanged.
+        Preserve the next occurrence unless the schedule actually changes.
         """
         store = self._require_store()
         job = next((j for j in store.jobs if j.id == job_id), None)
@@ -903,6 +925,7 @@ class CronService:
         if job.payload.kind == "system_event":
             return "protected"
 
+        schedule_changed = schedule is not None and schedule != job.schedule
         if schedule is not None:
             _validate_schedule_for_add(schedule)
             job.schedule = schedule
@@ -922,10 +945,10 @@ class CronService:
         self._enforce_agent_binding(job)
 
         job.updated_at_ms = _now_ms()
-        if job.enabled:
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
-        else:
+        if not job.enabled:
             job.state.next_run_at_ms = None
+        elif schedule_changed:
+            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
 
         if self._should_persist_store():
             self._save_store()

@@ -36,6 +36,7 @@ from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import build_help_text
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
+from nanobot.events import ContextCompactionEvent
 from nanobot.security.network import validate_url_target
 from nanobot.utils.helpers import split_message
 from nanobot.utils.logging_bridge import redirect_lib_logging
@@ -52,6 +53,8 @@ TELEGRAM_HTML_MAX_LEN = 4096
 TELEGRAM_RICH_MAX_LEN = 32768
 TELEGRAM_REPLY_CONTEXT_MAX_LEN = TELEGRAM_MAX_MESSAGE_LEN  # Max length for reply context in user message
 TELEGRAM_RICH_DRAFT_MIN_INTERVAL = 0.75  # 40 draft updates per 30 seconds per chat
+# Bound for in-flight compaction notices in case a terminal phase never arrives.
+COMPACTION_NOTICES_MAX = 64
 
 # python-telegram-bot exposes a six-parameter Application generic. Nanobot
 # doesn't customize its context/data/job-queue types, so keep that SDK boundary
@@ -463,6 +466,41 @@ class TelegramConfig(Base):
         return self
 
 
+_TELEGRAM_COMMAND_ALIASES = {
+    "/dream_log": "/dream-log",
+    "/dream_restore": "/dream-restore",
+    "/dream_prompt": "/dream-prompt",
+    "/evaluator_prompt": "/evaluator-prompt",
+}
+_TELEGRAM_DISPLAY_COMMAND_RE = re.compile(
+    r"(?<![\w/.-])/(?:dream-log|dream-restore|dream-prompt|evaluator-prompt)(?![\w/.-])"
+)
+
+
+def _telegram_command_text(text: str) -> str:
+    """Render command references for Telegram without changing fenced code or diffs."""
+    display_names = {value: key for key, value in _TELEGRAM_COMMAND_ALIASES.items()}
+    lines: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if fence is not None:
+            if stripped.startswith(fence):
+                fence = None
+        elif stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+        else:
+            line = _TELEGRAM_DISPLAY_COMMAND_RE.sub(lambda match: display_names[match[0]], line)
+            # Inline code is not tappable as a Telegram command.
+            line = re.sub(
+                r"`(/(?:dream_log|dream_restore|dream_prompt|evaluator_prompt)(?: [^`\n]*)?)`",
+                r"\1",
+                line,
+            )
+        lines.append(line)
+    return "".join(lines)
+
+
 class TelegramChannel(BaseChannel):
     """
     Telegram channel using long polling or webhook mode.
@@ -478,6 +516,7 @@ class TelegramChannel(BaseChannel):
     BOT_COMMANDS: list[BotCommand] = [
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
+        BotCommand("compact", "Compact this chat's context"),
         BotCommand("stop", "Stop the current task"),
         BotCommand("restart", "Restart the bot"),
         BotCommand("status", "Show bot status"),
@@ -491,13 +530,16 @@ class TelegramChannel(BaseChannel):
         BotCommand("dream_log", "Show the latest Dream memory change"),
         BotCommand("dream_restore", "Restore Dream memory to an earlier version"),
         BotCommand("dream_prompt", "Tell Dream how to organize memory"),
+        BotCommand("evaluator_prompt", "Customize the heartbeat evaluator prompt"),
         BotCommand("help", "Show available commands"),
     ]
 
     # Regex for slash commands routed to AgentLoop via ``_forward_command``.
-    # Hyphenated ``dream-*`` commands stay on a separate handler (below).
+    # Telegram-safe aliases are normalized before reaching the core router.
+    # Canonical hyphenated commands stay on a separate handler (below).
     TELEGRAM_BUS_SLASH_COMMAND_RE = re.compile(
-        r"^/(?:new|stop|restart|status|dream|history|goal|trigger|pairing|model|skill)(?:@\w+)?(?:\s+.*)?$"
+        r"^/(?:new|compact|stop|restart|status|dream|history|goal|trigger|pairing|model|skill"
+        r"|dream_log|dream_restore|dream_prompt|evaluator_prompt|evaluator-prompt)(?:@\w+)?(?:\s+.*)?$"
     )
 
     @classmethod
@@ -517,6 +559,7 @@ class TelegramChannel(BaseChannel):
         self._bot_user_id: int | None = None
         self._bot_username: str | None = None
         self._stream_bufs: dict[str, _StreamBuf] = {}  # chat_id -> streaming state
+        self._compaction_notices: dict[tuple[str, str], int] = {}  # (chat_id, compaction_id) -> message_id
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -553,12 +596,9 @@ class TelegramChannel(BaseChannel):
         """Map Telegram-safe command aliases back to canonical nanobot commands."""
         if not content.startswith("/"):
             return content
-        if content == "/dream_log" or content.startswith("/dream_log "):
-            return content.replace("/dream_log", "/dream-log", 1)
-        if content == "/dream_restore" or content.startswith("/dream_restore "):
-            return content.replace("/dream_restore", "/dream-restore", 1)
-        if content == "/dream_prompt" or content.startswith("/dream_prompt "):
-            return content.replace("/dream_prompt", "/dream-prompt", 1)
+        for alias, canonical in _TELEGRAM_COMMAND_ALIASES.items():
+            if content == alias or content.startswith(f"{alias} "):
+                return canonical + content[len(alias):]
         return content
 
     async def start(self) -> None:
@@ -620,6 +660,8 @@ class TelegramChannel(BaseChannel):
     async def _start_app(self) -> None:
         """Build, initialize and start the Telegram application."""
         proxy = self.config.proxy or None
+        if proxy and "://" not in proxy:
+            proxy = f"http://{proxy}"
 
         # Separate pools so long-polling (getUpdates) never starves outbound sends.
         api_request = HTTPXRequest(
@@ -656,7 +698,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(
             MessageHandler(
                 filters.Regex(
-                    r"^/(dream-log|dream_log|dream-restore|dream_restore|dream-prompt|dream_prompt)(?:@\w+)?(?:\s+.*)?$"
+                    r"^/(?:dream-log|dream-restore|dream-prompt)(?:@\w+)?(?:\s+.*)?$"
                 ),
                 self._forward_command,
             )
@@ -1055,6 +1097,14 @@ class TelegramChannel(BaseChannel):
                     allow_sending_without_reply=True
                 )
 
+        # Compaction notices collapse into one message: the started phase sends
+        # it, a terminal phase edits it in place instead of posting a new one.
+        if isinstance(msg.event, ContextCompactionEvent):
+            await self._send_compaction_notice(
+                chat_id, msg, msg.event, reply_params, thread_kwargs,
+            )
+            return
+
         # Send media files
         for media_path in (msg.media or []):
             try:
@@ -1117,6 +1167,8 @@ class TelegramChannel(BaseChannel):
             buttons = cast(list[list[str]], getattr(msg, "buttons", None) or [])
             reply_markup = self._build_keyboard(buttons) if buttons else None
             text = msg.content
+            if msg.metadata.get("render_as") == "text":
+                text = _telegram_command_text(text)
             # Fallback: no native keyboard → splice labels into the message so the choices survive.
             if buttons and reply_markup is None:
                 text = f"{text}\n\n{self._buttons_as_text(buttons)}"
@@ -1217,6 +1269,53 @@ class TelegramChannel(BaseChannel):
     @staticmethod
     def _is_not_modified_error(exc: Exception) -> bool:
         return isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower()
+
+    async def _send_compaction_notice(
+        self,
+        chat_id: int,
+        msg: OutboundMessage,
+        event: ContextCompactionEvent,
+        reply_params: ReplyParameters | None,
+        thread_kwargs: dict[str, int],
+    ) -> None:
+        """Deliver compaction status as one message that is edited in place.
+
+        The started phase posts the notice and remembers its message id; a
+        terminal phase rewrites that same message instead of posting another.
+        If the notice cannot be edited, a fresh message keeps the outcome
+        visible either way.
+        """
+        app = self._require_app()
+        key = (msg.chat_id, event.compaction_id)
+        if event.phase == "started":
+            sent = await self._call_with_retry(
+                app.bot.send_message,
+                chat_id=chat_id,
+                text=msg.content,
+                reply_parameters=reply_params,
+                **thread_kwargs,
+            )
+            while len(self._compaction_notices) >= COMPACTION_NOTICES_MAX:
+                self._compaction_notices.pop(next(iter(self._compaction_notices)))
+            self._compaction_notices[key] = sent.message_id
+            return
+
+        message_id = self._compaction_notices.pop(key, None)
+        if message_id is None or not msg.content:
+            await self._send_text(chat_id, msg.content, thread_kwargs=thread_kwargs)
+            return
+        try:
+            await self._call_with_retry(
+                app.bot.edit_message_text,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=msg.content,
+            )
+        except Exception as exc:
+            if self._is_not_modified_error(exc):
+                return
+            self.logger.warning("Compaction notice edit failed, sending anew: {}", exc)
+            await self._send_text(chat_id, msg.content, thread_kwargs=thread_kwargs)
 
     async def send_delta(
         self,
@@ -1545,7 +1644,7 @@ class TelegramChannel(BaseChannel):
         if not self.is_allowed(sender_id):
             await self._send_pairing_code_if_private(sender_id, update.message, user)
             return
-        await update.message.reply_text(build_help_text())
+        await update.message.reply_text(_telegram_command_text(build_help_text()))
 
     @staticmethod
     def _sender_id(user: User) -> str:

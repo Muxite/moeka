@@ -140,6 +140,36 @@ function installReducedMotion() {
 }
 
 describe("AgentActivityCluster", () => {
+  it("loads deferred trace details only after completed activity is expanded", async () => {
+    const onLoadTraceDetails = vi.fn();
+    render(
+      <AgentActivityCluster
+        messages={[{
+          id: "t-deferred",
+          role: "tool",
+          kind: "trace",
+          content: "exec(…)",
+          traces: ["exec(…)"],
+          traceDetail: {
+            ref: "9.tr-deadbeefdeadbeef",
+            bytes: 40_000,
+            traceCount: 1,
+          },
+          createdAt: 1,
+        }]}
+        isTurnStreaming={false}
+        hasBodyBelow={false}
+        onLoadTraceDetails={onLoadTraceDetails}
+      />,
+    );
+
+    expect(onLoadTraceDetails).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Worked/ }));
+    await waitFor(() => {
+      expect(onLoadTraceDetails).toHaveBeenCalledWith(["9.tr-deadbeefdeadbeef"]);
+    });
+  });
+
   it("shows model retries in the existing live activity header", () => {
     render(
       <AgentActivityCluster
@@ -848,7 +878,7 @@ describe("AgentActivityCluster", () => {
     }
   });
 
-  it("keeps long file edit diffs collapsed until opened", () => {
+  it("keeps long file edit diffs lazy and releases them after closing", async () => {
     localStorage.setItem(
       "nanobot-webui.settings-preferences",
       JSON.stringify({ fileEditDisplayMode: "diff" }),
@@ -917,10 +947,20 @@ describe("AgentActivityCluster", () => {
         "Show 5 more lines",
       );
 
+      const content = document.getElementById(toggle.getAttribute("aria-controls")!)!;
+      let finish!: () => void;
+      const finished = new Promise<void>((resolve) => { finish = resolve; });
+      Object.defineProperty(content, "getAnimations", { value: () => [{ finished }] });
       fireEvent.click(toggle);
-
       expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(content).toHaveAttribute("data-state", "closed");
+      expect(content).toHaveAttribute("inert");
+      expect(screen.getByTestId("file-edit-diff")).toBeInTheDocument();
+      await act(async () => { finish(); });
       expect(screen.queryByTestId("file-edit-diff")).not.toBeInTheDocument();
+      fireEvent.click(toggle);
+      expect(screen.getByText("line-160")).toBeInTheDocument();
+      expect(screen.queryByText("line-161")).not.toBeInTheDocument();
     } finally {
       localStorage.removeItem("nanobot-webui.settings-preferences");
     }

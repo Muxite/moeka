@@ -129,3 +129,4 @@ webui/.verify-*
 
 # MagicMock file pollution from tests that mock Path objects
 <MagicMock*
+.playwright-cli/

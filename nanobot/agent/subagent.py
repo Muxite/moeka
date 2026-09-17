@@ -8,7 +8,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from loguru import logger
 
@@ -107,7 +107,6 @@ class SubagentManager:
         max_concurrent_subagents: int | None = None,
         tools_allow: list[str] | None = None,
         tools_deny: list[str] | None = None,
-        llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
         inline_skills: list | None = None,
     ):
         if workspace is None:
@@ -157,7 +156,6 @@ class SubagentManager:
         self._run_slots = asyncio.Semaphore(self.max_concurrent_subagents)
         self.runner = AgentRunner()
         self._exec_session_manager = ExecSessionManager()
-        self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[str]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -426,11 +424,6 @@ class SubagentManager:
             ]
 
             sess_key = origin.get("session_key")
-            llm_timeout = (
-                self._llm_wall_timeout_for_session(sess_key)
-                if self._llm_wall_timeout_for_session
-                else None
-            )
             request_token = bind_request_context(RequestContext(
                 channel=origin["channel"],
                 chat_id=origin["chat_id"],
@@ -453,7 +446,6 @@ class SubagentManager:
                     checkpoint_callback=_on_checkpoint,
                     session_key=sess_key,
                     workspace=root,
-                    llm_timeout_s=llm_timeout,
                     llm_usage_source=origin.get(
                         "llm_usage_source",
                         current_llm_usage_source(),

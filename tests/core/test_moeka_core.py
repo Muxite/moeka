@@ -233,7 +233,7 @@ async def test_action_invoked_by_real_engine(tmp_path):
     provider.supports_progress_deltas = False
     step = {"n": 0}
 
-    async def chat_with_retry(**kwargs):
+    async def chat_stream_with_retry(**kwargs):
         step["n"] += 1
         if step["n"] == 1:
             return LLMResponse(
@@ -242,7 +242,7 @@ async def test_action_invoked_by_real_engine(tmp_path):
             )
         return LLMResponse(content="The answer is 42.", tool_calls=[], usage=None)
 
-    provider.chat_with_retry = chat_with_retry
+    provider.chat_stream_with_retry = chat_stream_with_retry
 
     core = MoekaCore.create(
         config_path=_write_config(tmp_path), workspace=tmp_path, provider=provider,

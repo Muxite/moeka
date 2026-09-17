@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import os
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,6 +29,7 @@ from nanobot.agent.context_governance import (
 )
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
+from nanobot.agent.tools.file_state import file_read_context
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.events import NO_EVENTS, EventSink
 from nanobot.llm_usage.context import (
@@ -144,7 +146,6 @@ class AgentRunSpec:
     consolidate_provider_compaction: ProviderCompactionConsolidator | None = None
     injection_callback: InjectionCallback | None = None
     terminal_injection_callback: InjectionCallback | None = None
-    llm_timeout_s: float | None = None
     limits: RunnerLimits = field(default_factory=RunnerLimits)
     continuation_callback: ContinuationCallback | None = None
     finalize_on_max_iterations: bool = True
@@ -573,6 +574,8 @@ class AgentRunner:
                     workspace_violation_counts,
                     hook,
                     context,
+                    model_messages=messages_for_model,
+                    compacted_tool_results=request_state.compacted_tool_results,
                 )
                 tool_events.extend(new_events)
                 tools_used.extend(
@@ -981,7 +984,6 @@ class AgentRunner:
         malformed_retry: bool = False,
         transcript: list[dict[str, Any]] | None,
     ) -> tuple[LLMResponse, LLMUsage]:
-        timeout_s = self._resolve_llm_timeout_s(spec)
         tool_definitions = spec.tools.get_definitions()
         messages, provider_context = await self.context_governor.prepare_request(
             request_state,
@@ -1100,44 +1102,19 @@ class AgentRunner:
                 on_stream_recover=_stream_recover,
             )
         else:
-            coro = spec.runtime.provider.chat_with_retry(
+            coro = spec.runtime.provider.chat_stream_with_retry(
                 **kwargs,
                 provider_context=provider_context,
             )
 
-        # Streaming requests also have provider-level idle timeouts
-        # (NANOBOT_STREAM_IDLE_TIMEOUT_S), but a stream that keeps producing
-        # very slow deltas can still run forever. Use a more generous wall-clock
-        # timeout for streaming while preserving NANOBOT_LLM_TIMEOUT_S=0 as an
-        # opt-out for all LLM wall-clock timeouts.
-        outer_timeout_s = (
-            max(300.0, timeout_s * 2)
-            if wants_streaming and timeout_s is not None
-            else timeout_s
-        )
+        # Providers bound the wait for each stream event, including reasoning and tool deltas.
         request_started_at = time.perf_counter()
         try:
-            response = (
-                await coro if outer_timeout_s is None
-                else await asyncio.wait_for(coro, timeout=outer_timeout_s)
-            )
+            response = await coro
         except asyncio.CancelledError:
             _pause_generation()
             await _close_native_reasoning()
             raise
-        except asyncio.TimeoutError:
-            if outer_timeout_s is None:
-                response = LLMResponse(
-                    content="Error calling LLM: stream stalled",
-                    finish_reason="error",
-                    error_kind="timeout",
-                )
-            else:
-                response = LLMResponse(
-                    content=f"Error calling LLM: timed out after {outer_timeout_s:g}s",
-                    finish_reason="error",
-                    error_kind="timeout",
-                )
         _pause_generation()
         await _close_native_reasoning()
         if first_output_at is not None:
@@ -1370,23 +1347,10 @@ class AgentRunner:
             messages,
             tools=None,
         )
-        coro = spec.runtime.provider.chat_with_retry(
+        response = await spec.runtime.provider.chat_stream_with_retry(
             **kwargs,
             provider_context=provider_context,
         )
-        timeout_s = self._resolve_llm_timeout_s(spec)
-        try:
-            response = (
-                await coro
-                if timeout_s is None
-                else await asyncio.wait_for(coro, timeout=timeout_s)
-            )
-        except asyncio.TimeoutError:
-            response = LLMResponse(
-                content=f"Error calling LLM: timed out after {timeout_s:g}s",
-                finish_reason="error",
-                error_kind="timeout",
-            )
         await self.context_governor.summarize_provider_compaction(
             request_state,
             response,
@@ -1394,21 +1358,6 @@ class AgentRunner:
         )
         request_state.provider_compaction_applied |= response.provider_compaction_applied
         return response
-
-    @staticmethod
-    def _resolve_llm_timeout_s(spec: AgentRunSpec) -> float | None:
-        """Resolve the wall-clock limit shared by every model request path."""
-        timeout_s = spec.llm_timeout_s
-        if timeout_s is None:
-            # Default to a finite timeout to avoid per-session lock starvation when an LLM
-            # request hangs indefinitely (e.g. gateway/network stall).
-            # Set NANOBOT_LLM_TIMEOUT_S=0 to disable.
-            raw = os.environ.get("NANOBOT_LLM_TIMEOUT_S", "300").strip()
-            try:
-                timeout_s = float(raw)
-            except (TypeError, ValueError):
-                timeout_s = 300.0
-        return timeout_s if timeout_s > 0 else None
 
     @staticmethod
     def _budget_exhausted_finalization_messages(
@@ -1514,9 +1463,24 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int],
         hook: AgentHook | None = None,
         context: AgentHookContext | None = None,
+        model_messages: list[dict[str, Any]] | None = None,
+        compacted_tool_results: set[str] | None = None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
+
+        @cache
+        def read_results() -> dict[str, str]:
+            """Index once, on the first read-dedup check in this batch."""
+            return {
+                message["tool_call_id"]: message["content"]
+                for message in model_messages or []
+                if message.get("role") == "tool"
+                and isinstance(message.get("tool_call_id"), str)
+                and isinstance(message.get("content"), str)
+                and message["tool_call_id"] not in (compacted_tool_results or ())
+            }
+
         batches = self._partition_tool_batches(spec, tool_calls)
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
         for batch in batches:
@@ -1529,6 +1493,7 @@ class AgentRunner:
                         workspace_violation_counts,
                         hook,
                         context,
+                        read_results,
                     )
                     for tool_call in batch
                 ))
@@ -1543,6 +1508,7 @@ class AgentRunner:
                         workspace_violation_counts,
                         hook,
                         context,
+                        read_results,
                     )
                     tool_results.append(result)
                     batch_results.append(result)
@@ -1569,6 +1535,7 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int],
         hook: AgentHook | None = None,
         context: AgentHookContext | None = None,
+        read_results: Callable[[], dict[str, str]] | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
@@ -1614,10 +1581,15 @@ class AgentRunner:
             return prep_error + hint, event, None
         await hook.before_execute_tool(context, tool_call, tool, params)
         try:
-            if tool is not None:
-                result = await tool.execute(**params)
-            else:
-                result = await spec.tools.execute(tool_call.name, params)
+            with (
+                file_read_context(tool_call.id, read_results)
+                if tool_call.name == "read_file" and read_results is not None
+                else nullcontext()
+            ):
+                if tool is not None:
+                    result = await tool.execute(**params)
+                else:
+                    result = await spec.tools.execute(tool_call.name, params)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

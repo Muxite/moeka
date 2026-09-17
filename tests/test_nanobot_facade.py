@@ -335,7 +335,7 @@ async def test_run_exposes_attributes_to_context_provider_without_persisting_the
     from nanobot.providers.base import LLMResponse
 
     provider = _fake_provider("test-model")
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
         content="done",
         tool_calls=[],
     ))
@@ -382,7 +382,7 @@ async def test_persisted_turn_callback_is_best_effort_and_reads_display_safe_ses
     from nanobot.providers.base import LLMResponse
 
     provider = _fake_provider("test-model")
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
         content="saved reply",
         tool_calls=[],
     ))
@@ -478,7 +478,7 @@ async def test_ephemeral_run_does_not_invoke_persisted_turn_callback(tmp_path):
     from nanobot.providers.base import LLMResponse
 
     provider = _fake_provider("test-model")
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
         content="temporary",
         tool_calls=[],
     ))
@@ -673,7 +673,7 @@ async def test_run_ephemeral_still_captures_runner_observability(tmp_path):
 
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
         content="done",
         tool_calls=[],
         usage=LLMUsage.reported(input_tokens=3, output_tokens=0),
