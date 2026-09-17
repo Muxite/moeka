@@ -301,10 +301,25 @@ class SqliteSessionStore:
         (``<workspace>/sessions``, the pre-SQLite-migration layout) is
         scanned — never the global legacy dir: a scoped/ephemeral workspace
         must not consume another install's session files into its
-        throwaway db. Runs before JsonlSessionStore's own migration claims
-        the same files (SessionManager constructs this store as a
-        constructor argument, so it runs first), so nothing is double
-        imported.
+        throwaway db.
+
+        Ordering matters: ``SessionManager.__init__`` (upstream, frozen —
+        see ``nanobot/session/manager.py``'s module-level note) *always*
+        builds its own internal ``JsonlSessionStore``, whose own migration
+        (``JsonlSessionStore._migrate_from_workspace``) globs the exact same
+        ``<workspace>/sessions/*.jsonl`` files and deletes each source after
+        copying it elsewhere. If that ran first, this method would find
+        nothing — not a double import (impossible), a silent *drop*. This is
+        safe only because this store is always fully constructed (import
+        included) *before* ``SessionManager`` exists. That ordering is not
+        implicit or accidental: ``build_default_session_manager`` below is
+        the one call path production code uses, and it constructs the store
+        and calls ``SessionManager`` as two separate, explicit statements in
+        that order, specifically so the dependency doesn't rely on a reader
+        noticing that a keyword argument gets evaluated before the function
+        body it's passed into. See
+        ``tests/agent/test_session_atomic.py::TestLegacyJsonlImport::test_jsonl_survives_via_build_default_session_manager``
+        for the regression test.
         """
         legacy_dir = self.workspace / "sessions"
         if not legacy_dir.is_dir():
@@ -732,9 +747,23 @@ def _is_sqlite_db_in_use(db_path: Path) -> bool:
     than blocking) if another connection already holds the write lock —
     which is exactly the condition that made the 2026-09-17 incident live
     rather than theoretical: a running ``moeka.service`` process had this
-    exact file open. Not perfect (a reader-only connection wouldn't block
-    this), but a positive result here is a hard "no", and that is the
-    side we need to fail safe on.
+    exact file open. Not perfect, and the gap is not academic:
+
+    - A reader-only connection wouldn't block this at all.
+    - **An idle connection that simply has the file open — with no write
+      transaction in flight — does not hold SQLite's write lock either, so
+      this check reports "not in use" even though a process is sitting
+      right there.** This is exactly ``moeka.service``'s normal state
+      between turns: connected, WAL mode, no active write. Migrating in
+      that window can still corrupt the database (e.g. a turn starting
+      mid-migration) even though this function said it was safe.
+
+    A positive result here (locked right now) is a hard, reliable "no" —
+    that's the side worth failing safe on. A negative result is **not**
+    proof the database is safe to move; it only means nothing was actively
+    writing at the exact instant this check ran. The only reliable
+    precondition is stopping the process first — see
+    ``.agent/deploy-runbook.md``, which this check cannot substitute for.
     """
     if not db_path.exists():
         return False
@@ -779,7 +808,8 @@ def migrate_session_database(
     *,
     force: bool = False,
 ) -> SessionDbMigrationPlan:
-    """Actually move a ``sessions.db`` (+ ``-wal``/``-shm``) triplet.
+    """Copy a ``sessions.db`` (+ ``-wal``/``-shm``) triplet, verify, then
+    delete the source.
 
     This is the only code path in moeka that moves a session database out
     from under a workspace -- startup (``SqliteSessionStore.__init__``)
@@ -791,14 +821,27 @@ def migrate_session_database(
       - there is nothing to move at *source*;
       - *destination* already exists (never silently overwrites/merges);
       - *source* is currently held open by another writer (detected via
-        ``_is_sqlite_db_in_use``) -- unless *force* is set.
+        ``_is_sqlite_db_in_use``) -- unless *force* is set. That check is
+        best-effort and cannot see an *idle* open connection (see that
+        function's docstring) -- stopping the process is still required.
 
-    Sequence: move the triplet with ``shutil.move`` (same-filesystem
-    rename where possible, so this only spends real I/O time crossing
-    filesystems), then run ``PRAGMA integrity_check`` against the
-    *destination*. If that check fails, the already-moved files are moved
-    back to *source* before raising, so a bad migration doesn't leave data
-    stranded in a half-verified state.
+    Sequence, deliberately **copy-then-delete, not move-then-verify-then-
+    move-back**: copy the triplet (``shutil.copy2``) to *destination*, run
+    ``PRAGMA integrity_check`` against the copy, and only *then* delete the
+    *source* files. The original design moved the files first and rolled
+    the move back on a failed check -- which meant that for the entire
+    window between the move and the check (and the window it takes the
+    rollback's own move to complete), no complete, verified copy of the
+    data existed *anywhere*: a crash in either window could lose data
+    outright, not just leave it in the "wrong" location. Copy-then-delete
+    keeps the original in place, completely untouched, until an independent
+    copy at the destination is verified good. Any failure to clean up
+    (a partial copy after a failed copy, a leftover unverified copy after a
+    failed integrity check, or the source file after a successful,
+    verified migration) is logged loudly via ``logger.error`` rather than
+    swallowed by ``with suppress(OSError)`` -- a silent rollback failure is
+    exactly the kind of "wait, where did my history go" surprise this
+    command exists to prevent, not cause.
     """
     plan = plan_session_database_migration(source, destination)
     if not plan.files:
@@ -813,22 +856,36 @@ def migrate_session_database(
             "lock could not be acquired). Stop that process first, or pass "
             "--force to override (only if you are certain nothing holds it "
             "open -- moving a database out from under a live writer can "
-            "corrupt it)."
+            "corrupt it). Note this check cannot detect an *idle* open "
+            "connection (no active write) -- exactly moeka.service's normal "
+            "state between turns -- so passing this check is not proof the "
+            "service is safe to migrate around; stop it first regardless."
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    moved: list[tuple[Path, Path]] = []
+    triplet = _sqlite_triplet(plan.source)
+    copied: list[tuple[Path, Path]] = []
+
+    def _cleanup_destination_copies(*, reason: str) -> None:
+        for _src_path, dst_path in copied:
+            try:
+                dst_path.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                logger.error(
+                    "{}: failed to clean up the unverified copy at {}: {}. "
+                    "The original at {} was never touched and remains the "
+                    "source of truth -- remove the stray copy manually.",
+                    reason, dst_path, cleanup_exc, plan.source,
+                )
+
     try:
-        for label, src_path in _sqlite_triplet(plan.source):
+        for label, src_path in triplet:
             suffix = "" if label == "db" else f"-{label}"
             dst_path = destination.with_name(destination.name + suffix)
-            shutil.move(str(src_path), str(dst_path))
-            moved.append((src_path, dst_path))
+            shutil.copy2(str(src_path), str(dst_path))
+            copied.append((src_path, dst_path))
     except OSError as exc:
-        # Best-effort rollback of whatever partial move happened.
-        for src_path, dst_path in reversed(moved):
-            with suppress(OSError):
-                shutil.move(str(dst_path), str(src_path))
-        raise SessionDbMigrationError(f"failed to move session database: {exc}") from exc
+        _cleanup_destination_copies(reason="failed to copy session database")
+        raise SessionDbMigrationError(f"failed to copy session database: {exc}") from exc
 
     conn = sqlite3.connect(str(destination))
     try:
@@ -843,13 +900,23 @@ def migrate_session_database(
         conn.close()
 
     if not ok:
-        for src_path, dst_path in reversed(moved):
-            with suppress(OSError):
-                shutil.move(str(dst_path), str(src_path))
+        _cleanup_destination_copies(reason="integrity check failed")
         raise SessionDbMigrationError(
             f"integrity check failed on {destination} ({integrity_error}); "
-            "moved files were rolled back to their original location"
+            f"the original at {plan.source} was never touched"
         )
+
+    for src_path, _dst_path in copied:
+        try:
+            src_path.unlink()
+        except OSError as exc:
+            logger.error(
+                "Session database verified and copied to {}, but removing "
+                "the now-redundant source file {} failed: {}. The migration "
+                "is otherwise complete and safe -- remove that file "
+                "manually once you've confirmed the new location is in use.",
+                destination, src_path, exc,
+            )
     return plan
 
 
@@ -920,7 +987,10 @@ def build_default_session_manager(
 
     Guarantees the injected store and the ``SessionManager`` wrapper around
     it are always handed the *same* resolved ``sessions_root`` — see
-    ``_resolve_workspace_and_sessions_root``.
+    ``_resolve_workspace_and_sessions_root``. Also guarantees construction
+    order: the store (and its one-time legacy-jsonl import) is fully built
+    *before* ``SessionManager`` — see ``SqliteSessionStore._import_legacy_jsonl``'s
+    docstring for why that order matters.
 
     Imports ``SessionManager`` locally (rather than at module load time) so
     this stays consistent with the test suite's existing

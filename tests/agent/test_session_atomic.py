@@ -262,6 +262,43 @@ class TestLegacyJsonlImport:
         assert not path.exists()
         assert path.with_suffix(".jsonl.imported").exists()
 
+    def test_jsonl_survives_via_build_default_session_manager(self, tmp_path: Path):
+        """Regression test for the ordering dependency ``sqlite_store.py``'s
+        ``_import_legacy_jsonl`` docstring flags: ``SessionManager.__init__``
+        (upstream, frozen) unconditionally builds its own internal
+        ``JsonlSessionStore``, whose own migration (``manager.py``'s
+        ``_migrate_from_workspace``) globs the *same* ``<workspace>/sessions/*.jsonl``
+        files and *deletes* each source after copying it into its own,
+        separate jsonl-backed directory. If that ran before
+        ``SqliteSessionStore``'s import, the files would already be gone by
+        the time this store looked for them -- a silent *drop* into storage
+        the SQLite-backed agent never reads from again (double-import is not
+        possible; the failure mode is loss). Safe today only because every
+        production call site constructs the ``SqliteSessionStore`` (and lets
+        its constructor run the import) before constructing ``SessionManager``.
+        ``build_default_session_manager`` is the one call path production code
+        actually uses (``nanobot/agent/loop.py``, ``nanobot/cli/commands.py``,
+        ``nanobot/cli/gateway_runtime.py``) -- this pins that it keeps doing
+        the import first.
+        """
+        from nanobot.session.sqlite_store import build_default_session_manager
+
+        path = self._write_jsonl(tmp_path, "telegram:99", [
+            json.dumps({"_type": "metadata", "key": "telegram:99",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-02T00:00:00",
+                        "metadata": {"title": "via factory"},
+                        "last_consolidated": 0}),
+            json.dumps({"role": "user", "content": "from jsonl via factory"}),
+        ])
+        sessions_root = tmp_path.parent / f"{tmp_path.name}-sessions"
+        mgr = build_default_session_manager(tmp_path, sessions_root=sessions_root)
+        loaded = mgr.get_or_create("telegram:99")
+        assert loaded.messages[0]["content"] == "from jsonl via factory"
+        assert loaded.metadata["title"] == "via factory"
+        assert not path.exists()
+        assert path.with_suffix(".jsonl.imported").exists()
+
     def test_corrupt_lines_skipped_on_import(self, tmp_path: Path):
         self._write_jsonl(tmp_path, "test:trunc", [
             json.dumps({"_type": "metadata", "key": "test:trunc",

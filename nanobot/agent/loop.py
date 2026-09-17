@@ -411,10 +411,18 @@ class AgentLoop:
             self.sessions = session_manager
         else:
             _sessions_root = default_sessions_root(workspace)
+            # Two explicit statements, in this order, deliberately: the store
+            # must be fully constructed -- including its one-time legacy
+            # jsonl import -- before SessionManager exists, or its own
+            # internal JsonlSessionStore (built unconditionally, upstream,
+            # frozen) would consume-and-delete the same files first. See
+            # SqliteSessionStore._import_legacy_jsonl's docstring in
+            # nanobot/session/sqlite_store.py.
+            _default_store = SqliteSessionStore(workspace, sessions_root=_sessions_root)
             self.sessions = SessionManager(
                 workspace,
                 sessions_root=_sessions_root,
-                store=SqliteSessionStore(workspace, sessions_root=_sessions_root),
+                store=_default_store,
             )
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
@@ -521,10 +529,13 @@ class AgentLoop:
         defaults = config.agents.defaults
         if "session_manager" not in extra:
             sessions_root = default_sessions_root(config.workspace_path)
+            # See the matching comment in __init__ above: store built first,
+            # as an explicit separate statement, then SessionManager.
+            _default_store = SqliteSessionStore(config.workspace_path, sessions_root=sessions_root)
             extra["session_manager"] = SessionManager(
                 config.workspace_path,
                 sessions_root=sessions_root,
-                store=SqliteSessionStore(config.workspace_path, sessions_root=sessions_root),
+                store=_default_store,
             )
         provider = extra.pop("provider", None) or make_provider(config)
         resolved = config.resolve_preset()

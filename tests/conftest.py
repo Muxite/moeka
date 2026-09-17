@@ -115,19 +115,28 @@ def _guard_live_workspace():
     existing sessions.db) -- a test leaking onto the real workspace can
     move the user's live session data. Hermetic tests must use tmp_path.
 
-    Belt-and-suspenders with the root conftest.py's $HOME redirect + mkdir
-    guard (which is the authoritative, always-on mechanism): this fixture
-    guards the specific constructors directly, in case some future
-    refactor adds another one that doesn't go through Path.home() /
-    Path.mkdir at all. See .agent/upstream-sync-notes.md's 2026-09-17
-    incident writeup for why both layers exist.
+    Belt-and-suspenders with the root conftest.py's $HOME redirect + mkdir/
+    rename/move/sqlite3.connect guards (which are the authoritative,
+    always-on mechanism): this fixture guards the specific constructors
+    directly, in case some future refactor adds another one that doesn't go
+    through any of those operations at all. See
+    .agent/upstream-sync-notes.md's 2026-09-17 incident writeup, and its
+    review-fixes follow-up, for why both layers exist.
     """
     from pathlib import Path
 
     from nanobot.session import manager as _manager
     from nanobot.session import sqlite_store as _sqlite_store
+    from tests._home_guard import REAL_NANOBOT_HOME
 
-    live = (Path.home() / ".nanobot").resolve()
+    # Computed from the real $HOME captured before pytest's root conftest.py
+    # redirects it (see tests/_home_guard.py's docstring) -- NOT
+    # Path.home() here, which by the time this fixture runs has already
+    # been redirected to an ephemeral test-session directory. Recomputing
+    # from Path.home() at fixture time was exactly the bug the 2026-09-17
+    # review caught: this guard could never fire because it was comparing
+    # against the fake home, not the real one.
+    live = REAL_NANOBOT_HOME
     orig_session_manager_init = _manager.SessionManager.__init__
     orig_jsonl_store_init = _manager.JsonlSessionStore.__init__
     orig_sqlite_store_init = _sqlite_store.SqliteSessionStore.__init__

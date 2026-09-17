@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import sqlite3
 import ssl
 import sys
 import tempfile
@@ -12,6 +14,8 @@ from pathlib import Path
 import certifi
 import pytest
 from loguru import logger
+
+from tests._home_guard import path_is_guarded
 
 # --- Real-$HOME isolation --------------------------------------------------
 #
@@ -33,54 +37,84 @@ from loguru import logger
 #      path via a route that doesn't go through Path.home() (e.g. a cached
 #      value, or get_state_home()'s MOEKA_WORKSPACE/NANOBOT_HOME env
 #      overrides, which this fixture also clears).
-_REAL_HOME = Path(os.environ.get("HOME") or os.path.expanduser("~")).resolve()
-# Guard specific nanobot/moeka state locations under the real $HOME, not the
-# whole home directory -- the project checkout, .cache, .pytest_cache, etc.
-# all legitimately live under $HOME too and must stay writable.
-_REAL_NANOBOT_HOME = _REAL_HOME / ".nanobot"
-_GUARDED_REAL_PATHS = (
-    _REAL_NANOBOT_HOME,
-    _REAL_HOME / f"{_REAL_NANOBOT_HOME.name}-sessions",  # default_sessions_root()'s sibling
-)
+#   3. shutil.move / os.rename / os.replace / sqlite3.connect are wrapped
+#      too (2026-09-17 review): the mkdir guard only ever caught directory
+#      *creation*. The incident itself was a file move -- shutil.move'ing
+#      an existing sessions.db out of an already-existing real ~/.nanobot --
+#      which never calls mkdir at all and was never actually intercepted by
+#      this guard. sqlite3.connect is guarded too since SQLite creates the
+#      database file itself on first connect, another path that touches the
+#      real home without ever calling mkdir.
+#
+# The real-home constants these checks compare against live in
+# tests/_home_guard.py, not here: they must be computed once, before the
+# $HOME redirect below runs, and tests/conftest.py's own guard needs the
+# same values -- see that module's docstring for why a shared module (not a
+# recompute-from-Path.home() in each file) is what makes both guards agree.
 
 
-def _install_real_home_mkdir_guard() -> None:
+def _reject_if_under_real_home(path: object, *, op: str) -> None:
+    guarded = path_is_guarded(path)
+    if guarded is not None:
+        raise AssertionError(
+            f"TEST LEAK: attempted to {op} under the real nanobot/moeka "
+            f"state home ({guarded}): {path!r}. Tests must not resolve "
+            f"paths under the real home -- use tmp_path (or pass an "
+            f"explicit workspace/sessions_root) instead."
+        )
+
+
+def _install_real_home_guards() -> None:
     import pathlib
 
     original_path_mkdir = pathlib.Path.mkdir
     original_os_makedirs = os.makedirs
     original_os_mkdir = os.mkdir
-
-    def _reject_if_under_real_home(path: object) -> None:
-        try:
-            resolved = Path(os.fspath(path)).expanduser().resolve(strict=False)
-        except (TypeError, ValueError, OSError):
-            return
-        for guarded in _GUARDED_REAL_PATHS:
-            if resolved == guarded or resolved.is_relative_to(guarded):
-                raise AssertionError(
-                    f"TEST LEAK: attempted to create a directory under the "
-                    f"real nanobot/moeka state home ({guarded}): {resolved}. "
-                    f"Tests must not resolve paths under the real home -- "
-                    f"use tmp_path (or pass an explicit "
-                    f"workspace/sessions_root) instead."
-                )
+    original_shutil_move = shutil.move
+    original_os_rename = os.rename
+    original_os_replace = os.replace
+    original_sqlite_connect = sqlite3.connect
 
     def guarded_path_mkdir(self: pathlib.Path, *args: object, **kwargs: object) -> object:
-        _reject_if_under_real_home(self)
+        _reject_if_under_real_home(self, op="create a directory")
         return original_path_mkdir(self, *args, **kwargs)
 
     def guarded_os_makedirs(name: object, *args: object, **kwargs: object) -> object:
-        _reject_if_under_real_home(name)
+        _reject_if_under_real_home(name, op="create a directory")
         return original_os_makedirs(name, *args, **kwargs)
 
     def guarded_os_mkdir(path: object, *args: object, **kwargs: object) -> object:
-        _reject_if_under_real_home(path)
+        _reject_if_under_real_home(path, op="create a directory")
         return original_os_mkdir(path, *args, **kwargs)
+
+    def guarded_shutil_move(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        _reject_if_under_real_home(src, op="move a file/directory from")
+        _reject_if_under_real_home(dst, op="move a file/directory to")
+        return original_shutil_move(src, dst, *args, **kwargs)
+
+    def guarded_os_rename(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        _reject_if_under_real_home(src, op="rename from")
+        _reject_if_under_real_home(dst, op="rename to")
+        return original_os_rename(src, dst, *args, **kwargs)
+
+    def guarded_os_replace(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        _reject_if_under_real_home(src, op="replace from")
+        _reject_if_under_real_home(dst, op="replace to")
+        return original_os_replace(src, dst, *args, **kwargs)
+
+    def guarded_sqlite_connect(database: object, *args: object, **kwargs: object) -> object:
+        # database may be a str/Path/os.PathLike, or ":memory:"/a URI --
+        # path_is_guarded() already tolerates anything Path() can't parse.
+        _reject_if_under_real_home(database, op="open a sqlite3 connection to")
+        return original_sqlite_connect(database, *args, **kwargs)
 
     pathlib.Path.mkdir = guarded_path_mkdir  # type: ignore[method-assign]
     os.makedirs = guarded_os_makedirs
     os.mkdir = guarded_os_mkdir
+    shutil.move = guarded_shutil_move
+    os.rename = guarded_os_rename
+    os.replace = guarded_os_replace
+    sqlite3.connect = guarded_sqlite_connect  # type: ignore[assignment]
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -98,7 +132,7 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ.pop("MOEKA_WORKSPACE", None)
     os.environ.pop("MOEKA_STATE", None)
     os.environ.pop("NANOBOT_HOME", None)
-    _install_real_home_mkdir_guard()
+    _install_real_home_guards()
 
 
 @pytest.fixture(autouse=True)
