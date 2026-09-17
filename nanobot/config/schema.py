@@ -149,7 +149,7 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     fallback_models: list[FallbackCandidate] = Field(default_factory=list)
     max_tool_iterations: int = 200
-    max_concurrent_subagents: int = Field(default=1, ge=1)
+    max_concurrent_subagents: int = Field(default=4, ge=1)
     max_tool_result_chars: int = 16_000
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     tool_hint_max_length: int = Field(
@@ -176,13 +176,6 @@ class AgentDefaults(Base):
         default=60,
         ge=0,
     )  # Minimum interval in seconds between scans for idle sessions
-    consolidation_ratio: float = Field(
-        default=0.5,
-        ge=0.1,
-        le=0.95,
-        validation_alias=AliasChoices("consolidationRatio"),
-        serialization_alias="consolidationRatio",
-    )  # Consolidation target ratio (0.5 = 50% of budget retained after compression)
     dream: DreamConfig = Field(default_factory=DreamConfig)
     vec: VecConfig = Field(default_factory=lambda: VecConfig())
     tools_allow: list[str] | None = None  # None = all tools; [] = no tools
@@ -404,7 +397,6 @@ class HeartbeatConfig(Base):
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
-    keep_recent_messages: int = 8
 
 
 class ApiConfig(Base):

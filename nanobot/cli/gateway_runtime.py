@@ -23,6 +23,7 @@ from nanobot.cli.webui_support import (
     _gateway_health_bind_note,
     _gateway_health_url,
     _host_for_local_browser,
+    _launch_browser,
     _prepare_webui_bundle_for_gateway,
     _print_foreground_port_conflict,
     _tcp_endpoint_reachable,
@@ -244,6 +245,44 @@ def _print_gateway_health_endpoint(host: str, port: int) -> None:
         "and may be reachable from other devices. "
         f"Keep port {port} private or protect it with a firewall or reverse proxy.[/yellow]"
     )
+
+
+def _gateway_readiness_payload(channels: Any) -> tuple[bool, dict[str, object]]:
+    """Describe process liveness separately from required WebSocket readiness."""
+    channel_status: dict[str, Any] = {}
+    get_status = getattr(channels, "get_status", None)
+    if callable(get_status):
+        try:
+            raw_status = get_status()
+            if isinstance(raw_status, dict):
+                channel_status = cast(dict[str, Any], raw_status)
+        except Exception:
+            logger.exception("Gateway readiness could not read channel status")
+
+    websocket = channel_status.get("websocket")
+    websocket_required = websocket is not None or "websocket" in getattr(
+        channels,
+        "enabled_channels",
+        (),
+    )
+    if not websocket_required:
+        websocket_state = "disabled"
+        ready = True
+    elif isinstance(websocket, dict):
+        websocket_status = cast(dict[str, Any], websocket)
+        ready = websocket_status.get("running") is True
+        state = websocket_status.get("state")
+        websocket_state = str(state) if isinstance(state, str) else "unavailable"
+    else:
+        ready = False
+        websocket_state = "unavailable"
+
+    return ready, {
+        "status": "ok" if ready else "degraded",
+        "process": "alive",
+        "ready": ready,
+        "websocket": websocket_state,
+    }
 
 
 async def _close_gateway_runtime(
@@ -624,11 +663,6 @@ def _run_gateway(
                 if isinstance(message_tool, MessageTool) and suppress_token is not None:
                     message_tool.reset_suppress_delivery(suppress_token)
 
-            # Keep a small tail of heartbeat history so the loop stays bounded.
-            session = agent.sessions.get_or_create("heartbeat")
-            session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
-            agent.sessions.save(session)
-
             if not resp or not resp.content:
                 return
 
@@ -759,8 +793,9 @@ def _run_gateway(
                         method, path = parts[0], parts[1]
 
                     if method == "GET" and path == "/health":
-                        body = _json.dumps({"status": "ok"})
-                        status = "200 OK"
+                        ready, payload = _gateway_readiness_payload(channels)
+                        body = _json.dumps(payload)
+                        status = "200 OK" if ready else "503 Service Unavailable"
                         content_type = "application/json"
                     else:
                         body = "Not Found"
@@ -826,7 +861,6 @@ def _run_gateway(
         """Wait for the gateway to bind, then point the user's browser at the webui."""
         if not open_browser_url:
             return
-        import webbrowser
         from urllib.parse import urlparse
 
         # Channels start asynchronously. When the caller supplies a backend
@@ -858,8 +892,10 @@ def _run_gateway(
                 await asyncio.sleep(0.1)
         display_url = _webui_display_url(open_browser_url)
         try:
-            webbrowser.open(open_browser_url)
-            console.print(f"[green]✓[/green] Opened browser at {display_url}")
+            if _launch_browser(open_browser_url):
+                console.print(f"[green]✓[/green] Opened browser at {display_url}")
+            else:
+                console.print(f"[yellow]Could not open browser; visit {display_url}[/yellow]")
         except Exception as e:
             console.print(f"[yellow]Could not open browser ({e}); visit {display_url}[/yellow]")
 
@@ -1004,4 +1040,6 @@ def _run_gateway(
                 restore_shutdown_handlers()
 
     with gateway_runtime.foreground_instance(gateway_start_options):
+        if health_server_enabled:
+            gateway_runtime.publish_health_host(config.gateway.host)
         asyncio.run(run())

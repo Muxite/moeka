@@ -63,6 +63,7 @@ def _response(content="", tool_calls=(), reasoning_content=None,
         preserve_provider_state_on_error=None,
         generation_ms=None,
         ttft_ms=None,
+        provider_compaction_applied=False,
     )
 
 
@@ -185,26 +186,31 @@ def planning_loop(tmp_path):
 
 
 async def test_maybe_plan_appends_planning_note(planning_loop):
+    from nanobot.agent.context import TranscriptInput
+
     loop, provider = planning_loop
-    messages = [{"role": "user", "content": "x" * 120}]
-    await loop._maybe_plan(messages)
-    assert len(messages) == 2
-    assert messages[1]["role"] == "user"
-    assert "Planning note" in messages[1]["content"]
-    assert "step one" in messages[1]["content"]
+    transcript_input = TranscriptInput(history=[], current_message="x" * 120)
+    await loop._maybe_plan(transcript_input)
+    assert len(transcript_input.history) == 1
+    assert transcript_input.history[0]["role"] == "user"
+    assert "Planning note" in transcript_input.history[0]["content"]
+    assert "step one" in transcript_input.history[0]["content"]
     # The planning call saw the user request, not the whole conversation.
     assert provider.calls[0][0]["role"] == "system"
 
 
 async def test_maybe_plan_skips_trivial_messages(planning_loop):
+    from nanobot.agent.context import TranscriptInput
+
     loop, provider = planning_loop
-    messages = [{"role": "user", "content": "hi"}]
-    await loop._maybe_plan(messages)
-    assert len(messages) == 1
+    transcript_input = TranscriptInput(history=[], current_message="hi")
+    await loop._maybe_plan(transcript_input)
+    assert len(transcript_input.history) == 0
     assert provider.calls == []
 
 
 async def test_maybe_plan_survives_provider_failure(tmp_path):
+    from nanobot.agent.context import TranscriptInput
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
 
@@ -219,6 +225,6 @@ async def test_maybe_plan_survives_provider_failure(tmp_path):
         bus=MessageBus(), provider=provider, workspace=tmp_path,
         model="test/model", planning=True,
     )
-    messages = [{"role": "user", "content": "y" * 200}]
-    await loop._maybe_plan(messages)  # must not raise
-    assert len(messages) == 1
+    transcript_input = TranscriptInput(history=[], current_message="y" * 200)
+    await loop._maybe_plan(transcript_input)  # must not raise
+    assert len(transcript_input.history) == 0

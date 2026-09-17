@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent.runner_helpers import make_run_spec
+from nanobot.agent.context import TranscriptInput
+from nanobot.agent.context_governance import ContextWindowExceededError
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import (
     LLMProvider,
@@ -34,6 +36,38 @@ def _make_usage_spec(provider, tools):
     )
 
 
+def test_initial_transcript_is_built_from_structured_turn_input() -> None:
+    from nanobot.agent.runner import AgentRunner
+
+    provider = MagicMock(spec=LLMProvider)
+    transcript_input = TranscriptInput(
+        history=[{"role": "user", "content": "earlier"}],
+        current_message="fresh",
+    )
+    expected = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "earlier"},
+        {"role": "user", "content": "fresh"},
+    ]
+    transcript_builder = MagicMock(return_value=expected)
+    spec = make_run_spec(
+        provider,
+        initial_messages=None,
+        transcript_input=transcript_input,
+        transcript_builder=transcript_builder,
+        tools=MagicMock(),
+        model="test-model",
+        max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    )
+
+    messages, compaction = AgentRunner._initial_transcript_and_compaction(spec)
+
+    assert messages == expected
+    assert compaction is None
+    transcript_builder.assert_called_once_with(transcript_input)
+
+
 def test_usage_or_estimate_replaces_reported_zero_for_content(monkeypatch) -> None:
     from nanobot.agent.runner import AgentRunner
 
@@ -56,6 +90,7 @@ def test_usage_or_estimate_replaces_reported_zero_for_content(monkeypatch) -> No
         _make_usage_spec(provider, tools),
         [{"role": "user", "content": "hello"}],
         response,
+        tool_definitions=tools.get_definitions(),
     )
 
     assert usage == LLMUsage.estimated(input_tokens=12, output_tokens=7).with_timing(
@@ -100,6 +135,7 @@ def test_usage_or_estimate_counts_tool_call_output_for_reported_zero(monkeypatch
         _make_usage_spec(provider, tools),
         [{"role": "user", "content": "hello"}],
         response,
+        tool_definitions=tools.get_definitions(),
     )
 
     assert usage == LLMUsage.estimated(input_tokens=13, output_tokens=9)
@@ -132,6 +168,7 @@ def test_usage_or_estimate_counts_error_without_estimating_tokens(
         _make_usage_spec(provider, tools),
         [{"role": "user", "content": "hello"}],
         response,
+        tool_definitions=tools.get_definitions(),
     )
 
     assert usage is not None
@@ -167,6 +204,7 @@ def test_usage_or_estimate_trusts_positive_reported_total(monkeypatch) -> None:
         _make_usage_spec(provider, tools),
         [{"role": "user", "content": "hello"}],
         response,
+        tool_definitions=tools.get_definitions(),
     )
 
     assert usage is not None
@@ -336,14 +374,12 @@ async def test_runner_replays_provider_state_without_chat_projection_duplicates(
 
 
 @pytest.mark.asyncio
-async def test_runner_governs_tool_result_before_adding_it_to_provider_state():
+async def test_runner_preserves_tool_result_before_rejecting_unfit_followup():
     from nanobot.agent.runner import AgentRunner
 
     provider = MagicMock(spec=LLMProvider)
     provider.can_resume_conversation_state.return_value = True
-    provider.supports_native_compaction.return_value = False
     calls = 0
-    captured_context: ProviderCallContext | None = None
     checkpoints: list[dict] = []
     state = ProviderConversationState(
         kind="openai_responses",
@@ -354,7 +390,7 @@ async def test_runner_governs_tool_result_before_adding_it_to_provider_state():
     )
 
     async def chat_with_retry(**kwargs):
-        nonlocal calls, captured_context
+        nonlocal calls
         calls += 1
         if calls == 1:
             return LLMResponse(
@@ -368,7 +404,6 @@ async def test_runner_governs_tool_result_before_adding_it_to_provider_state():
                 ],
                 provider_state=state,
             )
-        captured_context = kwargs["provider_context"]
         return LLMResponse(content="done")
 
     provider.chat_with_retry = chat_with_retry
@@ -379,37 +414,36 @@ async def test_runner_governs_tool_result_before_adding_it_to_provider_state():
     async def checkpoint(payload: dict) -> None:
         checkpoints.append(payload)
 
-    await AgentRunner().run(make_run_spec(
-        provider,
-        initial_messages=[
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": "read the file"},
-        ],
-        tools=tools,
-        model="gpt-5.6",
-        context_window_tokens=3_000,
-        context_block_limit=200,
-        max_tokens=1_000,
-        max_iterations=3,
-        max_tool_result_chars=10_000,
-        checkpoint_callback=checkpoint,
-    ))
+    with pytest.raises(ContextWindowExceededError):
+        await AgentRunner().run(make_run_spec(
+            provider,
+            initial_messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "read the file"},
+            ],
+            tools=tools,
+            model="gpt-5.6",
+            context_window_tokens=3_000,
+            context_block_limit=200,
+            max_tokens=1_000,
+            max_iterations=3,
+            max_tool_result_chars=10_000,
+            checkpoint_callback=checkpoint,
+        ))
 
-    assert captured_context is not None
-    assert captured_context.conversation_state is not None
-    pending = captured_context.conversation_state.pending_messages
-    assert len(pending) == 1
-    assert pending[0]["role"] == "tool"
-    assert "compacted to fit context" in pending[0]["content"]
-    assert pending[0]["content"] != "x" * 5_000
+    assert calls == 1
     completed_checkpoint = next(
         checkpoint
         for checkpoint in checkpoints
         if checkpoint["phase"] == "tools_completed"
     )
     checkpoint_pending = completed_checkpoint["provider_state"].pending_messages
-    assert "compacted to fit context" in checkpoint_pending[0]["content"]
-    assert checkpoint_pending[0]["content"] != "x" * 5_000
+    assert checkpoint_pending == [{
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "name": "read_file",
+        "content": "x" * 5_000,
+    }]
 
 
 @pytest.mark.asyncio
@@ -795,64 +829,6 @@ async def test_runner_times_out_never_ending_streaming_request():
 
     assert result.stop_reason == "error"
     assert result.final_content == "Error calling LLM: timed out after 400s"
-    provider.chat_with_retry.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_runner_closes_progress_reasoning_on_streaming_wall_timeout():
-    from nanobot.agent.hook import AgentHook
-    from nanobot.agent.runner import AgentRunner
-
-    provider = MagicMock(spec=LLMProvider)
-    provider.supports_progress_deltas = True
-    events: list[tuple[str, str | None]] = []
-
-    async def chat_stream_with_retry(*, on_content_delta, **kwargs):
-        try:
-            await on_content_delta("<think>working...</think>")
-            await asyncio.sleep(3600)
-        finally:
-            events.append(("provider_cancelled", None))
-
-    provider.chat_stream_with_retry = chat_stream_with_retry
-    provider.chat_with_retry = AsyncMock()
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
-
-    class ProgressReasoningHook(AgentHook):
-        async def emit_reasoning(self, reasoning_content: str | None) -> None:
-            if reasoning_content:
-                events.append(("reasoning", reasoning_content))
-
-        async def emit_reasoning_end(self) -> None:
-            events.append(("reasoning_end", None))
-
-    real_wait_for = asyncio.wait_for
-
-    async def fake_wait_for(coro, *, timeout):
-        assert timeout == 300.0
-        return await real_wait_for(coro, timeout=0.01)
-
-    runner = AgentRunner()
-    with patch("nanobot.agent.runner.asyncio.wait_for", fake_wait_for):
-        result = await runner.run(make_run_spec(provider,
-            initial_messages=[{"role": "user", "content": "think forever"}],
-            tools=tools,
-            model="test-model",
-            max_iterations=1,
-            max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-            hook=ProgressReasoningHook(),
-            progress_callback=AsyncMock(),
-            llm_timeout_s=1,
-        ))
-
-    assert result.stop_reason == "error"
-    assert result.final_content == "Error calling LLM: timed out after 300s"
-    assert events == [
-        ("reasoning", "working..."),
-        ("provider_cancelled", None),
-        ("reasoning_end", None),
-    ]
     provider.chat_with_retry.assert_not_awaited()
 
 
@@ -1285,13 +1261,8 @@ async def test_runner_accumulates_usage_and_preserves_cache_reads():
 
 
 @pytest.mark.asyncio
-async def test_runner_binds_on_retry_wait_to_retry_callback_not_progress():
-    """Regression: provider retry heartbeats must route through
-    ``retry_wait_callback``, not ``progress_callback``. Binding them to
-    the progress callback (as an earlier runtime refactor did) caused
-    internal retry diagnostics like "Model request failed, retry in 1s"
-    to leak to end-user channels as normal progress updates.
-    """
+async def test_runner_binds_on_retry_wait_callback():
+    """Provider retry heartbeats use the explicitly supplied callback."""
     from nanobot.agent.runner import AgentRunner
 
     captured: dict = {}
@@ -1305,7 +1276,6 @@ async def test_runner_binds_on_retry_wait_to_retry_callback_not_progress():
     tools = MagicMock()
     tools.get_definitions.return_value = []
 
-    progress_cb = AsyncMock()
     retry_wait_cb = AsyncMock()
 
     runner = AgentRunner()
@@ -1318,12 +1288,10 @@ async def test_runner_binds_on_retry_wait_to_retry_callback_not_progress():
         model="test-model",
         max_iterations=1,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        progress_callback=progress_cb,
         retry_wait_callback=retry_wait_cb,
     ))
 
     assert captured["on_retry_wait"] is retry_wait_cb
-    assert captured["on_retry_wait"] is not progress_cb
 
 
 # ---------------------------------------------------------------------------

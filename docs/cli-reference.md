@@ -12,8 +12,8 @@ Use this page when you know what you want to run and need the command shape. For
 | Use guided setup | `nanobot onboard --wizard` | Best when you prefer prompts over hand-editing JSON |
 | Open the browser workbench | `nanobot webui` | Prepares local WebUI settings, starts the gateway, and opens the browser |
 | Check readiness without calling a model | `nanobot status` | Summarizes config/workspace and validates the active provider/model configuration |
-| Send one test message | `nanobot agent -m "Hello!"` | First proof that install, config, provider, model, and workspace all work |
-| Chat in the terminal | `nanobot agent` | Interactive local chat; exit with `exit`, `/exit`, `:q`, or `Ctrl+D` |
+| Send one test message | `nanobot -m "Hello!"` | First proof that install, config, provider, model, and workspace all work |
+| Chat in the terminal | `nanobot` | Interactive local chat; `nanobot agent` remains an explicit alias |
 | Run the gateway directly | `nanobot gateway` | Service/ops command for WebUI, chat apps, cron, and heartbeat |
 | Deliver a local trigger | `nanobot trigger <id> "message"` | Created first with `/trigger <name>` in the target chat/session |
 | Serve an OpenAI-compatible API | `nanobot serve` | Starts `/v1/chat/completions`, `/v1/models`, and `/health` |
@@ -86,15 +86,15 @@ follow the printed WebUI **Settings → Models** or `nanobot onboard --wizard` r
 
 | Command | Description |
 |---|---|
-| `nanobot agent -m "Hello!"` | Send one message and exit |
-| `nanobot agent` | Start interactive terminal chat |
-| `nanobot agent --session <id>` | Use a WebSocket session key; add `--classic` for another channel |
-| `nanobot agent --workspace <path>` | Override workspace |
-| `nanobot agent --config <path>` | Use a specific config file |
-| `nanobot agent --classic` | Use the classic Python prompt instead of the native terminal UI |
-| `nanobot agent --theme auto\|dark\|light` | Auto-detect the terminal appearance or force a TUI palette |
-| `nanobot agent --no-markdown` | Use the classic prompt and print plain text instead of Markdown |
-| `nanobot agent --logs` | Use the classic prompt and show runtime logs while chatting |
+| `nanobot -m "Hello!"` | Send one message and exit |
+| `nanobot` | Start interactive terminal chat |
+| `nanobot --session <id>` | Use a WebSocket session key; add `--classic` for another channel |
+| `nanobot --workspace <path>` | Override workspace |
+| `nanobot --config <path>` | Use a specific config file |
+| `nanobot --classic` | Use the classic Python prompt instead of the native terminal UI |
+| `nanobot --theme auto\|dark\|light` | Auto-detect the terminal appearance or force a TUI palette |
+| `nanobot --no-markdown` | Use the classic prompt and print plain text instead of Markdown |
+| `nanobot --logs` | Use the classic prompt and show runtime logs while chatting |
 
 Inside the native TUI, `/sessions` switches saved conversations, `/new-chat` starts another saved
 conversation, and `/context` explains the compacted summary and raw session suffix available to
@@ -139,7 +139,7 @@ Interactive mode exits with `exit`, `quit`, `/exit`, `/quit`, `:q`, or `Ctrl+D`.
 
 | Command | Description |
 |---|---|
-| `nanobot webui` | Create config/workspace if needed, enable the local WebUI channel after confirmation, start the gateway, and open `http://127.0.0.1:8765` |
+| `nanobot webui` | Create config/workspace if needed, enable the local WebUI channel after confirmation, start the gateway, open `http://127.0.0.1:8765`, and follow new gateway logs |
 | `nanobot webui --background` | Deprecated; prints the equivalent explicit `nanobot gateway --background` command and exits |
 | `nanobot webui --dev` | Start the gateway and Vite together at `http://127.0.0.1:5173`, with live frontend updates |
 | `nanobot webui --no-open` | Prepare and start the WebUI without opening a browser |
@@ -344,7 +344,7 @@ remain accepted as no-op compatibility aliases.
 | Command | Description |
 |---|---|
 | `nanobot provider login openai-codex --set-main` | Authenticate Codex and select its current default model |
-| `nanobot provider login xai-grok --set-main` | Authenticate an eligible X Premium / Grok subscription and select Grok 4.5; hosted X Search is enabled for models that advertise support |
+| `nanobot provider login xai-grok --set-main` | Authenticate an eligible X Premium / Grok subscription and select Grok 4.6; hosted X Search is enabled for models that advertise support |
 | `nanobot provider login github-copilot --set-main` | Authenticate GitHub Copilot and select its current default model |
 | `nanobot provider logout openai-codex` | Remove OpenAI Codex OAuth state |
 | `nanobot provider logout xai-grok --config <path>` | Remove the selected nanobot instance's xAI OAuth state |

@@ -1124,3 +1124,402 @@ Three full-suite runs this batch, tracking down the regressions above:
   commits landed in `nanobot/cron/service.py` in this window beyond the
   new `remove_system_job` method (additive, no conflict with the
   batch-3 finding).
+
+## Batch 5 — 2026-09-17
+
+Merge commit `<pending — see commit that carries this same notes update>`
+into `merge/upstream-main-2026-08-05`, checkpoint
+`d81aa5a4ab420877e43a2a878c26f5635bbef743` (2026-09-02, "refactor(agent):
+let runner own context compaction (#5568)"), 76 commits since batch 4's
+`f9d449ef`. Worked in worktree `/home/muk/projects/moeka-sync`; verified
+`/home/muk/projects/moeka` stayed on `main` throughout (before and after).
+One fixup commit on top of the merge commit for a small stray-artifact
+cleanup mid-batch (see "Incident" note below) — everything else landed in
+the merge commit itself since all breakage was found and fixed before the
+first commit.
+
+### `nanobot/session/manager.py` (rule 1)
+Auto-merged with **zero conflict markers** — the file was already
+byte-identical to upstream going into this batch, and this batch's
+upstream commits applied cleanly on top. `git diff d81aa5a4... --
+nanobot/session/manager.py` is empty — confirmed both immediately after
+the merge and again after all post-merge fixes landed.
+
+`SessionStore` Protocol shape unchanged this batch (still `load`/`save`/
+`delete`/`read`/`read_metadata`/`update_metadata`/`list_sessions`, same as
+batches 3-4) — no new method for `sqlite_store.py` to implement. The
+`Session` dataclass did change internally (`last_archived` became a
+property wrapping the same underlying `last_consolidated` storage field,
+replacing the old `enforce_file_cap`-era direct attribute — auto-merged
+clean, `sqlite_store.py`'s own `last_consolidated` column/serialization
+was untouched and needed no changes).
+
+### Conflicts resolved (6 files)
+- `nanobot/agent/context.py` (3 hunks) — kept moeka's hybrid recency+
+  semantic-retrieval "# Recent History" feature (`_build_history_section`/
+  `_without_duplicate_session_summary`, VecStore-backed) end-to-end:
+  restored `include_memory_recent_history`/`session_key`/`unified_session`
+  params on `build_system_prompt` (upstream removed them this batch — see
+  "silent breakage" below, this is the conflict-adjacent half of that same
+  story) and threaded them through the new `build_transcript`/
+  `TranscriptInput` machinery upstream introduced for the compaction
+  refactor (`build_transcript(transcript, *, ..., include_memory_recent_history=
+  True, session_key=None, unified_session=False)`, passed through from
+  `build_messages` too). memory category, moeka's shape is the identity;
+  upstream's genuine improvement here (typed `SessionSummary`, deferred
+  transcript assembly) was kept underneath.
+- `nanobot/agent/loop.py` (3 hunks) — import-list merge (moeka's
+  `SqliteSessionStore`/`default_sessions_root` alongside upstream's new
+  `SUMMARY_CONTINUATION_TEXT`/`SessionSummaryCheckpoint`); kept moeka's
+  `MyTool` manual registration in `_register_default_tools`; combined
+  moeka's `_maybe_plan` planning feature with upstream's new
+  `_insert_summary_checkpoint`/`_validated_checkpoint_boundary` compaction
+  helpers (both wanted, unrelated features landing in the same spot).
+- `nanobot/agent/memory.py` — one conflict: upstream's own "remove
+  background token consolidation" change (part of this batch, per the
+  merge commit's own squashed subject list) deleted moeka's
+  `maybe_consolidate_by_tokens`/`consolidation_ratio`/
+  `_MAX_CONSOLIDATION_ROUNDS`. Verified this method had **zero production
+  callers already** pre-merge (only two defensive `AsyncMock` stubs in
+  `tests/agent/test_runner.py`, guarding against something that no longer
+  exists) — moeka's own idle-consolidation path has been `AutoCompact`/
+  `compact_idle_session` since a previous batch, this was already dead
+  code. Took upstream's removal (deleted the whole dead block); not a
+  functional regression.
+- `nanobot/agent/runner.py` (6 hunks) — the substantial one, see
+  "tool-execution-boundary" below.
+- `tests/cli/test_commands.py` — one hunk: kept moeka's `**_kwargs`-
+  tolerant `_FakeSessionManager.__init__(self, _workspace, **_kwargs)`
+  signature (matches `build_default_session_manager`'s call shape).
+- `tests/cron/test_cron_service.py` — pure additive import-list merge
+  (moeka's `CronRunRecord`, upstream's `RUNTIME_CONTEXT_INPUT_META`).
+
+### `nanobot/agent/tools/execution.py` — new upstream module, not adopted in `runner.py`
+This batch's `e73cce70` ("extract tool execution boundary") moved tool
+dispatch out of `AgentRunner` into a standalone `execute_tool_calls()`
+function in a new file, `nanobot/agent/tools/execution.py`. Per the
+plugin-abstraction rule (rule 2), evaluated switching `runner.py`'s tool
+dispatch over to it — but moeka's own `_execute_tools`/`_run_tool` methods
+carry two features the extracted module doesn't have:
+1. The **`AskUserInterrupt` 3-tuple contract** (`(result, event,
+   fatal_error)` vs upstream's 2-tuple `(result, event)`) — moeka's
+   `ask_user` tool depends on this to interrupt a turn cleanly (flagged as
+   critical in batch 4's notes; re-verified explicitly this batch since
+   the coordinator's brief called it out by name).
+2. The **`exec_guard_denial`/`repeated_exec_guard_error` classification
+   branch** in `_classify_violation` — a moeka-specific escalation path
+   for deny/allowlist violations (distinct from the SSRF/workspace-
+   violation branches upstream's `execution.py` does have) that has no
+   upstream equivalent at all.
+
+Kept `runner.py`'s own `_execute_tools`/`_run_tool`/`_classify_violation`
+wholesale (not the new module), with an inline comment at the call site
+explaining why. `nanobot/agent/tools/execution.py` itself was still
+auto-merged in unmodified (unconflicted, brand new file) and is exercised
+by its own dedicated tests (`tests/agent/test_runner_errors.py`,
+`tests/agent/test_runner_tool_execution.py`,
+`tests/agent/test_runner_safety.py`,
+`tests/agent/tools/test_subagent_tools.py` — all call
+`execute_tool_calls`/`is_ssrf_violation` directly, backend-agnostic to
+which of the two implementations `AgentRunner` itself uses) — it's simply
+unused-by-`runner.py` dead-from-the-runner's-perspective code, present
+and tested on its own merits, available for a future batch to reconsider
+once/if the `exec_guard_denial` and `AskUserInterrupt` gaps are closed
+upstream-side.
+
+One upstream bugfix in this same file **did** need porting by hand since
+it only touched `execution.py`, not `runner.py`'s duplicate:
+`919e3d34` "fix(agent): add retry hint to tool exceptions" — a generic
+tool-raised `Exception` didn't get the "[Analyze the error above...]"
+retry hint appended (only lookup-errors, prep-errors, and
+`is_tool_error_result` payloads did; the plain-exception branch had a
+comment reading "Preserve legacy exception payloads without the retry
+hint," which was itself the bug upstream fixed). Ported the one-line fix
+into `_run_tool`'s exception branch. Found via a real test failure
+(`test_runner_returns_tool_exception_to_model_for_recovery`), not
+proactively — a reminder that keeping a duplicate of extracted code means
+manually watching for future upstream fixes to the original, batch after
+batch.
+
+### Silent breakage in cleanly-merged code — hunt results (this batch: four real regressions, all found by the full Docker run + local pytest follow-up)
+
+Per the brief's specific instruction to trace the compaction-ownership
+change against moeka's `AutoCompact`/`Consolidator` wiring: `AutoCompact`
+(`nanobot/agent/autocompact.py`) had a single one-line, unconflicted
+change this batch (`session.last_consolidated` → `session.last_archived`,
+a pure rename following the `Session` dataclass's own internal refactor,
+verified via direct diff against the batch-4 checkpoint) and its
+`prepare_session`/`check_expired` call sites in `loop.py` are unconflicted
+and unchanged in shape. **AutoCompact does not overlap with or get
+bypassed by the runner-owned compaction added this batch** — they operate
+at different layers: `AutoCompact` decides *when* to proactively archive
+an idle session (unchanged, still `loop.py`-driven, still calls into
+`Consolidator.compact_idle_session`); the new `ContextGovernor`/
+`ModelRequestState`/`ContextCompactionState` machinery in
+`context_governance.py` (947 new lines, no conflicts) decides how to fit
+*this specific request's* messages into the model's context window
+in-flight, inside `AgentRunner.run()`. No duplication or bypass found.
+
+`git diff HEAD@{1} -- nanobot/core/` (pre-merge vs. merged): empty, same
+as every batch since batch 3 — 0 upstream commits touch `nanobot/core` in
+this window.
+
+Four real regressions found (all from clean, non-conflicted auto-merges;
+none had conflict markers):
+1. **`nanobot/agent/context.py`'s "# Recent History" feature was silently
+   deleted, not just its params.** The batch's `bb34b58f` ("make memory
+   summaries cumulative") commit removed the whole recent-history-in-
+   system-prompt block from upstream's `build_system_prompt` (upstream's
+   own reasoning: with cumulative checkpoint summaries, the raw message
+   list itself now already carries sufficient recent context, so a
+   redundant "# Recent History" text block was pure duplication for
+   upstream's stock feature set). But moeka's version of the same block is
+   not just recency — it does genuine **semantic retrieval** via VecStore
+   over history that has *already scrolled out* of the raw message list
+   entirely (a materially different, still-valuable feature). The 3-way
+   merge of the *signature* (moeka added `query`, upstream deleted
+   `include_memory_recent_history`/`session_key`/`unified_session`)
+   resolved fine on its own, but a **naive first-pass "keep HEAD" resolution
+   of the conflict markers around the method *bodies*** accidentally
+   dropped the entire `_build_history_section`/`_without_duplicate_session_summary`/
+   `_behavioral_guidelines` method definitions and the `return` statement
+   that ends `build_system_prompt` — self-inflicted during resolution, not
+   an upstream artifact, but exactly the kind of "second-order" breakage
+   the "read every failure, don't skim" policy is meant to catch (`ruff`
+   didn't flag it because `self._behavioral_guidelines()` was still a
+   valid-looking call, just to a name that no longer existed — a plain
+   `python -m py_compile` *did* eventually flag the missing `def`s as an
+   `AttributeError` at runtime, but only once exercised). Fully restored
+   both methods and the `return` statement verbatim; also had to restore
+   `nanobot/agent/memory.py`'s `read_recent_history_for_prompt`/
+   `_is_internal_history_session`/`_INTERNAL_HISTORY_SESSION_KEYS`/
+   `_INTERNAL_HISTORY_SESSION_PREFIXES` (also cleanly deleted by the same
+   upstream commit, since `MemoryStore` is the layer `_build_history_section`
+   reads from) and `nanobot/agent/context.py`'s `truncate_text_to_tokens`
+   import + `_MAX_HISTORY_TOKENS` class constant (same fate). Verified via
+   `python -c "import nanobot.agent.context"` and the full Docker run.
+2. **`loop.py`'s `_run_agent_loop` calling convention changed from "a
+   pre-built message list" to "a `TranscriptInput`", and moeka's own
+   `_maybe_plan` planning feature + two moeka-authored tests still called
+   it the old way.** Upstream's `_build_initial_messages` (built the full
+   message list eagerly in `loop.py`) was replaced by
+   `_build_transcript_input` (builds a `TranscriptInput` — raw parts only)
+   plus a `transcript_builder = partial(self.context.build_transcript,
+   channel=..., workspace=..., include_memory=...)` callback the runner
+   invokes lazily, possibly more than once, for compaction. This dropped
+   moeka's `include_memory_recent_history`/`session_key`/`unified_session`
+   wiring from the call site entirely (not passed to the partial at all) —
+   **a second, independent path to the same regression as #1**: without
+   `session_key`, `_build_history_section`'s underlying
+   `read_recent_history_for_prompt(session_key=None, ...)` call returns
+   *every session's* history entries unfiltered, a real cross-session
+   privacy leak for the semantic-history feature, not just a broken
+   reference. Fixed by passing `include_memory_recent_history=not
+   ephemeral`, `session_key=session.key`, `unified_session=
+   self._unified_session` into the `transcript_builder` partial. Separately,
+   moeka's `_maybe_plan(initial_messages: list)` (opt-in plan-then-execute
+   step, appends a planning note as an extra message) had nothing to
+   append to anymore — there is no eagerly-built message list in scope at
+   its call site post-refactor. Changed its signature to
+   `_maybe_plan(transcript_input: TranscriptInput)`, extracting the user
+   text from `transcript_input.current_message` and appending the planning
+   note to `transcript_input.history` instead (safe: `TranscriptInput.history`
+   is a fresh per-turn list, a slice of `session.messages`, not a live
+   reference — confirmed against `Session.get_history()` — so mutating it
+   never leaks into persisted session history). This changes exactly where
+   the planning note lands in the transcript (previously strictly after
+   the current user message as a second same-role message; now
+   immediately before it, in `history`) — a deliberate, documented,
+   behavior-preserving-in-spirit adaptation to the new architecture, not a
+   silent behavior change moeka chose to accept quietly. Two
+   moeka-authored tests in `tests/agent/test_runner.py`
+   (`test_loop_injected_followup_preserves_image_media`,
+   `test_pending_queue_preserves_overflow_for_next_injection_cycle`) called
+   `loop._run_agent_loop([{"role": "user", ...}], ...)` with a raw list
+   directly (pre-dating this batch's refactor); updated both to build a
+   `TranscriptInput(history=[], current_message="hello")` instead, matching
+   the pattern already used by `tests/agent/test_runner_injections.py`'s
+   (already-upstream-shaped) equivalents. Three tests in
+   `tests/agent/test_thought_process.py` that called `loop._maybe_plan(...)`
+   directly with a raw list were updated to construct/inspect a
+   `TranscriptInput` instead.
+3. **`nanobot/agent/runner.py`'s `_partition_tool_batches` method was
+   deleted along with the parts of it that *did* need deleting.** The
+   `AgentRunner._merge_message_content` static helper (used only by
+   `_append_injected_messages`, which upstream itself simplified this
+   batch from a complex runtime-context-aware merge down to a plain
+   `messages.extend(injections)` — confirmed via `git blame`, both the
+   complex version and its simplification are upstream-authored, not
+   moeka's; no functional loss for moeka) was correctly gone with no
+   dangling references. But `_partition_tool_batches` (batches tool calls
+   for concurrent execution, still called from moeka's own kept
+   `_execute_tools`, see above) also disappeared in the same clean merge —
+   it moved into `nanobot/agent/tools/execution.py`'s private
+   `_partition_tool_batches` as part of the same extraction, but
+   `runner.py`'s own copy (which `_execute_tools` still needs, since
+   `_execute_tools` was kept per the tool-execution-boundary decision
+   above) was never restored automatically. Restored it verbatim after
+   `_append_model_error_placeholder`. Found via `AttributeError` at first
+   Docker run, confirmed by a scripted before/after method-name diff
+   against the batch-4 checkpoint across `context.py`/`loop.py`/
+   `memory.py`/`runner.py` (the same technique used to find #1's missing
+   methods) — this technique is now worth keeping as a standard step for
+   future batches wherever "keep moeka's side wholesale" is the
+   resolution, since it catches exactly this class of "the kept region
+   silently depended on something the discarded region used to provide."
+4. **Two mock-response test helpers needed a new field.**
+   `tests/agent/test_thought_process.py`'s `_response()` `SimpleNamespace`
+   helper was missing `provider_compaction_applied` (new `LLMResponse`
+   field this batch, read unconditionally by
+   `context_governance.ProviderCompactionConsolidator`/`runner.py`'s
+   `_record_request_usage`/compaction accounting at lines 1143/1376) —
+   added with a `False` default, matching the real dataclass. Same
+   category as batch 3's `generation_ms`/`ttft_ms` fix and batch 4's
+   `LLMUsage` fixture staleness — a recurring pattern worth naming
+   explicitly: **any batch that adds a new `LLMResponse`/`LLMUsage` field
+   read unconditionally by production code will break every
+   `SimpleNamespace`-based response mock in the suite that predates it**,
+   and grepping for `SimpleNamespace(\s*content=` (or similar) across
+   `tests/` before running the suite would likely catch these faster than
+   waiting for the failure.
+
+### New upstream test needing backend-specific adaptation
+`tests/agent/test_dream.py::TestEphemeralDirect::
+test_dream_turn_injects_memory_files_once_and_persists_session` — a
+brand-new upstream test (doesn't exist in the batch-4 checkpoint at all)
+asserting a dream turn persists its session even with `ephemeral=True`.
+Its final assertion, `loop.sessions._get_session_path(session_key).exists()`,
+is a `JsonlSessionStore`-specific helper (`SessionManager._get_session_path`
+delegates to `self._jsonl_store.get_session_path()`, the *internal*,
+always-constructed-but-otherwise-unused `JsonlSessionStore` instance every
+`SessionManager` carries per the ADR-0001 conversion — not the store
+`AgentLoop` actually persists through). Since moeka's `AgentLoop` defaults
+to `SqliteSessionStore`, that jsonl path is never written to, so the
+assertion failed even though the session *was* correctly persisted (to
+`sessions.db`). Same "new upstream test assumes jsonl backing" pattern
+documented in batches 1 and 3. Fixed by asserting through
+`SessionManager.read_session_metadata()` (store-agnostic) instead, with a
+comment explaining why.
+
+### Deviation verification (post-merge, on the final commit)
+- `allow_sudo: bool = False` — default unchanged (verified: 2 occurrences,
+  both False; `nanobot/agent/tools/shell.py` untouched by any conflict
+  this batch).
+- `_DEFAULT_DENY_PATTERNS` still only the fork-bomb pattern; `rm -rf`/`dd`/
+  `mkfs`/`format`/`shutdown` absent. `_INTERNAL_DENY_PATTERNS` untouched.
+- The shell command-guard call (`self._guard_command(...)` in
+  `_prepare_command`) is still unconditional — re-verified explicitly per
+  the coordinator's brief (batch 4's fix, `# moeka: unlike upstream, the
+  command guard always runs regardless of restrict_to_workspace`); this
+  batch's upstream commits did not touch `nanobot/agent/tools/shell.py` at
+  all (0 diff lines against the batch-4 checkpoint), so nothing to
+  re-apply — confirmed the comment/guard call survived untouched.
+- `grep -n "sessions.db" nanobot/session/manager.py nanobot/session/sqlite_store.py`
+  — `manager.py` has 0 literal references (pure upstream `SessionStore`
+  Protocol code, expected); `sqlite_store.py` has 16, unchanged shape.
+- `ChannelManager._dispatch_with_watchdog` present and wired
+  (`nanobot/channels/manager.py`, untouched by this batch).
+- `bg_shell`'s `enabled(ctx)` still hardcoded `return False`.
+- `nanobot channels enable/disable` CLI present in `nanobot/cli/commands.py`
+  (untouched by this batch) — also runtime-exercised in Docker
+  (`tests/cli/test_commands.py::test_channels_enable_*`/`test_channels_disable_*`,
+  all passing; these need the `telegram` extra, which only Docker's
+  `--all-extras` install provides — a local `.venv` run without that extra
+  fails these with "Unknown channel: telegram", a false alarm matching the
+  brief's warning about local-venv authority).
+- Telegram `drop_pending_updates: bool = True` — confirmed
+  (`nanobot/channels/telegram/runtime.py`, untouched by this batch).
+- No `CONTRIBUTING.md`, no `images/nanobot_logo.png`;
+  `images/GitHub_README.png` present.
+- moeka `CLAUDE.md`, everything under `.agent/`, `bin/*` launchers — 0
+  upstream commits touch any of these paths this batch (`git log
+  f9d449ef..d81aa5a4... -- bin .agent CLAUDE.md images` — empty).
+- `tools.exec.allowPatterns` whitelist-only semantics — re-exercised by
+  `tests/tools/test_exec_allow_patterns.py`, all passing, no upstream
+  changes to that file this batch.
+- `git diff d81aa5a4ab420877e43a2a878c26f5635bbef743 -- nanobot/session/manager.py`
+  — empty, confirmed (rule 1 success criterion), re-checked after all
+  post-merge fixes landed too.
+
+### `ruff check nanobot/ tests/` — clean, no new lint (final commit).
+
+### Docker test results
+Two full-suite runs:
+1. First run (merge commit content, before the 4 silent-breakage fixes and
+   the retry-hint port above): **15 failed, 6711 passed, 33 skipped.** 11
+   of the 15 were the real regressions documented above (some tests
+   surfaced more than one assertion failure per root cause); the other 4
+   were the expected baseline. Read in full, not skimmed — this is what
+   surfaced items 1-4 above (the two silent-breakage items in `context.py`/
+   `loop.py` were *also* independently confirmed by direct code reading
+   before the Docker run even finished, per the coordinator's explicit
+   "hunt for silent breakage in cleanly-merged code" instruction — Docker
+   then caught the two implementation slips in resolving them, plus items
+   3 and 4 which reading alone hadn't caught).
+2. Second run (after all fixes): **4 failed, 6722 passed, 33 skipped** —
+   matches the 6714/4/33 baseline exactly on the known-failure side
+   (+8 passed net from this batch's new upstream coverage after
+   accounting for 3 removed batch-5 test files —
+   `tests/agent/test_consolidate_offset.py`, `test_consolidation_ratio.py`,
+   `test_session_retention.py`, all deleted by upstream's own "remove
+   consolidation ratio"/"decouple archival" commits alongside the
+   `maybe_consolidate_by_tokens` removal above), 0 new failure categories:
+   `tests/tools/test_tool_validation.py::test_exec_guard_allows_public_urls`
+   ×2 (no DNS/network egress in this sandbox) and
+   `tests/webui/test_mcp_presets_api.py::test_test_mcp_preset_*` ×2 (no
+   `npx`/playwright in the test image) — same two pre-existing environment
+   artifacts as every prior batch.
+
+### Incident — stray test-artifact leak during local verification, caught before commit
+While running a local (non-Docker) `pytest tests/agent tests/session
+tests/tools tests/cli tests/cron tests/webui` sweep to iterate faster on
+the fixes above, one test constructed a `SqliteSessionStore` against an
+unconfigured `MagicMock().parent` path, which resolved to a literal
+`MagicMock/mock.parent.__truediv__()/<id>/<hash>/` directory tree under
+the **repo root** (not `~/.nanobot` — a different, narrower leak than the
+2026-09-17 incident documented earlier in this file) containing empty
+`.workspace`/`sessions.db` files. Caught by `git status` before commit (a
+`git add -A` briefly staged ~40 of these as new files), never committed.
+Root-caused to a `git reset` (no args) I ran to recover from an unrelated
+mistake (see below) accidentally clearing `.git/MERGE_HEAD`/`MERGE_MSG` —
+recovered by writing the checkpoint sha back to
+`.git/worktrees/moeka-sync/MERGE_HEAD` directly so `git commit` would
+still produce a proper two-parent merge commit; unrelated to the
+MagicMock leak itself, just flagging that a plain `git reset` mid-merge is
+destructive to merge state even though it looks read-only. Deleted the
+stray directory (`rm -rf MagicMock`) and re-verified `git status` was
+clean of anything outside the intended merge diff before staging for
+real.
+
+### ⚠️ Needs human review
+- **The tool-execution-boundary duplication (this batch's central design
+  tension) is now two batches deep.** `runner.py` carries its own
+  `_execute_tools`/`_run_tool`/`_classify_violation`, functionally
+  overlapping upstream's extracted `nanobot/agent/tools/execution.py`
+  module, diverging only in the `AskUserInterrupt` 3-tuple contract and
+  the `exec_guard_denial` classification branch. This batch had to
+  manually port one upstream bugfix (`919e3d34`) into the duplicate by
+  hand after a test failure revealed it was missing; nothing guarantees
+  the next batch's upstream fix to `execution.py` will announce itself
+  the same way. Worth a real design decision: either (a) extend
+  `execute_tool_calls()` upstream-side (i.e. in moeka's fork of
+  `execution.py`) with an optional `AskUserInterrupt`-aware return mode
+  and the `exec_guard_denial` branch, then switch `runner.py` over to call
+  it and delete the duplicate, or (b) accept the duplication as a
+  permanent moeka-specific layer and add a standing test that diffs the
+  two implementations' shared logic (SSRF/workspace-violation handling,
+  retry-hint behavior) to catch drift automatically instead of relying on
+  incidental test failures.
+- Same "silent breakage in clean auto-merges" pattern flagged in batches
+  3-4 continues: 4 real regressions this batch (3-4 in prior batches
+  each). The scripted before/after method-name diff (comparing `def `
+  names between the pre-merge checkpoint and the merged file for every
+  file `git merge` touched) used to find items #2's `_partition_tool_batches`
+  and #1's missing `context.py`/`memory.py` methods this batch was
+  effective enough that it's worth promoting from "improvised when
+  something looked suspicious" to a standard, always-run step for every
+  future batch, not just ones where a test happens to catch the gap.
+- moeka's cron "only persist when a job ran" fix (`558fe35e`, dropped in
+  batch 3) remains unresolved — no new upstream commits landed in
+  `nanobot/cron/service.py` this batch beyond additive
+  `RUNTIME_CONTEXT_INPUT_META` test coverage (unconflicted).

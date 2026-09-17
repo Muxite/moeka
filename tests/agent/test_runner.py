@@ -1880,6 +1880,7 @@ async def test_checkpoint2_preserves_final_response_in_history_before_followup()
 @pytest.mark.asyncio
 async def test_loop_injected_followup_preserves_image_media(tmp_path):
     """Mid-turn follow-ups with images should keep multimodal content."""
+    from nanobot.agent.context import TranscriptInput
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.events import InboundMessage
     from nanobot.bus.queue import MessageBus
@@ -1916,7 +1917,7 @@ async def test_loop_injected_followup_preserves_image_media(tmp_path):
     ))
 
     result = await loop._run_agent_loop(
-        [{"role": "user", "content": "hello"}],
+        TranscriptInput(history=[], current_message="hello"),
         runtime=loop.runtime_resolver.current(),
         request_context=RequestContext(channel="cli", chat_id="c"),
         pending_queue=pending_queue,
@@ -2131,6 +2132,7 @@ async def test_followup_routed_to_pending_queue(tmp_path):
 @pytest.mark.asyncio
 async def test_pending_queue_preserves_overflow_for_next_injection_cycle(tmp_path):
     """Pending queue should leave overflow messages queued for later drains."""
+    from nanobot.agent.context import TranscriptInput
     from nanobot.agent.loop import AgentLoop
     from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN
     from nanobot.bus.events import InboundMessage
@@ -2162,7 +2164,7 @@ async def test_pending_queue_preserves_overflow_for_next_injection_cycle(tmp_pat
         ))
 
     result = await loop._run_agent_loop(
-        [{"role": "user", "content": "hello"}],
+        TranscriptInput(history=[], current_message="hello"),
         runtime=loop.runtime_resolver.current(),
         request_context=RequestContext(channel="cli", chat_id="c"),
         pending_queue=pending_queue,

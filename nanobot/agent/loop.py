@@ -13,7 +13,9 @@ import weakref
 from collections.abc import Coroutine, Iterable, Mapping
 from contextlib import AbstractContextManager, ExitStack, nullcontext, suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum, auto
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar, cast
 
@@ -23,7 +25,7 @@ from nanobot.agent import context as agent_context
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.automation_turns import publish_next_deferred_turn
-from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver
+from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
 from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
 from nanobot.agent.memory import Consolidator
@@ -38,7 +40,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
-from nanobot.agent.tools.message import MessageTool
+from nanobot.agent.tools.message import capture_message_deliveries
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.runtime_control import AgentRuntimeControl
 from nanobot.agent.tools.self import MyTool
@@ -94,7 +96,11 @@ from nanobot.session.recovery import (
     restore_runtime_checkpoint,
 )
 from nanobot.session.sqlite_store import SqliteSessionStore, default_sessions_root
-from nanobot.session.summary import SessionSummary
+from nanobot.session.summary import (
+    SUMMARY_CONTINUATION_TEXT,
+    SessionSummary,
+    SessionSummaryCheckpoint,
+)
 from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
 from nanobot.utils.background import log_task_exceptions
 from nanobot.utils.cancellation import task_is_cancelling
@@ -138,7 +144,7 @@ class TurnContext:
     session: Session | None = None
 
     history: list[dict[str, Any]] = field(default_factory=list)
-    initial_messages: list[dict[str, Any]] = field(default_factory=list)
+    transcript_input: TranscriptInput | None = None
     provider_state: ProviderConversationState | None = field(default=None, repr=False)
     request_context: RequestContext | None = None
     runtime_context_blocks: list[RuntimeContextBlock] = field(default_factory=list)
@@ -147,7 +153,6 @@ class TurnContext:
     final_content: str | None = None
     all_messages: list[dict[str, Any]] = field(default_factory=list)
     stop_reason: str = ""
-    had_injections: bool = False
     streamed_content: bool = False
 
     input_persisted_early: bool = False
@@ -164,6 +169,8 @@ class TurnContext:
 
     pending_queue: asyncio.Queue[InboundMessage] | None = None
     pending_summary: SessionSummary | None = None
+    summary_checkpoint: SessionSummaryCheckpoint | None = None
+    provider_compaction_applied: bool = False
 
     ephemeral: bool = False
     run_extra_hooks_for_ephemeral: bool = False
@@ -277,7 +284,6 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         session_ttl_minutes: int = 0,
-        consolidation_ratio: float = 0.5,
         hooks: list[AgentHook] | None = None,
         hook_factories: list[AgentTurnHookFactory] | None = None,
         unified_session: bool = False,
@@ -492,8 +498,8 @@ class AgentLoop:
             ("cron", self._cron_turns),
             ("local trigger", self._local_trigger_turns),
         )
-        # NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
-        _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3"))
+        # NANOBOT_MAX_CONCURRENT_REQUESTS: unset or <=0 means unlimited.
+        _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "0"))
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )
@@ -506,8 +512,6 @@ class AgentLoop:
                 workspace_scopes=self.workspace_scopes,
                 unified_session=unified_session,
             ),
-            consolidation_ratio=consolidation_ratio,
-            unified_session=unified_session,
         )
         self.auto_compact = AutoCompact(
             sessions=self.sessions,
@@ -588,7 +592,6 @@ class AgentLoop:
             runner_limits=defaults.limits,
             session_ttl_minutes=defaults.session_ttl_minutes,
             idle_compact_check_interval_seconds=defaults.idle_compact_check_interval_seconds,
-            consolidation_ratio=defaults.consolidation_ratio,
             tools_config=config.tools,
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
@@ -713,6 +716,7 @@ class AgentLoop:
             timezone=self.context.timezone or "UTC",
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_events=self.runtime_events,
+            runtime_control=AgentRuntimeControl(self),
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools, allow=self.tools_allow, deny=self.tools_deny)
@@ -811,22 +815,15 @@ class AgentLoop:
             return True
         return False
 
-    def _build_initial_messages(self, ctx: TurnContext) -> list[dict[str, Any]]:
-        """Build the initial message list for the LLM turn."""
+    def _build_transcript_input(self, ctx: TurnContext) -> TranscriptInput:
+        """Capture the persisted history and fresh input as separate transcript parts."""
         assert ctx.session is not None
-        scope = self.workspace_scopes.for_message(ctx.msg, ctx.session.metadata)
-        return self.context.build_messages(
+        return TranscriptInput(
             history=ctx.history,
             current_message=ctx.msg.content,
             media=ctx.msg.media if ctx.kind is TurnKind.USER and ctx.msg.media else None,
-            channel=ctx.delivery.route.channel,
             session_summary=ctx.pending_summary,
-            workspace=scope.project_path,
             runtime_context_blocks=ctx.runtime_context_blocks,
-            include_memory=ctx.session.policy.persist,
-            include_memory_recent_history=not ctx.ephemeral,
-            session_key=ctx.session.key,
-            unified_session=self._unified_session,
         )
 
     def _request_context_for_turn(self, ctx: TurnContext) -> RequestContext:
@@ -947,6 +944,22 @@ class AgentLoop:
             metadata={**metadata, "render_as": "text"},
         )
 
+    def _track_active_task(self, key: str, task: asyncio.Task[Any]) -> None:
+        """Track active session work until its task group becomes empty."""
+        tasks = self._active_tasks.setdefault(key, set())
+        tasks.add(task)
+        task.add_done_callback(partial(self._active_task_done, key, tasks))
+
+    def _active_task_done(
+        self,
+        key: str,
+        tasks: set[asyncio.Task[Any]],
+        task: asyncio.Task[Any],
+    ) -> None:
+        tasks.discard(task)
+        if not tasks and self._active_tasks.get(key) is tasks:
+            self._active_tasks.pop(key, None)
+
     async def _cancel_active_tasks(self, key: str) -> int:
         """Cancel and await all active work for *key*.
 
@@ -1002,22 +1015,9 @@ class AgentLoop:
             return
         remember_last_channel(session.metadata, msg.channel, msg.chat_id)
 
-    @staticmethod
-    def _replay_token_budget(runtime: LLMRuntime) -> int:
-        """Derive a token budget for session history replay from the context window."""
-        if runtime.context_window_tokens <= 0:
-            return 0
-        max_output = runtime.generation.max_tokens
-        try:
-            reserved_output = int(max_output)
-        except (TypeError, ValueError):
-            reserved_output = 4096
-        budget = runtime.context_window_tokens - max(1, reserved_output) - 1024
-        return budget if budget > 0 else max(128, runtime.context_window_tokens // 2)
-
     async def _run_agent_loop(
         self,
-        initial_messages: list[dict[str, Any]],
+        transcript_input: TranscriptInput,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
@@ -1198,6 +1198,18 @@ class AgentLoop:
             message_metadata=request_metadata,
             session_metadata=session.metadata if session is not None else None,
         )
+        transcript_builder = partial(
+            self.context.build_transcript,
+            channel=request_ctx.channel,
+            workspace=effective_scope.project_path,
+            include_memory=session.policy.persist if session is not None else True,
+            # moeka: hybrid recency+semantic "# Recent History" retrieval is
+            # session-scoped and must not leak other sessions' content, and
+            # is skipped entirely for ephemeral (unpersisted) turns.
+            include_memory_recent_history=not ephemeral,
+            session_key=session.key if session is not None else None,
+            unified_session=self._unified_session,
+        )
         if request_context is None:
             request_ctx = dataclasses.replace(
                 request_ctx,
@@ -1222,7 +1234,7 @@ class AgentLoop:
 
         session_metadata = session.metadata if session is not None else None
         if self.planning:
-            await self._maybe_plan(initial_messages)
+            await self._maybe_plan(transcript_input)
         try:
             for scope in turn_scopes or ():
                 turn_scope_stack.enter_context(scope)
@@ -1246,11 +1258,13 @@ class AgentLoop:
                 run_extra_hooks_for_ephemeral=run_extra_hooks_for_ephemeral,
             ))
             result = await self.runner.run(AgentRunSpec(
-                initial_messages=initial_messages,
+                initial_messages=None,
                 tools=effective_tools,
                 runtime=runtime,
                 max_iterations=self.max_iterations,
                 max_tool_result_chars=self.max_tool_result_chars,
+                transcript_input=transcript_input,
+                transcript_builder=transcript_builder,
                 hook=hook,
                 concurrent_tools=True,
                 workspace=effective_scope.project_path,
@@ -1259,6 +1273,26 @@ class AgentLoop:
                 provider_retry_mode=self.provider_retry_mode,
                 retry_wait_callback=on_retry_wait,
                 checkpoint_callback=_checkpoint,
+                consolidate_history=(
+                    partial(
+                        self.consolidator.summarize_transcript,
+                        runtime=runtime,
+                        session_key=session.key,
+                        tools=effective_tools.get_definitions(),
+                    )
+                    if session is not None and not ephemeral
+                    else None
+                ),
+                consolidate_provider_compaction=(
+                    partial(
+                        self.consolidator.summarize_provider_compaction,
+                        runtime=runtime,
+                        session_key=session.key,
+                        tools=effective_tools.get_definitions(),
+                    )
+                    if session is not None and not ephemeral
+                    else None
+                ),
                 injection_callback=_drain_pending,
                 limits=self.runner_limits,
                 terminal_injection_callback=_wait_for_pending,
@@ -1440,12 +1474,7 @@ class AgentLoop:
                 # Compute the effective session key before dispatching
                 # This ensures /stop command can find tasks correctly when unified session is enabled
                 task = asyncio.create_task(self._dispatch(msg))
-                active_tasks: set[asyncio.Task[Any]] = self._active_tasks.setdefault(
-                    effective_key,
-                    set(),
-                )
-                active_tasks.add(task)
-                task.add_done_callback(active_tasks.discard)
+                self._track_active_task(effective_key, task)
         finally:
             await self.aclose()
 
@@ -1816,18 +1845,12 @@ class AgentLoop:
         msg: InboundMessage,
         final_content: str,
         stop_reason: str,
-        had_injections: bool,
         streamed_content: bool,
         *,
         log_content: bool = True,
         turn_latency_ms: int | None = None,
     ) -> OutboundMessage | None:
         """Assemble the final outbound message from turn results."""
-        # MessageTool suppression
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
-            if not had_injections or stop_reason == "empty_final_response":
-                return None
-
         if log_content:
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
@@ -1977,21 +2000,14 @@ class AgentLoop:
         if ctx.on_runtime_admitted is not None:
             await ctx.on_runtime_admitted(runtime)
         if not ctx.ephemeral:
-            await self.consolidator.maybe_consolidate_by_tokens(
+            ctx.session, ctx.pending_summary = self.auto_compact.prepare_session(
                 session,
-                runtime=runtime,
+                ctx.session_key,
             )
+            session = ctx.require_session()
         is_subagent = ctx.kind is TurnKind.SYSTEM and ctx.msg.sender_id == "subagent"
 
-        if ctx.kind is TurnKind.USER and (message_tool := self.tools.get("message")):
-            if isinstance(message_tool, MessageTool):
-                message_tool.start_turn()
-
-        _hist_kwargs: dict[str, Any] = {
-            "max_tokens": self._replay_token_budget(runtime),
-            "extend_to_user": is_subagent,
-        }
-        ctx.history = session.get_history(**_hist_kwargs)
+        ctx.history = session.get_history(extend_to_user=is_subagent)
         stored_state = session.provider_state
         subagent_followup_persisted = False
         if is_subagent:
@@ -2075,7 +2091,7 @@ class AgentLoop:
             # Upgrade the replay-safe baseline to the resumable state before
             # prompt assembly and the first model checkpoint.
             self.sessions.save(session)
-        ctx.initial_messages = self._build_initial_messages(ctx)
+        ctx.transcript_input = self._build_transcript_input(ctx)
 
         if ctx.on_progress is None:
             ctx.on_progress = ctx.delivery.progress_callback()
@@ -2087,35 +2103,43 @@ class AgentLoop:
         if ctx.visible_run_started_at is None:
             ctx.visible_run_started_at = time.time()
         await ctx.delivery.running(started_at=ctx.visible_run_started_at)
-        result = await self._run_agent_loop(
-            ctx.initial_messages,
-            runtime=runtime,
-            on_progress=ctx.on_progress,
-            on_stream=ctx.on_stream,
-            on_stream_end=ctx.on_stream_end,
-            on_retry_wait=ctx.on_retry_wait,
-            session=ctx.session,
-            pending_queue=ctx.pending_queue,
-            ephemeral=ctx.ephemeral,
-            run_extra_hooks_for_ephemeral=ctx.run_extra_hooks_for_ephemeral,
-            hooks=ctx.hooks,
-            hook_factories=ctx.hook_factories,
-            turn_scopes=ctx.turn_scopes,
-            tools=ctx.tools,
-            request_context=ctx.request_context,
-            provider_state=ctx.provider_state,
-        )
+        assert ctx.transcript_input is not None
+        with capture_message_deliveries() as message_sends:
+            result = await self._run_agent_loop(
+                ctx.transcript_input,
+                runtime=runtime,
+                on_progress=ctx.on_progress,
+                on_stream=ctx.on_stream,
+                on_stream_end=ctx.on_stream_end,
+                on_retry_wait=ctx.on_retry_wait,
+                session=ctx.session,
+                pending_queue=ctx.pending_queue,
+                ephemeral=ctx.ephemeral,
+                run_extra_hooks_for_ephemeral=ctx.run_extra_hooks_for_ephemeral,
+                hooks=ctx.hooks,
+                hook_factories=ctx.hook_factories,
+                turn_scopes=ctx.turn_scopes,
+                tools=ctx.tools,
+                request_context=ctx.request_context,
+                provider_state=ctx.provider_state,
+            )
         ctx.final_content = result.final_content
         ctx.all_messages = result.messages
+        ctx.summary_checkpoint = result.summary_checkpoint
+        ctx.provider_compaction_applied = result.provider_compaction_applied
         ctx.stop_reason = result.stop_reason
-        ctx.had_injections = result.had_injections
+        if (
+            ctx.kind is TurnKind.USER
+            and (ctx.delivery.route.channel, ctx.delivery.route.chat_id) in message_sends
+            and (not result.had_injections or result.stop_reason == "empty_final_response")
+        ):
+            ctx.suppress_response = True
         ctx.usage = result.usage
         ctx.delivery.record_usage(ctx.usage)
         if ctx.kind is TurnKind.USER:
             await turn_continuation.maybe_continue_turn(ctx)
 
     async def _persist_turn(self, ctx: TurnContext) -> None:
-        runtime = ctx.require_runtime()
         session = ctx.require_session()
         turn_continuation.prepare_save_boundary(ctx)
 
@@ -2141,15 +2165,18 @@ class AgentLoop:
         self._save_turn(
             session, ctx.all_messages, ctx.save_skip,
             turn_latency_ms=ctx.turn_latency_ms,
+            summary_checkpoint=ctx.summary_checkpoint,
+            input_persisted_early=ctx.input_persisted_early,
         )
+        if (
+            not ctx.ephemeral
+            and ctx.provider_compaction_applied
+            and ctx.summary_checkpoint is not None
+        ):
+            # The next request must rebuild from the portable checkpoint;
+            # the opaque continuation predates that transcript rewrite.
+            session.provider_state = None
         ctx.delivery.record_latency(ctx.turn_latency_ms)
-        if not ctx.ephemeral:
-            self.schedule_background(
-                self.consolidator.maybe_consolidate_by_tokens(
-                    session,
-                    runtime=runtime,
-                )
-            )
         self._clear_pending_user_turn(session)
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
@@ -2177,7 +2204,6 @@ class AgentLoop:
             ctx.delivery.delivery_message,
             cast(str, ctx.final_content),
             ctx.stop_reason,
-            ctx.had_injections,
             ctx.streamed_content,
             log_content=ctx.require_session().policy.log_content,
             turn_latency_ms=ctx.turn_latency_ms,
@@ -2235,19 +2261,30 @@ class AgentLoop:
         "the evidence demands]\n"
     )
 
-    async def _maybe_plan(self, initial_messages: list[dict[str, Any]]) -> None:
+    async def _maybe_plan(self, transcript_input: TranscriptInput) -> None:
         """Opt-in plan-then-execute: one small non-tool LLM call before the
-        main run whose output is appended as a planning note. No new loop
-        state — the note rides the normal message list.
+        main run whose output is appended as a planning note.
+
+        moeka: the runner now assembles the provider transcript lazily
+        (upstream's "runner owns context compaction" refactor), so there is
+        no eagerly-built message list to append the note to anymore. The
+        note is appended to ``transcript_input.history`` instead — this is
+        a fresh list built per turn (a slice of ``session.messages``, not a
+        live reference — see ``Session.get_history()``), so mutating it here
+        never leaks into persisted session history. It lands immediately
+        before the current user message rather than immediately after, as
+        it used to.
         """
-        user_text = next(
-            (
-                m.get("content")
-                for m in reversed(initial_messages)
-                if m.get("role") == "user" and isinstance(m.get("content"), str)
-            ),
-            None,
-        )
+        user_text = transcript_input.current_message
+        if not isinstance(user_text, str) or not user_text:
+            user_text = next(
+                (
+                    m.get("content")
+                    for m in reversed(transcript_input.history)
+                    if m.get("role") == "user" and isinstance(m.get("content"), str)
+                ),
+                None,
+            )
         if not user_text or len(user_text) < self._PLANNING_MIN_CHARS:
             return
         try:
@@ -2267,10 +2304,59 @@ class AgentLoop:
             return
         plan = (response.content or "").strip()
         if plan and response.finish_reason != "error":
-            initial_messages.append(
+            transcript_input.history.append(
                 {"role": "user", "content": self._PLANNING_NOTE_PREFIX + plan}
             )
             logger.info("Planning note injected ({} chars)", len(plan))
+
+    @staticmethod
+    def _insert_summary_checkpoint(
+        session: Session,
+        checkpoint: SessionSummaryCheckpoint,
+        *,
+        insert_at: int | None = None,
+    ) -> None:
+        """Commit a replacement summary and its hidden transcript boundary."""
+        hint = {
+            "role": "user",
+            "content": SUMMARY_CONTINUATION_TEXT,
+            HIDDEN_HISTORY_META: True,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if insert_at is None:
+            session.messages.append(hint)
+            checkpoint_session_index = len(session.messages) - 1
+        else:
+            session.messages.insert(insert_at, hint)
+            checkpoint_session_index = insert_at
+        session.metadata["_last_summary"] = {
+            "text": checkpoint.summary,
+            "last_active": session.updated_at.isoformat(),
+        }
+        session.last_archived = checkpoint_session_index
+
+    @staticmethod
+    def _validated_checkpoint_boundary(
+        checkpoint: SessionSummaryCheckpoint | None,
+        *,
+        skip: int,
+        message_count: int,
+        session_key: str,
+    ) -> int | None:
+        """Return a checkpoint boundary only when it belongs to this turn."""
+        if checkpoint is None:
+            return None
+        boundary = checkpoint.transcript_boundary
+        if skip - 1 <= boundary <= message_count:
+            return boundary
+        logger.warning(
+            "Ignoring invalid summary boundary {} outside [{}, {}] for {}",
+            boundary,
+            skip - 1,
+            message_count,
+            session_key,
+        )
+        return None
 
     def _save_turn(
         self,
@@ -2279,10 +2365,10 @@ class AgentLoop:
         skip: int,
         *,
         turn_latency_ms: int | None = None,
+        summary_checkpoint: SessionSummaryCheckpoint | None = None,
+        input_persisted_early: bool = False,
     ) -> None:
-        """Save new-turn messages into session, truncating large tool results."""
-        from datetime import datetime
-
+        """Commit new-turn messages and an optional summary boundary."""
         declared_tool_call_ids = {
             str(tc["id"])
             for m in session.messages
@@ -2299,8 +2385,30 @@ class AgentLoop:
         }
         last_assistant_idx: int | None = None
         saved_followup_ids: set[str] = set()
-        for m in messages[skip:]:
-            entry = dict(m)
+        checkpoint_boundary = self._validated_checkpoint_boundary(
+            summary_checkpoint,
+            skip=skip,
+            message_count=len(messages),
+            session_key=session.key,
+        )
+
+        # The trigger input may already be the session tail while still being
+        # the first message after the replacement checkpoint.
+        if summary_checkpoint is not None and checkpoint_boundary == skip - 1:
+            insert_at = len(session.messages) - (1 if input_persisted_early else 0)
+            self._insert_summary_checkpoint(
+                session,
+                summary_checkpoint,
+                insert_at=insert_at,
+            )
+
+        for message_index, message in enumerate(messages[skip:], start=skip):
+            # Insert against the raw transcript index before filtering the
+            # message so persistence cleanup cannot shift the H/Δ boundary.
+            if summary_checkpoint is not None and checkpoint_boundary == message_index:
+                self._insert_summary_checkpoint(session, summary_checkpoint)
+
+            entry = dict(message)
             followup_id_value = cast(object, entry.pop(PENDING_FOLLOWUP_ID_KEY, None))
             followup_ids = (
                 [followup_id_value]
@@ -2379,6 +2487,8 @@ class AgentLoop:
                     for tc in (cast(dict[str, Any], tc_value),)
                     if tc.get("id")
                 )
+        if summary_checkpoint is not None and checkpoint_boundary == len(messages):
+            self._insert_summary_checkpoint(session, summary_checkpoint)
         if turn_latency_ms is not None and last_assistant_idx is not None:
             session.messages[last_assistant_idx]["latency_ms"] = int(turn_latency_ms)
         if saved_followup_ids:

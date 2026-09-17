@@ -510,6 +510,8 @@ interface ProviderModelInfo {
   description?: string | null;
   owned_by?: string | null;
   context_window?: number | null;
+  reasoning_efforts?: string[];
+  supports_backend_search?: boolean;
 }
 
 export interface ProviderModelsPayload {
@@ -521,7 +523,15 @@ export interface ProviderModelsPayload {
     | "not_configured"
     | "missing_api_base"
     | "error";
-  catalog_kind: "builtin" | "official" | "catalog" | "local" | "custom" | "unsupported";
+  catalog_kind:
+    | "builtin"
+    | "hybrid"
+    | "official"
+    | "catalog"
+    | "local"
+    | "custom"
+    | "unsupported";
+  source?: "remote" | "cache" | "stale" | "fallback";
   models: ProviderModelInfo[];
   model_count: number;
   message?: string | null;
@@ -585,6 +595,8 @@ export interface SettingsPayload {
   }>;
   model_call_order: string[];
   model_call_order_editable: boolean;
+  /** Whether an actual legacy model configuration is available to convert. */
+  model_configuration_migratable?: boolean;
   created_model_preset?: string;
   created_provider?: string;
   providers: Array<{
@@ -702,7 +714,6 @@ export interface SettingsPayload {
     heartbeat: {
       enabled: boolean;
       interval_s: number;
-      keep_recent_messages: number;
     };
     dream: {
       schedule: string;

@@ -145,7 +145,7 @@
       "presetName": "Nome da predefinição",
       "presetNameHelp": "Usado na interface e nos comandos /model. Os nomes devem ser únicos.",
       "presetNameDuplicate": "Já existe uma predefinição com este nome.",
-      "presetNamePlaceholder": "Escrita rápida",
+      "presetNamePlaceholder": "ex.: Escrita rápida",
       "advancedOptions": "Opções avançadas",
       "advancedSummary": "Contexto {{context}} · Máx. {{max}} tokens",
       "maxTokens": "Máx. de tokens de saída",
@@ -483,7 +483,7 @@
       "save": "Salvar",
       "saving": "Salvando",
       "saveOrder": "Salvar ordem",
-      "savePreset": "Salvar predefinição",
+      "savePreset": "Salvar",
       "delete": "Excluir",
       "deleting": "Excluindo...",
       "edit": "Editar",
@@ -1195,7 +1195,9 @@
       "removeQuotedContext": "Remover contexto citado",
       "modelNotConfigured": "Modelo não configurado",
       "configureModel": "Configurar modelo",
+      "chooseAI": "Escolha sua IA",
       "switchModel": "Alternar o modelo desta conversa",
+      "manageModels": "Gerenciar modelos",
       "context": {
         "tooltip": "Contexto · {{tokens}}{{capacity}}",
         "meterDescription": "{{context}}. {{percent}}% usado."

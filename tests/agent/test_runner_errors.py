@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent.runner_helpers import make_run_spec
+from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools import ToolResult
+from nanobot.agent.tools.execution import execute_tool_calls
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
@@ -50,16 +52,36 @@ async def test_runner_returns_tool_exception_to_model_for_recovery():
         {"name": "list_dir", "status": "error", "detail": "boom"}
     ]
     tool_message = next(message for message in result.messages if message.get("role") == "tool")
+    retry_hint = "[Analyze the error above and try a different approach.]"
     assert "Error: RuntimeError: boom" in tool_message["content"]
+    assert tool_message["content"].count(retry_hint) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_does_not_duplicate_existing_retry_hint():
+    retry_hint = "\n\n[Analyze the error above and try a different approach.]"
+    tools = SimpleNamespace(
+        execute=AsyncMock(return_value=ToolResult.error("Error: boom" + retry_hint)),
+    )
+
+    results, events = await execute_tool_calls(
+        tools,
+        [ToolCallRequest(id="call_1", name="list_dir", arguments={})],
+        concurrent=False,
+        external_lookup_counts={},
+        workspace_violation_counts={},
+        hook=AgentHook(),
+        context=AgentHookContext(iteration=0, messages=[]),
+    )
+
+    assert results == ["Error: boom" + retry_hint]
+    assert results[0].count(retry_hint) == 1
+    assert events[0]["status"] == "error"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("control_error", [KeyboardInterrupt, SystemExit])
-async def test_runner_propagates_tool_control_flow_exceptions(control_error: type[BaseException]):
-    from nanobot.agent.runner import AgentRunner
-
-    provider = MagicMock(spec=LLMProvider)
-
+async def test_tool_execution_propagates_control_flow_exceptions(control_error: type[BaseException]):
     async def execute(_name, _args):
         raise control_error("stop")
 
@@ -67,22 +89,15 @@ async def test_runner_propagates_tool_control_flow_exceptions(control_error: typ
         get_definitions=lambda: [],
         execute=execute,
     )
-    runner = AgentRunner()
-    spec = make_run_spec(
-        provider,
-        initial_messages=[],
-        tools=tools,
-        model="test-model",
-        max_iterations=1,
-        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-    )
-
     with pytest.raises(control_error):
-        await runner._run_tool(
-            spec,
-            ToolCallRequest(id="call_1", name="list_dir", arguments={}),
+        await execute_tool_calls(
+            tools,
+            [ToolCallRequest(id="call_1", name="list_dir", arguments={})],
+            concurrent=False,
             external_lookup_counts={},
             workspace_violation_counts={},
+            hook=AgentHook(),
+            context=AgentHookContext(iteration=0, messages=[]),
         )
 
 

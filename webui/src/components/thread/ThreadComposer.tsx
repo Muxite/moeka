@@ -300,6 +300,7 @@ interface ThreadComposerProps {
   modelNeedsSetup?: boolean;
   fallbackModelName?: string | null;
   onModelBadgeClick?: () => void;
+  onManageModels?: () => void;
   contextUsage?: ComposerContextUsage | null;
   variant?: "thread" | "hero";
   slashCommands?: SlashCommand[];
@@ -998,6 +999,7 @@ export function ThreadComposer({
   modelNeedsSetup = false,
   fallbackModelName = null,
   onModelBadgeClick,
+  onManageModels,
   contextUsage = null,
   variant = "thread",
   slashCommands = [],
@@ -1034,6 +1036,7 @@ export function ThreadComposer({
   } | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [sendPending, setSendPending] = useState(false);
+  const [modelSetupAttentionRequest, setModelSetupAttentionRequest] = useState(0);
   const interactionDisabled = !!disabled || sendPending;
   const [voiceErrorFading, setVoiceErrorFading] = useState(false);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
@@ -2006,7 +2009,9 @@ export function ThreadComposer({
 
   const submit = useCallback(() => {
     if (modelNeedsSetup) {
-      onModelBadgeClick?.();
+      if (hasComposerContent) {
+        setModelSetupAttentionRequest((request) => request + 1);
+      }
       return;
     }
     if (!canSend) return;
@@ -2110,11 +2115,11 @@ export function ThreadComposer({
     clear,
     clearComposerText,
     hasTouchPrimaryPointer,
+    hasComposerContent,
     handleStop,
     isStreaming,
     maxTextBytes,
     modelNeedsSetup,
-    onModelBadgeClick,
     onSend,
     onStop,
     onQuotedContextChange,
@@ -2539,10 +2544,12 @@ export function ThreadComposer({
                 modelPreset={modelPreset}
                 modelPresets={modelPresets}
                 onPresetChange={onModelPresetChange}
+                onManageModels={onManageModels}
                 onRequestComposerFocus={() => textareaRef.current?.focus()}
                 provider={modelProvider}
                 providerLabel={modelProviderLabel}
                 needsSetup={modelNeedsSetup}
+                attentionRequest={modelSetupAttentionRequest}
                 fallbackModelName={fallbackModelName}
                 isHero={isHero}
                 onClick={modelNeedsSetup ? onModelBadgeClick : undefined}
