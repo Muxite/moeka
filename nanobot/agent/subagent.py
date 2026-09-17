@@ -106,7 +106,6 @@ class SubagentManager:
         max_concurrent_subagents: int | None = None,
         tools_allow: list[str] | None = None,
         tools_deny: list[str] | None = None,
-        fail_on_tool_error: bool | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
         inline_skills: list | None = None,
     ):
@@ -153,11 +152,6 @@ class SubagentManager:
             max_concurrent_subagents
             if max_concurrent_subagents is not None
             else defaults.max_concurrent_subagents
-        )
-        self.fail_on_tool_error = (
-            fail_on_tool_error
-            if fail_on_tool_error is not None
-            else defaults.fail_on_tool_error
         )
         self.runner = AgentRunner()
         self._exec_session_manager = ExecSessionManager()
@@ -428,7 +422,6 @@ class SubagentManager:
                     checkpoint_callback=_on_checkpoint,
                     session_key=sess_key,
                     workspace=root,
-                    fail_on_tool_error=self.fail_on_tool_error,
                     llm_timeout_s=llm_timeout,
                     llm_usage_source=origin.get(
                         "llm_usage_source",

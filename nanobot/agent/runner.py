@@ -1600,8 +1600,6 @@ class AgentRunner:
                 "status": "error",
                 "detail": "repeated external lookup blocked",
             }
-            if spec.fail_on_tool_error:
-                return lookup_error + hint, event, RuntimeError(lookup_error)
             return lookup_error + hint, event, None
         prepare_call = cast(
             Callable[[str, Any], object] | None,
@@ -1629,9 +1627,7 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
-            return prep_error + hint, event, (
-                RuntimeError(prep_error) if spec.fail_on_tool_error else None
-            )
+            return prep_error + hint, event, None
         await hook.before_execute_tool(context, tool_call, tool, params)
         try:
             if tool is not None:
@@ -1661,8 +1657,6 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
-            if spec.fail_on_tool_error:
-                return payload, event, exc
             return payload, event, None
 
         if is_tool_error_result(result):
@@ -1681,8 +1675,6 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
-            if spec.fail_on_tool_error:
-                return result + hint, event, RuntimeError(result)
             return result + hint, event, None
 
         await hook.after_execute_tool(context, tool_call, tool, params, result)

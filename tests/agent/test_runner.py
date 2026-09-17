@@ -11,9 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.context import RequestContext
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import AgentDefaults
-from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMResponse, LLMUsage, ToolCallRequest
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
@@ -62,10 +63,10 @@ async def test_runner_preserves_reasoning_fields_and_tool_results():
                 tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={"path": "."})],
                 reasoning_content="hidden reasoning",
                 thinking_blocks=[{"type": "thinking", "thinking": "step"}],
-                usage={"prompt_tokens": 5, "completion_tokens": 3},
+                usage=LLMUsage.reported(input_tokens=5, output_tokens=3),
             )
         captured_second_call[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -121,7 +122,7 @@ async def test_runner_calls_hooks_in_order():
                 content="thinking",
                 tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={"path": "."})],
             )
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -195,7 +196,7 @@ async def test_runner_streaming_hook_receives_deltas_and_end_signal():
     async def chat_stream_with_retry(*, on_content_delta, **kwargs):
         await on_content_delta("he")
         await on_content_delta("llo")
-        return LLMResponse(content="hello", tool_calls=[], usage={})
+        return LLMResponse(content="hello", tool_calls=[], usage=None)
 
     provider.chat_stream_with_retry = chat_stream_with_retry
     provider.chat_with_retry = AsyncMock()
@@ -262,39 +263,6 @@ async def test_runner_returns_max_iterations_fallback():
     assert result.messages[-1]["content"] == result.final_content
 
 @pytest.mark.asyncio
-async def test_runner_returns_structured_tool_error():
-    from agent.runner_helpers import make_run_spec
-    from nanobot.agent.runner import AgentRunner
-
-    provider = MagicMock()
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
-        content="working",
-        tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={})],
-    ))
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
-    tools.execute = AsyncMock(side_effect=RuntimeError("boom"))
-
-    runner = AgentRunner()
-
-    result = await runner.run(make_run_spec(
-        provider,
-        initial_messages=[],
-        tools=tools,
-        model="test-model",
-        max_iterations=2,
-        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        fail_on_tool_error=True,
-    ))
-
-    assert result.stop_reason == "tool_error"
-    assert result.error == "Error: RuntimeError: boom"
-    assert result.tool_events == [
-        {"name": "list_dir", "status": "error", "detail": "boom"}
-    ]
-
-
-@pytest.mark.asyncio
 async def test_runner_persists_large_tool_results_for_follow_up_calls(tmp_path):
     from agent.runner_helpers import make_run_spec
     from nanobot.agent.runner import AgentRunner
@@ -309,10 +277,10 @@ async def test_runner_persists_large_tool_results_for_follow_up_calls(tmp_path):
             return LLMResponse(
                 content="working",
                 tool_calls=[ToolCallRequest(id="call_big", name="list_dir", arguments={"path": "."})],
-                usage={"prompt_tokens": 5, "completion_tokens": 3},
+                usage=LLMUsage.reported(input_tokens=5, output_tokens=3),
             )
         captured_second_call[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -354,10 +322,10 @@ async def test_read_file_result_is_not_offloaded(tmp_path):
             return LLMResponse(
                 content="reading",
                 tool_calls=[ToolCallRequest(id="call_rf", name="read_file", arguments={"path": "big.txt"})],
-                usage={"prompt_tokens": 5, "completion_tokens": 3},
+                usage=LLMUsage.reported(input_tokens=5, output_tokens=3),
             )
         captured_second_call[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -473,10 +441,10 @@ async def test_runner_replaces_empty_tool_result_with_marker():
             return LLMResponse(
                 content="working",
                 tool_calls=[ToolCallRequest(id="call_1", name="noop", arguments={})],
-                usage={},
+                usage=None,
             )
         captured_second_call[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -513,12 +481,12 @@ async def test_runner_retries_empty_final_response_with_summary_prompt():
             return LLMResponse(
                 content=None,
                 tool_calls=[],
-                usage={"prompt_tokens": 5, "completion_tokens": 1},
+                usage=LLMUsage.reported(input_tokens=5, output_tokens=1),
             )
         return LLMResponse(
             content="final answer",
             tool_calls=[],
-            usage={"prompt_tokens": 3, "completion_tokens": 7},
+            usage=LLMUsage.reported(input_tokens=3, output_tokens=7),
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -541,8 +509,8 @@ async def test_runner_retries_empty_final_response_with_summary_prompt():
     assert calls[0]["tools"] is not None
     assert calls[1]["tools"] is not None
     assert calls[2]["tools"] is None
-    assert result.usage["prompt_tokens"] == 13
-    assert result.usage["completion_tokens"] == 9
+    assert result.usage.input_tokens == 13
+    assert result.usage.output_tokens == 9
 
 
 @pytest.mark.asyncio
@@ -555,7 +523,7 @@ async def test_runner_uses_specific_message_after_empty_finalization_retry():
     provider = MagicMock()
 
     async def chat_with_retry(*, messages, **kwargs):
-        return LLMResponse(content=None, tool_calls=[], usage={})
+        return LLMResponse(content=None, tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -595,20 +563,20 @@ async def test_runner_empty_response_does_not_break_tool_chain():
             return LLMResponse(
                 content=None,
                 tool_calls=[ToolCallRequest(id="tc1", name="read_file", arguments={"path": "a.txt"})],
-                usage={"prompt_tokens": 10, "completion_tokens": 5},
+                usage=LLMUsage.reported(input_tokens=10, output_tokens=5),
             )
         if call_count == 2:
-            return LLMResponse(content=None, tool_calls=[], usage={"prompt_tokens": 10, "completion_tokens": 1})
+            return LLMResponse(content=None, tool_calls=[], usage=LLMUsage.reported(input_tokens=10, output_tokens=1))
         if call_count == 3:
             return LLMResponse(
                 content=None,
                 tool_calls=[ToolCallRequest(id="tc2", name="read_file", arguments={"path": "b.txt"})],
-                usage={"prompt_tokens": 10, "completion_tokens": 5},
+                usage=LLMUsage.reported(input_tokens=10, output_tokens=5),
             )
         return LLMResponse(
             content="Here are the results.",
             tool_calls=[],
-            usage={"prompt_tokens": 10, "completion_tokens": 10},
+            usage=LLMUsage.reported(input_tokens=10, output_tokens=10),
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -657,10 +625,10 @@ async def test_runner_keeps_going_when_tool_result_persistence_fails():
             return LLMResponse(
                 content="working",
                 tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={"path": "."})],
-                usage={"prompt_tokens": 5, "completion_tokens": 3},
+                usage=LLMUsage.reported(input_tokens=5, output_tokens=3),
             )
         captured_second_call[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -832,10 +800,10 @@ async def test_runner_blocks_repeated_external_fetches():
             return LLMResponse(
                 content="working",
                 tool_calls=[ToolCallRequest(id=f"call_{call_count['n']}", name="web_fetch", arguments={"url": "https://example.com"})],
-                usage={},
+                usage=None,
             )
         captured_final_call[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -872,9 +840,9 @@ async def test_loop_max_iterations_message_stays_stable(tmp_path):
     loop.tools.execute = AsyncMock(return_value="ok")
     loop.max_iterations = 2
 
-    final_content, _, _, _, _ = await loop._run_agent_loop(
+    final_content = (await loop._run_agent_loop(
         [], runtime=loop.runtime_resolver.current(),
-    )
+    )).final_content
 
     assert final_content == (
         "I reached the maximum number of tool call iterations (2) "
@@ -891,7 +859,7 @@ async def test_loop_stream_filter_handles_think_only_prefix_without_crashing(tmp
     async def chat_stream_with_retry(*, on_content_delta, **kwargs):
         await on_content_delta("<think>hidden")
         await on_content_delta("</think>Hello")
-        return LLMResponse(content="<think>hidden</think>Hello", tool_calls=[], usage={})
+        return LLMResponse(content="<think>hidden</think>Hello", tool_calls=[], usage=None)
 
     loop.provider.chat_stream_with_retry = chat_stream_with_retry
 
@@ -901,12 +869,12 @@ async def test_loop_stream_filter_handles_think_only_prefix_without_crashing(tmp
     async def on_stream_end(*, resuming: bool = False) -> None:
         endings.append(resuming)
 
-    final_content, _, _, _, _ = await loop._run_agent_loop(
+    final_content = (await loop._run_agent_loop(
         [],
         runtime=loop.runtime_resolver.current(),
         on_stream=on_stream,
         on_stream_end=on_stream_end,
-    )
+    )).final_content
 
     assert final_content == "Hello"
     assert deltas == ["Hello"]
@@ -921,14 +889,14 @@ async def test_loop_retries_think_only_final_response(tmp_path):
     async def chat_with_retry(**kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            return LLMResponse(content="<think>hidden</think>", tool_calls=[], usage={})
-        return LLMResponse(content="Recovered answer", tool_calls=[], usage={})
+            return LLMResponse(content="<think>hidden</think>", tool_calls=[], usage=None)
+        return LLMResponse(content="Recovered answer", tool_calls=[], usage=None)
 
     loop.provider.chat_with_retry = chat_with_retry
 
-    final_content, _, _, _, _ = await loop._run_agent_loop(
+    final_content = (await loop._run_agent_loop(
         [], runtime=loop.runtime_resolver.current(),
-    )
+    )).final_content
 
     assert final_content == "Recovered answer"
     assert call_count["n"] == 2
@@ -946,7 +914,7 @@ async def test_llm_error_not_appended_to_session_messages():
 
     provider = MagicMock()
     provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
-        content="429 rate limit exceeded", finish_reason="error", tool_calls=[], usage={},
+        content="429 rate limit exceeded", finish_reason="error", tool_calls=[], usage=None,
     ))
     tools = MagicMock()
     tools.get_definitions.return_value = []
@@ -982,7 +950,7 @@ async def test_streamed_flag_not_set_on_llm_error(tmp_path):
     provider.get_default_model.return_value = "test-model"
     loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
     error_resp = LLMResponse(
-        content="503 service unavailable", finish_reason="error", tool_calls=[], usage={},
+        content="503 service unavailable", finish_reason="error", tool_calls=[], usage=None,
     )
     loop.provider.chat_with_retry = AsyncMock(return_value=error_resp)
     loop.provider.chat_stream_with_retry = AsyncMock(return_value=error_resp)
@@ -1013,8 +981,8 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
     provider.chat_with_retry = AsyncMock(side_effect=[
-        LLMResponse(content="429 rate limit exceeded", finish_reason="error", tool_calls=[], usage={}),
-        LLMResponse(content="Recovered answer", tool_calls=[], usage={}),
+        LLMResponse(content="429 rate limit exceeded", finish_reason="error", tool_calls=[], usage=None),
+        LLMResponse(content="Recovered answer", tool_calls=[], usage=None),
     ])
 
     loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, model="test-model")
@@ -1057,40 +1025,6 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     }
     assert non_system[2]["role"] == "user"
     assert "second question" in non_system[2]["content"]
-
-
-@pytest.mark.asyncio
-async def test_runner_tool_error_sets_final_content():
-    from agent.runner_helpers import make_run_spec
-    from nanobot.agent.runner import AgentRunner
-
-    provider = MagicMock()
-
-    async def chat_with_retry(*, messages, **kwargs):
-        return LLMResponse(
-            content="working",
-            tool_calls=[ToolCallRequest(id="call_1", name="read_file", arguments={"path": "x"})],
-            usage={},
-        )
-
-    provider.chat_with_retry = chat_with_retry
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
-    tools.execute = AsyncMock(side_effect=RuntimeError("boom"))
-
-    runner = AgentRunner()
-    result = await runner.run(make_run_spec(
-        provider,
-        initial_messages=[{"role": "user", "content": "do task"}],
-        tools=tools,
-        model="test-model",
-        max_iterations=1,
-        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        fail_on_tool_error=True,
-    ))
-
-    assert result.final_content == "Error: RuntimeError: boom"
-    assert result.stop_reason == "tool_error"
 
 
 @pytest.mark.asyncio
@@ -1146,12 +1080,12 @@ async def test_runner_accumulates_usage_and_preserves_cached_tokens():
             return LLMResponse(
                 content="thinking",
                 tool_calls=[ToolCallRequest(id="call_1", name="read_file", arguments={"path": "x"})],
-                usage={"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 80},
+                usage=LLMUsage.reported(input_tokens=100, output_tokens=10, cache_read_tokens=80),
             )
         return LLMResponse(
             content="done",
             tool_calls=[],
-            usage={"prompt_tokens": 200, "completion_tokens": 20, "cached_tokens": 150},
+            usage=LLMUsage.reported(input_tokens=200, output_tokens=20, cache_read_tokens=150),
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -1170,9 +1104,9 @@ async def test_runner_accumulates_usage_and_preserves_cached_tokens():
     ))
 
     # Usage should be accumulated across iterations
-    assert result.usage["prompt_tokens"] == 300  # 100 + 200
-    assert result.usage["completion_tokens"] == 30  # 10 + 20
-    assert result.usage["cached_tokens"] == 230  # 80 + 150
+    assert result.usage.input_tokens == 300  # 100 + 200
+    assert result.usage.output_tokens == 30  # 10 + 20
+    assert result.usage.cache_read_tokens == 230  # 80 + 150
 
 
 @pytest.mark.asyncio
@@ -1183,17 +1117,17 @@ async def test_runner_passes_cached_tokens_to_hook_context():
     from nanobot.agent.runner import AgentRunner
 
     provider = MagicMock()
-    captured_usage: list[dict] = []
+    captured_usage: list[LLMUsage] = []
 
     class UsageHook(AgentHook):
         async def after_iteration(self, context: AgentHookContext) -> None:
-            captured_usage.append(dict(context.usage))
+            captured_usage.append(context.usage)
 
     async def chat_with_retry(**kwargs):
         return LLMResponse(
             content="done",
             tool_calls=[],
-            usage={"prompt_tokens": 200, "completion_tokens": 20, "cached_tokens": 150},
+            usage=LLMUsage.reported(input_tokens=200, output_tokens=20, cache_read_tokens=150),
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -1212,7 +1146,7 @@ async def test_runner_passes_cached_tokens_to_hook_context():
     ))
 
     assert len(captured_usage) == 1
-    assert captured_usage[0]["cached_tokens"] == 150
+    assert captured_usage[0].cache_read_tokens == 150
 
 
 # ---------------------------------------------------------------------------
@@ -1236,9 +1170,9 @@ async def test_length_recovery_continues_from_truncated_output():
             return LLMResponse(
                 content=f"part{call_count['n']} ",
                 finish_reason="length",
-                usage={},
+                usage=None,
             )
-        return LLMResponse(content="final", finish_reason="stop", usage={})
+        return LLMResponse(content="final", finish_reason="stop", usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -1288,8 +1222,8 @@ async def test_length_recovery_streaming_calls_on_stream_end_with_resuming():
     async def chat_stream_with_retry(*, messages, on_content_delta=None, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            return LLMResponse(content="partial ", finish_reason="length", usage={})
-        return LLMResponse(content="done", finish_reason="stop", usage={})
+            return LLMResponse(content="partial ", finish_reason="length", usage=None)
+        return LLMResponse(content="done", finish_reason="stop", usage=None)
 
     provider.chat_stream_with_retry = chat_stream_with_retry
     tools = MagicMock()
@@ -1325,7 +1259,7 @@ async def test_length_recovery_gives_up_after_max_retries():
         return LLMResponse(
             content=f"chunk{call_count['n']}",
             finish_reason="length",
-            usage={},
+            usage=None,
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -1361,7 +1295,7 @@ async def test_runner_drops_orphan_tool_results_before_model_request():
 
     async def chat_with_retry(*, messages, **kwargs):
         captured_messages[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -1402,7 +1336,7 @@ async def test_backfill_repairs_model_context_without_shifting_save_turn_boundar
 
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    response = LLMResponse(content="new answer", tool_calls=[], usage={})
+    response = LLMResponse(content="new answer", tool_calls=[], usage=None)
     provider.chat_with_retry = AsyncMock(return_value=response)
     provider.chat_stream_with_retry = AsyncMock(return_value=response)
 
@@ -1489,7 +1423,7 @@ async def test_runner_backfill_only_mutates_model_context_not_returned_messages(
 
     async def chat_with_retry(*, messages, **kwargs):
         captured_messages[:] = messages
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -1565,7 +1499,7 @@ async def test_runner_backfill_only_mutates_model_context_not_returned_messages(
 
 @pytest.mark.asyncio
 async def test_runner_tool_error_preserves_tool_results_in_messages():
-    """When a tool raises a fatal error, its results must still be appended
+    """When a tool errors, its results must still be appended
     to messages so the session never contains orphan tool_calls (#2943)."""
     from agent.runner_helpers import make_run_spec
     from nanobot.agent.runner import AgentRunner
@@ -1579,7 +1513,7 @@ async def test_runner_tool_error_preserves_tool_results_in_messages():
                 ToolCallRequest(id="tc1", name="read_file", arguments={"path": "a"}),
                 ToolCallRequest(id="tc2", name="exec", arguments={"cmd": "bad"}),
             ],
-            usage={},
+            usage=None,
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -1606,11 +1540,10 @@ async def test_runner_tool_error_preserves_tool_results_in_messages():
         model="test-model",
         max_iterations=1,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        fail_on_tool_error=True,
     ))
 
-    assert result.stop_reason == "tool_error"
-    # Both tool results must be in messages even though tc2 had a fatal error.
+    assert result.stop_reason == "max_iterations"
+    # Both tool results must be in messages even though tc2 errored.
     tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
     assert len(tool_msgs) == 2
     assert tool_msgs[0]["tool_call_id"] == "tc1"
@@ -1789,9 +1722,9 @@ async def test_checkpoint1_injects_after_tool_execution():
             return LLMResponse(
                 content="using tool",
                 tool_calls=[ToolCallRequest(id="c1", name="read_file", arguments={"path": "x"})],
-                usage={},
+                usage=None,
             )
-        return LLMResponse(content="final answer", tool_calls=[], usage={})
+        return LLMResponse(content="final answer", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -1851,8 +1784,8 @@ async def test_checkpoint2_injects_after_final_response_with_resuming_stream():
     async def chat_stream_with_retry(*, messages, on_content_delta=None, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            return LLMResponse(content="first answer", tool_calls=[], usage={})
-        return LLMResponse(content="second answer", tool_calls=[], usage={})
+            return LLMResponse(content="first answer", tool_calls=[], usage=None)
+        return LLMResponse(content="second answer", tool_calls=[], usage=None)
 
     provider.chat_stream_with_retry = chat_stream_with_retry
     tools = MagicMock()
@@ -1902,8 +1835,8 @@ async def test_checkpoint2_preserves_final_response_in_history_before_followup()
         call_count["n"] += 1
         captured_messages.append([dict(message) for message in messages])
         if call_count["n"] == 1:
-            return LLMResponse(content="first answer", tool_calls=[], usage={})
-        return LLMResponse(content="second answer", tool_calls=[], usage={})
+            return LLMResponse(content="first answer", tool_calls=[], usage=None)
+        return LLMResponse(content="second answer", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -1966,8 +1899,8 @@ async def test_loop_injected_followup_preserves_image_media(tmp_path):
         call_count["n"] += 1
         captured_messages.append(list(messages))
         if call_count["n"] == 1:
-            return LLMResponse(content="first answer", tool_calls=[], usage={})
-        return LLMResponse(content="second answer", tool_calls=[], usage={})
+            return LLMResponse(content="first answer", tool_calls=[], usage=None)
+        return LLMResponse(content="second answer", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
@@ -1982,13 +1915,14 @@ async def test_loop_injected_followup_preserves_image_media(tmp_path):
         media=[str(image_path)],
     ))
 
-    final_content, _, _, _, had_injections = await loop._run_agent_loop(
+    result = await loop._run_agent_loop(
         [{"role": "user", "content": "hello"}],
         runtime=loop.runtime_resolver.current(),
-        channel="cli",
-        chat_id="c",
+        request_context=RequestContext(channel="cli", chat_id="c"),
         pending_queue=pending_queue,
     )
+    final_content = result.final_content
+    had_injections = result.had_injections
 
     assert final_content == "second answer"
     assert had_injections is True
@@ -2019,8 +1953,8 @@ async def test_runner_merges_multiple_injected_user_messages_without_losing_medi
         call_count["n"] += 1
         captured_messages.append([dict(message) for message in messages])
         if call_count["n"] == 1:
-            return LLMResponse(content="first answer", tool_calls=[], usage={})
-        return LLMResponse(content="second answer", tool_calls=[], usage={})
+            return LLMResponse(content="first answer", tool_calls=[], usage=None)
+        return LLMResponse(content="second answer", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -2082,7 +2016,7 @@ async def test_injection_cycles_capped_at_max():
 
     async def chat_with_retry(*, messages, **kwargs):
         call_count["n"] += 1
-        return LLMResponse(content=f"answer-{call_count['n']}", tool_calls=[], usage={})
+        return LLMResponse(content=f"answer-{call_count['n']}", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -2122,7 +2056,7 @@ async def test_no_injections_flag_is_false_by_default():
     provider = MagicMock()
 
     async def chat_with_retry(**kwargs):
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -2147,7 +2081,7 @@ async def test_pending_queue_cleanup_on_dispatch(tmp_path):
     loop = _make_loop(tmp_path)
 
     async def chat_with_retry(**kwargs):
-        return LLMResponse(content="done", tool_calls=[], usage={})
+        return LLMResponse(content="done", tool_calls=[], usage=None)
 
     loop.provider.chat_with_retry = chat_with_retry
 
@@ -2211,7 +2145,7 @@ async def test_pending_queue_preserves_overflow_for_next_injection_cycle(tmp_pat
     async def chat_with_retry(*, messages, **kwargs):
         call_count["n"] += 1
         captured_messages.append([dict(message) for message in messages])
-        return LLMResponse(content=f"answer-{call_count['n']}", tool_calls=[], usage={})
+        return LLMResponse(content=f"answer-{call_count['n']}", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
@@ -2227,13 +2161,14 @@ async def test_pending_queue_preserves_overflow_for_next_injection_cycle(tmp_pat
             content=f"follow-up-{idx}",
         ))
 
-    final_content, _, _, _, had_injections = await loop._run_agent_loop(
+    result = await loop._run_agent_loop(
         [{"role": "user", "content": "hello"}],
         runtime=loop.runtime_resolver.current(),
-        channel="cli",
-        chat_id="c",
+        request_context=RequestContext(channel="cli", chat_id="c"),
         pending_queue=pending_queue,
     )
+    final_content = result.final_content
+    had_injections = result.had_injections
 
     assert final_content == "answer-3"
     assert had_injections is True
@@ -2337,10 +2272,10 @@ async def test_drain_injections_on_fatal_tool_error():
             return LLMResponse(
                 content="",
                 tool_calls=[ToolCallRequest(id="c1", name="exec", arguments={"cmd": "bad"})],
-                usage={},
+                usage=None,
             )
         # Second call: respond normally to the injected follow-up
-        return LLMResponse(content="reply to follow-up", tool_calls=[], usage={})
+        return LLMResponse(content="reply to follow-up", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -2362,7 +2297,6 @@ async def test_drain_injections_on_fatal_tool_error():
         model="test-model",
         max_iterations=5,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        fail_on_tool_error=True,
         injection_callback=inject_cb,
     ))
 
@@ -2393,10 +2327,10 @@ async def test_drain_injections_on_llm_error():
                 content=None,
                 tool_calls=[],
                 finish_reason="error",
-                usage={},
+                usage=None,
             )
         # Second call: respond normally to the injected follow-up
-        return LLMResponse(content="recovered answer", tool_calls=[], usage={})
+        return LLMResponse(content="recovered answer", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -2446,9 +2380,9 @@ async def test_drain_injections_on_empty_final_response():
     async def chat_with_retry(*, messages, **kwargs):
         call_count["n"] += 1
         if call_count["n"] <= _MAX_EMPTY_RETRIES + 1:
-            return LLMResponse(content="", tool_calls=[], usage={})
+            return LLMResponse(content="", tool_calls=[], usage=None)
         # After retries exhausted + injection drain, respond normally
-        return LLMResponse(content="answer after empty", tool_calls=[], usage={})
+        return LLMResponse(content="answer after empty", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
     tools = MagicMock()
@@ -2505,7 +2439,7 @@ async def test_drain_injections_on_max_iterations():
         return LLMResponse(
             content="",
             tool_calls=[ToolCallRequest(id=f"c{call_count['n']}", name="read_file", arguments={"path": "x"})],
-            usage={},
+            usage=None,
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -2559,7 +2493,7 @@ async def test_drain_injections_set_flag_when_followup_arrives_after_last_iterat
         return LLMResponse(
             content="",
             tool_calls=[ToolCallRequest(id=f"c{call_count['n']}", name="read_file", arguments={"path": "x"})],
-            usage={},
+            usage=None,
         )
 
     provider.chat_with_retry = chat_with_retry
@@ -2624,7 +2558,7 @@ async def test_injection_cycle_cap_on_error_path():
             content=None,
             tool_calls=[],
             finish_reason="error",
-            usage={},
+            usage=None,
         )
 
     provider.chat_with_retry = chat_with_retry

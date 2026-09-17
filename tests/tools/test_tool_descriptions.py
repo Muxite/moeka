@@ -51,7 +51,12 @@ def test_coding_tool_descriptions_steer_discovery() -> None:
 
 
 def test_exec_tool_descriptions_are_concise() -> None:
-    assert ExecTool().description == "Execute a shell command."
+    # moeka deviation: ExecTool's description is intentionally verbose — it
+    # documents the permissive server-management sandbox posture (rm -rf/dd/
+    # mkfs/shutdown permitted by default, sudo gated by allow_sudo) so the
+    # model doesn't need to rediscover that via trial and error. See
+    # nanobot/agent/tools/shell.py's description property.
+    assert ExecTool().description.startswith("Execute a shell command and return its output.")
     assert ExecSessionTool().description == "Manage a session returned by exec."
     assert ListExecSessionsTool().description == "List active exec sessions."
 

@@ -478,18 +478,21 @@ class ExecTool(Tool):
                     + _WORKSPACE_BOUNDARY_NOTE
                 )
 
-        # Full access is an explicit trust decision. Keep the application-level
-        # command guard aligned with the selected access mode instead of
-        # continuing to block commands after workspace restriction is disabled.
-        if access.restrict_to_workspace:
-            guard_error = self._guard_command(
-                command,
-                cwd,
-                restrict_to_workspace=True,
-                workspace_root=workspace_root,
-            )
-            if guard_error:
-                return guard_error
+        # moeka: unlike upstream, the command guard always runs regardless of
+        # restrict_to_workspace. deny_patterns/allow_patterns are a separate,
+        # operator-configured safety mechanism independent of workspace-escape
+        # prevention — full workspace access is an explicit trust decision
+        # about *where* commands run, not whether deny/allow patterns apply.
+        # See tests/integration/test_exec_real.py's blockable_when_configured
+        # tests.
+        guard_error = self._guard_command(
+            command,
+            cwd,
+            restrict_to_workspace=access.restrict_to_workspace,
+            workspace_root=workspace_root,
+        )
+        if guard_error:
+            return guard_error
 
         # moeka: sudo is gated by tools.exec.allow_sudo (defaults False) with a
         # clear opt-in denial message. Destructive commands stay permitted by

@@ -240,7 +240,7 @@ async def test_action_invoked_by_real_engine(tmp_path):
                 content="",
                 tool_calls=[ToolCallRequest(id="c1", name="multiply", arguments={"a": 6, "b": 7})],
             )
-        return LLMResponse(content="The answer is 42.", tool_calls=[], usage={})
+        return LLMResponse(content="The answer is 42.", tool_calls=[], usage=None)
 
     provider.chat_with_retry = chat_with_retry
 

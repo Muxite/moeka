@@ -118,7 +118,14 @@ def test_exec_full_workspace_scope_still_blocks_metadata(tmp_path):
         "echo http://169.254.169.254/latest/meta-data/",
     ],
 )
-async def test_exec_full_access_skips_command_guard(tmp_path, command):
+async def test_exec_full_access_still_enforces_command_guard(tmp_path, command):
+    """moeka deviation from upstream: the command guard (operator-configured
+    deny_patterns and the hard SSRF guard) always applies, independent of
+    restrict_to_workspace/full-access mode. Full workspace access is a trust
+    decision about *where* commands may run, not whether deny/allow patterns
+    or the SSRF guard apply — see tests/integration/test_exec_real.py's
+    blockable_when_configured tests and nanobot/agent/tools/shell.py's
+    _prepare_command guard-call comment."""
     tool = ExecTool(
         working_dir=str(tmp_path),
         restrict_to_workspace=False,
@@ -126,11 +133,11 @@ async def test_exec_full_access_skips_command_guard(tmp_path, command):
     )
     result = await tool.execute(command=command)
 
-    assert "Exit code: 0" in result
-    assert "Command blocked" not in result
+    assert "Command blocked" in result
 
 
-async def test_exec_full_workspace_scope_skips_command_guard(tmp_path):
+async def test_exec_full_workspace_scope_still_enforces_ssrf_guard(tmp_path):
+    """moeka deviation: full workspace access does not bypass the SSRF guard."""
     tool = ExecTool(working_dir=str(tmp_path), restrict_to_workspace=True)
     scope = build_workspace_scope(tmp_path, "full", source_channel="websocket")
     token = bind_workspace_scope(scope)
@@ -141,8 +148,7 @@ async def test_exec_full_workspace_scope_skips_command_guard(tmp_path):
     finally:
         reset_workspace_scope(token)
 
-    assert "Exit code: 0" in result
-    assert "Command blocked" not in result
+    assert "Command blocked by safety guard (internal/private URL detected)" in result
 
 
 @pytest.mark.asyncio
