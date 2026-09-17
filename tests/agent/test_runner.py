@@ -378,7 +378,9 @@ def test_persist_tool_result_prunes_old_session_buckets(tmp_path):
         max_chars=64,
     )
 
-    assert "[tool output persisted]" in persisted
+    # max_chars=64 is smaller than the full reference message, so
+    # maybe_persist_tool_result falls back to the short truncated form.
+    assert "truncated" in persisted
     assert not old_bucket.exists()
     assert recent_bucket.exists()
     assert (root / "current_session" / "call_big.txt").exists()
@@ -410,7 +412,7 @@ def test_persist_tool_result_logs_cleanup_failures(monkeypatch, tmp_path):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy")),
     )
     monkeypatch.setattr(
-        "nanobot.utils.helpers.logger.warning",
+        "nanobot.utils.helpers.logger.exception",
         lambda message, *args: warnings.append(message.format(*args)),
     )
 
@@ -422,7 +424,7 @@ def test_persist_tool_result_logs_cleanup_failures(monkeypatch, tmp_path):
         max_chars=64,
     )
 
-    assert "[tool output persisted]" in persisted
+    assert "truncated" in persisted
     assert warnings and "Failed to clean stale tool result buckets" in warnings[0]
 
 
@@ -869,11 +871,13 @@ async def test_loop_stream_filter_handles_think_only_prefix_without_crashing(tmp
     async def on_stream_end(*, resuming: bool = False) -> None:
         endings.append(resuming)
 
+    from nanobot.utils.progress_events import output_events
+
     final_content = (await loop._run_agent_loop(
         [],
         runtime=loop.runtime_resolver.current(),
-        on_stream=on_stream,
-        on_stream_end=on_stream_end,
+        events=output_events(on_stream=on_stream, on_stream_end=on_stream_end),
+        streaming=True,
     )).final_content
 
     assert final_content == "Hello"

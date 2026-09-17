@@ -19,7 +19,6 @@ from nanobot.bus.outbound_events import (
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeEventPublisher
-from nanobot.channels.notification_routes import notification_metadata
 from nanobot.events import AgentEvent, EventSink
 from nanobot.providers.base import LLMUsage
 from nanobot.session.keys import UNIFIED_SESSION_KEY, last_channel_from_metadata
@@ -216,6 +215,13 @@ class TurnDelivery:
 
     def remember_session_route(self, session_metadata: dict[str, Any]) -> None:
         """Keep only routing fields needed to deliver a later idle notification."""
+        # moeka: import lazily -- nanobot.channels/__init__.py pulls in BaseChannel
+        # and its full runtime deps (pairing, etc.); nanobot.agent.loop (and this
+        # module transitively) is on the always-imported path for the embeddable
+        # moeka-core surface (`from nanobot.core import MoekaCore`), which must
+        # stay free of channel/gateway imports. See tests/core/test_import_boundary.py.
+        from nanobot.channels.notification_routes import notification_metadata
+
         # Keep the storage key readable by older gateways.
         session_metadata["_compaction_route"] = {
             "channel": self.route.channel,

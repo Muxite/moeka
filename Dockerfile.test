@@ -60,6 +60,13 @@ COPY tests/ tests/
 # source), but tests/utils/test_webui_event_projection_equivalence.py reads
 # this one fixture directly to cross-check Python/TS event-projection parity.
 COPY webui/src/tests/fixtures/live-replay-event-projection.json webui/src/tests/fixtures/live-replay-event-projection.json
+# packages/ and tui/ are TS/Bun sources, not Python packages, but
+# tests/webui/test_notification_contract.py reads packages/client-events/
+# fixtures.json directly and exec's tui/scripts/package-release.py as a
+# module to check its source archive step -- both need the real trees on
+# disk, not just their Python-relevant fixture files.
+COPY packages/ packages/
+COPY tui/ tui/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}}
 

@@ -125,7 +125,12 @@ async def test_checkpoint_continues_through_reloaded_session(loop, trigger, summ
     expected_summary = reloaded.metadata["_last_summary"] if summary != "(nothing)" else None
     assert sent[0] == {
         "role": "system",
-        "content": loop.context.build_system_prompt(channel="cli", session_summary=expected_summary),
+        # moeka: session_key must match the live turn's build_system_prompt call
+        # -- it feeds the "# Recent History" semantic-memory section, which
+        # dedupes an entry against session_summary only when session_key matches.
+        "content": loop.context.build_system_prompt(
+            channel="cli", session_summary=expected_summary, session_key=key,
+        ),
     }
     assert [message["role"] for message in sent] == ["system", "user", "user"]
     assert sent[1] == {"role": "user", "content": SUMMARY_CONTINUATION_TEXT}
