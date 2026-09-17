@@ -17,6 +17,7 @@ import websockets
 
 from nanobot.session.manager import SessionManager
 from nanobot.session.recovery import PENDING_USER_TURN_KEY, RUNTIME_CHECKPOINT_KEY
+from nanobot.session.sqlite_store import SqliteSessionStore, default_sessions_root
 
 _BOOTSTRAP_SECRET = "smoke-secret"
 
@@ -236,8 +237,15 @@ def test_gateway_restart_restores_a_completed_answer_without_replaying_model(
     finally:
         _stop_gateway(first)
 
-    sessions_root = tmp_path / "sessions"
-    sessions = SessionManager(workspace, sessions_root=sessions_root)
+    # moeka: the gateway persists sessions via SqliteSessionStore at
+    # default_sessions_root(workspace) (ADR-0001's out-of-workspace layout),
+    # not upstream's default JsonlSessionStore — seed/read through the same
+    # backend and path the gateway process actually uses, or this test seeds
+    # data the gateway never sees.
+    sessions_root = default_sessions_root(workspace.expanduser().resolve(strict=False))
+    sessions = SessionManager(workspace, sessions_root=sessions_root, store=SqliteSessionStore(
+        workspace, sessions_root=sessions_root,
+    ))
     session = sessions.get_or_create("websocket:recovery-smoke")
     session.messages.append({"role": "user", "content": "recover this answer"})
     session.metadata["webui"] = True
@@ -262,6 +270,7 @@ def test_gateway_restart_restores_a_completed_answer_without_replaying_model(
             restored = SessionManager(
                 workspace,
                 sessions_root=sessions_root,
+                store=SqliteSessionStore(workspace, sessions_root=sessions_root),
             ).get_or_create("websocket:recovery-smoke")
             if any(
                 message.get("content") == "restored without another model request"
