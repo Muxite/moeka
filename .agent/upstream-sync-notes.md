@@ -368,6 +368,53 @@ SQLite store (still in-workspace by default — see ADR-0001 note above),
 `drop_pending_updates=True`, lazy `Config`/`ToolsConfig` model_rebuild
 intact, no `CONTRIBUTING.md`/`nanobot_logo.png`.
 
+## Batch 2.5 — session store conversion to upstream's SessionStore Protocol
+
+Not a numbered batch (no new upstream commits merged) — this is the
+SqliteSessionStore/ADR-0001 conversion the owner asked for before
+continuing to batch 3, done in three commits on top of `71150b04`
+(the read-only plugin-seam assessment that made this decidable). Full
+detail, including the incident that interrupted the write-up, is in
+`.agent/upstream-sync-handover.md`; this section is the short version so
+the record here isn't a gap.
+
+- **`3cb4f03c`** — `nanobot/session/manager.py` reset to byte-identical
+  with the batch-2 checkpoint (`0c684c5a`); all of moeka's SQLite session
+  logic moved into a new `nanobot/session/sqlite_store.py`, implementing
+  upstream's `SessionStore` Protocol. ADR-0001 adopted: sessions live
+  outside the workspace by default, at a workspace-relative sibling
+  directory (`default_sessions_root()`). The three `_conn()` reach-ins
+  (`session_list_index.py`, `memory.py`, the CLI restore command) fixed
+  via a `get_store()` accessor. Dockerfile.test's CMD fixed to actually
+  run `nanobot/channels/` (previously silently skipped). First structural
+  test-isolation layer added (root `conftest.py` $HOME redirect + mkdir
+  guard; `tests/conftest.py`'s `_guard_live_workspace` extended to wrap
+  the store constructors directly).
+- **`b013eba7`** — `Dockerfile.test` never `COPY`'d the root `conftest.py`,
+  so the isolation layer from `3cb4f03c` was inactive in Docker. Fixed.
+  This had inflated an apparent 45-test regression to the real number: 7
+  (all `tests/cli/test_commands.py`, all classification (b) — see the
+  handover doc §3 for the full enumeration). Fixed those 7 via explicit
+  `tmp_path` workspace overrides.
+- **`5f4c6872`** — the migrate command. Startup no longer auto-migrates a
+  legacy in-workspace `sessions.db` (only warns, via
+  `_warn_if_legacy_db_in_workspace`). New `nanobot sessions migrate --from
+  --to [--no-dry-run] [--yes] [--force]`: dry-run by default (two-key
+  arming to actually move anything), refuses an existing destination,
+  refuses a source that looks held open by another process unless
+  `--force`, verifies destination `PRAGMA integrity_check` before
+  releasing the source, rolls back on failure.
+
+Success criterion as of this commit: `git diff 0c684c5a... --
+nanobot/session/manager.py` is empty. Docker (`scripts/test-docker.sh`):
+6333 passed, 4 failed (same known pre-existing artifacts), 31 skipped.
+
+Not done yet: consolidating the three eager `SqliteSessionStore(...)`
+construction sites behind one factory seam, and fixing
+`nanobot/gateway/service.py`'s bare `Path.home()` fallback. See the
+handover doc for the full remaining-work list and risk assessment before
+picking this back up.
+
 ## Incident — 2026-09-17: live session DB relocated by a test-triggered migration
 
 **What happened.** During the SqliteSessionStore/ADR-0001 conversion work,
