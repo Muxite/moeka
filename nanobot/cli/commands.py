@@ -481,6 +481,89 @@ def sessions_restore_workspace(
         raise typer.Exit(1)
 
 
+@sessions_app.command("migrate")
+def sessions_migrate(
+    from_path: str = typer.Option(
+        ..., "--from", help="Path to the source sessions.db to move"
+    ),
+    to_path: str = typer.Option(
+        ..., "--to", help="Destination path for sessions.db (must not already exist)"
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--no-dry-run",
+        help="Report what would move without touching anything (default: on)",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Actually perform the move (required together with --no-dry-run)"
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Move even if the source database appears to be held open by a "
+            "running process. Dangerous: only use this if you are certain "
+            "nothing has it open."
+        ),
+    ),
+) -> None:
+    """Explicitly move a sessions.db (+ -wal/-shm) from one path to another.
+
+    This is the *only* supported way to relocate session data. Nothing in
+    moeka moves a session database automatically anymore: startup only
+    detects a legacy in-workspace ``sessions.db`` and warns. See
+    .agent/upstream-sync-notes.md's 2026-09-17 incident writeup for why.
+
+    Defaults to a dry run (``--dry-run`` is the default): this prints the
+    files it would move, their sizes, and whether the source looks like it
+    is currently open by another process, then exits without touching
+    anything. Pass both ``--no-dry-run`` and ``--yes`` to actually move the
+    files -- neither one alone is enough, so an accidental single flag
+    (an unattended script, a fat-fingered flag) can't trigger a real move.
+    """
+    from nanobot.session.sqlite_store import (
+        SessionDbMigrationError,
+        migrate_session_database,
+        plan_session_database_migration,
+    )
+
+    source = Path(from_path).expanduser()
+    destination = Path(to_path).expanduser()
+    plan = plan_session_database_migration(source, destination)
+
+    if not plan.files:
+        console.print(f"[yellow]No session database found at {escape(str(plan.source))}[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"Source      : {escape(str(plan.source))}")
+    console.print(f"Destination : {escape(str(plan.destination))}")
+    for label, size in plan.files:
+        console.print(f"  - {label}: {size} bytes")
+    if plan.destination_exists:
+        console.print("[red]Destination already exists -- migration would refuse to run.[/red]")
+    if plan.source_in_use:
+        console.print(
+            "[red]Source appears to be held open by a running process "
+            "(a write lock could not be acquired).[/red]"
+        )
+
+    if dry_run or not yes:
+        console.print(
+            "\n[cyan]Dry run only -- nothing was moved.[/cyan] "
+            "Re-run with --no-dry-run --yes to perform this migration"
+            + (" (add --force to override the in-use check)." if plan.source_in_use else ".")
+        )
+        return
+
+    try:
+        migrate_session_database(source, destination, force=force)
+    except SessionDbMigrationError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]Migrated[/green] {escape(str(plan.source))} -> {escape(str(plan.destination))}")
+
+
 # ============================================================================
 # Channel Commands
 # ============================================================================

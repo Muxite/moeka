@@ -40,6 +40,7 @@ import shutil
 import sqlite3
 import threading
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -184,7 +185,7 @@ class SqliteSessionStore:
             self.db_path = self.sessions_dir / "sessions.db"
             self._conn_obj: sqlite3.Connection | None = None
             self._write_lock = threading.Lock()
-            self._migrate_legacy_db_from_workspace()
+            self._warn_if_legacy_db_in_workspace()
             self._ensure_schema()
 
         # Legacy jsonl import can happen outside the identity-claim lock
@@ -258,44 +259,36 @@ class SqliteSessionStore:
     # One-time migrations
     # ------------------------------------------------------------------
 
-    def _migrate_legacy_db_from_workspace(self) -> None:
-        """Move a pre-ADR-0001 in-workspace ``sessions.db`` to ``self.db_path``.
+    def _warn_if_legacy_db_in_workspace(self) -> None:
+        """Detect a pre-ADR-0001 in-workspace ``sessions.db`` and warn loudly.
 
         Before ADR-0001, moeka kept ``sessions.db`` directly under the
-        workspace (``<workspace>/sessions.db``). On first run after
-        upgrading, if the new location is empty (no db created yet by this
-        process) and the old in-workspace file exists, move the database
-        file and its WAL/SHM sidecars together so no committed data is
-        left behind mid-checkpoint. Never overwrites an existing new-path
-        database. This mirrors the manual procedure documented in
-        .agent/upstream-sync-notes.md, for hosts that don't stop the
-        service for a controlled cutover.
+        workspace (``<workspace>/sessions.db``). This used to be migrated
+        automatically (moved out of the workspace) the first time a process
+        constructed this store against the new, empty destination. That
+        auto-migration is exactly what turned a routine test run into a
+        2026-09-17 incident: a code path that resolved a workspace to the
+        *real* ~/.nanobot triggered a real, unattended move of the live
+        moeka.service database. See .agent/upstream-sync-notes.md's
+        incident writeup.
+
+        Startup detects and warns only, now -- it never touches the legacy
+        file. Migration is an explicit, opt-in operation:
+        ``nanobot sessions migrate --from <legacy> --to <new> [--dry-run]
+        [--yes]`` (see ``nanobot/cli/commands.py``). This mirrors the manual
+        procedure also documented in .agent/upstream-sync-notes.md, for
+        hosts that don't stop the service for a controlled cutover.
         """
-        if self.db_path.exists():
-            return
         legacy_db = self.workspace / "sessions.db"
         if not legacy_db.exists():
             return
-        moved: list[str] = []
-        try:
-            for suffix in ("", "-wal", "-shm"):
-                src = legacy_db.with_name(legacy_db.name + suffix)
-                if not src.exists():
-                    continue
-                dst = self.db_path.with_name(self.db_path.name + suffix)
-                shutil.move(str(src), str(dst))
-                moved.append(suffix or "db")
-        except OSError:
-            logger.exception(
-                "Failed to migrate legacy in-workspace sessions.db from {} to {}",
-                legacy_db, self.db_path,
-            )
-            return
-        if moved:
-            logger.info(
-                "Migrated legacy in-workspace session database ({}) from {} to {}",
-                ", ".join(moved), legacy_db, self.db_path,
-            )
+        logger.warning(
+            "Legacy in-workspace session database found at {} (this workspace "
+            "now stores sessions at {}, per ADR-0001). This will NOT be moved "
+            "automatically. Review it and, if it holds data you want kept, run: "
+            "nanobot sessions migrate --from {} --to {} --dry-run",
+            legacy_db, self.db_path, legacy_db, self.db_path,
+        )
 
     def _import_legacy_jsonl(self) -> None:
         """One-time import of per-session ``.jsonl`` files into sessions.db.
@@ -696,6 +689,165 @@ class SqliteSessionStore:
             unchanged=unchanged,
             conflicts=tuple(conflicts),
         )
+
+
+@dataclass
+class SessionDbMigrationPlan:
+    """What ``migrate_session_database`` would do, computed without acting.
+
+    ``source_in_use`` is best-effort: it only detects a *currently open,
+    lockable* SQLite writer, not "some other process might open it later".
+    Callers still need the destination-side integrity check as the real
+    safety net.
+    """
+
+    source: Path
+    destination: Path
+    files: tuple[tuple[str, int], ...]  # (suffix label, size in bytes)
+    source_in_use: bool
+    destination_exists: bool
+
+
+class SessionDbMigrationError(RuntimeError):
+    """Raised when a migration is refused or fails verification."""
+
+
+def _sqlite_triplet(db_path: Path) -> list[tuple[str, Path]]:
+    """Return the (label, path) pairs for a sessions.db + WAL/SHM triplet that exist."""
+    pairs = [
+        ("db", db_path),
+        ("wal", db_path.with_name(db_path.name + "-wal")),
+        ("shm", db_path.with_name(db_path.name + "-shm")),
+    ]
+    return [(label, path) for label, path in pairs if path.exists()]
+
+
+def _is_sqlite_db_in_use(db_path: Path) -> bool:
+    """Best-effort check: can we grab an exclusive write lock right now?
+
+    ``BEGIN IMMEDIATE`` with a zero busy_timeout fails immediately (rather
+    than blocking) if another connection already holds the write lock —
+    which is exactly the condition that made the 2026-09-17 incident live
+    rather than theoretical: a running ``moeka.service`` process had this
+    exact file open. Not perfect (a reader-only connection wouldn't block
+    this), but a positive result here is a hard "no", and that is the
+    side we need to fail safe on.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=0)
+        try:
+            conn.execute("PRAGMA busy_timeout=0")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("ROLLBACK")
+            return False
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return True
+
+
+def plan_session_database_migration(source: Path, destination: Path) -> SessionDbMigrationPlan:
+    """Compute (without touching anything) what a migration would move.
+
+    *source* and *destination* are ``sessions.db`` file paths, not
+    directories — callers resolve the specific database they mean (e.g.
+    ``<workspace>/sessions.db`` for a legacy in-workspace database, or
+    ``<sessions_root>/<workspace-id>/sessions.db`` for the ADR-0001
+    location) rather than this function guessing.
+    """
+    source = Path(source).expanduser().resolve(strict=False)
+    destination = Path(destination).expanduser().resolve(strict=False)
+    triplet = _sqlite_triplet(source)
+    files = tuple((label, path.stat().st_size) for label, path in triplet)
+    return SessionDbMigrationPlan(
+        source=source,
+        destination=destination,
+        files=files,
+        source_in_use=_is_sqlite_db_in_use(source),
+        destination_exists=destination.exists(),
+    )
+
+
+def migrate_session_database(
+    source: Path,
+    destination: Path,
+    *,
+    force: bool = False,
+) -> SessionDbMigrationPlan:
+    """Actually move a ``sessions.db`` (+ ``-wal``/``-shm``) triplet.
+
+    This is the only code path in moeka that moves a session database out
+    from under a workspace -- startup (``SqliteSessionStore.__init__``)
+    never does this on its own; it only warns (see
+    ``_warn_if_legacy_db_in_workspace``). Callers are the explicit
+    ``nanobot sessions migrate`` CLI command.
+
+    Refuses to run if:
+      - there is nothing to move at *source*;
+      - *destination* already exists (never silently overwrites/merges);
+      - *source* is currently held open by another writer (detected via
+        ``_is_sqlite_db_in_use``) -- unless *force* is set.
+
+    Sequence: move the triplet with ``shutil.move`` (same-filesystem
+    rename where possible, so this only spends real I/O time crossing
+    filesystems), then run ``PRAGMA integrity_check`` against the
+    *destination*. If that check fails, the already-moved files are moved
+    back to *source* before raising, so a bad migration doesn't leave data
+    stranded in a half-verified state.
+    """
+    plan = plan_session_database_migration(source, destination)
+    if not plan.files:
+        raise SessionDbMigrationError(f"no session database found at {plan.source}")
+    if plan.destination_exists:
+        raise SessionDbMigrationError(
+            f"refusing to overwrite an existing database at {plan.destination}"
+        )
+    if plan.source_in_use and not force:
+        raise SessionDbMigrationError(
+            f"{plan.source} appears to be open by a running process (a write "
+            "lock could not be acquired). Stop that process first, or pass "
+            "--force to override (only if you are certain nothing holds it "
+            "open -- moving a database out from under a live writer can "
+            "corrupt it)."
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for label, src_path in _sqlite_triplet(plan.source):
+            suffix = "" if label == "db" else f"-{label}"
+            dst_path = destination.with_name(destination.name + suffix)
+            shutil.move(str(src_path), str(dst_path))
+            moved.append((src_path, dst_path))
+    except OSError as exc:
+        # Best-effort rollback of whatever partial move happened.
+        for src_path, dst_path in reversed(moved):
+            with suppress(OSError):
+                shutil.move(str(dst_path), str(src_path))
+        raise SessionDbMigrationError(f"failed to move session database: {exc}") from exc
+
+    conn = sqlite3.connect(str(destination))
+    try:
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+        ok = bool(result) and result[0] == "ok"
+    except sqlite3.Error as exc:
+        ok = False
+        integrity_error = str(exc)
+    else:
+        integrity_error = None if ok else str(result[0] if result else "unknown")
+    finally:
+        conn.close()
+
+    if not ok:
+        for src_path, dst_path in reversed(moved):
+            with suppress(OSError):
+                shutil.move(str(dst_path), str(src_path))
+        raise SessionDbMigrationError(
+            f"integrity check failed on {destination} ({integrity_error}); "
+            "moved files were rolled back to their original location"
+        )
+    return plan
 
 
 def get_store(session_manager: Any) -> SqliteSessionStore:
