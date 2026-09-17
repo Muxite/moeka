@@ -4,6 +4,12 @@ import json
 from pathlib import Path
 
 from nanobot.session.manager import Session, SessionManager
+from nanobot.session.sqlite_store import SqliteSessionStore
+
+
+def _manager(workspace: Path) -> SessionManager:
+    """Construct a SessionManager backed by moeka's SqliteSessionStore."""
+    return SessionManager(workspace, store=SqliteSessionStore(workspace))
 
 
 def _session(count: int, last_consolidated: object) -> Session:
@@ -31,9 +37,13 @@ def test_loaded_corrupt_offset_keeps_messages(tmp_path: Path):
 
     for name, offset in offsets.items():
         workspace = tmp_path / name
-        manager = SessionManager(workspace)
-        path = manager.sessions_dir / f"{SessionManager.safe_key('chan:chat')}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Legacy per-session jsonl files live directly under
+        # <workspace>/sessions/ (moeka's pre-SQLite layout); the one-time
+        # import scans that dir, not the (now out-of-workspace, ADR-0001)
+        # SqliteSessionStore.sessions_dir.
+        legacy_dir = workspace / "sessions"
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        path = legacy_dir / f"{SessionManager.safe_key('chan:chat')}.jsonl"
         message = {"role": "user", "content": f"survived {name}"}
         path.write_text(
             "\n".join([
@@ -47,8 +57,8 @@ def test_loaded_corrupt_offset_keeps_messages(tmp_path: Path):
             ]) + "\n",
             encoding="utf-8",
         )
-        # Re-open to trigger the one-time legacy jsonl import.
-        manager = SessionManager(workspace)
+        # Construct to trigger the one-time legacy jsonl import.
+        manager = _manager(workspace)
 
         session = manager.get_or_create("chan:chat")
 
@@ -65,9 +75,9 @@ def test_valid_offset_is_preserved():
 
 def test_loaded_null_metadata_becomes_empty_dict(tmp_path: Path):
     """Session jsonl metadata:null must load as {} so agent .pop/.get work."""
-    manager = SessionManager(tmp_path)
-    path = manager.sessions_dir / f"{SessionManager.safe_key('chan:chat')}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_dir = tmp_path / "sessions"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    path = legacy_dir / f"{SessionManager.safe_key('chan:chat')}.jsonl"
     path.write_text(
         json.dumps({
             "_type": "metadata",
@@ -79,8 +89,8 @@ def test_loaded_null_metadata_becomes_empty_dict(tmp_path: Path):
         }) + "\n",
         encoding="utf-8",
     )
-    # Re-open to trigger the one-time legacy jsonl import.
-    manager = SessionManager(tmp_path)
+    # Construct to trigger the one-time legacy jsonl import.
+    manager = _manager(tmp_path)
     session = manager.get_or_create("chan:chat")
     assert session.metadata == {}
     session.metadata["title"] = "ok"

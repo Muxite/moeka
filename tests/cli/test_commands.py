@@ -2023,7 +2023,7 @@ def test_heartbeat_empty_response_still_retains_recent_messages(
             seen["retained_limit"] = limit
 
     class _FakeSessionManager:
-        def __init__(self, _workspace: Path) -> None:
+        def __init__(self, _workspace: Path, **_kwargs) -> None:
             self.session = _FakeSession()
             seen["heartbeat_session"] = self.session
 
@@ -2734,7 +2734,7 @@ def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -
         monkeypatch,
         config,
         message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        session_manager=lambda _workspace, **_kwargs: object(),
     )
     monkeypatch.setattr("nanobot.cli.commands.AgentLoop", _FakeAgentLoop)
     monkeypatch.setattr("nanobot.api.server.create_app", _fake_create_app)
@@ -2801,7 +2801,7 @@ def test_gateway_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: 
         monkeypatch,
         config,
         message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        session_manager=lambda _workspace, **_kwargs: object(),
         cron_service=_StopCron,
     )
 
@@ -2849,7 +2849,7 @@ def test_gateway_unbound_agent_cron_is_skipped(
             self.messages.append({"role": role, "content": content, **kwargs})
 
     class _FakeSessionManager:
-        def __init__(self, _workspace: Path) -> None:
+        def __init__(self, _workspace: Path, **_kwargs) -> None:
             self.session = _FakeSession()
             seen["session_manager"] = self
 
@@ -2970,7 +2970,7 @@ def test_gateway_bound_cron_runs_as_session_turn(
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: bus)
 
     class _FakeSessionManager:
-        def __init__(self, _workspace: Path) -> None:
+        def __init__(self, _workspace: Path, **_kwargs) -> None:
             pass
 
     monkeypatch.setattr("nanobot.session.manager.SessionManager", _FakeSessionManager)
@@ -3159,7 +3159,7 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
         monkeypatch,
         config,
         message_bus=lambda: bus,
-        session_manager=lambda _workspace: _FakeSessionManager(),
+        session_manager=lambda _workspace, **_kwargs: _FakeSessionManager(),
         cron_service=lambda _store_path: _FakeCronService(),
     )
 
@@ -3301,7 +3301,7 @@ def test_gateway_workspace_override_does_not_migrate_legacy_cron(
         monkeypatch,
         config,
         message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        session_manager=lambda _workspace, **_kwargs: object(),
         cron_service=_StopCron,
         get_cron_dir=lambda: legacy_dir,
     )
@@ -3340,7 +3340,7 @@ def test_gateway_custom_config_workspace_does_not_migrate_legacy_cron(
         monkeypatch,
         config,
         message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        session_manager=lambda _workspace, **_kwargs: object(),
         cron_service=_StopCron,
         get_cron_dir=lambda: legacy_dir,
     )
@@ -3541,7 +3541,7 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
         monkeypatch,
         config,
         message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        session_manager=lambda _workspace, **_kwargs: object(),
     )
     monkeypatch.setattr("nanobot.cli.gateway_runtime.AgentLoop", _FakeAgentLoop)
     monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _FakeChannelManager)
@@ -3743,7 +3743,7 @@ def test_gateway_agent_task_owns_initial_mcp_provider_close(
         monkeypatch,
         config,
         message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        session_manager=lambda _workspace, **_kwargs: object(),
     )
     monkeypatch.setattr("nanobot.cli.gateway_runtime.AgentLoop", _FakeAgentLoop)
     monkeypatch.setattr("nanobot.cli.gateway_runtime.MCPProvider", _FakeMCPProvider)
@@ -3866,7 +3866,7 @@ def test_gateway_shutdown_event_exits_forever_runtime_tasks(
         monkeypatch,
         config,
         message_bus=lambda: object(),
-        session_manager=lambda _workspace: object(),
+        session_manager=lambda _workspace, **_kwargs: object(),
     )
     monkeypatch.setattr("nanobot.cli.gateway_runtime.AgentLoop", _FakeAgentLoop)
     monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _FakeChannelManager)

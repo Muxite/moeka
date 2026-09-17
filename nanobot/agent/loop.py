@@ -84,6 +84,7 @@ from nanobot.session.model_selection import (
     SESSION_MODEL_PRESET_METADATA_KEY,
     model_preset_from_metadata,
 )
+from nanobot.session.sqlite_store import SqliteSessionStore, default_sessions_root
 from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
 from nanobot.utils.background import log_task_exceptions
 from nanobot.utils.cancellation import task_is_cancelling
@@ -406,7 +407,15 @@ class AgentLoop:
             bootstrap_overrides=bootstrap_overrides,
             inline_skills=inline_skills,
         )
-        self.sessions = session_manager or SessionManager(workspace)
+        if session_manager is not None:
+            self.sessions = session_manager
+        else:
+            _sessions_root = default_sessions_root(workspace)
+            self.sessions = SessionManager(
+                workspace,
+                sessions_root=_sessions_root,
+                store=SqliteSessionStore(workspace, sessions_root=_sessions_root),
+            )
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         # One file-read/write tracker per logical session. The tool registry is
@@ -511,10 +520,11 @@ class AgentLoop:
             bus = MessageBus()
         defaults = config.agents.defaults
         if "session_manager" not in extra:
-            data_dir = config.runtime_data_dir
+            sessions_root = default_sessions_root(config.workspace_path)
             extra["session_manager"] = SessionManager(
                 config.workspace_path,
-                sessions_root=data_dir / "sessions" if data_dir is not None else None,
+                sessions_root=sessions_root,
+                store=SqliteSessionStore(config.workspace_path, sessions_root=sessions_root),
             )
         provider = extra.pop("provider", None) or make_provider(config)
         resolved = config.resolve_preset()

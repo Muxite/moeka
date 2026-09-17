@@ -22,6 +22,7 @@ from nanobot.optional_features import InstallResult
 from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.session.manager import Session, SessionManager
+from nanobot.session.sqlite_store import SqliteSessionStore
 from nanobot.triggers.local_store import LocalTriggerStore
 from nanobot.webui.gateway_services import GatewayServices, build_gateway_services
 
@@ -150,7 +151,7 @@ def bus() -> MagicMock:
 
 
 def _seed_session(workspace: Path, key: str = "websocket:test") -> SessionManager:
-    sm = SessionManager(workspace)
+    sm = SessionManager(workspace, store=SqliteSessionStore(workspace))
     s = Session(key=key)
     s.add_message("user", "hi")
     s.add_message("assistant", "hello back")
@@ -159,7 +160,7 @@ def _seed_session(workspace: Path, key: str = "websocket:test") -> SessionManage
 
 
 def _seed_many(workspace: Path, keys: list[str]) -> SessionManager:
-    sm = SessionManager(workspace)
+    sm = SessionManager(workspace, store=SqliteSessionStore(workspace))
     for k in keys:
         s = Session(key=k)
         s.add_message("user", f"hi from {k}")
@@ -2738,12 +2739,12 @@ async def test_session_delete_blocks_origin_automation_when_unified_enabled(
     )
     server_task = asyncio.create_task(channel.start())
     try:
-        token = channel.gateway.tokens.issue_api_token(300)
-        auth = {"Authorization": f"Bearer {token}"}
-
-        resp = await _http_get(
-            "http://127.0.0.1:29918/api/sessions/websocket:doomed/delete",
-            headers=auth,
+        # Session mutations (including delete) are websocket-mutation only
+        # now -- a plain GET is hard-blocked with 405, never routed.
+        resp = await _webui_mutate(
+            channel,
+            "session.delete",
+            {"key": "websocket:doomed"},
         )
 
         assert resp.status_code == 200
@@ -2768,20 +2769,15 @@ async def test_session_delete_action_accepts_websocket_keys(
     channel = _ch(bus, session_manager=sm, port=29910)
     server_task = asyncio.create_task(channel.start())
     try:
-        token = channel.gateway.tokens.issue_api_token(300)
-        auth = {"Authorization": f"Bearer {token}"}
-
-        msgs = await _http_get(
-            "http://127.0.0.1:29910/api/sessions/websocket%3Aencoded-key/messages",
-            headers=auth,
-        )
-        assert msgs.status_code == 200
-        assert msgs.json()["key"] == "websocket:encoded-key"
-
+        # Session mutations (including delete) are websocket-mutation only
+        # now -- a plain GET is hard-blocked with 405, never routed. This
+        # exercises URL-encoded-key handling end-to-end through that path
+        # (the old GET /messages route this used is gone upstream).
         assert sm.read_session_file("websocket:encoded-key") is not None
-        deleted = await _http_get(
-            "http://127.0.0.1:29910/api/sessions/websocket%3Aencoded-key/delete",
-            headers=auth,
+        deleted = await _webui_mutate(
+            channel,
+            "session.delete",
+            {"key": "websocket:encoded-key"},
         )
         assert deleted.status_code == 200
         assert deleted.json()["deleted"] is True
@@ -2942,7 +2938,7 @@ async def test_webui_thread_negotiates_gzip_for_large_payloads(
     from nanobot.webui.transcript import append_transcript_object
 
     monkeypatch.setattr("nanobot.config.paths.get_data_dir", lambda: tmp_path)
-    sm = SessionManager(tmp_path)
+    sm = SessionManager(tmp_path, store=SqliteSessionStore(tmp_path))
     append_transcript_object(
         "websocket:gzip-thread",
         {

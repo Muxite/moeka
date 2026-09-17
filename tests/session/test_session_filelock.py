@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.session.manager import SessionManager
+from nanobot.session.sqlite_store import SqliteSessionStore, get_store
 
 _IS_WINDOWS = sys.platform == "win32"
 pytestmark = pytest.mark.skipif(
@@ -49,7 +50,7 @@ def _child_holds_write_txn_script(db_path: Path, ready_marker: Path, hold_second
 def test_save_blocks_while_other_process_writes(tmp_path: Path):
     import subprocess
 
-    manager = SessionManager(workspace=tmp_path)
+    manager = SessionManager(workspace=tmp_path, store=SqliteSessionStore(workspace=tmp_path))
     session = manager.get_or_create("test:sqlite-lock")
     session.add_message("user", "hello from parent")
 
@@ -58,7 +59,7 @@ def test_save_blocks_while_other_process_writes(tmp_path: Path):
 
     child = subprocess.Popen(
         [sys.executable, "-c", _child_holds_write_txn_script(
-            manager.db_path, ready_marker, hold_seconds,
+            get_store(manager).db_path, ready_marker, hold_seconds,
         )],
     )
 
@@ -95,7 +96,7 @@ def test_save_blocks_while_other_process_writes(tmp_path: Path):
         child.wait(timeout=10.0)
 
     # Both writes survived: the parent's session and the child's row.
-    fresh = SessionManager(workspace=tmp_path)
+    fresh = SessionManager(workspace=tmp_path, store=SqliteSessionStore(workspace=tmp_path))
     reloaded = fresh.get_or_create(session.key)
     history = reloaded.get_history(max_messages=10)
     assert any(m.get("content") == "hello from parent" for m in history)

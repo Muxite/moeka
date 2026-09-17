@@ -368,6 +368,155 @@ SQLite store (still in-workspace by default — see ADR-0001 note above),
 `drop_pending_updates=True`, lazy `Config`/`ToolsConfig` model_rebuild
 intact, no `CONTRIBUTING.md`/`nanobot_logo.png`.
 
+## Incident — 2026-09-17: live session DB relocated by a test-triggered migration
+
+**What happened.** During the SqliteSessionStore/ADR-0001 conversion work,
+a test process constructed a session store against the real `~/.nanobot`
+workspace, which tripped ADR-0001's out-of-workspace migration logic
+against `moeka.service`'s live database (PID 2091). I caught it mid-way
+(a `mv` I attempted to undo it was correctly blocked by the permission
+system as irreversible), stopped immediately, and reported rather than
+forcing the corrective move. The coordinator restored the data personally
+and confirmed integrity (same inodes, 4 sessions / 1,738 messages intact).
+Separately, 24 stray directories under the legacy `~/.nanobot/sessions/`
+tree were found to contain real data (22 of 24 non-empty, 35 messages,
+written 04:58 that day) — **not** "schema-only" as I first, wrongly,
+asserted without checking row counts. Lesson: never claim "no real data"
+without having verified content.
+
+### 1. Root cause, precisely
+
+Two independent constructor call sites in **moeka's own code** build a
+`SqliteSessionStore` *eagerly, as a constructor argument*, before the
+(mockable) `SessionManager` is ever called — so the test suite's existing
+`session_manager=` monkeypatch seam (`_patch_cli_command_runtime` in
+`tests/cli/test_commands.py`, which patches
+`nanobot.session.manager.SessionManager`) never intercepts them:
+
+- `nanobot/cli/commands.py:360`, inside `serve()`:
+  `store=SqliteSessionStore(runtime_config.workspace_path, sessions_root=_sessions_root)`
+- `nanobot/cli/gateway_runtime.py:393`, inside `_run_gateway()`:
+  `store=SqliteSessionStore(config.workspace_path, sessions_root=_sessions_root)`
+
+Reproduced directly: `tests/cli/test_commands.py::test_serve_passes_configured_api_key`
+(and its siblings `test_serve_allows_loopback_without_api_key`,
+`test_serve_cli_options_override_api_config`, plus the three
+`test_gateway_*` tests that share `_patch_serve_runtime`/
+`_patch_cli_command_runtime`) construct `config = Config()` with **no**
+`config.agents.defaults.workspace` override — unlike the one sibling test
+that does (`test_serve_uses_api_config_defaults_and_workspace_override`,
+which passes). With no override, `runtime_config.workspace_path` falls
+back to the pydantic default `AgentDefaults.workspace: str = "~/.nanobot"`
+(`nanobot/config/schema.py:141`), which `Path(...).expanduser()`
+resolved — before this incident's fixes existed — straight to the real
+developer/service home, because nothing in the test process redirected
+`$HOME` or `MOEKA_WORKSPACE`/`NANOBOT_HOME` at the time. "A test or an
+ad-hoc script" is not the root cause; the root cause is these two
+call sites constructing a store as an unguarded constructor argument,
+combined with a test file that (for 6 of ~9 `serve`/`gateway` tests)
+never overrides the workspace default and had no structural isolation
+forcing it to.
+
+### 2. Every isolation hole found in the branch (not just mine)
+
+Moeka's code:
+- `nanobot/cli/commands.py:360` and `:468` (`sessions restore-workspace`),
+  `nanobot/cli/gateway_runtime.py:393` — eager `SqliteSessionStore(...)`
+  construction as above.
+- `nanobot/gateway/service.py:217-224` — `resolve_workspace()` falls back
+  to bare `Path.home()` (not even `get_state_home()`'s
+  `MOEKA_WORKSPACE`/`NANOBOT_HOME` override chain) when no
+  `--workspace`/`options.workspace` is given.
+
+Upstream's code (unforked, byte-identical to `upstream/main` per the
+merge's success criterion):
+- `nanobot/session/manager.py`'s `JsonlSessionStore.__init__` (line ~555)
+  defaults `sessions_root` to `get_runtime_subdir("sessions")` when not
+  passed explicitly — this chain (`get_runtime_subdir` →
+  `get_data_dir()` → `get_config_path().parent` → ... → `get_state_home()`
+  → `Path.home() / ".nanobot"`, all in `nanobot/config/paths.py`) is what
+  most plausibly created the 24 stray `~/.nanobot/sessions/<id>/`
+  directories: any test or code path constructing a `JsonlSessionStore`
+  (or, before the SQLite conversion, the old `SessionManager`) without an
+  explicit `sessions_root=` and without `$HOME`/env redirection lands on
+  the real home. This is a second, independent hole, not something the
+  SQLite conversion introduced.
+- `get_state_home()` itself (`nanobot/config/paths.py:14-48`) is the
+  single real chokepoint for the "default resolves under real `$HOME`"
+  family — every other `get_*_dir()` helper in that file routes through
+  it, so it's the one function that needed the `$HOME`/env-var
+  redirection (now in root `conftest.py`), not each call site individually.
+
+Test suite (before this incident's fixes):
+- No autouse fixture redirected `$HOME`/`Path.home()` for the whole
+  session; isolation was "remember to pass an explicit workspace/tmp_path
+  per test", which ~6 tests in `tests/cli/test_commands.py` didn't do.
+- `tests/conftest.py`'s pre-existing `_guard_live_workspace` fixture only
+  wrapped `SessionManager.__init__`, not `JsonlSessionStore.__init__` or
+  `SqliteSessionStore.__init__` directly — so a code path that constructed
+  either store type without going through `SessionManager` (exactly what
+  `commands.py:360` and `gateway_runtime.py:393` do) had no guard at all.
+
+### 3. Proposed design fix (not implemented yet — proposal only)
+
+Per the coordinator's explicit instruction, migration must stop being an
+implicit side effect of construction:
+
+- Make `SqliteSessionStore.__init__` **never** migrate automatically.
+  Startup (`serve`, `gateway`, `nanobot agent`, etc.) may *detect* a
+  legacy `sessions.db` sitting inside the workspace or under the legacy
+  jsonl dir and log a loud, actionable warning ("legacy session data
+  found at X; run `nanobot sessions migrate --dry-run` to review"), but
+  must never move a file itself.
+  a `nanobot sessions migrate <source> <destination>` command:
+  - Requires both `--from`/`--to` explicitly (or well-defined
+    `--from-legacy-workspace`/`--to-sessions-root` flags with the
+    resolved paths always echoed back before acting).
+  - `--dry-run` (default-safe posture: consider making `--dry-run` the
+    implicit behavior unless `--execute`/`--yes` is also passed) prints
+    exactly what it would move — file names, byte sizes, source/dest —
+    without touching anything.
+  - Refuses to run unattended: requires either an interactive
+    confirmation prompt or an explicit `--yes`.
+  - Uses the existing `FileLock` migration lock and moves the
+    `sessions.db`/`-wal`/`-shm` triplet atomically together, verifying an
+    integrity check (`PRAGMA integrity_check`) on the destination before
+    declaring success, with the source left untouched until that check
+    passes.
+  - The `nanobot sessions restore-workspace` CLI command
+    (`nanobot/cli/commands.py:468`, already explicit/opt-in) is the right
+    shape to model this on — it already takes explicit source/destination
+    and never runs implicitly.
+- The three eager `SqliteSessionStore(...)` construction call sites
+  (`commands.py:360`, `commands.py:468`, `gateway_runtime.py:393`) should
+  all go through one small factory/seam so tests can inject a fake
+  without needing to know each call site's constructor shape by heart —
+  this both fixes today's mock gap and gives batch 3+ one seam to extend
+  instead of three.
+
+### 4. Structural test isolation (implemented, verified)
+
+- Root `conftest.py`: `pytest_configure()` (runs before collection,
+  earlier than any fixture) redirects `$HOME`/`USERPROFILE` to a fresh
+  `tempfile.mkdtemp()` for the whole test session, clears
+  `MOEKA_WORKSPACE`/`MOEKA_STATE`/`NANOBOT_HOME`, and wraps
+  `pathlib.Path.mkdir`/`os.makedirs`/`os.mkdir` to raise loudly if
+  anything still resolves under the *real* `~/.nanobot` or
+  `~/.nanobot-sessions` (guard is scoped to those two paths, not all of
+  `$HOME`, so pytest's own `.pytest_cache` etc. under the real checkout
+  stay writable).
+- `tests/conftest.py`'s session-scoped `_guard_live_workspace` fixture
+  extended to also wrap `JsonlSessionStore.__init__` and
+  `SqliteSessionStore.__init__` directly (previously only
+  `SessionManager.__init__`), so any construction path that bypasses
+  `SessionManager` is still caught.
+- Verified: this guard newly fails the exact 9 tests named in item 1/2
+  above (nothing else) — i.e. "a test that tries to touch the real home
+  cannot pass" now holds structurally, not by convention. Those 9 failures
+  are not yet fixed (that's follow-up work, likely adding explicit
+  `config.agents.defaults.workspace = str(tmp_path / ...)` to each,
+  matching the one sibling test that already does this and passes).
+
 ## STOPPED HERE per coordinator instruction
 
 Per the coordinator's stop criteria ("a merge requires a judgment call

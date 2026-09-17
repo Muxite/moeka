@@ -320,6 +320,7 @@ def _run_gateway(
     from nanobot.providers.fallback_provider import FallbackProvider
     from nanobot.providers.image_generation import image_gen_provider_configs
     from nanobot.session.manager import SessionManager
+    from nanobot.session.sqlite_store import SqliteSessionStore, default_sessions_root
     from nanobot.session.webui_turns import (
         WebuiTurnCoordinator,
         WebuiTurnRoutePolicy,
@@ -385,7 +386,12 @@ def _run_gateway(
         except ValueError as exc:
             console.print(f"[red]Error: {exc}[/red]")
             raise typer.Exit(1) from exc
-    session_manager = SessionManager(config.workspace_path)
+    _sessions_root = default_sessions_root(config.workspace_path)
+    session_manager = SessionManager(
+        config.workspace_path,
+        sessions_root=_sessions_root,
+        store=SqliteSessionStore(config.workspace_path, sessions_root=_sessions_root),
+    )
 
     # Self-heal the gateway state file with the current PID after any restart.
     from nanobot.config.loader import get_config_path
@@ -946,7 +952,9 @@ def _run_gateway(
                 # nothing -- which is how a 5.7MB WAL survived restart after restart
                 # against a 1.8MB database.
                 with suppress(Exception):
-                    agent.sessions.close()
+                    from nanobot.session.sqlite_store import get_store
+
+                    get_store(agent.sessions).close()
             finally:
                 restore_shutdown_handlers()
 

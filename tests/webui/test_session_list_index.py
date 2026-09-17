@@ -14,6 +14,12 @@ from nanobot.session.automation_turns import AUTOMATION_HISTORY_META
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META
 from nanobot.session.manager import SessionManager
 from nanobot.session.model_selection import SESSION_MODEL_PRESET_METADATA_KEY
+from nanobot.session.sqlite_store import SqliteSessionStore, get_store
+
+
+def _manager(workspace: Path) -> SessionManager:
+    """Construct a SessionManager backed by moeka's SqliteSessionStore."""
+    return SessionManager(workspace, store=SqliteSessionStore(workspace))
 
 
 def test_webui_session_list_reuses_valid_index_without_scanning_files(
@@ -21,7 +27,7 @@ def test_webui_session_list_reuses_valid_index_without_scanning_files(
 ) -> None:
     """No file-scan cache is needed for the SQLite store — listing is always
     a single cheap query, so this just checks repeated calls stay correct."""
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:indexed")
     session.metadata[SESSION_MODEL_PRESET_METADATA_KEY] = "fast"
     session.add_message("user", "indexed preview")
@@ -40,7 +46,7 @@ def test_webui_session_list_reuses_valid_index_without_scanning_files(
 def test_webui_session_list_indexes_workspace_scope_and_preserves_null(
     tmp_path: Path,
 ) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     project = tmp_path / "project"
     project.mkdir()
 
@@ -86,7 +92,7 @@ def test_webui_session_list_indexes_workspace_scope_and_preserves_null(
 def test_webui_session_list_rejects_invalid_internal_model_preset_metadata(
     tmp_path: Path,
 ) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:custom-metadata")
     session.metadata["model_preset"] = 7
     session.metadata[SESSION_MODEL_PRESET_METADATA_KEY] = {"invalid": True}
@@ -102,7 +108,7 @@ def test_webui_session_list_rejects_invalid_internal_model_preset_metadata(
 def test_webui_session_list_rescans_only_changed_file(tmp_path: Path) -> None:
     """Updating one session's messages must not affect any other session's
     listing — the SQLite store has no per-file cache to go stale."""
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     first = manager.get_or_create("websocket:first")
     first.add_message("user", "first")
     manager.save(first)
@@ -126,7 +132,7 @@ def test_webui_session_list_skips_provider_state_before_preview_budget(
 ) -> None:
     """provider_state lives in the metadata column, never the messages table,
     so it can never be mistaken for preview content regardless of budget."""
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:private-state")
     session.provider_state = ProviderConversationState(
         kind="openai_responses",
@@ -142,7 +148,7 @@ def test_webui_session_list_skips_provider_state_before_preview_budget(
 
 
 def test_webui_session_list_drops_deleted_index_rows(tmp_path: Path) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:deleted")
     session.add_message("user", "gone")
     manager.save(session)
@@ -155,8 +161,11 @@ def test_webui_session_list_drops_deleted_index_rows(tmp_path: Path) -> None:
 
 
 def test_webui_session_list_ignores_legacy_stem(tmp_path: Path) -> None:
-    manager = SessionManager(tmp_path)
-    legacy_path = manager.sessions_dir / "websocket_legacy.jsonl"
+    """A stray jsonl file sitting in the store's own (out-of-workspace)
+    directory is never scanned — only <workspace>/sessions/*.jsonl (the
+    legacy pre-SQLite layout) is examined for one-time import."""
+    manager = _manager(tmp_path)
+    legacy_path = get_store(manager).sessions_dir / "websocket_legacy.jsonl"
     legacy_path.write_text(
         '{"_type":"metadata","key":"websocket:legacy",'
         '"created_at":"2025-01-01T00:00:00",'
@@ -169,7 +178,7 @@ def test_webui_session_list_ignores_legacy_stem(tmp_path: Path) -> None:
 
 
 def test_webui_session_list_skips_cron_internal_user_preview(tmp_path: Path) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:cron-preview")
     session.add_message(
         "user",
@@ -183,7 +192,7 @@ def test_webui_session_list_skips_cron_internal_user_preview(tmp_path: Path) -> 
 
 
 def test_webui_session_list_skips_trigger_internal_user_preview(tmp_path: Path) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:trigger-preview")
     session.add_message(
         "user",
@@ -197,7 +206,7 @@ def test_webui_session_list_skips_trigger_internal_user_preview(tmp_path: Path) 
 
 
 def test_webui_session_list_skips_hidden_history_user_preview(tmp_path: Path) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:hidden-preview")
     session.add_message(
         "user",
@@ -218,7 +227,7 @@ def test_webui_session_list_uses_webui_transcript_activity_for_sort(
     webui_dir.mkdir()
     monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
 
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     old_session = manager.get_or_create("websocket:old-metadata")
     old_session.created_at = datetime(2026, 6, 15, 10, 0, 0)
     old_session.updated_at = datetime(2026, 6, 15, 10, 0, 0)
@@ -260,7 +269,7 @@ def test_webui_session_list_rescans_when_transcript_changes(
     webui_dir.mkdir()
     monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
 
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     session = manager.get_or_create("websocket:transcript-change")
     session.created_at = datetime(2026, 6, 15, 10, 0, 0)
     session.updated_at = datetime(2026, 6, 15, 10, 0, 0)
@@ -287,7 +296,7 @@ def test_webui_session_list_rescans_when_transcript_changes(
 def test_webui_session_list_sorts_by_message_activity_not_maintenance_timestamp(
     tmp_path: Path,
 ) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     old = manager.get_or_create("websocket:old")
     old.created_at = datetime(2026, 6, 1, 10, 0, 0)
     old.add_message("user", "old first visible activity")
@@ -316,9 +325,17 @@ def list_webui_sessions(manager: SessionManager) -> list[dict]:
 
 def _write_legacy_jsonl_missing_timestamps(manager: SessionManager, key: str) -> None:
     """Write a legacy per-session jsonl file with no created_at/updated_at,
-    for the one-time import path exercised at SessionManager construction."""
+    for the one-time import path exercised at SessionManager construction.
+
+    Legacy per-session jsonl files live directly under
+    <workspace>/sessions/ (moeka's pre-SQLite layout) — the one-time
+    import scans that dir, not the (out-of-workspace, ADR-0001)
+    SqliteSessionStore.sessions_dir.
+    """
     stem = SessionManager.safe_key(key)
-    path = manager.sessions_dir / f"{stem}.jsonl"
+    legacy_dir = manager.workspace / "sessions"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    path = legacy_dir / f"{stem}.jsonl"
     path.write_text(
         f'{{"_type": "metadata", "key": "{key}"}}\n'
         '{"role": "user", "content": "hello"}\n',
@@ -329,9 +346,9 @@ def _write_legacy_jsonl_missing_timestamps(manager: SessionManager, key: str) ->
 def test_webui_session_list_fallback_time_when_missing(tmp_path: Path) -> None:
     """A legacy jsonl file with no timestamps still gets a usable created_at
     / updated_at after import (Session defaults to "now", never None)."""
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     _write_legacy_jsonl_missing_timestamps(manager, "websocket:missing-time")
-    manager = SessionManager(tmp_path)  # re-open to trigger the one-time import
+    manager = _manager(tmp_path)  # re-open to trigger the one-time import
 
     rows = list_webui_sessions(manager)
     assert len(rows) == 1
@@ -343,9 +360,9 @@ def test_webui_session_list_fallback_time_when_missing(tmp_path: Path) -> None:
 
 
 def test_session_manager_list_sessions_fallback_time_when_missing(tmp_path: Path) -> None:
-    manager = SessionManager(tmp_path)
+    manager = _manager(tmp_path)
     _write_legacy_jsonl_missing_timestamps(manager, "websocket:missing-time2")
-    manager = SessionManager(tmp_path)  # re-open to trigger the one-time import
+    manager = _manager(tmp_path)  # re-open to trigger the one-time import
 
     sessions = manager.list_sessions()
     assert len(sessions) == 1

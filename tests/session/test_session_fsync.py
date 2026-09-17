@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.session.manager import SessionManager
+from nanobot.session.sqlite_store import SqliteSessionStore, get_store
 
 
 @pytest.fixture
@@ -19,7 +20,10 @@ def sessions_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def manager(sessions_dir: Path) -> SessionManager:
-    return SessionManager(workspace=sessions_dir)
+    return SessionManager(
+        workspace=sessions_dir,
+        store=SqliteSessionStore(workspace=sessions_dir),
+    )
 
 
 class TestSaveDurability:
@@ -30,7 +34,7 @@ class TestSaveDurability:
         session.add_message("user", "hello")
         manager.save(session, fsync=True)
 
-        wal = Path(str(manager.db_path) + "-wal")
+        wal = Path(str(get_store(manager).db_path) + "-wal")
         # TRUNCATE checkpoint leaves an empty (or absent) WAL.
         assert not wal.exists() or os.path.getsize(wal) == 0
 
@@ -39,7 +43,7 @@ class TestSaveDurability:
         session.add_message("user", "hello")
         manager.save(session, fsync=False)
 
-        wal = Path(str(manager.db_path) + "-wal")
+        wal = Path(str(get_store(manager).db_path) + "-wal")
         assert wal.exists() and os.path.getsize(wal) > 0
 
     def test_save_default_no_checkpoint(self, manager: SessionManager):
@@ -47,7 +51,7 @@ class TestSaveDurability:
         session = manager.get_or_create("test:default")
         session.add_message("user", "hello")
         manager.save(session)
-        wal = Path(str(manager.db_path) + "-wal")
+        wal = Path(str(get_store(manager).db_path) + "-wal")
         assert wal.exists() and os.path.getsize(wal) > 0
 
 class TestFlushAll:
@@ -74,7 +78,7 @@ class TestFlushAll:
         manager.save(session)
 
         manager.flush_all()
-        wal = Path(str(manager.db_path) + "-wal")
+        wal = Path(str(get_store(manager).db_path) + "-wal")
         assert not wal.exists() or os.path.getsize(wal) == 0
 
     def test_flush_all_continues_on_error(self, manager: SessionManager):
@@ -105,7 +109,10 @@ class TestFlushAll:
 
     def test_flush_all_data_survives_reload(self, sessions_dir: Path):
         """Data flushed by flush_all should survive a fresh SessionManager load."""
-        mgr1 = SessionManager(workspace=sessions_dir)
+        mgr1 = SessionManager(
+            workspace=sessions_dir,
+            store=SqliteSessionStore(workspace=sessions_dir),
+        )
         session = mgr1.get_or_create("test:persist")
         session.add_message("user", "remember this")
         session.add_message("assistant", "noted")
@@ -113,7 +120,10 @@ class TestFlushAll:
         mgr1.flush_all()
 
         # Simulate process restart — new manager, cold cache
-        mgr2 = SessionManager(workspace=sessions_dir)
+        mgr2 = SessionManager(
+            workspace=sessions_dir,
+            store=SqliteSessionStore(workspace=sessions_dir),
+        )
         reloaded = mgr2.get_or_create("test:persist")
         history = reloaded.get_history(max_messages=100)
 

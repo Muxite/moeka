@@ -107,31 +107,61 @@ def _reenable_nanobot_logging():
 
 @pytest.fixture(autouse=True, scope="session")
 def _guard_live_workspace():
-    """Fail loudly if any test opens a SessionManager on the live ~/.nanobot.
+    """Fail loudly if any test opens a session store on the live ~/.nanobot.
 
-    SessionManager construction now has side effects (sessions.db creation,
-    one-time jsonl import), so a test leaking onto the real workspace can
+    SessionManager/SqliteSessionStore/JsonlSessionStore construction has
+    side effects (sessions.db creation, one-time jsonl import, and for
+    SqliteSessionStore, ADR-0001's out-of-workspace *migration* of an
+    existing sessions.db) -- a test leaking onto the real workspace can
     move the user's live session data. Hermetic tests must use tmp_path.
+
+    Belt-and-suspenders with the root conftest.py's $HOME redirect + mkdir
+    guard (which is the authoritative, always-on mechanism): this fixture
+    guards the specific constructors directly, in case some future
+    refactor adds another one that doesn't go through Path.home() /
+    Path.mkdir at all. See .agent/upstream-sync-notes.md's 2026-09-17
+    incident writeup for why both layers exist.
     """
     from pathlib import Path
 
     from nanobot.session import manager as _manager
+    from nanobot.session import sqlite_store as _sqlite_store
 
     live = (Path.home() / ".nanobot").resolve()
-    orig_init = _manager.SessionManager.__init__
+    orig_session_manager_init = _manager.SessionManager.__init__
+    orig_jsonl_store_init = _manager.JsonlSessionStore.__init__
+    orig_sqlite_store_init = _sqlite_store.SqliteSessionStore.__init__
 
-    def guarded_init(self, workspace, **kwargs):
-        ws = Path(workspace).expanduser().resolve()
+    def _check(workspace: object) -> None:
+        try:
+            ws = Path(workspace).expanduser().resolve()  # type: ignore[arg-type]
+        except (TypeError, ValueError, OSError):
+            return
         if ws == live:
             raise AssertionError(
-                "TEST LEAK: SessionManager constructed on the live ~/.nanobot "
-                "workspace — use tmp_path instead"
+                "TEST LEAK: a session store was constructed on the live "
+                "~/.nanobot workspace — use tmp_path instead"
             )
-        orig_init(self, workspace, **kwargs)
 
-    _manager.SessionManager.__init__ = guarded_init
+    def guarded_session_manager_init(self, workspace, **kwargs):
+        _check(workspace)
+        orig_session_manager_init(self, workspace, **kwargs)
+
+    def guarded_jsonl_store_init(self, workspace, **kwargs):
+        _check(workspace)
+        orig_jsonl_store_init(self, workspace, **kwargs)
+
+    def guarded_sqlite_store_init(self, workspace, **kwargs):
+        _check(workspace)
+        orig_sqlite_store_init(self, workspace, **kwargs)
+
+    _manager.SessionManager.__init__ = guarded_session_manager_init
+    _manager.JsonlSessionStore.__init__ = guarded_jsonl_store_init
+    _sqlite_store.SqliteSessionStore.__init__ = guarded_sqlite_store_init
     yield
-    _manager.SessionManager.__init__ = orig_init
+    _manager.SessionManager.__init__ = orig_session_manager_init
+    _manager.JsonlSessionStore.__init__ = orig_jsonl_store_init
+    _sqlite_store.SqliteSessionStore.__init__ = orig_sqlite_store_init
 
 
 @pytest.fixture(autouse=True, scope="session")

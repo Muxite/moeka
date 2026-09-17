@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.session.manager import SessionManager
+from nanobot.session.sqlite_store import SqliteSessionStore
 
 
 class TestDreamSessionKey:
@@ -33,7 +34,7 @@ class TestPruneDreamSessions:
         sessions.save(session)
 
     def test_keeps_n_most_recent(self, tmp_path):
-        sessions = SessionManager(tmp_path)
+        sessions = SessionManager(tmp_path, store=SqliteSessionStore(tmp_path))
         base = datetime(2026, 5, 28, 10, 0, 0)
         keys = [f"dream:20260528-{100000 + i:06d}" for i in range(15)]
         for i, key in enumerate(keys):
@@ -48,7 +49,7 @@ class TestPruneDreamSessions:
         assert remaining == set(keys[5:]) | {"telegram:123"}
 
     def test_noop_when_under_limit(self, tmp_path):
-        sessions = SessionManager(tmp_path)
+        sessions = SessionManager(tmp_path, store=SqliteSessionStore(tmp_path))
         base = datetime(2026, 5, 28, 10, 0, 0)
         keys = [f"dream:20260528-{100000 + i:06d}" for i in range(3)]
         for i, key in enumerate(keys):
@@ -58,6 +59,6 @@ class TestPruneDreamSessions:
         assert {row["key"] for row in sessions.list_sessions()} == set(keys)
 
     def test_empty_store_noop(self, tmp_path):
-        sessions = SessionManager(tmp_path)
+        sessions = SessionManager(tmp_path, store=SqliteSessionStore(tmp_path))
         MemoryStore.prune_dream_sessions(sessions, keep=10)
         assert sessions.list_sessions() == []

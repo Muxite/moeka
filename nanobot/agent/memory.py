@@ -831,7 +831,9 @@ class MemoryStore:
         N most recent. Non-dream sessions are never touched.
         """
         try:
-            rows = sessions._conn().execute(
+            from nanobot.session.sqlite_store import get_store
+
+            rows = get_store(sessions)._conn().execute(  # noqa: SLF001
                 "SELECT key FROM sessions WHERE key LIKE 'dream:%' ORDER BY updated_at DESC"
             ).fetchall()
         except Exception:

@@ -55,4 +55,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}}
 
 ENTRYPOINT ["uv", "run", "--no-sync"]
-CMD ["pytest", "tests/"]
+# Match pyproject.toml's [tool.pytest.ini_options] testpaths (tests/ plus
+# nanobot/channels/, which carries its own per-channel tests/ subpackages,
+# e.g. nanobot/channels/websocket/tests/) -- a bare "pytest tests/" here
+# silently skipped that whole tree.
+CMD ["pytest", "tests/", "nanobot/channels/"]

@@ -1,38 +1,36 @@
 """Session management for conversation history."""
 
+import base64
+import errno
+import hashlib
 import json
+import os
 import re
-import sqlite3
-import threading
+import secrets
+import stat
 from collections import OrderedDict
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Collection, cast
+from typing import Any, Callable, Collection, Protocol, TypedDict, cast
 from weakref import WeakValueDictionary
 
+from filelock import FileLock
 from loguru import logger
 
-# get_runtime_subdir is not called internally (moeka's SessionManager
-# defaults sessions_root to the workspace, not this — see the ADR-0001 note
-# on SessionManager below), but tests/conftest.py's autouse
-# _isolate_sessions_root fixture patches this module attribute
-# unconditionally, so the name must resolve.
-from nanobot.config.paths import get_legacy_sessions_dir, get_runtime_subdir  # noqa: F401
+from nanobot.config.paths import get_legacy_sessions_dir, get_runtime_subdir
 from nanobot.providers.base import ProviderConversationState
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
     public_history_message,
 )
-from nanobot.session.history_visibility import is_hidden_history_message
-from nanobot.session.model_selection import model_preset_from_metadata
 from nanobot.utils.helpers import (
+    content_with_media_breadcrumbs,
     ensure_dir,
     estimate_message_tokens,
     find_legal_message_start,
-    image_placeholder_text,
     recent_message_start_index,
     safe_filename,
     strip_think,
@@ -42,9 +40,6 @@ from nanobot.utils.subagent_channel_display import scrub_subagent_announce_body
 FILE_MAX_MESSAGES = 2000
 SESSION_CACHE_MAX_SIZE = 128
 MIN_REPLAY_MAX_MESSAGES = 120
-# Small raw suffix kept for continuity across the last_consolidated
-# compaction boundary in Session.get_history() (also imported directly by
-# nanobot/agent/memory.py's consolidation logic).
 MIN_COMPACTED_REPLAY_MESSAGES = 8
 REPLAY_TOKENS_PER_MESSAGE = 100
 _MESSAGE_TIME_PREFIX_RE = re.compile(r"^\[Message Time: [^\]]+\]\n?")
@@ -53,9 +48,11 @@ _TOOL_CALL_ECHO_RE = re.compile(r'^\s*(?:generate_image|message)\([^)]*\)\s*$')
 _SESSION_PREVIEW_MAX_CHARS = 120
 _SESSION_LIST_PREVIEW_MAX_RECORDS = 200
 _SESSION_LIST_PREVIEW_MAX_CHARS = 1_000_000
-# sqlite3.Error is included so SQLite I/O failures (locked db, corrupt file,
-# etc.) are handled the same defensive way as malformed jsonl data.
-_SESSION_DATA_ERRORS = (ValueError, TypeError, AttributeError, KeyError, sqlite3.Error)
+_SESSION_DATA_ERRORS = (ValueError, TypeError, AttributeError, KeyError)
+_PROVIDER_STATE_RECORD_TYPE = "provider_state"
+_PROVIDER_STATE_RECORD_PREFIX_RE = re.compile(
+    r'^\s*\{\s*"_type"\s*:\s*"provider_state"\s*(?:,|\})'
+)
 _FORK_VOLATILE_METADATA_KEYS = {
     "goal_state",
     "pending_user_turn",
@@ -64,6 +61,23 @@ _FORK_VOLATILE_METADATA_KEYS = {
     "title",
     "title_user_edited",
 }
+_WORKSPACE_STATE_DIR = ".nanobot"
+_WORKSPACE_ID_FILE = "workspace-id"
+_WORKSPACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_SESSION_MIGRATION_LOCK_TIMEOUT_SECONDS = 30
+_COPY_CHUNK_SIZE = 1024 * 1024
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    """Narrow a decoded JSON object while preserving its original values."""
+    if not isinstance(value, dict):
+        raise ValueError("session records must be JSON objects")
+    return cast(dict[str, Any], value)
+
+
+def _is_provider_state_record_line(line: str) -> bool:
+    """Recognize the canonical private record without decoding its opaque payload."""
+    return _PROVIDER_STATE_RECORD_PREFIX_RE.match(line) is not None
 
 
 def replay_max_messages_for_context(context_window_tokens: int | None) -> int:
@@ -91,15 +105,18 @@ def _sanitize_assistant_replay_text(content: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _text_preview(content: Any) -> str:
+def _text_preview(content: object) -> str:
     """Return compact display text for session lists."""
     if isinstance(content, str):
         text = content
     elif isinstance(content, list):
         parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                value = block.get("text")
+        for block in cast(list[object], content):
+            if isinstance(block, dict):
+                block_data = cast(dict[object, object], block)
+                if block_data.get("type") != "text":
+                    continue
+                value = block_data.get("text")
                 if isinstance(value, str):
                     parts.append(value)
         text = " ".join(parts)
@@ -115,37 +132,31 @@ def _text_preview(content: Any) -> str:
 def _message_preview_text(message: dict[str, Any]) -> str:
     """Session list preview text; subagent inject blobs are shortened for display."""
     message = public_history_message(message)
-    content: Any = message.get("content")
+    content = cast(object, message.get("content"))
     if message.get("injected_event") == "subagent_result" and isinstance(content, str):
         content = scrub_subagent_announce_body(content)
     return _text_preview(content)
 
 
-def _metadata_title(metadata: Any) -> str:
+def _metadata_title(metadata: object) -> str:
     if not isinstance(metadata, dict):
         return ""
-    title = metadata.get("title")
+    metadata_data = cast(dict[object, object], metadata)
+    title = metadata_data.get("title")
     if not isinstance(title, str):
         return ""
-    if metadata.get("title_user_edited") is True:
+    if metadata_data.get("title_user_edited") is True:
         return title
     return strip_think(title)
 
 
 @dataclass
 class RetentionResult:
-    dropped: list[dict]
+    dropped: list[dict[str, Any]]
     already_consolidated_count: int
 
 
-@dataclass
-class SessionRestoreResult:
-    restored: int
-    unchanged: int
-    conflicts: tuple[Path, ...]
-
-
-@dataclass
+@dataclass(frozen=True)
 class SessionPolicy:
     """Runtime rules that do not belong in durable session data."""
 
@@ -164,24 +175,22 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # Number of messages already consolidated to files
-    # Opaque provider-owned continuation state (e.g. OpenAI Responses API
-    # encrypted reasoning items). Never part of public history; persisted
-    # alongside metadata in the sessions.db row (see SessionManager.save).
     provider_state: ProviderConversationState | None = field(default=None, repr=False)
     policy: SessionPolicy = field(default_factory=SessionPolicy, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.metadata, dict):
+        if not isinstance(cast(object, self.metadata), dict):
             self.metadata = {}
-        # An out-of-range offset (corrupt metadata) would hide all history; reset it.
-        if (
-            isinstance(self.last_consolidated, bool)
-            or not isinstance(self.last_consolidated, int)
-            or not 0 <= self.last_consolidated <= len(self.messages)
-        ):
-            self.last_consolidated = 0
         if not isinstance(cast(object, self.provider_state), ProviderConversationState):
             self.provider_state = None
+        # An out-of-range offset (corrupt metadata) would hide all history; reset it.
+        last_consolidated = cast(object, self.last_consolidated)
+        if (
+            isinstance(last_consolidated, bool)
+            or not isinstance(last_consolidated, int)
+            or not 0 <= last_consolidated <= len(self.messages)
+        ):
+            self.last_consolidated = 0
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -268,13 +277,12 @@ class Session:
             # image used to be. Without this, an image-only user turn
             # replays as an empty user message — the assistant's reply then
             # looks like it's responding to nothing.
-            media = message.get("media")
-            if role == "user" and isinstance(media, list) and media and isinstance(content, str):
-                breadcrumbs = "\n".join(
-                    image_placeholder_text(p) for p in media if isinstance(p, str) and p
-                )
-                content = f"{content}\n{breadcrumbs}" if content else breadcrumbs
-            cli_apps = message.get("cli_apps")
+            content = content_with_media_breadcrumbs(
+                role,
+                content,
+                message.get("media"),
+            )
+            cli_apps = cast(object, message.get("cli_apps"))
             if (
                 include_runtime_context
                 and not has_persisted_runtime_context
@@ -284,43 +292,22 @@ class Session:
                 and isinstance(content, str)
             ):
                 cli_lines: list[str] = []
-                for item in cli_apps[:8]:
+                for item in cast(list[object], cli_apps[:8]):
                     if not isinstance(item, dict):
                         continue
-                    name = str(item.get("name") or "").strip().lower()
+                    item_data = cast(dict[object, object], item)
+                    name = str(item_data.get("name") or "").strip().lower()
                     if not name:
                         continue
-                    entry = str(item.get("entry_point") or "unknown").strip() or "unknown"
+                    entry_point = (
+                        str(item_data.get("entry_point") or "unknown").strip() or "unknown"
+                    )
                     cli_lines.append(
-                        f"[CLI App Attachment: @{name}; tool=run_cli_app; entry_point={entry}; "
+                        f"[CLI App Attachment: @{name}; tool=run_cli_app; entry_point={entry_point}; "
                         f"skill=skills/cli-app-{name}/SKILL.md]"
                     )
                 if cli_lines:
                     breadcrumbs = "\n".join(cli_lines)
-                    content = f"{content}\n{breadcrumbs}" if content else breadcrumbs
-            mcp_presets = message.get("mcp_presets")
-            if (
-                include_runtime_context
-                and not has_persisted_runtime_context
-                and role == "user"
-                and isinstance(mcp_presets, list)
-                and mcp_presets
-                and isinstance(content, str)
-            ):
-                mcp_lines: list[str] = []
-                for item in mcp_presets[:8]:
-                    if not isinstance(item, dict):
-                        continue
-                    name = str(item.get("name") or "").strip().lower()
-                    if not name:
-                        continue
-                    transport = str(item.get("transport") or "mcp").strip() or "mcp"
-                    mcp_lines.append(
-                        f"[MCP Preset Attachment: @{name}; tool_prefix=mcp_{name}_; "
-                        f"transport={transport}]"
-                    )
-                if mcp_lines:
-                    breadcrumbs = "\n".join(mcp_lines)
                     content = f"{content}\n{breadcrumbs}" if content else breadcrumbs
             if role == "assistant" and isinstance(content, str) and not content.strip():
                 if not any(key in message for key in ("tool_calls", "reasoning_content", "thinking_blocks")):
@@ -368,9 +355,9 @@ class Session:
         """Clear all messages and reset session to initial state."""
         self.messages = []
         self.last_consolidated = 0
+        self.provider_state = None
         self.updated_at = datetime.now()
         self.metadata.pop("_last_summary", None)
-        self.provider_state = None
 
     def retain_recent_legal_suffix(
         self,
@@ -414,8 +401,7 @@ class Session:
 
         retained = self.messages[start_idx:]
 
-        # Prefer starting at a user turn (or its preceding _channel_delivery)
-        # when one exists within the retained window.
+        # Prefer starting at a user turn (or its preceding _channel_delivery) when one exists within the retained window.
         first_user = next((i for i, m in enumerate(retained) if m.get("role") == "user"), None)
         if first_user is not None:
             if first_user > 0 and retained[first_user - 1].get("_channel_delivery"):
@@ -469,12 +455,9 @@ class Session:
 
         self.messages = retained
         self.last_consolidated = new_lc
-        self.updated_at = datetime.now()
         if dropped:
-            # A provider continuation state describes the exact turn sequence
-            # it was issued for; once any of that history is dropped the
-            # state no longer matches and must not be resumed.
             self.provider_state = None
+        self.updated_at = datetime.now()
         return RetentionResult(
             dropped=dropped,
             already_consolidated_count=already_consolidated,
@@ -482,7 +465,7 @@ class Session:
 
     def enforce_file_cap(
         self,
-        on_archive: Any = None,
+        on_archive: Callable[[list[dict[str, Any]]], None] | None = None,
         limit: int = FILE_MAX_MESSAGES,
     ) -> None:
         """Bound session message growth by archiving and trimming old prefixes."""
@@ -505,59 +488,988 @@ class Session:
         )
 
 
-class SessionManager:
-    """Manages conversation sessions.
+class SessionPayload(TypedDict):
+    key: str
+    created_at: str | None
+    updated_at: str | None
+    metadata: dict[str, Any]
+    messages: list[dict[str, Any]]
 
-    Sessions are stored in a single SQLite database (``sessions.db``, WAL
-    mode) under the workspace. SQLite's locking replaces the old per-file
-    FileLock for cross-process safety; messages are kept as one JSON blob per
-    row so heterogeneous message dicts round-trip exactly. Legacy per-session
-    ``.jsonl`` files are imported once on startup (then renamed to
-    ``*.jsonl.imported`` as a backup).
 
-    moeka note: upstream (as of the 2026-08-05 checkpoint) split this into a
-    ``SessionStore`` Protocol + pluggable ``JsonlSessionStore`` /
-    ``SessionManager`` wrapper, presumably groundwork for alternate backends,
-    and (2026-08-12) kept building that split out further. Nothing else in
-    the tree consumes the Protocol itself, so this merge keeps moeka's single
-    SQLite-backed ``SessionManager`` as-is rather than reshaping it to fit
-    the new interface — but genuinely new, backend-independent features
-    introduced alongside it (``sessions_root``, ``SessionPolicy`` /
-    ``get_or_create_transient`` for ephemeral WebUI Temporary Chats) are
-    ported forward each time, since other already-merged call sites depend
-    on them unconditionally. Worth revisiting later: making moeka's store
-    implement ``SessionStore`` would fit the "everything is a plugin
-    abstraction" framing better than carrying this divergence forever.
-    """
+class SessionMetadataPayload(TypedDict):
+    key: str
+    created_at: str | None
+    updated_at: str | None
+    metadata: dict[str, Any]
 
-    _SCHEMA_VERSION = 1
+
+class SessionInfo(TypedDict):
+    key: str
+    created_at: str
+    updated_at: str
+    title: str
+    preview: str
+    path: str
+
+
+@dataclass(frozen=True)
+class _SessionFileSnapshot:
+    digest: str
+    size: int
+    mtime_ns: int
+    updated_at: float
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class SessionRestoreResult:
+    restored: int
+    unchanged: int
+    conflicts: tuple[Path, ...]
+
+
+class SessionStore(Protocol):
+    def load(self, key: str) -> Session | None: ...
+
+    def save(self, session: Session, *, fsync: bool = False) -> None: ...
+
+    def delete(self, key: str) -> bool: ...
+
+    def read(self, key: str) -> SessionPayload | None: ...
+
+    def read_metadata(self, key: str) -> SessionMetadataPayload | None: ...
+
+    def list_sessions(self) -> list[SessionInfo]: ...
+
+
+class JsonlSessionStore:
+    """JSONL implementation of session persistence."""
 
     def __init__(self, workspace: Path, *, sessions_root: Path | None = None):
+        canonical_workspace = Path(workspace).expanduser().resolve(strict=False)
+        ensure_dir(canonical_workspace)
+        root = (
+            Path(sessions_root).expanduser().resolve(strict=False)
+            if sessions_root is not None
+            else get_runtime_subdir("sessions").resolve(strict=False)
+        )
+        if root == canonical_workspace or root.is_relative_to(canonical_workspace):
+            raise RuntimeError(
+                "session storage must be outside the agent workspace; "
+                "move --config outside --workspace or choose a nested workspace directory"
+            )
+        ensure_dir(root)
+        with suppress(OSError):
+            os.chmod(root, 0o700)
+        self.workspace = canonical_workspace
+        self._migration_lock = FileLock(
+            str(root / ".workspace-migration.lock"),
+            timeout=_SESSION_MIGRATION_LOCK_TIMEOUT_SECONDS,
+        )
+        with self._migration_lock:
+            workspace_id = self._load_or_create_workspace_id(canonical_workspace, root)
+            workspace_id = self._claim_workspace_namespace(
+                root,
+                canonical_workspace,
+                workspace_id,
+            )
+            self.sessions_dir = ensure_dir(root / workspace_id)
+            self.legacy_sessions_dir = get_legacy_sessions_dir()
+            self._migrate_from_workspace(canonical_workspace)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        with suppress(PermissionError, NotImplementedError):
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            except OSError as exc:
+                if exc.errno != errno.EINVAL:
+                    raise
+            finally:
+                os.close(fd)
+
+    @classmethod
+    def _write_text_atomic(cls, path: Path, content: str, *, mode: int = 0o600) -> None:
+        tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            with open(tmp, "x", encoding="utf-8") as handle:
+                os.chmod(tmp, mode)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            cls._fsync_directory(path.parent)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @classmethod
+    def _read_workspace_id(cls, marker: Path) -> str:
+        if marker.is_symlink():
+            raise RuntimeError(f"workspace identity marker must not be a symlink: {marker}")
+        value = marker.read_text(encoding="utf-8").strip()
+        if not _WORKSPACE_ID_RE.fullmatch(value):
+            raise RuntimeError(
+                f"workspace identity marker is invalid: {marker}; "
+                "restore its original 32-character identifier before starting nanobot"
+            )
+        return value
+
+    @staticmethod
+    def _workspace_id_path(workspace: Path) -> Path:
+        state_dir = workspace / _WORKSPACE_STATE_DIR
+        if state_dir.is_symlink():
+            raise RuntimeError(f"workspace state directory must not be a symlink: {state_dir}")
+        ensure_dir(state_dir)
+        return state_dir / _WORKSPACE_ID_FILE
+
+    @classmethod
+    def _find_workspace_namespace(cls, workspace: Path, root: Path) -> str | None:
+        """Recover an identity marker removed by cleanup at the same workspace path."""
+        matches: list[str] = []
+        for sessions_dir in root.iterdir():
+            if (
+                not _WORKSPACE_ID_RE.fullmatch(sessions_dir.name)
+                or sessions_dir.is_symlink()
+                or not sessions_dir.is_dir()
+            ):
+                continue
+            marker = sessions_dir / ".workspace"
+            if marker.is_symlink() or not marker.is_file():
+                continue
+            try:
+                recorded = Path(marker.read_text(encoding="utf-8").strip()).expanduser()
+                recorded = recorded.resolve(strict=False)
+                same_workspace = recorded == workspace or (
+                    recorded.exists() and recorded.samefile(workspace)
+                )
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if same_workspace:
+                matches.append(sessions_dir.name)
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"multiple session namespaces claim workspace {workspace}; "
+                "remove the stale namespace marker before starting nanobot"
+            )
+        return matches[0] if matches else None
+
+    @classmethod
+    def _load_or_create_workspace_id(cls, workspace: Path, root: Path) -> str:
+        marker = cls._workspace_id_path(workspace)
+        if marker.exists() or marker.is_symlink():
+            return cls._read_workspace_id(marker)
+
+        recovered = cls._find_workspace_namespace(workspace, root)
+        if recovered is not None:
+            cls._write_text_atomic(marker, f"{recovered}\n")
+            return recovered
+
+        workspace_id = secrets.token_hex(16)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(marker, flags, 0o600)
+        except FileExistsError:
+            return cls._read_workspace_id(marker)
+        try:
+            payload = f"{workspace_id}\n".encode("ascii")
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        except BaseException:
+            with suppress(OSError):
+                marker.unlink()
+            raise
+        finally:
+            os.close(fd)
+        cls._fsync_directory(marker.parent)
+        return workspace_id
+
+    @classmethod
+    def _replace_workspace_id(cls, workspace: Path, workspace_id: str) -> None:
+        cls._write_text_atomic(cls._workspace_id_path(workspace), f"{workspace_id}\n")
+
+    @classmethod
+    def _write_workspace_marker(cls, sessions_dir: Path, workspace: Path) -> None:
+        cls._write_text_atomic(sessions_dir / ".workspace", f"{workspace}\n")
+
+    @classmethod
+    def _claim_workspace_namespace(
+        cls,
+        root: Path,
+        workspace: Path,
+        workspace_id: str,
+    ) -> str:
+        """Bind a stable workspace ID, rotating copied live workspaces apart."""
+        for _attempt in range(3):
+            sessions_dir = root / workspace_id
+            marker = sessions_dir / ".workspace"
+            if sessions_dir.is_symlink():
+                raise RuntimeError(f"session namespace must not be a symlink: {sessions_dir}")
+            if not sessions_dir.exists():
+                ensure_dir(sessions_dir)
+                cls._write_workspace_marker(sessions_dir, workspace)
+                return workspace_id
+            if marker.is_symlink():
+                raise RuntimeError(f"session workspace marker must not be a symlink: {marker}")
+            if not marker.exists():
+                if any(sessions_dir.iterdir()):
+                    raise RuntimeError(
+                        f"session namespace has data but no workspace marker: {sessions_dir}"
+                    )
+                cls._write_workspace_marker(sessions_dir, workspace)
+                return workspace_id
+
+            recorded_text = marker.read_text(encoding="utf-8").strip()
+            if not recorded_text:
+                raise RuntimeError(f"session workspace marker is empty: {marker}")
+            recorded = Path(recorded_text).expanduser().resolve(strict=False)
+            if recorded == workspace:
+                return workspace_id
+            try:
+                same_workspace = recorded.exists() and recorded.samefile(workspace)
+            except OSError:
+                same_workspace = False
+            if same_workspace:
+                cls._write_workspace_marker(sessions_dir, workspace)
+                return workspace_id
+            if not recorded.exists():
+                # The identity marker travelled with a renamed or moved workspace.
+                cls._write_workspace_marker(sessions_dir, workspace)
+                return workspace_id
+
+            # Both paths exist and are different: this is a copy, not a move.
+            workspace_id = secrets.token_hex(16)
+            cls._replace_workspace_id(workspace, workspace_id)
+
+        raise RuntimeError(f"could not allocate an isolated session namespace for {workspace}")
+
+    @staticmethod
+    def _session_file_snapshot(path: Path) -> _SessionFileSnapshot | None:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            return None
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                return None
+            digest = hashlib.sha256()
+            saw_record = False
+            updated_at: float | None = None
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                for raw_line in handle:
+                    digest.update(raw_line)
+                    if not raw_line.strip():
+                        continue
+                    value: object = json.loads(raw_line.decode("utf-8"))
+                    data = _json_object(value)
+                    saw_record = True
+                    if data.get("_type") == "metadata":
+                        raw_updated_at = cast(object, data.get("updated_at"))
+                        if isinstance(raw_updated_at, str) and raw_updated_at:
+                            updated_at = datetime.fromisoformat(raw_updated_at).timestamp()
+            after = os.fstat(fd)
+            if (
+                not saw_record
+                or before.st_dev != after.st_dev
+                or before.st_ino != after.st_ino
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+            ):
+                return None
+            return _SessionFileSnapshot(
+                digest=digest.hexdigest(),
+                size=after.st_size,
+                mtime_ns=after.st_mtime_ns,
+                updated_at=(updated_at if updated_at is not None else after.st_mtime_ns / 1e9),
+                device=after.st_dev,
+                inode=after.st_ino,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+            return None
+        finally:
+            os.close(fd)
+
+    @classmethod
+    def _prepare_copy(
+        cls,
+        src: Path,
+        dst_dir: Path,
+        snapshot: _SessionFileSnapshot,
+    ) -> Path:
+        tmp = dst_dir / f".{src.name}.{secrets.token_hex(8)}.tmp"
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        src_fd = os.open(src, flags)
+        try:
+            before = os.fstat(src_fd)
+            if (
+                before.st_dev != snapshot.device
+                or before.st_ino != snapshot.inode
+                or before.st_size != snapshot.size
+                or before.st_mtime_ns != snapshot.mtime_ns
+            ):
+                raise OSError("session source changed before migration")
+            digest = hashlib.sha256()
+            size = 0
+            with os.fdopen(src_fd, "rb", closefd=False) as source, open(tmp, "xb") as target:
+                os.chmod(tmp, 0o600)
+                while chunk := source.read(_COPY_CHUNK_SIZE):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            after = os.fstat(src_fd)
+            if (
+                digest.hexdigest() != snapshot.digest
+                or size != snapshot.size
+                or after.st_dev != snapshot.device
+                or after.st_ino != snapshot.inode
+                or after.st_size != snapshot.size
+                or after.st_mtime_ns != snapshot.mtime_ns
+            ):
+                raise OSError("session source changed during migration")
+            return tmp
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(src_fd)
+
+    @classmethod
+    def _install_snapshot(
+        cls,
+        src: Path,
+        dst: Path,
+        snapshot: _SessionFileSnapshot,
+    ) -> None:
+        tmp = cls._prepare_copy(src, dst.parent, snapshot)
+        try:
+            os.replace(tmp, dst)
+            cls._fsync_directory(dst.parent)
+            installed = cls._session_file_snapshot(dst)
+            if installed is None or installed.digest != snapshot.digest:
+                raise OSError(f"session migration verification failed: {dst}")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _archive_conflict(
+        self,
+        src: Path,
+        snapshot: _SessionFileSnapshot,
+        label: str,
+    ) -> Path:
+        conflict_dir = ensure_dir(self.sessions_dir / ".migration-conflicts")
+        conflict = conflict_dir / (
+            f"{src.stem}.{label}.{snapshot.digest[:12]}.{secrets.token_hex(4)}.jsonl"
+        )
+        self._install_snapshot(src, conflict, snapshot)
+        return conflict
+
+    @classmethod
+    def _remove_migrated_source(
+        cls,
+        src: Path,
+        snapshot: _SessionFileSnapshot,
+    ) -> bool:
+        try:
+            current = src.stat(follow_symlinks=False)
+            if (
+                current.st_dev != snapshot.device
+                or current.st_ino != snapshot.inode
+                or current.st_size != snapshot.size
+                or current.st_mtime_ns != snapshot.mtime_ns
+            ):
+                return False
+            src.unlink()
+            cls._fsync_directory(src.parent)
+            return True
+        except OSError:
+            return False
+
+    def _migrate_from_workspace(self, workspace: Path) -> None:
+        """Durably copy legacy sessions out of the workspace, then remove the source."""
+        old_dir = workspace / "sessions"
+        if old_dir.is_symlink() or not old_dir.is_dir():
+            if old_dir.is_symlink():
+                logger.warning("Skipping symlinked legacy sessions directory: {}", old_dir)
+            return
+        for src in old_dir.glob("*.jsonl"):
+            if src.is_symlink() or not src.is_file():
+                logger.warning("Skipping unsafe legacy session file: {}", src)
+                continue
+            dst = self.sessions_dir / src.name
+            source_snapshot = self._session_file_snapshot(src)
+            if source_snapshot is None:
+                logger.warning("Skipping invalid or changing legacy session file: {}", src)
+                continue
+            try:
+                destination_snapshot = self._session_file_snapshot(dst) if dst.exists() else None
+                if dst.exists() and destination_snapshot is None:
+                    logger.warning(
+                        "Keeping legacy session because destination is invalid: {}",
+                        dst,
+                    )
+                    continue
+
+                if destination_snapshot is None:
+                    self._install_snapshot(src, dst, source_snapshot)
+                elif destination_snapshot.digest == source_snapshot.digest:
+                    pass
+                elif source_snapshot.updated_at > destination_snapshot.updated_at:
+                    archived = self._archive_conflict(dst, destination_snapshot, "destination")
+                    self._install_snapshot(src, dst, source_snapshot)
+                    logger.warning("Archived older session migration conflict at {}", archived)
+                else:
+                    archived = self._archive_conflict(src, source_snapshot, "workspace")
+                    logger.warning("Archived older session migration conflict at {}", archived)
+
+                installed = self._session_file_snapshot(dst)
+                if installed is None:
+                    raise OSError(f"session migration destination is unreadable: {dst}")
+                selected_digest = (
+                    source_snapshot.digest
+                    if destination_snapshot is None
+                    or source_snapshot.updated_at > destination_snapshot.updated_at
+                    else destination_snapshot.digest
+                )
+                if installed.digest != selected_digest:
+                    raise OSError(f"session migration selected unexpected data: {dst}")
+                if not self._remove_migrated_source(src, source_snapshot):
+                    logger.warning(
+                        "Session migrated but legacy source changed or could not be removed: {}",
+                        src,
+                    )
+            except OSError as exc:
+                logger.warning("Failed to migrate session {}: {}", src, exc)
+
+    def restore_to_workspace(self) -> SessionRestoreResult:
+        """Copy canonical sessions back for an explicit downgrade or rollback."""
+        restored = 0
+        unchanged = 0
+        conflicts: list[Path] = []
+        old_dir = self.workspace / "sessions"
+        if old_dir.is_symlink():
+            raise RuntimeError(f"refusing to restore into symlinked sessions directory: {old_dir}")
+        ensure_dir(old_dir)
+
+        with self._migration_lock:
+            for src in self.sessions_dir.glob("*.jsonl"):
+                if self.session_key_from_path(src) is None:
+                    continue
+                source_snapshot = self._session_file_snapshot(src)
+                if source_snapshot is None:
+                    conflicts.append(src)
+                    continue
+                dst = old_dir / src.name
+                if dst.exists():
+                    destination_snapshot = self._session_file_snapshot(dst)
+                    if (
+                        destination_snapshot is not None
+                        and destination_snapshot.digest == source_snapshot.digest
+                    ):
+                        unchanged += 1
+                    else:
+                        conflicts.append(dst)
+                    continue
+                self._install_snapshot(src, dst, source_snapshot)
+                restored += 1
+        return SessionRestoreResult(
+            restored=restored,
+            unchanged=unchanged,
+            conflicts=tuple(conflicts),
+        )
+
+    @staticmethod
+    def safe_key(key: str) -> str:
+        return safe_filename(key.replace(":", "_"))
+
+    @staticmethod
+    def storage_key(key: str) -> str:
+        return base64.urlsafe_b64encode(key.encode()).decode().rstrip("=")
+
+    @staticmethod
+    def decode_storage_key(stem: str) -> str | None:
+        try:
+            padding = 4 - len(stem) % 4
+            if padding != 4:
+                stem += "=" * padding
+            return base64.urlsafe_b64decode(stem).decode("utf-8")
+        except _SESSION_DATA_ERRORS:
+            return None
+
+    @classmethod
+    def session_key_from_path(cls, path: Path) -> str | None:
+        key = cls.decode_storage_key(path.stem)
+        if key is None or cls.storage_key(key) != path.stem:
+            return None
+        return key
+
+    def get_session_path(self, key: str) -> Path:
+        return self.sessions_dir / f"{self.storage_key(key)}.jsonl"
+
+    def get_legacy_lossy_path(self, key: str) -> Path:
+        return self.sessions_dir / f"{safe_filename(key.replace(':', '_'))}.jsonl"
+
+    def get_legacy_session_path(self, key: str) -> Path:
+        return self.legacy_sessions_dir / f"{self.safe_key(key)}.jsonl"
+
+    def load(self, key: str) -> Session | None:
+        path = self.get_session_path(key)
+        if not path.exists():
+            return None
+
+        try:
+            messages: list[dict[str, Any]] = []
+            metadata: dict[str, Any] = {}
+            created_at: datetime | None = None
+            updated_at: datetime | None = None
+            last_consolidated = 0
+            provider_state: ProviderConversationState | None = None
+
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    raw_data: object = json.loads(line)
+                    data = _json_object(raw_data)
+
+                    record_type = data.get("_type")
+                    if record_type == "metadata":
+                        metadata_value = cast(object, data.get("metadata", {}))
+                        metadata = (
+                            cast(dict[str, Any], metadata_value)
+                            if isinstance(metadata_value, dict)
+                            else {}
+                        )
+                        created_at_value = cast(object, data.get("created_at"))
+                        updated_at_value = cast(object, data.get("updated_at"))
+                        created_at = (
+                            datetime.fromisoformat(created_at_value)
+                            if isinstance(created_at_value, str) and created_at_value
+                            else None
+                        )
+                        updated_at = (
+                            datetime.fromisoformat(updated_at_value)
+                            if isinstance(updated_at_value, str) and updated_at_value
+                            else None
+                        )
+                        offset = cast(object, data.get("last_consolidated", 0))
+                        last_consolidated = (
+                            offset
+                            if isinstance(offset, int) and not isinstance(offset, bool)
+                            else 0
+                        )
+                    elif record_type == _PROVIDER_STATE_RECORD_TYPE:
+                        provider_state = ProviderConversationState.from_private_record(
+                            data.get("state")
+                        )
+                    else:
+                        messages.append(data)
+
+            return Session(
+                key=key,
+                messages=messages,
+                created_at=created_at or datetime.now(),
+                updated_at=updated_at or datetime.now(),
+                metadata=metadata,
+                last_consolidated=last_consolidated,
+                provider_state=provider_state,
+            )
+        except _SESSION_DATA_ERRORS as e:
+            logger.warning("Failed to load session {}: {}", key, e)
+            repaired = self.repair(key)
+            if repaired is not None:
+                logger.info(
+                    "Recovered session {} from corrupt file ({} messages)",
+                    key,
+                    len(repaired.messages),
+                )
+            return repaired
+
+    def repair(self, key: str, *, path: Path | None = None) -> Session | None:
+        if path is None:
+            path = self.get_session_path(key)
+        if not path.exists():
+            return None
+
+        try:
+            messages: list[dict[str, Any]] = []
+            metadata: dict[str, Any] = {}
+            created_at: datetime | None = None
+            updated_at: datetime | None = None
+            last_consolidated = 0
+            provider_state: ProviderConversationState | None = None
+            skipped = 0
+
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw_data: object = json.loads(line)
+                    except json.JSONDecodeError:
+                        skipped += 1
+                        continue
+                    if not isinstance(raw_data, dict):
+                        skipped += 1
+                        continue
+                    data = cast(dict[str, Any], raw_data)
+
+                    record_type = data.get("_type")
+                    if record_type == "metadata":
+                        metadata_value = cast(object, data.get("metadata", {}))
+                        metadata = (
+                            cast(dict[str, Any], metadata_value)
+                            if isinstance(metadata_value, dict)
+                            else {}
+                        )
+                        created_at_value = cast(object, data.get("created_at"))
+                        if isinstance(created_at_value, str) and created_at_value:
+                            with suppress(ValueError):
+                                created_at = datetime.fromisoformat(created_at_value)
+                        updated_at_value = cast(object, data.get("updated_at"))
+                        if isinstance(updated_at_value, str) and updated_at_value:
+                            with suppress(ValueError):
+                                updated_at = datetime.fromisoformat(updated_at_value)
+                        offset = cast(object, data.get("last_consolidated", 0))
+                        last_consolidated = (
+                            offset
+                            if isinstance(offset, int) and not isinstance(offset, bool)
+                            else 0
+                        )
+                    elif record_type == _PROVIDER_STATE_RECORD_TYPE:
+                        candidate = ProviderConversationState.from_private_record(
+                            data.get("state")
+                        )
+                        if candidate is None:
+                            skipped += 1
+                        else:
+                            provider_state = candidate
+                    else:
+                        messages.append(data)
+
+            if skipped:
+                logger.warning("Skipped {} corrupt lines in session {}", skipped, key)
+
+            if not messages and not metadata and provider_state is None:
+                return None
+
+            return Session(
+                key=key,
+                messages=messages,
+                created_at=created_at or datetime.now(),
+                updated_at=updated_at or datetime.now(),
+                metadata=metadata,
+                last_consolidated=last_consolidated,
+                provider_state=provider_state,
+            )
+        except _SESSION_DATA_ERRORS as e:
+            logger.warning("Repair failed for session {}: {}", key, e)
+            return None
+
+    @staticmethod
+    def session_payload(session: Session) -> SessionPayload:
+        return {
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "messages": session.messages,
+        }
+
+    def save(self, session: Session, *, fsync: bool = False) -> None:
+        path = self.get_session_path(session.key)
+        tmp_path = path.with_suffix(".jsonl.tmp")
+
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                metadata_line = {
+                    "_type": "metadata",
+                    "key": session.key,
+                    "created_at": session.created_at.isoformat(),
+                    "updated_at": session.updated_at.isoformat(),
+                    "metadata": session.metadata,
+                    "last_consolidated": session.last_consolidated,
+                }
+                f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+                if session.provider_state is not None:
+                    provider_state_line = {
+                        "_type": _PROVIDER_STATE_RECORD_TYPE,
+                        "state": session.provider_state.to_private_record(),
+                    }
+                    f.write(json.dumps(provider_state_line, ensure_ascii=False) + "\n")
+                for msg in session.messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                if fsync:
+                    f.flush()
+                    os.fsync(f.fileno())
+
+            os.replace(tmp_path, path)
+
+            if fsync:
+                with suppress(PermissionError):
+                    fd = os.open(str(path.parent), os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    except OSError as exc:
+                        if exc.errno != errno.EINVAL:
+                            raise
+                    finally:
+                        os.close(fd)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    def delete(self, key: str) -> bool:
+        paths = [
+            self.get_session_path(key),
+            self.get_legacy_lossy_path(key),
+            self.get_legacy_session_path(key),
+        ]
+        deleted = False
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                path.unlink()
+                deleted = True
+            except OSError as e:
+                logger.warning("Failed to delete session file {}: {}", path, e)
+        return deleted
+
+    def read(self, key: str) -> SessionPayload | None:
+        path = self.get_session_path(key)
+        if not path.exists():
+            return None
+        try:
+            messages: list[dict[str, Any]] = []
+            metadata: dict[str, Any] = {}
+            created_at: str | None = None
+            updated_at: str | None = None
+            stored_key: str | None = None
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    raw_data: object = json.loads(line)
+                    data = _json_object(raw_data)
+                    record_type = data.get("_type")
+                    if record_type == "metadata":
+                        metadata_value = cast(object, data.get("metadata", {}))
+                        metadata = (
+                            cast(dict[str, Any], metadata_value)
+                            if isinstance(metadata_value, dict)
+                            else {}
+                        )
+                        created_at_value = cast(object, data.get("created_at"))
+                        updated_at_value = cast(object, data.get("updated_at"))
+                        stored_key_value = cast(object, data.get("key"))
+                        created_at = (
+                            created_at_value if isinstance(created_at_value, str) else None
+                        )
+                        updated_at = (
+                            updated_at_value if isinstance(updated_at_value, str) else None
+                        )
+                        stored_key = (
+                            stored_key_value if isinstance(stored_key_value, str) else None
+                        )
+                    elif record_type == _PROVIDER_STATE_RECORD_TYPE:
+                        continue
+                    else:
+                        messages.append(data)
+            return {
+                "key": stored_key or key,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "metadata": metadata,
+                "messages": messages,
+            }
+        except _SESSION_DATA_ERRORS as e:
+            logger.warning("Failed to read session {}: {}", key, e)
+            repaired = self.repair(key, path=path)
+            if repaired is not None:
+                logger.info("Recovered read-only session view {} from corrupt file", key)
+                return self.session_payload(repaired)
+            return None
+
+    def read_metadata(self, key: str) -> SessionMetadataPayload | None:
+        path = self.get_session_path(key)
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    raw_data: object = json.loads(line)
+                    data = _json_object(raw_data)
+                    if data.get("_type") != "metadata":
+                        return None
+                    metadata_value = cast(object, data.get("metadata", {}))
+                    key_value = cast(object, data.get("key"))
+                    created_at_value = cast(object, data.get("created_at"))
+                    updated_at_value = cast(object, data.get("updated_at"))
+                    return {
+                        "key": key_value if isinstance(key_value, str) and key_value else key,
+                        "created_at": (
+                            created_at_value if isinstance(created_at_value, str) else None
+                        ),
+                        "updated_at": (
+                            updated_at_value if isinstance(updated_at_value, str) else None
+                        ),
+                        "metadata": (
+                            cast(dict[str, Any], metadata_value)
+                            if isinstance(metadata_value, dict)
+                            else {}
+                        ),
+                    }
+            return None
+        except _SESSION_DATA_ERRORS as e:
+            logger.warning("Failed to read session metadata {}: {}", key, e)
+            repaired = self.repair(key, path=path)
+            if repaired is not None:
+                logger.info("Recovered read-only session metadata {} from corrupt file", key)
+                return {
+                    "key": repaired.key,
+                    "created_at": repaired.created_at.isoformat(),
+                    "updated_at": repaired.updated_at.isoformat(),
+                    "metadata": repaired.metadata,
+                }
+            return None
+
+    def list_sessions(self) -> list[SessionInfo]:
+        sessions: list[SessionInfo] = []
+
+        for path in self.sessions_dir.glob("*.jsonl"):
+            storage_key = self.session_key_from_path(path)
+            if storage_key is None:
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    first_line = f.readline().strip()
+                    if first_line:
+                        raw_data: object = json.loads(first_line)
+                        data = _json_object(raw_data)
+                        if data.get("_type") == "metadata":
+                            key_value = cast(object, data.get("key"))
+                            key = (
+                                key_value
+                                if isinstance(key_value, str) and key_value
+                                else storage_key
+                            )
+                            metadata = cast(object, data.get("metadata", {}))
+                            title = _metadata_title(metadata)
+                            preview = ""
+                            fallback_preview = ""
+                            scanned_records = 0
+                            scanned_chars = 0
+                            for line in f:
+                                if not line.strip():
+                                    continue
+                                if _is_provider_state_record_line(line):
+                                    continue
+                                scanned_records += 1
+                                scanned_chars += len(line)
+                                if (
+                                    scanned_records > _SESSION_LIST_PREVIEW_MAX_RECORDS
+                                    or scanned_chars > _SESSION_LIST_PREVIEW_MAX_CHARS
+                                ):
+                                    break
+                                raw_item: object = json.loads(line)
+                                item = _json_object(raw_item)
+                                if item.get("_type") in {
+                                    "metadata",
+                                    _PROVIDER_STATE_RECORD_TYPE,
+                                }:
+                                    continue
+                                text = _message_preview_text(item)
+                                if not text:
+                                    continue
+                                if item.get("role") == "user":
+                                    preview = text
+                                    break
+                                if not fallback_preview and item.get("role") == "assistant":
+                                    fallback_preview = text
+                            preview = preview or fallback_preview
+                            fallback_time = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+                            created_at = cast(object, data.get("created_at"))
+                            updated_at = cast(object, data.get("updated_at"))
+                            sessions.append(
+                                {
+                                    "key": key,
+                                    "created_at": (
+                                        created_at
+                                        if isinstance(created_at, str) and created_at
+                                        else fallback_time
+                                    ),
+                                    "updated_at": (
+                                        updated_at
+                                        if isinstance(updated_at, str) and updated_at
+                                        else fallback_time
+                                    ),
+                                    "title": title,
+                                    "preview": preview,
+                                    "path": str(path),
+                                }
+                            )
+            except FileNotFoundError:
+                continue
+            except _SESSION_DATA_ERRORS:
+                repaired = self.repair(storage_key, path=path)
+                if repaired is not None:
+                    sessions.append(
+                        {
+                            "key": repaired.key,
+                            "created_at": repaired.created_at.isoformat(),
+                            "updated_at": repaired.updated_at.isoformat(),
+                            "title": _metadata_title(repaired.metadata),
+                            "preview": next(
+                                (
+                                    text
+                                    for msg in repaired.messages
+                                    if (text := _message_preview_text(msg))
+                                ),
+                                "",
+                            ),
+                            "path": str(path),
+                        }
+                    )
+                continue
+        return sorted(sessions, key=lambda item: item["updated_at"], reverse=True)
+
+
+class SessionManager:
+    """Manage session identity, caching, retention, and persistence."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        store: SessionStore | None = None,
+        sessions_root: Path | None = None,
+    ):
         self.workspace = workspace
-        self.sessions_dir = ensure_dir(self.workspace / "sessions")
-        self.legacy_sessions_dir = get_legacy_sessions_dir()
-        # sessions_root lets the caller (AgentLoop.from_config, via
-        # Config.runtime_data_dir) put sessions.db outside the agent's own
-        # workspace, so shell/file tools running inside that workspace can
-        # never read or tamper with session data. Defaults to the previous
-        # in-workspace location when not given, so existing installs are
-        # unaffected.
-        db_root = Path(sessions_root).expanduser().resolve(strict=False) if sessions_root else self.workspace
-        ensure_dir(db_root)
-        self.db_path = db_root / "sessions.db"
-        # LRU-style cache: strongly-referenced recent sessions in self._cache,
-        # with idle overflow demoted to a WeakValueDictionary so identity is
-        # preserved for any caller still holding a reference without
-        # unboundedly growing memory for long-running processes with many
-        # sessions.
+        self._jsonl_store = JsonlSessionStore(workspace, sessions_root=sessions_root)
+        self._store: SessionStore = store if store is not None else self._jsonl_store
+        self.sessions_dir = self._jsonl_store.sessions_dir
+        self.legacy_sessions_dir = self._jsonl_store.legacy_sessions_dir
         self._cache: OrderedDict[str, Session] = OrderedDict()
+        # Preserve identity for sessions held by active callers without retaining idle ones.
         self._overflow_cache: WeakValueDictionary[str, Session] = WeakValueDictionary()
         self._max_cached_sessions = SESSION_CACHE_MAX_SIZE
         self._file_cap_archiver: Callable[..., None] | None = None
-        self._conn_obj: sqlite3.Connection | None = None
-        self._write_lock = threading.Lock()
-        self._ensure_schema()
-        self._import_legacy_jsonl()
 
     def _remember(self, session: Session) -> None:
         """Keep recent sessions strongly cached without duplicating live objects."""
@@ -590,159 +1502,39 @@ class SessionManager:
     @staticmethod
     def safe_key(key: str) -> str:
         """Public helper used by HTTP handlers to map an arbitrary key to a stable filename stem."""
-        return safe_filename(key.replace(":", "_"))
-
-    # ------------------------------------------------------------------
-    # SQLite plumbing
-    # ------------------------------------------------------------------
-
-    def _conn(self) -> sqlite3.Connection:
-        if self._conn_obj is None:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(
-                str(self.db_path), check_same_thread=False, timeout=30.0,
-            )
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=10000")
-            self._conn_obj = conn
-        return self._conn_obj
-
-    def close(self) -> None:
-        """Checkpoint the WAL and release the connection.
-
-        Without this the only checkpoint was ``save(fsync=True)``, reached solely
-        via ``flush_all()`` at graceful shutdown — so a SIGKILL, an OOM or a
-        TimeoutStopSec expiry left the WAL untruncated, and an embedding host
-        creating many short-lived managers leaked one SQLite connection each.
-        Idempotent, and safe to call on an already-closed manager.
-        """
-        conn, self._conn_obj = self._conn_obj, None
-        if conn is None:
-            return
-        try:
-            with suppress(sqlite3.OperationalError):
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        finally:
-            with suppress(sqlite3.Error):
-                conn.close()
-
-    def __enter__(self) -> "SessionManager":
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
-    def _ensure_schema(self) -> None:
-        conn = self._conn()
-        conn.executescript(f"""
-            CREATE TABLE IF NOT EXISTS sessions (
-                key TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{{}}',
-                last_consolidated INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-                session_key TEXT NOT NULL,
-                seq INTEGER NOT NULL,
-                role TEXT,
-                created_at TEXT,
-                data TEXT NOT NULL,
-                PRIMARY KEY (session_key, seq)
-            );
-            PRAGMA user_version = {self._SCHEMA_VERSION};
-        """)
-        conn.commit()
-
-    def _import_legacy_jsonl(self) -> None:
-        """One-time import of per-session ``.jsonl`` files into sessions.db.
-
-        Imported files are renamed to ``*.jsonl.imported`` (kept as backup,
-        never deleted). Only THIS workspace's own sessions directory is
-        scanned — never the global legacy dir: a scoped/ephemeral workspace
-        must not consume another install's session files into its throwaway
-        db. (For the primary workspace the legacy dir *is* its sessions dir,
-        so the old-layout migration still happens.)
-        """
-        candidates: list[Path] = sorted(self.sessions_dir.glob("*.jsonl"))
-        if not candidates:
-            return
-        imported = 0
-        for path in candidates:
-            try:
-                session = self._parse_jsonl(path)
-                if session is not None:
-                    row = self._conn().execute(
-                        "SELECT updated_at FROM sessions WHERE key = ?", (session.key,)
-                    ).fetchone()
-                    # Newer-wins: a jsonl written after the db row (e.g. by an
-                    # old-code process that ran during the migration window)
-                    # replaces it; otherwise the db copy is kept.
-                    if row is None or row[0] < session.updated_at.isoformat():
-                        self.save(session)
-                        self._cache.pop(session.key, None)
-                        imported += 1
-                # Rename unconditionally (even unparseable files) so the same
-                # file is never re-parsed on every startup.
-                path.rename(path.with_suffix(".jsonl.imported"))
-            except Exception:
-                logger.exception("Failed to import legacy session file {}", path)
-        if imported:
-            logger.info(
-                "Imported {} legacy jsonl session(s) into {}", imported, self.db_path
-            )
+        return JsonlSessionStore.safe_key(key)
 
     @staticmethod
-    def _parse_jsonl(path: Path) -> Session | None:
-        """Tolerantly parse a legacy jsonl session file (corrupt lines skipped)."""
-        messages: list[dict[str, Any]] = []
-        metadata: dict[str, Any] = {}
-        key: str | None = None
-        created_at: datetime | None = None
-        updated_at: datetime | None = None
-        last_consolidated = 0
-        skipped = 0
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    skipped += 1
-                    continue
-                if data.get("_type") == "metadata":
-                    metadata = data.get("metadata", {})
-                    key = data.get("key") or key
-                    if data.get("created_at"):
-                        with suppress(ValueError, TypeError):
-                            created_at = datetime.fromisoformat(data["created_at"])
-                    if data.get("updated_at"):
-                        with suppress(ValueError, TypeError):
-                            updated_at = datetime.fromisoformat(data["updated_at"])
-                    last_consolidated = data.get("last_consolidated", 0)
-                else:
-                    messages.append(data)
-        if skipped:
-            logger.warning("Skipped {} corrupt line(s) importing {}", skipped, path)
-        if key is None:
-            key = path.stem.replace("_", ":", 1)
-        if not messages and not metadata:
-            return None
-        return Session(
-            key=key,
-            messages=messages,
-            created_at=created_at or datetime.now(),
-            updated_at=updated_at or datetime.now(),
-            metadata=metadata,
-            last_consolidated=last_consolidated,
-        )
+    def _storage_key(key: str) -> str:
+        """Collision-resistant encoding for internal session storage filenames."""
+        return JsonlSessionStore.storage_key(key)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _decode_storage_key(stem: str) -> str | None:
+        """Reverse _storage_key(): decode a base64url (no-padding) stem back to the original key."""
+        return JsonlSessionStore.decode_storage_key(stem)
+
+    @staticmethod
+    def decode_storage_key(stem: str) -> str | None:
+        """Public decoder for components that inspect canonical session filenames."""
+        return SessionManager._decode_storage_key(stem)
+
+    @classmethod
+    def _session_key_from_path(cls, path: Path) -> str | None:
+        """Decode a session key only from a canonical collision-resistant filename."""
+        return JsonlSessionStore.session_key_from_path(path)
+
+    def _get_session_path(self, key: str) -> Path:
+        """Get the collision-resistant workspace path for a session."""
+        return self._jsonl_store.get_session_path(key)
+
+    def _get_legacy_lossy_path(self, key: str) -> Path:
+        """Previous workspace session path using lossy ':' to '_' replacement."""
+        return self._jsonl_store.get_legacy_lossy_path(key)
+
+    def _get_legacy_session_path(self, key: str) -> Path:
+        """Legacy global session path (~/.nanobot/sessions/)."""
+        return self._jsonl_store.get_legacy_session_path(key)
 
     def get_or_create(self, key: str) -> Session:
         """
@@ -771,12 +1563,7 @@ class SessionManager:
         *,
         disabled_tools: Collection[str] = (),
     ) -> Session:
-        """Return a fresh, non-persistent session without loading history.
-
-        Used by ephemeral surfaces (e.g. WebUI Temporary Chats) that must
-        never touch ``sessions.db`` — ``save()`` is a no-op for a session
-        whose ``policy.persist`` is False.
-        """
+        """Return a fresh, non-persistent session without loading history."""
         policy = SessionPolicy(
             persist=False,
             log_content=False,
@@ -789,135 +1576,27 @@ class SessionManager:
         return session
 
     def _load(self, key: str) -> Session | None:
-        """Load a session from the database."""
-        try:
-            conn = self._conn()
-            row = conn.execute(
-                "SELECT created_at, updated_at, metadata, last_consolidated"
-                " FROM sessions WHERE key = ?",
-                (key,),
-            ).fetchone()
-            if row is None:
-                return None
-            messages: list[dict[str, Any]] = []
-            for (data,) in conn.execute(
-                "SELECT data FROM messages WHERE session_key = ? ORDER BY seq", (key,)
-            ):
-                try:
-                    parsed = json.loads(data)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping corrupt message row in session {}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping non-object message row in session {}", key)
-                    continue
-                messages.append(parsed)
-            created_at = updated_at = None
-            with suppress(ValueError, TypeError):
-                created_at = datetime.fromisoformat(row[0])
-            with suppress(ValueError, TypeError):
-                updated_at = datetime.fromisoformat(row[1])
-            try:
-                metadata = json.loads(row[2]) if row[2] else {}
-            except json.JSONDecodeError:
-                metadata = {}
-            if not isinstance(metadata, dict):
-                metadata = {}
-            provider_state = ProviderConversationState.from_private_record(
-                metadata.pop("_provider_state", None)
-            )
-            return Session(
-                key=key,
-                messages=messages,
-                created_at=created_at or datetime.now(),
-                updated_at=updated_at or datetime.now(),
-                metadata=metadata,
-                last_consolidated=row[3] or 0,
-                provider_state=provider_state,
-            )
-        except _SESSION_DATA_ERRORS as e:
-            logger.warning("Failed to load session {}: {}", key, e)
-            return None
+        return self._store.load(key)
 
-    @staticmethod
-    def _session_payload(session: Session) -> dict[str, Any]:
-        return {
-            "key": session.key,
-            "created_at": session.created_at.isoformat(),
-            "updated_at": session.updated_at.isoformat(),
-            "metadata": session.metadata,
-            "messages": session.messages,
-        }
+    def _repair(self, key: str, *, path: Path | None = None) -> Session | None:
+        """Attempt to recover a session from a corrupt JSONL file."""
+        return self._jsonl_store.repair(key, path=path)
 
     def save(self, session: Session, *, fsync: bool = False) -> None:
-        """Persist a session in one transaction (full replace of its rows).
-
-        SQLite WAL + the transaction give atomicity; concurrent writers from
-        other processes are serialized by SQLite's own locking (busy_timeout
-        retries). When *fsync* is ``True`` the WAL is checkpointed so the
-        write is durable on filesystems with write-back caching.
-
-        A session whose ``policy.persist`` is False (e.g. an ephemeral
-        WebUI Temporary Chat) is never written to disk.
-        """
+        """Persist a session and retain it in the cache."""
         if not session.policy.persist:
             return
-        if self._file_cap_archiver is not None:
+
+        archiver = self._file_cap_archiver
+        if archiver is not None:
             session.enforce_file_cap(
-                on_archive=lambda messages: self._file_cap_archiver(
+                on_archive=lambda messages: archiver(
                     messages,
                     session_key=session.key,
                 )
             )
 
-        conn = self._conn()
-        rows = []
-        for seq, msg in enumerate(session.messages):
-            rows.append((
-                session.key,
-                seq,
-                msg.get("role"),
-                msg.get("timestamp"),
-                json.dumps(msg, ensure_ascii=False),
-            ))
-        # provider_state rides along in the metadata blob under a reserved key
-        # rather than a dedicated column, so it survives the same atomic
-        # replace as the rest of the row without a schema migration.
-        metadata_to_store = dict(session.metadata)
-        if session.provider_state is not None:
-            metadata_to_store["_provider_state"] = session.provider_state.to_private_record()
-        else:
-            metadata_to_store.pop("_provider_state", None)
-        with self._write_lock:
-            with conn:  # one transaction
-                conn.execute(
-                    "INSERT INTO sessions(key, created_at, updated_at, metadata,"
-                    " last_consolidated) VALUES (?, ?, ?, ?, ?)"
-                    " ON CONFLICT(key) DO UPDATE SET"
-                    " created_at = excluded.created_at,"
-                    " updated_at = excluded.updated_at,"
-                    " metadata = excluded.metadata,"
-                    " last_consolidated = excluded.last_consolidated",
-                    (
-                        session.key,
-                        session.created_at.isoformat(),
-                        session.updated_at.isoformat(),
-                        json.dumps(metadata_to_store, ensure_ascii=False),
-                        session.last_consolidated,
-                    ),
-                )
-                conn.execute(
-                    "DELETE FROM messages WHERE session_key = ?", (session.key,)
-                )
-                conn.executemany(
-                    "INSERT INTO messages(session_key, seq, role, created_at, data)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    rows,
-                )
-            if fsync:
-                with suppress(sqlite3.OperationalError):
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
+        self._store.save(session, fsync=fsync)
         self._remember(session)
 
     def flush_all(self) -> int:
@@ -944,20 +1623,13 @@ class SessionManager:
         self._overflow_cache.pop(key, None)
 
     def delete_session(self, key: str) -> bool:
-        """Remove a session from the database and the in-memory cache.
-
-        Returns True if a stored session was found and deleted.
-        """
+        """Delete a persisted session and invalidate its cache entry."""
         self.invalidate(key)
-        try:
-            conn = self._conn()
-            with self._write_lock, conn:
-                cur = conn.execute("DELETE FROM sessions WHERE key = ?", (key,))
-                conn.execute("DELETE FROM messages WHERE session_key = ?", (key,))
-            return cur.rowcount > 0
-        except _SESSION_DATA_ERRORS as e:
-            logger.warning("Failed to delete session {}: {}", key, e)
-            return False
+        return self._store.delete(key)
+
+    def restore_sessions_to_workspace(self) -> SessionRestoreResult:
+        """Restore session files to the pre-relocation path for an explicit rollback."""
+        return self._jsonl_store.restore_to_workspace()
 
     def fork_session_before_user_index(
         self,
@@ -1016,184 +1688,12 @@ class SessionManager:
         return target
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
-        """Load a session without caching; intended for read-only HTTP endpoints.
-
-        Returns ``{"key", "created_at", "updated_at", "metadata", "messages"}`` or
-        ``None`` when the session does not exist.
-        """
-        session = self._load(key)
-        if session is None:
-            return None
-        return self._session_payload(session)
+        """Read a session without populating the cache."""
+        return cast(dict[str, Any] | None, self._store.read(key))
 
     def read_session_metadata(self, key: str) -> dict[str, Any] | None:
-        """Load only the metadata record for a session, without its messages.
-
-        This is used by WebUI routes that need session-level metadata but not the
-        full conversation transcript.
-        """
-        try:
-            row = self._conn().execute(
-                "SELECT key, created_at, updated_at, metadata FROM sessions WHERE key = ?",
-                (key,),
-            ).fetchone()
-            if row is None:
-                return None
-            try:
-                metadata = json.loads(row[3]) if row[3] else {}
-            except json.JSONDecodeError:
-                metadata = {}
-            if not isinstance(metadata, dict):
-                metadata = {}
-            # Never surface the provider-private continuation blob (may hold
-            # encrypted reasoning items) through the WebUI metadata route.
-            metadata.pop("_provider_state", None)
-            return {
-                "key": row[0] or key,
-                "created_at": row[1],
-                "updated_at": row[2],
-                "metadata": metadata,
-            }
-        except _SESSION_DATA_ERRORS as e:
-            logger.warning("Failed to read session metadata {}: {}", key, e)
-            return None
+        """Read session metadata without loading the transcript."""
+        return cast(dict[str, Any] | None, self._store.read_metadata(key))
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        """List all sessions (most recently updated first) with a short preview."""
-        sessions: list[dict[str, Any]] = []
-        try:
-            conn = self._conn()
-            rows = conn.execute(
-                "SELECT key, created_at, updated_at, metadata FROM sessions"
-                " ORDER BY updated_at DESC"
-            ).fetchall()
-        except _SESSION_DATA_ERRORS:
-            logger.exception("Failed to list sessions")
-            return []
-        for row in rows:
-            try:
-                metadata = json.loads(row[3]) if row[3] else {}
-            except json.JSONDecodeError:
-                metadata = {}
-            sessions.append({
-                "key": row[0],
-                "created_at": row[1],
-                "updated_at": row[2],
-                "title": _metadata_title(metadata),
-                "preview": self._preview(row[0]),
-                # Reserved-namespace metadata is expected to be well-formed;
-                # a malformed value here indicates a real bug elsewhere and
-                # should fail loud rather than be silently hidden.
-                "model_preset": model_preset_from_metadata(metadata),
-                "path": str(self.db_path),
-            })
-        return sessions
-
-    def _preview(self, key: str) -> str:
-        """First user message preview (assistant fallback), like the old file scan.
-
-        The rows are materialised with ``fetchall()`` *before* scanning them, and
-        that is load-bearing rather than stylistic. Iterating the cursor directly
-        and ``return``-ing from inside the loop — which is what this did — leaves
-        an un-exhausted statement on the long-lived shared connection, and SQLite
-        keeps a read transaction open for exactly as long as that statement is
-        live. An open read transaction blocks WAL checkpointing, so the WAL grows
-        without bound: on jifan it reached 5.7 MB against a 1.8 MB database, well
-        past the 1000-page auto-checkpoint threshold that should have capped it.
-
-        ``list_sessions()`` calls this once per session, so the leak recurred on
-        every listing. The LIMIT keeps the materialised set small.
-        """
-        fallback = ""
-        scanned_records = 0
-        scanned_chars = 0
-        try:
-            rows = self._conn().execute(
-                "SELECT data FROM messages WHERE session_key = ?"
-                f" ORDER BY seq LIMIT {_SESSION_LIST_PREVIEW_MAX_RECORDS}",
-                (key,),
-            ).fetchall()
-        except _SESSION_DATA_ERRORS:
-            logger.exception("Failed to build preview for session {}", key)
-            return fallback
-
-        # Upstream's bounded scan (char cap + hidden-message filter) applied to
-        # the materialised rows. Upstream still iterated the cursor and both
-        # `return`ed and `break`ed out of it, so it carried the same leak — the
-        # early `break` on the char cap actually added a second exit path.
-        for (data,) in rows:
-            scanned_records += 1
-            scanned_chars += len(data)
-            if scanned_chars > _SESSION_LIST_PREVIEW_MAX_CHARS:
-                break
-            try:
-                item = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            if is_hidden_history_message(item):
-                continue
-            text = _message_preview_text(item)
-            if not text:
-                continue
-            if item.get("role") == "user":
-                return text
-            if not fallback and item.get("role") == "assistant":
-                fallback = text
-        return fallback
-
-    def dump_jsonl(self, key: str) -> str | None:
-        """Export one session in the legacy jsonl format (for debugging)."""
-        session = self._load(key)
-        if session is None:
-            return None
-        lines = [json.dumps({
-            "_type": "metadata",
-            "key": session.key,
-            "created_at": session.created_at.isoformat(),
-            "updated_at": session.updated_at.isoformat(),
-            "metadata": session.metadata,
-            "last_consolidated": session.last_consolidated,
-        }, ensure_ascii=False)]
-        lines += [json.dumps(msg, ensure_ascii=False) for msg in session.messages]
-        return "\n".join(lines) + "\n"
-
-    def restore_sessions_to_workspace(self) -> SessionRestoreResult:
-        """Export every session as legacy jsonl into ``<workspace>/sessions/``.
-
-        moeka has no in-workspace/out-of-workspace store split to roll back
-        (sessions always live in ``sessions.db``, wherever that is), so this
-        is a plain jsonl export of the current SQLite-backed store, useful
-        before downgrading to a nanobot version that predates the SQLite
-        migration. Never overwrites a file whose content already matches;
-        anything else already on disk at that path is reported as a
-        conflict rather than clobbered.
-        """
-        restored = 0
-        unchanged = 0
-        conflicts: list[Path] = []
-        for row in self.list_sessions():
-            key = row.get("key")
-            if not isinstance(key, str):
-                continue
-            dumped = self.dump_jsonl(key)
-            if dumped is None:
-                continue
-            target = self.sessions_dir / f"{self.safe_key(key)}.jsonl"
-            if target.exists():
-                try:
-                    existing = target.read_text(encoding="utf-8")
-                except OSError:
-                    existing = None
-                if existing == dumped:
-                    unchanged += 1
-                    continue
-                conflicts.append(target)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(dumped, encoding="utf-8")
-            restored += 1
-        return SessionRestoreResult(
-            restored=restored,
-            unchanged=unchanged,
-            conflicts=tuple(conflicts),
-        )
+        return cast(list[dict[str, Any]], self._store.list_sessions())

@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 from nanobot.cli import commands
 from nanobot.config.loader import load_config
 from nanobot.session.manager import SessionManager
+from nanobot.session.sqlite_store import SqliteSessionStore, default_sessions_root
 
 
 def test_sessions_restore_workspace_command_prepares_downgrade(
@@ -15,7 +16,14 @@ def test_sessions_restore_workspace_command_prepares_downgrade(
     config_path = tmp_path / "instance" / "config.json"
     config = load_config(config_path)
     config.agents.defaults.workspace = str(workspace)
-    manager = SessionManager(workspace, sessions_root=config_path.parent / "sessions")
+    # Must match what nanobot sessions restore-workspace computes internally
+    # (nanobot/cli/commands.py: default_sessions_root(workspace_path)).
+    sessions_root = default_sessions_root(workspace)
+    manager = SessionManager(
+        workspace,
+        sessions_root=sessions_root,
+        store=SqliteSessionStore(workspace, sessions_root=sessions_root),
+    )
     session = manager.get_or_create("cli:rollback")
     session.add_message("user", "restore-me")
     manager.save(session, fsync=True)
