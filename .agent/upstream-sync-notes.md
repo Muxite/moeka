@@ -837,3 +837,290 @@ environment artifacts as every prior batch: `test_exec_guard_allows_public_urls`
 - ADR-0001 out-of-workspace session storage: already adopted (batch 2.5),
   not revisited this batch — no new upstream commits touched that surface
   area in this window.
+
+## Batch 4 — 2026-09-17
+
+Merge commit `505fff2e` into `merge/upstream-main-2026-08-05`, checkpoint
+`f9d449ef6c6d3d307c663890ae55d1eac4d088f8` (2026-08-26, "refactor(webui):
+isolate websocket application orchestration (#5548)"), 92 commits since
+batch 3's `1018bdb7`. Two follow-up fixup commits: `cdc7a5ae` (uv.lock
+regen) and `7136de6d` + `d16b3608` (post-test-run fixes — see below).
+
+### Conflicts resolved (11 files + 1 modify/delete)
+- `README.md` — took upstream wholesale, then stripped the two
+  `CONTRIBUTING.md` links it reintroduced (file stays deleted on moeka).
+- `nanobot/session/manager.py` — took upstream wholesale, unconditional
+  (rule 1). `git diff f9d449ef... -- nanobot/session/manager.py` empty,
+  confirmed.
+- `nanobot/agent/loop.py`, `runner.py`, `subagent.py` — combined moeka's
+  `bootstrap_overrides`/`inline_skills`/`tools_allow`/`tools_deny`/
+  AskUserInterrupt surface with upstream's `recovery_admission`/
+  `continuation_callback`/`terminal_injection_callback` refactor. See
+  "Silent breakage" below — this conflict resolution alone left several
+  bugs that only surfaced once the goal-continuation dead code
+  (`goal_active_predicate`/`goal_continue_message`/
+  `build_goal_continue_message`) was dropped in favor of upstream's
+  equivalent `continuation_callback` (same `_goal_continue` closure,
+  simpler interface — confirmed functionally identical before removing).
+- `nanobot/agent/skills.py` — merged moeka's inline-skills group
+  (`root=None`, no on-disk path) with upstream's relative-path
+  display-root feature (`use_relative_roots`/`display_root`).
+- `nanobot/agent/tools/shell.py` — kept moeka's permissive-sandbox
+  `description` property in full; upstream reduced it to a one-line stub
+  ("Execute a shell command."). See "Silent breakage" below for a second,
+  non-conflicted regression found in this same file.
+- `nanobot/cli/gateway_runtime.py` — kept moeka's
+  `sqlite_store.build_default_session_manager` import alongside upstream's
+  new `RecoveryCoordinator` (both used: `session_manager =
+  build_default_session_manager(...)`, `recovery = RecoveryCoordinator(
+  sessions=session_manager, ...)`).
+- `nanobot/utils/runtime.py` — dropped moeka's `build_goal_continue_message`
+  (superseded, see above); kept `build_tool_failure_reflection_message`.
+- `nanobot/webui/session_list_index.py` — kept moeka's SQLite-direct-query
+  shape (no jsonl-scan `.webui_session_index.json` cache — the module's
+  own docstring already explains why: `SessionManager.list_sessions()` is
+  already one cheap SQL query). Ported in two genuine upstream
+  improvements: (a) the `nanobot.webui.session_identity` helpers
+  (`webui_session_key`/`webui_chat_id`/`WEBUI_SESSION_STORAGE_PREFIX`),
+  replacing ad-hoc `"websocket:"` string literals, matching what the rest
+  of `nanobot/webui/` already migrated to in this same batch; (b) the new
+  `recovery_state` field, wired through
+  `SqliteSessionStore.list_sessions()` via the new
+  `recovery_state_from_metadata()` (mirrors the existing `model_preset`/
+  workspace-scope computed-field pattern there).
+- `tests/agent/test_runner_persistence.py` — kept deleted (`git rm`).
+  Moeka consolidated its coverage into `tests/agent/test_runner.py` before
+  batch 3 (commit `99cc6ee8`); all 6 of upstream's modified test names in
+  this batch already exist there under the same names.
+- `tests/cli/test_commands.py` — kept moeka's `**_kwargs`-tolerant
+  `session_manager=lambda _workspace, **_kwargs: ...` lambda signature
+  (`build_default_session_manager` calls `SessionManager(workspace,
+  sessions_root=..., store=...)`, so the monkeypatched class must accept
+  those kwargs) while adopting upstream's stronger
+  `_EmptyGatewaySessionManager` fake (`list_sessions()`/`flush_all()`)
+  over a bare `object()`, across all 7 occurrences.
+- `tests/cron/test_cron_service.py` — kept moeka's `_dream_job()` helper
+  and its 4 restart/reconciliation/validation tests
+  (`test_register_system_job_preserves_run_history_across_restart`,
+  `_reconciles_schedule_changes`, `test_add_job_rejects_unparseable_cron_expression`),
+  added upstream's 2 new tests
+  (`test_remove_system_job_retires_persisted_system_job`,
+  `test_remove_system_job_without_store_file`) alongside them, reusing
+  `_dream_job()` in the former instead of upstream's inline duplicate.
+- `tests/webui/test_session_list_index.py` — dropped the
+  `.webui_session_index.json` temp-file-cache-specific test (not
+  applicable to moeka's SQLite-direct shape, matching the production-code
+  decision above); kept/adapted upstream's model-preset-rename test and
+  added the new pending-recovery-state test, both switched onto moeka's
+  `_manager()` `SqliteSessionStore` fixture instead of a bare
+  `SessionManager(tmp_path)`.
+
+### Dropped in favor of upstream (one-line reason each)
+- `AgentRunSpec.stream_progress_deltas` / the direct `progress_callback`
+  wiring in `AgentLoop`'s main-turn `AgentRunSpec` construction — upstream
+  refactored progress delivery to route through the `AgentTurnHookSpec`/
+  `build_agent_turn_hook` hook system instead; the field is gone from
+  `runner.py` entirely and `loop.py`'s call site already only used the
+  hook-based path post-merge (auto-merged clean, verified equivalent).
+- `AgentProgressHook.__init__`'s `on_iteration` callback param — dead code,
+  zero call sites anywhere in the tree even pre-merge; upstream dropped it
+  cleanly.
+- **`fail_on_tool_error` (the whole feature, config field through
+  runner.py's `spec.fail_on_tool_error` gating)** — this was originally an
+  upstream feature (PR #4198, not moeka-authored) that upstream itself
+  deliberately removed this batch. Confirmed via two new upstream tests:
+  `tests/config/test_config_migration.py::test_load_config_ignores_removed_fail_on_tool_error`
+  and `::test_save_config_drops_removed_fail_on_tool_error`, both
+  asserting the config field is gone. See "Silent breakage" below for how
+  this was initially mishandled.
+
+### Protocol-shape changes found
+`class SessionStore(Protocol)` in `manager.py` is unchanged from batch 3's
+checkpoint (still has `update_metadata`) — no new Protocol methods this
+batch. `sqlite_store.py` needed one addition regardless: `list_sessions()`
+now also computes `recovery_state` per row (see session_list_index.py
+above), mirroring the existing `model_preset`/workspace-scope pattern —
+not a Protocol requirement, but a "keep the extra computed fields in sync
+with what the WebUI sidebar needs" requirement, same shape as batch 3's
+`update_metadata()` addition.
+
+### Silent breakage in cleanly-merged code — three real regressions found
+
+This bit again, a third time running (see batches 3's writeup for the
+first two). All three were only caught because the full Docker suite was
+run and its *entire* failure list was read, not just skimmed for
+known-baseline matches.
+
+1. **`nanobot/agent/runner.py`'s `_execute_tools`/`_run_tool` AskUserInterrupt
+   3-tuple contract silently collapsed to upstream's 2-tuple.** Moeka's
+   `ask_user` tool (`nanobot/agent/tools/ask.py`) relies on
+   `_run_tool`/`_execute_tools` returning `(result, event, fatal_error)`
+   so an `AskUserInterrupt` can propagate up and stop the turn cleanly.
+   Upstream has no such concept at all (confirmed: `AskUserInterrupt`
+   doesn't exist anywhere upstream). The merge's automatic resolution of
+   a *nearby* conflict (the `fail_on_tool_error`-gated branches) somehow
+   left `_execute_tools`'s signature/return at upstream's clean 2-tuple
+   while the loop-body code still called `_run_tool` expecting 3 values
+   in one place and 2 in another — inconsistent within the same function,
+   which would have raised `TypeError`/`NameError` on the very first tool
+   call. Restored the full 3-tuple contract end-to-end
+   (`_execute_tools`/`_run_tool`/`_classify_violation`/the `fatal_error`
+   unpack in the main iteration loop).
+2. **`fail_on_tool_error` restoration itself was wrong, then wrong again
+   in a different way.** First pass (in the merge commit `505fff2e`)
+   treated the field's disappearance as an ordinary silent-merge casualty
+   and "restored" it everywhere *except* forgetting to add the field to
+   the `AgentRunSpec` dataclass itself — so `spec.fail_on_tool_error`
+   raised `AttributeError` on every tool-error path, breaking ~40 tests.
+   Investigating that `AttributeError` surfaced the *actual* story: this
+   wasn't a silent regression at all, it was upstream's deliberate,
+   tested removal (see "Dropped in favor of upstream" above). Second pass
+   (commit `7136de6d`) fully reverted the restoration instead of fixing
+   the missing field, matching upstream's decision.
+3. **`nanobot/agent/tools/shell.py`: the command guard got silently gated
+   behind `restrict_to_workspace`.** Pre-merge, `_prepare_command()`
+   called `self._guard_command(...)` *unconditionally* — `restrict_to_workspace`
+   was passed as a parameter *into* the guard (affecting what it checks:
+   path-traversal detection), not whether the guard runs at all. Upstream
+   added a new "full workspace access is an explicit trust decision, skip
+   the guard entirely" feature this batch, wrapping the whole call in
+   `if access.restrict_to_workspace:` — clean merge, no conflict markers,
+   silently made deny_patterns/allow_patterns and even the hard SSRF
+   guard (`contains_internal_url`) skippable via workspace-scope alone.
+   This directly broke moeka's own pre-existing
+   `tests/integration/test_exec_real.py` contract (opt-in deny_patterns
+   must work regardless of workspace mode) and is a real security-relevant
+   regression, not just a test mismatch — silently disabling the SSRF
+   guard under "full access" is a meaningfully larger attack surface than
+   moeka's documented "destructive commands permitted by default" stance.
+   Reverted to moeka's unconditional guard call (commit `7136de6d`).
+   Upstream added two new tests asserting the opposite behavior
+   (`test_exec_full_access_skips_command_guard`,
+   `test_exec_full_workspace_scope_skips_command_guard`); adapted both to
+   assert moeka's contract instead, renamed to
+   `test_exec_full_access_still_enforces_command_guard` /
+   `test_exec_full_workspace_scope_still_enforces_ssrf_guard`, with a
+   comment explaining the deviation. **Flagged for human review** — this
+   is a genuine design disagreement with upstream (not just a "moeka
+   default" preservation), see "Needs human review" below.
+
+### Test-fixture staleness (not production bugs, but ~50 broken assertions)
+Two moeka-only test files that don't exist upstream at all
+(`tests/agent/test_runner.py`, `tests/core/test_moeka_core.py`) predate
+this batch's new `LLMUsage` dataclass (replacing ad-hoc `dict[str, int]`
+usage tracking everywhere — `AgentHookContext.usage`,
+`AgentRunResult.usage`, `LLMResponse.usage` are all `LLMUsage | None` now)
+and `AgentLoop._run_agent_loop()`'s return type collapsing from a 5-tuple
+to `AgentRunResult` directly. Fixed ~50
+`LLMResponse(..., usage={...})`/`usage={}` construction sites to
+`LLMUsage.reported(...)`/`None`, fixed `result.usage["prompt_tokens"]`-style
+dict-indexing assertions to attribute access
+(`result.usage.input_tokens`), and fixed 5 `_run_agent_loop()` call sites
+to build `request_context=RequestContext(channel=..., chat_id=...)` and
+read fields off the returned `AgentRunResult` instead of tuple-unpacking.
+Deleted 2 tests and adapted 1 whose entire premise was the now-removed
+`fail_on_tool_error` fatal-error path (see above) —
+`test_runner_returns_structured_tool_error` and
+`test_runner_tool_error_sets_final_content` deleted outright (no
+equivalent behavior exists anymore);
+`test_runner_tool_error_preserves_tool_results_in_messages` kept (the
+underlying orphan-tool_calls invariant from #2943 is still real) but its
+`stop_reason` assertion changed from `"tool_error"` to `"max_iterations"`
+since the same scenario now retries instead of stopping fatally.
+
+Also fixed a genuine test/fixture bug in the new upstream test
+`tests/webui/test_gateway_webui_smoke.py::test_gateway_restart_restores_a_completed_answer_without_replaying_model`:
+it seeded/read recovery-checkpoint data through a bare
+`SessionManager(workspace, sessions_root=tmp_path / "sessions")`, which
+defaults to `JsonlSessionStore` at a `sessions_root` that doesn't match
+`default_sessions_root(workspace)` either — neither matches what the real
+gateway subprocess (spawned via `_start_gateway`, using
+`build_default_session_manager`) actually persists to
+(`SqliteSessionStore` at `default_sessions_root(workspace)`), so the
+seeded checkpoint was invisible to the second gateway process and
+recovery silently never fired within the test's 20s deadline. Fixed by
+wiring both the seed and the read-back through `SqliteSessionStore` at
+`default_sessions_root(workspace)`, matching `gateway_runtime.py`. Fixed
+in commit `d16b3608`, separate from the main fixup commit since it was
+only found by re-running the full suite after the fail_on_tool_error/shell
+fixes landed.
+
+Also fixed `tests/tools/test_tool_descriptions.py::test_exec_tool_descriptions_are_concise`
+(new upstream test asserting the shortened stub description) to check
+moeka's verbose description's prefix instead, with a comment explaining
+why.
+
+### Deviation verification (post-merge, on the final commit)
+- `allow_sudo: bool = False` — default unchanged.
+- `rm -rf`/`dd`/`mkfs`/`shutdown` absent from `_DEFAULT_DENY_PATTERNS`
+  (only the fork-bomb pattern remains there); `_INTERNAL_DENY_PATTERNS`
+  untouched.
+- `nanobot/session/manager.py`/`sqlite_store.py` both reference
+  `sessions.db` (WAL) — confirmed (manager.py itself has 0 literal
+  references, expected — it's pure upstream `SessionStore` Protocol code;
+  the concrete filename lives entirely in moeka's `sqlite_store.py`, 16
+  references there).
+- `ChannelManager._dispatch_with_watchdog` present and wired.
+- `bg_shell`'s `enabled(ctx)` still hardcoded `return False`.
+- `nanobot channels enable/disable` CLI commands present in
+  `nanobot/cli/commands.py` (untouched by this batch).
+- Telegram `drop_pending_updates: bool = True` — confirmed.
+- No `CONTRIBUTING.md`, no `images/nanobot_logo.png`.
+- `.agent/*`, `CLAUDE.md`, `bin/*` launchers untouched by this batch.
+- `git diff f9d449ef6c6d3d307c663890ae55d1eac4d088f8 -- nanobot/session/manager.py`
+  — empty, confirmed (rule 1 success criterion).
+
+### `ruff check nanobot/ tests/` — clean, no new lint (final commit `d16b3608`).
+
+### Docker test results
+Three full-suite runs this batch, tracking down the regressions above:
+1. First run (merge commit only, before `uv.lock` regen): build failure —
+   `pyproject.toml` gained `httpx[socks]`/`setproctitle`, dropped
+   `websocket-client`; `uv sync --locked` rejected the stale lockfile.
+   Fixed by `uv lock` (commit `cdc7a5ae`).
+2. Second run (after `uv.lock` fix, before the fail_on_tool_error/shell
+   fixes): **100 failed, 6620 passed, 33 skipped.** Read in full (not just
+   skimmed) — this is what surfaced all three silent-breakage items above.
+3. Third run (after commit `7136de6d`): 5 failed, 6713 passed, 33 skipped
+   — 4 known baseline + the gateway-smoke test fixture bug (found and
+   fixed in `d16b3608`).
+4. **Fourth/final run (after `d16b3608`): 4 failed, 6714 passed, 33
+   skipped.** Matches the expected baseline exactly (6546/4/33 → +168
+   passed from this batch's new upstream coverage, same 4 pre-existing
+   failures, 0 new failure categories):
+   `tests/tools/test_tool_validation.py::test_exec_guard_allows_public_urls`
+   ×2 (no DNS/network egress in this sandbox) and
+   `tests/webui/test_mcp_presets_api.py::test_test_mcp_preset_*` ×2 (no
+   `npx`/playwright in the test image).
+
+### ⚠️ Needs human review
+- **Shell command-guard scope (item 3 above) is a genuine, deliberate
+  design disagreement with upstream, not a "moeka default" preservation.**
+  Upstream's new position: granting a channel/session "full" workspace
+  access is an explicit trust decision that should also bypass the
+  command guard (deny_patterns, allow_patterns, and the hard SSRF/internal-URL
+  guard) entirely. moeka kept the guard always-on, on the reasoning that
+  workspace-escape trust and network/destructive-command trust are
+  orthogonal axes, and the SSRF guard in particular protects against
+  something (cloud metadata endpoint / internal service exfiltration)
+  that "the user granted this session full filesystem access" says
+  nothing about. This is *not* the same axis as CLAUDE.md's documented
+  "destructive commands permitted by default" deviation — it's new
+  territory upstream opened this batch. Worth an explicit decision (and
+  possibly a CLAUDE.md addition either way) rather than silently carrying
+  it forward every future batch as an undocumented merge-conflict
+  resolution.
+- **Confirming this pattern (silent breakage in clean auto-merges) has now
+  repeated 3 batches running (batch 3: two instances; batch 4: three
+  instances, one of which is a real security-relevant behavior change,
+  not just a broken reference).** Worth considering, for future batches,
+  whether the "read the full Docker failure list, not just a skim" step
+  should be promoted from implicit diligence to an explicit required step
+  in the process — this batch's regressions were *only* caught because
+  the entire 100-line failure list was read line-by-line rather than
+  grep'd for "known" patterns.
+- moeka's cron "only persist when a job ran" fix (`558fe35e`, dropped in
+  batch 3) remains unresolved — not touched this batch, no new upstream
+  commits landed in `nanobot/cron/service.py` in this window beyond the
+  new `remove_system_job` method (additive, no conflict with the
+  batch-3 finding).
