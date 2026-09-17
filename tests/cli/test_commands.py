@@ -3444,6 +3444,7 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
 ) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "gateway-workspace")
     config.gateway.host = host
     config.gateway.port = 18791
     captured: dict[str, object] = {}
@@ -3643,6 +3644,7 @@ def test_gateway_agent_task_owns_initial_mcp_provider_close(
 ) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "gateway-workspace")
     config.gateway.port = 18791
     seen: dict[str, object] = {}
 
@@ -3772,6 +3774,7 @@ def test_gateway_shutdown_event_exits_forever_runtime_tasks(
 ) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "gateway-workspace")
     config.gateway.port = 18791
     seen: dict[str, object] = {}
     shutdown_order: list[str] = []
@@ -3955,6 +3958,7 @@ def test_trigger_cli_queues_message_in_workspace(
 def test_serve_cli_options_override_api_config(monkeypatch, tmp_path: Path) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "serve-workspace")
     config.api.host = "127.0.0.2"
     config.api.port = 18900
     config.api.timeout = 45.0
@@ -3988,6 +3992,7 @@ def test_serve_cli_options_override_api_config(monkeypatch, tmp_path: Path) -> N
 def test_serve_allows_loopback_without_api_key(monkeypatch, tmp_path: Path) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "serve-workspace")
     seen: dict[str, object] = {}
 
     _patch_serve_runtime(monkeypatch, config, seen)
@@ -4002,6 +4007,7 @@ def test_serve_allows_loopback_without_api_key(monkeypatch, tmp_path: Path) -> N
 def test_serve_passes_configured_api_key(monkeypatch, tmp_path: Path) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "serve-workspace")
     config.api.api_key = " secret "
     seen: dict[str, object] = {}
 

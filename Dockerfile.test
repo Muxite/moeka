@@ -43,6 +43,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # --- source layer: code last so edits only rebuild from here -----------------
 # scripts/ is imported directly by tests/channels/test_channel_plugins.py
 # (as `scripts.install_channel_dependencies`), not just shelled out to.
+# conftest.py (root) carries cross-suite infrastructure that must be active
+# for *every* test tree, not just tests/: the $HOME redirect + mkdir guard
+# that makes it structurally impossible for a leaking test to touch the real
+# ~/.nanobot, and _isolate_sessions_root, which keeps ADR-0001's "session
+# storage must be outside the workspace" invariant from firing on tests that
+# never intended to test it. Omitting this file silently disabled both for
+# every Docker run until the 2026-09-17 incident review caught it -- see
+# .agent/upstream-sync-notes.md's incident writeup.
+COPY conftest.py ./
 COPY README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 COPY nanobot/ nanobot/
 COPY scripts/ scripts/
