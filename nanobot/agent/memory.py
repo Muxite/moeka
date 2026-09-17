@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, cast
 
 from loguru import logger
 
+from nanobot.llm_usage.context import llm_usage_source
 from nanobot.runtime_context import public_history_messages
 from nanobot.session.manager import (
     MIN_COMPACTED_REPLAY_MESSAGES,
@@ -52,25 +53,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # MemoryStore — pure file I/O layer
 # ---------------------------------------------------------------------------
-
-
-class DreamRunProgress:
-    """Track tool failures that make a nominally completed Dream run unsafe to advance."""
-
-    def __init__(self) -> None:
-        self.had_tool_errors = False
-
-    async def __call__(
-        self,
-        *_args: Any,
-        tool_events: list[dict[str, Any]] | None = None,
-        **_kwargs: Any,
-    ) -> None:
-        if any(
-            isinstance(cast(object, event), dict) and event.get("phase") == "error"
-            for event in tool_events or ()
-        ):
-            self.had_tool_errors = True
 
 
 class MemoryStore:
@@ -744,14 +726,24 @@ class MemoryStore:
     @staticmethod
     def dream_run_completed(
         resp: object | None,
-        *,
-        had_tool_errors: bool = False,
     ) -> bool:
-        """Return True only when a Dream turn completed without tool failures."""
+        """Return True when the Dream agent reached a normal terminal response."""
         metadata = getattr(resp, "metadata", None)
-        if had_tool_errors or not isinstance(metadata, dict):
+        if not isinstance(metadata, dict):
             return False
         return cast(dict[str, Any], metadata).get("_stop_reason") == "completed"
+
+    @staticmethod
+    def dream_incompletion_reason(
+        resp: object | None,
+    ) -> str:
+        """Human-readable explanation of why a Dream run cannot advance."""
+        metadata = getattr(resp, "metadata", None)
+        if isinstance(metadata, dict):
+            stop_reason = cast(dict[str, Any], metadata).get("_stop_reason", "unknown")
+        else:
+            stop_reason = "missing response metadata"
+        return f"stop_reason: {stop_reason}"
 
     # -- message formatting utility ------------------------------------------
 
@@ -982,15 +974,16 @@ class Consolidator:
         if not messages:
             return None
         try:
-            response = await runtime.provider.chat_with_retry(
-                model=runtime.model,
-                messages=request_messages,
-                tools=request_tools,
-                tool_choice="none",
-                temperature=runtime.generation.temperature,
-                max_tokens=runtime.generation.max_tokens,
-                reasoning_effort=runtime.generation.reasoning_effort,
-            )
+            with llm_usage_source("dream"):
+                response = await runtime.provider.chat_with_retry(
+                    model=runtime.model,
+                    messages=request_messages,
+                    tools=request_tools,
+                    tool_choice="none",
+                    temperature=runtime.generation.temperature,
+                    max_tokens=runtime.generation.max_tokens,
+                    reasoning_effort=runtime.generation.reasoning_effort,
+                )
         except Exception:
             logger.warning("Consolidation provider call failed, raw-dumping to history")
             self.store.raw_archive(messages, session_key=session_key)

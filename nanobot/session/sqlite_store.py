@@ -66,6 +66,7 @@ from nanobot.session.manager import (
     _metadata_title,
 )
 from nanobot.session.model_selection import model_preset_from_metadata
+from nanobot.session.recovery import recovery_state_from_metadata
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
 if TYPE_CHECKING:
@@ -81,7 +82,8 @@ _SESSION_DATA_ERRORS = (ValueError, TypeError, AttributeError, KeyError, sqlite3
 # solves the same "don't re-scan for the WebUI sidebar" problem with a
 # persistent .webui_session_index.json cache file (dropped in favor of
 # moeka's single SQL query — see nanobot/webui/session_list_index.py's
-# module docstring); this mirrors its two computed fields so
+# module docstring); this mirrors its computed fields (model preset,
+# workspace scope, recovery state) so
 # nanobot/webui/session_list_index.py's _public_row() never needs a second
 # read_session_metadata() call per row (upstream's
 # perf(webui): accelerate JSONL session list and thread loading, #5194,
@@ -639,6 +641,7 @@ class SqliteSessionStore:
             # nanobot/webui/session_list_index.py; extra dict keys are fine
             # for downstream .get() consumers, just not statically declared.
             info["model_preset"] = model_preset_from_metadata(metadata)
+            info["recovery_state"] = recovery_state_from_metadata(metadata)
             info.update(_indexed_workspace_scope_fields(metadata))
             sessions.append(cast(SessionInfo, info))
         return sessions

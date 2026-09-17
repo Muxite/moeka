@@ -6,9 +6,9 @@ module was originally written against). This module adds the WebUI-only
 concerns on top: reconciling each session's "visible activity" timestamp
 against out-of-band WebUI activity files (so purely-internal housekeeping
 writes don't bump a session to the top of the sidebar), exposing the
-per-session model preset, and recovering sessions that exist only as a WebUI
-transcript (no canonical ``sessions.db`` row yet, e.g. a crash between the
-first WebUI turn and the agent's own session save).
+per-session model preset and recovery state, and recovering sessions that
+exist only as a WebUI transcript (no canonical ``sessions.db`` row yet, e.g.
+a crash between the first WebUI turn and the agent's own session save).
 """
 
 from __future__ import annotations
@@ -27,12 +27,18 @@ from nanobot.session.sqlite_store import (
     _WORKSPACE_SCOPE_VALUE_FIELD,
     _indexed_workspace_scope_fields,
 )
+from nanobot.webui.session_identity import (
+    WEBUI_SESSION_STORAGE_PREFIX,
+    webui_chat_id,
+    webui_session_key,
+)
 
 _MODEL_PRESET_FIELD = "model_preset"
+_RECOVERY_STATE_FIELD = "recovery_state"
 _VISIBLE_TRANSCRIPT_ROLES = {"user", "assistant"}
 _SESSION_LIST_PREVIEW_MAX_RECORDS = 200
 _SESSION_LIST_PREVIEW_MAX_CHARS = 1_000_000
-_WEBUI_SESSION_STEM_PREFIX = SessionManager.safe_key("websocket:")
+_WEBUI_SESSION_STEM_PREFIX = SessionManager.safe_key(WEBUI_SESSION_STORAGE_PREFIX)
 _WEBUI_CHAT_ID_RE = re.compile(r"^[A-Za-z0-9_:-]{1,64}$")
 _TRANSCRIPT_SEGMENTS_SUFFIX = ".segments"
 _TRANSCRIPT_NON_ANSWER_KINDS = {"progress", "reasoning", "tool_hint"}
@@ -95,6 +101,7 @@ def _public_row(session_manager: SessionManager, row: dict[str, Any]) -> dict[st
         "title": row.get("title", ""),
         "preview": row.get("preview", ""),
         _MODEL_PRESET_FIELD: row.get(_MODEL_PRESET_FIELD),
+        _RECOVERY_STATE_FIELD: row.get(_RECOVERY_STATE_FIELD),
         "path": row.get("path"),
         _WORKSPACE_SCOPE_PRESENT_FIELD: row.get(_WORKSPACE_SCOPE_PRESENT_FIELD),
         _WORKSPACE_SCOPE_VALUE_FIELD: row.get(_WORKSPACE_SCOPE_VALUE_FIELD),
@@ -280,9 +287,9 @@ def _transcript_record(line: str) -> dict[str, Any] | None:
 
 
 def _valid_transcript_session_key(key: str, stem: str) -> bool:
-    if not key.startswith("websocket:"):
+    chat_id = webui_chat_id(key)
+    if chat_id is None:
         return False
-    chat_id = key.split(":", 1)[1]
     return _WEBUI_CHAT_ID_RE.fullmatch(chat_id) is not None and SessionManager.safe_key(key) == stem
 
 
@@ -324,7 +331,9 @@ def _scan_transcript_row(
     paths: tuple[Path, ...],
     webui_dir: Path,
 ) -> dict[str, Any] | None:
-    path_key = session_key or f"websocket:{stem.removeprefix(_WEBUI_SESSION_STEM_PREFIX)}"
+    path_key = session_key or webui_session_key(
+        stem.removeprefix(_WEBUI_SESSION_STEM_PREFIX)
+    )
     signature = _webui_activity_signature(path_key)
     activity_updated_at = _webui_activity_updated_at(signature)
     if activity_updated_at is None:
@@ -349,7 +358,7 @@ def _scan_transcript_row(
                         saw_record = True
                         chat_id = record.get("chat_id")
                         if isinstance(chat_id, str) and chat_id.strip():
-                            candidate = f"websocket:{chat_id.strip()}"
+                            candidate = webui_session_key(chat_id.strip())
                             if _valid_transcript_session_key(candidate, stem):
                                 session_key = candidate
                         if created_at is None:
@@ -375,7 +384,7 @@ def _scan_transcript_row(
     if not saw_record:
         return None
     if session_key is None:
-        fallback = f"websocket:{stem.removeprefix(_WEBUI_SESSION_STEM_PREFIX)}"
+        fallback = webui_session_key(stem.removeprefix(_WEBUI_SESSION_STEM_PREFIX))
         if not _valid_transcript_session_key(fallback, stem):
             return None
         session_key = fallback
@@ -393,6 +402,7 @@ def _scan_transcript_row(
         "title": "",
         "preview": preview or fallback_preview,
         _MODEL_PRESET_FIELD: None,
+        _RECOVERY_STATE_FIELD: None,
         "path": str(webui_dir / f"{stem}.jsonl"),
         **_indexed_workspace_scope_fields({}),
     }
