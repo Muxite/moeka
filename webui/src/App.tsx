@@ -8,13 +8,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Eye, EyeOff, Moon, PanelLeft, ShieldCheck, Sun, X } from "lucide-react";
+import { Eye, EyeOff, Moon, ShieldCheck, Sun, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { channelUiPresentation } from "@/channel-plugins/registry";
 import { Sidebar } from "@/components/Sidebar";
 import type { SidebarDeleteItem } from "@/components/ChatList";
 import type { SettingsSectionKey } from "@/components/settings/SettingsView";
-import { ThreadShell } from "@/components/thread/ThreadShell";
+import { ThreadVisibilityContext } from "@/hooks/useThreadVisibility";
 import { PaneWorkbench } from "@/components/workbench/PaneWorkbench";
 import {
   MAX_WORKBENCH_PANES,
@@ -79,6 +79,7 @@ import {
 } from "@/lib/api";
 import {
   createRuntimeHost,
+  isNativeRuntime,
   toRuntimeSurface,
 } from "@/lib/runtime";
 import { projectNameFromPath, scopeWithAccessMode } from "@/lib/workspace";
@@ -122,6 +123,9 @@ type ShellRoute = {
   settingsSection: SettingsSectionKey;
   temporary?: boolean;
 };
+const ThreadShell = lazy(() => import("@/components/thread/ThreadShell").then(
+  (module) => ({ default: module.ThreadShell }),
+));
 const loadSettingsView = () => import("@/components/settings/SettingsView");
 const SettingsView = lazy(async () => {
   const module = await loadSettingsView();
@@ -140,14 +144,14 @@ const RenameChatDialog = lazy(async () => {
   return { default: module.RenameChatDialog };
 });
 
-function SurfaceLoadingFallback() {
+function SurfaceLoadingFallback({ label }: { label?: string }) {
   const { t } = useTranslation();
   return (
     <div
       aria-busy="true"
       className="flex h-full w-full flex-col gap-5 px-5 py-8 sm:px-8 lg:px-12"
     >
-      <span className="sr-only">{t("settings.status.loading")}</span>
+      <span className="sr-only">{label ?? t("settings.status.loading")}</span>
       <div className="h-4 w-20 animate-pulse rounded bg-muted/70 motion-reduce:animate-none" />
       <div className="h-9 w-48 animate-pulse rounded bg-muted/70 motion-reduce:animate-none" />
       <div className="mt-4 h-12 w-full max-w-3xl animate-pulse rounded-md bg-muted/55 motion-reduce:animate-none" />
@@ -312,7 +316,11 @@ function writeShellRoute(route: ShellRoute, replace = false): void {
     );
     return;
   }
-  window.location.hash = nextHash;
+  window.history.pushState(
+    null,
+    "",
+    `${window.location.pathname}${window.location.search}${nextHash}`,
+  );
 }
 
 function bootstrapTokenExpiresAt(expiresInSeconds: number): number {
@@ -475,39 +483,12 @@ function isBootstrapAuthRequired(error: unknown): boolean {
 }
 
 function HostChrome({
-  onToggleSidebar,
-  onSidebarPreviewEnter,
-  onSidebarPreviewLeave,
-  sidebarOpen = true,
   rightAction,
 }: {
-  onToggleSidebar?: () => void;
-  onSidebarPreviewEnter?: () => void;
-  onSidebarPreviewLeave?: () => void;
-  sidebarOpen?: boolean;
   rightAction?: ReactNode;
 }) {
-  const { t } = useTranslation();
-
   return (
     <header className="host-drag-region pointer-events-none absolute inset-x-0 top-0 z-40 h-11 bg-transparent text-foreground/90">
-      {onToggleSidebar ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label={t("thread.header.toggleSidebar")}
-          data-testid="host-sidebar-toggle"
-          onClick={onToggleSidebar}
-          onFocus={!sidebarOpen ? onSidebarPreviewEnter : undefined}
-          onBlur={!sidebarOpen ? onSidebarPreviewLeave : undefined}
-          onMouseEnter={!sidebarOpen ? onSidebarPreviewEnter : undefined}
-          onMouseLeave={!sidebarOpen ? onSidebarPreviewLeave : undefined}
-          className="host-no-drag pointer-events-auto absolute left-[88px] top-[8px] h-7 w-7 rounded-lg bg-transparent text-muted-foreground/85 shadow-none hover:bg-transparent hover:text-foreground"
-        >
-          <PanelLeft className="h-[15px] w-[15px]" strokeWidth={1.75} />
-        </Button>
-      ) : null}
       {rightAction ? (
         <div className="host-no-drag pointer-events-auto absolute right-3 top-2">
           {rightAction}
@@ -805,6 +786,14 @@ function formatPairingExpiry(seconds: number | null | undefined): string {
   return `${Math.ceil(seconds / 60)} min`;
 }
 
+function resolveRuntimeSurface(
+  surface: RuntimeSurface | null | undefined,
+  fallback: RuntimeSurface,
+): RuntimeSurface {
+  if (isNativeRuntime(surface)) return "native";
+  return surface ? toRuntimeSurface(surface) : fallback;
+}
+
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<BootState>({ status: "loading" });
@@ -814,9 +803,7 @@ export default function App() {
     async (client: NanobotClient, fallbackSurface: RuntimeSurface) => {
       const boot = await fetchBootstrap("", bootstrapSecretRef.current);
       const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
-      const runtimeSurface = boot.runtime_surface
-        ? toRuntimeSurface(boot.runtime_surface)
-        : fallbackSurface;
+      const runtimeSurface = resolveRuntimeSurface(boot.runtime_surface, fallbackSurface);
       const runtimeHost = createRuntimeHost(runtimeSurface, boot.runtime_capabilities);
       const tokenExpiresAt = boot.expires_in
         ? bootstrapTokenExpiresAt(boot.expires_in)
@@ -854,7 +841,7 @@ export default function App() {
           if (cancelled) return;
           if (secret) saveSecret(secret);
           const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
-          const runtimeSurface = toRuntimeSurface(boot.runtime_surface);
+          const runtimeSurface = resolveRuntimeSurface(boot.runtime_surface, "browser");
           const runtimeHost = createRuntimeHost(runtimeSurface, boot.runtime_capabilities);
           const client = new NanobotClient({
             url,
@@ -1055,7 +1042,6 @@ function Shell({
     useState<SettingsSectionKey>(initialRouteRef.current.settingsSection);
   const [hostSidebarOpen, setHostSidebarOpen] =
     useState<boolean>(readSidebarOpen);
-  const [hostSidebarPreviewOpen, setHostSidebarPreviewOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const mobileWorkbench = useMediaQuery("(max-width: 767px)");
@@ -1112,10 +1098,9 @@ function Shell({
   const activeChatIdRef = useRef<string | null>(null);
   const pendingCreatedSessionKeyRef = useRef<string | null>(null);
   const temporarySessionsRef = useRef<Record<string, ChatSummary>>({});
-  const hostSidebarPreviewCloseTimerRef = useRef<number | null>(null);
   const effectiveRuntimeSurface =
     settingsSnapshot?.surface ?? settingsSnapshot?.runtime_surface ?? runtimeSurface;
-  const showHostChrome = effectiveRuntimeSurface === "native";
+  const showHostChrome = isNativeRuntime(effectiveRuntimeSurface);
   const showMainSidebar = view !== "settings";
   const activeTemporarySession = activeKey ? temporarySessions[activeKey] ?? null : null;
   const temporaryChatId = activeTemporarySession?.chatId ?? null;
@@ -1154,7 +1139,11 @@ function Shell({
       }
     };
     window.addEventListener("hashchange", applyRoute);
-    return () => window.removeEventListener("hashchange", applyRoute);
+    window.addEventListener("popstate", applyRoute);
+    return () => {
+      window.removeEventListener("hashchange", applyRoute);
+      window.removeEventListener("popstate", applyRoute);
+    };
   }, []);
 
   useEffect(() => {
@@ -1453,74 +1442,13 @@ function Shell({
     });
   }, [client, loading, sessions]);
 
-  const clearHostSidebarPreviewCloseTimer = useCallback(() => {
-    if (hostSidebarPreviewCloseTimerRef.current === null) return;
-    window.clearTimeout(hostSidebarPreviewCloseTimerRef.current);
-    hostSidebarPreviewCloseTimerRef.current = null;
+  const closeHostSidebar = useCallback(() => {
+    setHostSidebarOpen(false);
   }, []);
 
-  const closeHostSidebarPreview = useCallback(() => {
-    clearHostSidebarPreviewCloseTimer();
-    setHostSidebarPreviewOpen(false);
-  }, [clearHostSidebarPreviewCloseTimer]);
-
-  const openHostSidebarPreview = useCallback(() => {
-    if (!showHostChrome || !showMainSidebar || hostSidebarOpen) return;
-    clearHostSidebarPreviewCloseTimer();
-    setHostSidebarPreviewOpen(true);
-  }, [
-    clearHostSidebarPreviewCloseTimer,
-    hostSidebarOpen,
-    showHostChrome,
-    showMainSidebar,
-  ]);
-
-  const scheduleHostSidebarPreviewClose = useCallback(() => {
-    clearHostSidebarPreviewCloseTimer();
-    if (!showHostChrome || !showMainSidebar || hostSidebarOpen) {
-      setHostSidebarPreviewOpen(false);
-      return;
-    }
-    hostSidebarPreviewCloseTimerRef.current = window.setTimeout(() => {
-      setHostSidebarPreviewOpen(false);
-      hostSidebarPreviewCloseTimerRef.current = null;
-    }, 160);
-  }, [
-    clearHostSidebarPreviewCloseTimer,
-    hostSidebarOpen,
-    showHostChrome,
-    showMainSidebar,
-  ]);
-
-  useEffect(() => {
-    return () => clearHostSidebarPreviewCloseTimer();
-  }, [clearHostSidebarPreviewCloseTimer]);
-
-  useEffect(() => {
-    if (!showHostChrome || !showMainSidebar || hostSidebarOpen) {
-      closeHostSidebarPreview();
-    }
-  }, [
-    closeHostSidebarPreview,
-    hostSidebarOpen,
-    showHostChrome,
-    showMainSidebar,
-  ]);
-
-  const closeHostSidebar = useCallback(() => {
-    closeHostSidebarPreview();
-    setHostSidebarOpen(false);
-  }, [closeHostSidebarPreview]);
-
   const openHostSidebar = useCallback(() => {
-    closeHostSidebarPreview();
     setHostSidebarOpen(true);
-  }, [closeHostSidebarPreview]);
-
-  const toggleHostSidebar = useCallback(() => {
-    closeHostSidebarPreview();
-    setHostSidebarOpen((v) => !v);
-  }, [closeHostSidebarPreview]);
+  }, []);
 
   const closeMobileSidebar = useCallback(() => {
     setMobileSidebarOpen(false);
@@ -1531,12 +1459,11 @@ function Shell({
       typeof window !== "undefined" &&
       window.matchMedia("(min-width: 1024px)").matches;
     if (isNativeHost) {
-      closeHostSidebarPreview();
       setHostSidebarOpen((v) => !v);
     } else {
       setMobileSidebarOpen((v) => !v);
     }
-  }, [closeHostSidebarPreview]);
+  }, []);
 
   const applyWorkspaceScope = useCallback(
     (scope: WorkspaceScopePayload) => {
@@ -1561,10 +1488,14 @@ function Shell({
     [activeChatId, activeChatRunning, activeKey, client, temporaryChatActive],
   );
 
-  const onCreateChat = useCallback(async (workspaceScope?: WorkspaceScopePayload | null) => {
+  const onCreateChat = useCallback(async (
+    workspaceScope?: WorkspaceScopePayload | null,
+    _initialMessage?: string,
+    modelPreset?: string | null,
+  ) => {
     try {
       const scope = workspaceScope ?? activeWorkspaceScope;
-      const chatId = await createChat(scope);
+      const chatId = await createChat(scope, modelPreset);
       const key = `websocket:${chatId}`;
       pendingCreatedSessionKeyRef.current = key;
       navigate({
@@ -1593,6 +1524,7 @@ function Shell({
     async (
       workspaceScope?: WorkspaceScopePayload | null,
       initialMessage?: string,
+      modelPreset?: string | null,
     ) => {
       try {
         const chatId = await client.newTemporaryChat();
@@ -1603,6 +1535,7 @@ function Shell({
         const nextSession: ChatSummary = {
           ...session,
           preview: initialMessage ?? "",
+          modelPreset: modelPreset ?? null,
           ...(restrictedScope ? { workspaceScope: restrictedScope } : {}),
         };
         setTemporarySessions((current) => ({
@@ -2574,13 +2507,7 @@ function Shell({
     archivedCount: sidebarArchivedTabKeys.length,
     defaultWorkspacePath: workspaces?.default_scope.project_path ?? null,
   };
-  const hostSidebarCollapsed = showHostChrome && !hostSidebarOpen;
-  const showHostSidebarPreview =
-    showMainSidebar && hostSidebarCollapsed && hostSidebarPreviewOpen;
-  const hostSidebarFlowWidth = showHostChrome
-    ? (hostSidebarOpen ? SIDEBAR_WIDTH : 0)
-    : (hostSidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_RAIL_WIDTH);
-  const renderHostSidebarFlowContent = !showHostChrome || hostSidebarOpen;
+  const hostSidebarFlowWidth = hostSidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_RAIL_WIDTH;
 
   useEffect(() => {
     document.documentElement.classList.toggle("native-host", showHostChrome);
@@ -2599,10 +2526,6 @@ function Shell({
       >
         {showHostChrome ? (
           <HostChrome
-            onToggleSidebar={showMainSidebar ? toggleHostSidebar : undefined}
-            onSidebarPreviewEnter={openHostSidebarPreview}
-            onSidebarPreviewLeave={scheduleHostSidebarPreviewClose}
-            sidebarOpen={hostSidebarOpen}
             rightAction={
               view === "chat" ? undefined : (
                 <Button
@@ -2640,38 +2563,17 @@ function Shell({
                 width: hostSidebarFlowWidth,
               }}
             >
-              {renderHostSidebarFlowContent ? (
-                <div
-                  className={cn(
-                    "absolute inset-y-0 left-0 h-full w-full overflow-hidden",
-                    showHostChrome
-                      ? "host-sidebar-glass"
-                      : "bg-sidebar",
-                  )}
-                >
-                  <Sidebar
-                    {...sidebarProps}
-                    collapsed={!showHostChrome && !hostSidebarOpen}
-                    hostChromeInset={showHostChrome}
-                    onCollapse={closeHostSidebar}
-                    onExpand={openHostSidebar}
-                  />
-                </div>
-              ) : null}
-            </aside>
-          ) : null}
-
-          {showHostSidebarPreview ? (
-            <aside
-              data-testid="host-sidebar-preview"
-              className="absolute inset-y-0 left-0 z-30 hidden overflow-hidden lg:block animate-in fade-in-0 slide-in-from-left-2 duration-150"
-              style={{ width: SIDEBAR_WIDTH }}
-              onMouseEnter={openHostSidebarPreview}
-              onMouseLeave={scheduleHostSidebarPreviewClose}
-            >
-              <div className="h-full w-full overflow-hidden host-sidebar-glass shadow-2xl">
+              <div
+                className={cn(
+                  "absolute inset-y-0 left-0 h-full w-full overflow-hidden",
+                  showHostChrome
+                    ? "host-sidebar-glass"
+                    : "bg-sidebar",
+                )}
+              >
                 <Sidebar
                   {...sidebarProps}
+                  collapsed={!hostSidebarOpen}
                   hostChromeInset={showHostChrome}
                   onCollapse={closeHostSidebar}
                   onExpand={openHostSidebar}
@@ -2726,135 +2628,137 @@ function Shell({
                 view !== "chat" && "hidden",
               )}
             >
-              <PaneWorkbench
-                panes={renderedWorkbenchPanes}
-                activePaneKey={renderedActivePaneKey}
-                layout={renderedWorkbenchLayout}
-                splitRatios={renderedWorkbenchSplitRatios}
-                chrome={paneChromeEnabled}
-                showLayoutControl={activeTabVisible}
-                addPaneDisabled={creatingPane || activePaneLimitReached}
-                addPaneDisabledLabel={activePaneLimitReached
-                  ? t("workbench.paneLimit", {
-                      count: MAX_WORKBENCH_PANES,
-                    })
-                  : undefined}
-                onActivatePane={onActivateWorkbenchPane}
-                onAddPane={onAddPane}
-                onLayoutChange={(layout) => {
-                  if (!activeTabKey) return;
-                  updateWorkbenchState((current) => (
-                    setWorkbenchLayout(current, activeTabKey, layout)
-                  ));
-                }}
-                onPaneOrderChange={(paneKeys) => {
-                  if (!activeTabKey) return;
-                  updateWorkbenchState((current) => (
-                    setWorkbenchPaneLayoutOrder(current, activeTabKey, paneKeys)
-                  ));
-                }}
-                onSplitRatiosChange={(splitRatios) => {
-                  if (!activeTabKey) return;
-                  updateWorkbenchState((current) => (
-                    setWorkbenchSplitRatios(current, activeTabKey, splitRatios)
-                  ));
-                }}
-                renderPane={(pane, context) => {
-                  if (!paneChromeEnabled) {
-                    return (
-                      <ThreadShell
-                        session={activeSession}
-                        sessions={sessions}
-                        title={headerTitle}
-                        temporary={temporaryChatRequested}
-                        temporaryChatIds={temporaryChatIds}
-                        temporaryChatEnabled={temporaryChatEnabled}
-                        onTemporaryChatEnabledChange={
-                          !activeKey ? onTemporaryChatEnabledChange : undefined
-                        }
-                        onToggleSidebar={toggleSidebar}
-                        onNewChat={onNewChat}
-                        onCreateChat={
-                          temporaryChatEnabled ? onCreateTemporaryChat : onCreateChat
-                        }
-                        onForkChat={temporaryChatActive ? undefined : onForkChat}
-                        onTurnEnd={onTurnEnd}
-                        theme={theme}
-                        onToggleTheme={toggle}
-                        hideSidebarToggleForHostChrome
-                        hostChromeTitleInset={hostSidebarCollapsed}
-                        hideHeader={false}
-                        workspaceScope={activeWorkspaceScope}
-                        workspaceDefaultScope={workspaces?.default_scope ?? null}
-                        workspaceControls={workspaces?.controls ?? null}
-                        workspaceScopeDisabled={activeChatRunning}
-                        workspaceError={workspaceError}
-                        onWorkspaceScopeChange={applyWorkspaceScope}
-                        settingsSnapshot={settingsSnapshot}
-                        onOpenModelSettings={onOpenModelSettings}
-                        skills={skills}
-                      />
-                    );
-                  }
+              <ThreadVisibilityContext.Provider value={view === "chat"}>
+                <Suspense fallback={<SurfaceLoadingFallback label={t("chat.loading")} />}>
+                  <PaneWorkbench
+                    panes={renderedWorkbenchPanes}
+                    activePaneKey={renderedActivePaneKey}
+                    layout={renderedWorkbenchLayout}
+                    splitRatios={renderedWorkbenchSplitRatios}
+                    chrome={paneChromeEnabled}
+                    showLayoutControl={activeTabVisible}
+                    addPaneDisabled={creatingPane || activePaneLimitReached}
+                    addPaneDisabledLabel={activePaneLimitReached
+                      ? t("workbench.paneLimit", {
+                          count: MAX_WORKBENCH_PANES,
+                        })
+                      : undefined}
+                    onActivatePane={onActivateWorkbenchPane}
+                    onAddPane={onAddPane}
+                    onLayoutChange={(layout) => {
+                      if (!activeTabKey) return;
+                      updateWorkbenchState((current) => (
+                        setWorkbenchLayout(current, activeTabKey, layout)
+                      ));
+                    }}
+                    onPaneOrderChange={(paneKeys) => {
+                      if (!activeTabKey) return;
+                      updateWorkbenchState((current) => (
+                        setWorkbenchPaneLayoutOrder(current, activeTabKey, paneKeys)
+                      ));
+                    }}
+                    onSplitRatiosChange={(splitRatios) => {
+                      if (!activeTabKey) return;
+                      updateWorkbenchState((current) => (
+                        setWorkbenchSplitRatios(current, activeTabKey, splitRatios)
+                      ));
+                    }}
+                    renderPane={(pane, context) => {
+                      if (!paneChromeEnabled) {
+                        return (
+                          <ThreadShell
+                            session={activeSession}
+                            sessions={sessions}
+                            title={headerTitle}
+                            temporary={temporaryChatRequested}
+                            temporaryChatIds={temporaryChatIds}
+                            temporaryChatEnabled={temporaryChatEnabled}
+                            onTemporaryChatEnabledChange={
+                              !activeKey ? onTemporaryChatEnabledChange : undefined
+                            }
+                            onToggleSidebar={toggleSidebar}
+                            onNewChat={onNewChat}
+                            onCreateChat={
+                              temporaryChatEnabled ? onCreateTemporaryChat : onCreateChat
+                            }
+                            onForkChat={temporaryChatActive ? undefined : onForkChat}
+                            onTurnEnd={onTurnEnd}
+                            theme={theme}
+                            onToggleTheme={toggle}
+                            hideSidebarToggleForHostChrome
+                            hideHeader={false}
+                            workspaceScope={activeWorkspaceScope}
+                            workspaceDefaultScope={workspaces?.default_scope ?? null}
+                            workspaceControls={workspaces?.controls ?? null}
+                            workspaceScopeDisabled={activeChatRunning}
+                            workspaceError={workspaceError}
+                            onWorkspaceScopeChange={applyWorkspaceScope}
+                            settingsSnapshot={settingsSnapshot}
+                            onOpenModelSettings={onOpenModelSettings}
+                            skills={skills}
+                          />
+                        );
+                      }
 
-                  const paneSession = workbenchPaneSessions.find(
-                    (session) => session.key === pane.key,
-                  );
-                  if (!paneSession) return null;
-                  const paneScope = workspaceOverrides[paneSession.chatId]
-                    ?? paneSession.workspaceScope
-                    ?? workspaces?.default_scope
-                    ?? null;
-                  const paneRunning = runningChatIds.has(paneSession.chatId);
-                  return (
-                    <ThreadShell
-                      session={paneSession}
-                      sessions={sessions}
-                      title={pane.title}
-                      onToggleSidebar={toggleSidebar}
-                      onNewChat={onNewChat}
-                      onCreateChat={onCreateChat}
-                      onForkChat={onForkChat}
-                      onTurnEnd={context.active ? onTurnEnd : () => void refresh()}
-                      theme={theme}
-                      onToggleTheme={toggle}
-                      hideSidebarToggle={!context.active}
-                      hideSidebarToggleForHostChrome={context.active}
-                      hostChromeTitleInset={hostSidebarCollapsed}
-                      hideThemeButton={!context.active}
-                      hideHeaderTitle
-                      inlineHandle={workbenchPaneSessions.length > 1}
-                      headerActions={context.headerActions}
-                      headerPortalTarget={context.headerPortalTarget}
-                      headerActive={context.active}
-                      composerPortalTarget={context.composerPortalTarget}
-                      composerActive={context.active}
-                      composerInputAriaLabel={t("workbench.composerAria", {
-                        title: pane.title,
-                      })}
-                      emptyComposerVariant="thread"
-                      workspaceScope={paneScope}
-                      workspaceDefaultScope={workspaces?.default_scope ?? null}
-                      workspaceControls={workspaces?.controls ?? null}
-                      workspaceScopeDisabled={paneRunning}
-                      workspaceError={context.active ? workspaceError : null}
-                      onWorkspaceScopeChange={(scope) => {
-                        if (paneRunning) return;
-                        const next = normalizeWorkspaceScope(scope);
-                        setWorkspaceError(null);
-                        setWorkspaceOverrides((current) => ({
-                          ...current,
-                          [paneSession.chatId]: next,
-                        }));
-                        client.setWorkspaceScope(paneSession.chatId, next);
-                      }}
-                      settingsSnapshot={settingsSnapshot}
-                      onOpenModelSettings={onOpenModelSettings}
-                      skills={skills}
-                    />
-                  );
-                }}
-              />
+                      const paneSession = workbenchPaneSessions.find(
+                        (session) => session.key === pane.key,
+                      );
+                      if (!paneSession) return null;
+                      const paneScope = workspaceOverrides[paneSession.chatId]
+                        ?? paneSession.workspaceScope
+                        ?? workspaces?.default_scope
+                        ?? null;
+                      const paneRunning = runningChatIds.has(paneSession.chatId);
+                      return (
+                        <ThreadShell
+                          session={paneSession}
+                          sessions={sessions}
+                          title={pane.title}
+                          onToggleSidebar={toggleSidebar}
+                          onNewChat={onNewChat}
+                          onCreateChat={onCreateChat}
+                          onForkChat={onForkChat}
+                          onTurnEnd={context.active ? onTurnEnd : () => void refresh()}
+                          theme={theme}
+                          onToggleTheme={toggle}
+                          hideSidebarToggle={!context.active}
+                          hideSidebarToggleForHostChrome={context.active}
+                          hideThemeButton={!context.active}
+                          hideHeaderTitle
+                          inlineHandle={workbenchPaneSessions.length > 1}
+                          headerActions={context.headerActions}
+                          headerPortalTarget={context.headerPortalTarget}
+                          headerActive={context.active}
+                          composerPortalTarget={context.composerPortalTarget}
+                          composerActive={context.active}
+                          composerInputAriaLabel={t("workbench.composerAria", {
+                            title: pane.title,
+                          })}
+                          emptyComposerVariant="thread"
+                          workspaceScope={paneScope}
+                          workspaceDefaultScope={workspaces?.default_scope ?? null}
+                          workspaceControls={workspaces?.controls ?? null}
+                          workspaceScopeDisabled={paneRunning}
+                          workspaceError={context.active ? workspaceError : null}
+                          onWorkspaceScopeChange={(scope) => {
+                            if (paneRunning) return;
+                            const next = normalizeWorkspaceScope(scope);
+                            setWorkspaceError(null);
+                            setWorkspaceOverrides((current) => ({
+                              ...current,
+                              [paneSession.chatId]: next,
+                            }));
+                            client.setWorkspaceScope(paneSession.chatId, next);
+                          }}
+                          settingsSnapshot={settingsSnapshot}
+                          onOpenModelSettings={onOpenModelSettings}
+                          skills={skills}
+                        />
+                      );
+                    }}
+                  />
+                </Suspense>
+              </ThreadVisibilityContext.Provider>
             </div>
             {view !== "chat" && (
               <div className="absolute inset-0 flex flex-col">

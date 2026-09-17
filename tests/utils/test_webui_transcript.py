@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import nanobot.webui.transcript as transcript_module
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META
 from nanobot.webui.transcript import (
@@ -548,6 +550,26 @@ def test_replay_turn_end_preserves_usage_semantics(tmp_path, monkeypatch) -> Non
                 "context_tokens": 8_200,
                 "request_count": 3,
             },
+            "round_usages": [
+                {
+                    "prompt_tokens": 4_000,
+                    "completion_tokens": 200,
+                    "cached_tokens": 2_000,
+                    "request_count": 1,
+                },
+                {
+                    "prompt_tokens": 4_200,
+                    "completion_tokens": 300,
+                    "cached_tokens": 3_672,
+                    "request_count": 1,
+                },
+                {
+                    "prompt_tokens": 4_200,
+                    "completion_tokens": 323,
+                    "cached_tokens": 4_000,
+                    "request_count": 1,
+                },
+            ],
             "context_window_tokens": 128_000,
         },
     ):
@@ -562,6 +584,11 @@ def test_replay_turn_end_preserves_usage_semantics(tmp_path, monkeypatch) -> Non
         "context_tokens": 8_200,
         "request_count": 3,
     }
+    assert [item["prompt_tokens"] for item in messages[-1]["roundUsages"]] == [
+        4_000,
+        4_200,
+        4_200,
+    ]
     assert messages[-1]["contextWindowTokens"] == 128_000
     assert messages[-1]["latencyMs"] == 18_200
 
@@ -1673,6 +1700,34 @@ def test_replay_merges_length_recovery_segments_into_one_assistant_message() -> 
     assert len(msgs) == 1
     assert msgs[0]["role"] == "assistant"
     assert msgs[0]["content"] == "first second"
+
+
+@pytest.mark.parametrize("event", ["delta", "stream_end"])
+def test_replay_recovery_answer_does_not_overwrite_an_unfinished_turn(event: str) -> None:
+    msgs = replay_transcript_to_ui_messages([
+        {
+            "event": "stream_end", "text": "Original answer", "turn_id": "original",
+            "resuming": True, "merge_next": True,
+        },
+        {"event": event, "text": "Recovered answer", "turn_id": "recovery"},
+        {"event": "turn_end", "turn_id": "recovery"},
+    ])
+
+    assert [(m["turnId"], m["content"]) for m in msgs] == [
+        ("original", "Original answer"), ("recovery", "Recovered answer"),
+    ]
+
+
+def test_replay_reasoning_after_an_ordinary_answer_preserves_the_answer_boundary() -> None:
+    msgs = replay_transcript_to_ui_messages([
+        {"event": "delta", "text": "First answer"},
+        {"event": "reasoning_end", "text": "Consider the next answer"},
+        {"event": "stream_end", "text": "Next answer"},
+        {"event": "turn_end"},
+    ])
+
+    assert [m["content"] for m in msgs] == ["First answer", "Next answer"]
+    assert msgs[1]["reasoning"] == "Consider the next answer"
 
 
 def test_replay_tool_events_dedupes_finish_after_start() -> None:

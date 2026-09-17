@@ -21,6 +21,7 @@ import {
 import { INLINE_TOKEN_HIGHLIGHT_COLOR } from "@/components/InlineTokenHighlight";
 import {
   Activity,
+  Archive,
   ArrowUp,
   BookOpen,
   Brain,
@@ -71,6 +72,11 @@ import {
   type ModelPresetOption,
 } from "@/components/thread/ModelPresetBadge";
 import {
+  ComposerUsagePopover,
+  type ComposerContextUsage,
+  type ComposerRoundUsage,
+} from "@/components/thread/ComposerUsagePopover";
+import {
   ACCEPT_ATTR,
   MAX_ATTACHMENTS_PER_MESSAGE,
   useAttachedImages,
@@ -102,6 +108,7 @@ import {
   logoFallbackUrls,
 } from "@/lib/provider-brand";
 import { sessionHandleColor } from "@/lib/session-handle";
+import { requestSkillsRefresh } from "@/lib/skill-events";
 import {
   isSideChannelLifecycle,
   slashCommandLifecycle,
@@ -112,7 +119,6 @@ import {
   readDraggedSession,
 } from "@/lib/session-drag";
 import { formatQuotedUserMessage } from "@/lib/user-message-quote";
-import { formatCompactTokenCount } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const VOICE_SHORTCUT_CODE = "KeyD";
@@ -179,107 +185,6 @@ function getVoiceShortcutLabel(): string {
   }
 }
 
-export interface ComposerContextUsage {
-  contextTokens: number;
-  contextWindowTokens?: number;
-}
-
-function ComposerContextBadge({ usage }: { usage: ComposerContextUsage | null }) {
-  const { t } = useTranslation();
-  if (!usage || !Number.isFinite(usage.contextTokens) || usage.contextTokens < 0) return null;
-
-  const context = formatCompactTokenCount(usage.contextTokens);
-  const contextWindow = typeof usage.contextWindowTokens === "number"
-    && Number.isFinite(usage.contextWindowTokens)
-    && usage.contextWindowTokens > 0
-    ? usage.contextWindowTokens
-    : null;
-  const capacity = contextWindow !== null
-    ? ` / ${formatCompactTokenCount(contextWindow)}`
-    : "";
-  // The meter is meaningful only with a known capacity.  Do not turn an
-  // otherwise unknown total into a second, text-heavy control beside the
-  // model picker.
-  if (contextWindow === null) return null;
-  const percentage = Math.min(100, Math.round(usage.contextTokens / contextWindow * 100));
-  const status = percentage >= 90
-      ? "critical"
-      : percentage >= 75
-        ? "caution"
-        : "normal";
-  const contextDescription = t("thread.composer.context.tooltip", {
-    defaultValue: "Context · {{tokens}}{{capacity}}",
-    tokens: context,
-    capacity,
-  });
-  const meterDescription = t("thread.composer.context.meterDescription", {
-    defaultValue: "{{context}}. {{percent}}% used.",
-    context: contextDescription,
-    percent: percentage,
-  });
-  const ringCircumference = 2 * Math.PI * 6;
-  const ringLength = ringCircumference * percentage / 100;
-
-  return (
-    <TooltipProvider delayDuration={300} skipDelayDuration={80}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            data-testid="composer-context-usage"
-            aria-label={meterDescription}
-            className={cn(
-              "inline-flex size-5 shrink-0 items-center justify-center rounded-full",
-              "text-muted-foreground/75 transition-colors hover:text-foreground/85",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            )}
-          >
-            <svg
-              viewBox="0 0 16 16"
-              aria-hidden="true"
-              className={cn(
-                "size-[15px] shrink-0 -rotate-90",
-                status === "critical" && "text-destructive",
-                status === "caution" && "text-amber-600 dark:text-amber-400",
-                status === "normal" && "text-muted-foreground/75",
-              )}
-            >
-              <circle
-                cx="8"
-                cy="8"
-                r="6"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                className="opacity-20"
-              />
-              <circle
-                cx="8"
-                cy="8"
-                r="6"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeDasharray={`${ringLength} ${ringCircumference}`}
-                data-testid="composer-context-meter"
-              />
-            </svg>
-          </button>
-        </TooltipTrigger>
-        <TooltipContent
-          side="top"
-          align="center"
-          sideOffset={8}
-          className="w-fit max-w-[calc(100vw-2rem)] rounded-full border-border/70 px-2.5 py-1 text-xs font-medium shadow-[0_8px_24px_rgba(15,23,42,0.13)]"
-        >
-          <span className="whitespace-nowrap tabular-nums">{contextDescription}</span>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
-
 interface ThreadComposerProps {
   onSend: (
     content: string,
@@ -302,6 +207,7 @@ interface ThreadComposerProps {
   onModelBadgeClick?: () => void;
   onManageModels?: () => void;
   contextUsage?: ComposerContextUsage | null;
+  recentRoundUsage?: readonly ComposerRoundUsage[];
   variant?: "thread" | "hero";
   slashCommands?: SlashCommand[];
   cliApps?: CliAppInfo[];
@@ -331,6 +237,7 @@ interface ThreadComposerProps {
 
 const COMMAND_ICONS: Record<string, LucideIcon> = {
   activity: Activity,
+  archive: Archive,
   "book-open": BookOpen,
   brain: Brain,
   "circle-help": CircleHelp,
@@ -1001,6 +908,7 @@ export function ThreadComposer({
   onModelBadgeClick,
   onManageModels,
   contextUsage = null,
+  recentRoundUsage = [],
   variant = "thread",
   slashCommands = [],
   cliApps = [],
@@ -1056,7 +964,7 @@ export function ThreadComposer({
   const secondEnterPromptIdRef = useRef<string | null>(null);
   const draggedQueuedPromptIdRef = useRef<string | null>(null);
   const previousPendingQueueKeyRef = useRef(pendingQueueKey);
-  const wasStreamingRef = useRef(isStreaming);
+  const previousQueueRunRef = useRef({ key: pendingQueueKey, isStreaming });
   const skipNextQueuedFlushRef = useRef(false);
   const skipQueuedPromptPersistRef = useRef(false);
   const voiceShortcutDownRef = useRef(false);
@@ -1213,6 +1121,12 @@ export function ThreadComposer({
       text: match[1].toLowerCase(),
     };
   }, [cursorPosition, interactionDisabled, slashMenuDismissed, value]);
+
+  const skillMenuActive = skillQuery !== null;
+  useEffect(() => {
+    // Also refresh an empty menu: skills may have been installed by the agent.
+    if (skillMenuActive) requestSkillsRefresh();
+  }, [skillMenuActive]);
 
   const visibleSlashCommands = useMemo(() => {
     if (!(isStreaming && onStop)) return slashCommands;
@@ -1988,16 +1902,21 @@ export function ThreadComposer({
   }, [onSend, queuedPrompts]);
 
   useEffect(() => {
-    const wasStreaming = wasStreamingRef.current;
-    wasStreamingRef.current = isStreaming;
+    const previous = previousQueueRunRef.current;
+    previousQueueRunRef.current = { key: pendingQueueKey, isStreaming };
     if (!isStreaming) secondEnterPromptIdRef.current = null;
-    if (!wasStreaming || isStreaming || queuedPrompts.length === 0) return;
+    // Switching to an idle session is not completion of the previous session's run.
+    if (previous.key !== pendingQueueKey) {
+      skipNextQueuedFlushRef.current = false;
+      return;
+    }
+    if (!previous.isStreaming || isStreaming || queuedPrompts.length === 0) return;
     if (skipNextQueuedFlushRef.current) {
       skipNextQueuedFlushRef.current = false;
       return;
     }
     sendNextQueuedPrompt();
-  }, [sendNextQueuedPrompt, isStreaming, queuedPrompts.length]);
+  }, [sendNextQueuedPrompt, isStreaming, pendingQueueKey, queuedPrompts.length]);
 
   const handleStop = useCallback(() => {
     secondEnterPromptIdRef.current = null;
@@ -2555,7 +2474,12 @@ export function ThreadComposer({
                 onClick={modelNeedsSetup ? onModelBadgeClick : undefined}
               />
             ) : null}
-            {!voiceRecorder.isRecording ? <ComposerContextBadge usage={contextUsage} /> : null}
+            {!voiceRecorder.isRecording ? (
+              <ComposerUsagePopover
+                context={contextUsage}
+                rounds={recentRoundUsage}
+              />
+            ) : null}
             {showVoiceButton ? (
               <TooltipProvider delayDuration={220} skipDelayDuration={80}>
                 <Tooltip>

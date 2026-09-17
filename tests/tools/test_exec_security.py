@@ -242,6 +242,28 @@ async def test_exec_blocks_working_dir_outside_workspace(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_exec_blocks_relative_working_dir_outside_workspace(tmp_path):
+    """A relative working_dir that escapes the workspace must be rejected."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+
+    tool = ExecTool(
+        working_dir=str(workspace),
+        restrict_to_workspace=True,
+        timeout=5,
+    )
+
+    result = await tool.execute(
+        command="echo ok",
+        working_dir="../outside",
+    )
+
+    assert "outside the configured workspace" in result
+
+
+@pytest.mark.asyncio
 async def test_exec_blocks_absolute_rm_via_hijacked_working_dir(tmp_path):
     """Regression for #2826: `rm /abs/path` via working_dir hijack."""
     workspace = tmp_path / "workspace"
@@ -357,7 +379,8 @@ def test_exec_still_blocks_real_outside_path_via_redirect(tmp_path):
     assert "path outside working dir" in blocked
 
 
-def test_exec_allows_absolute_path_inside_bwrap_ro_bind(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backend", ["bwrap", "seatbelt"])
+def test_exec_allows_absolute_path_inside_sandbox_ro_bind(tmp_path, monkeypatch, backend):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     tool_bin = tmp_path / "home" / ".local" / "bin"
@@ -368,7 +391,7 @@ def test_exec_allows_absolute_path_inside_bwrap_ro_bind(tmp_path, monkeypatch):
     tool = ExecTool(
         working_dir=str(workspace),
         restrict_to_workspace=True,
-        sandbox="bwrap",
+        sandbox=backend,
         sandbox_ro_binds=[str(tool_bin)],
     )
 
@@ -382,7 +405,8 @@ def test_exec_allows_absolute_path_inside_bwrap_ro_bind(tmp_path, monkeypatch):
     assert blocked is None
 
 
-def test_exec_allows_absolute_path_inside_bwrap_rw_bind(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backend", ["bwrap", "seatbelt"])
+def test_exec_allows_absolute_path_inside_sandbox_rw_bind(tmp_path, monkeypatch, backend):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     cache_dir = tmp_path / "cache"
@@ -391,7 +415,7 @@ def test_exec_allows_absolute_path_inside_bwrap_rw_bind(tmp_path, monkeypatch):
     tool = ExecTool(
         working_dir=str(workspace),
         restrict_to_workspace=True,
-        sandbox="bwrap",
+        sandbox=backend,
         sandbox_rw_binds=[str(cache_dir)],
     )
 
@@ -405,7 +429,7 @@ def test_exec_allows_absolute_path_inside_bwrap_rw_bind(tmp_path, monkeypatch):
     assert blocked is None
 
 
-def test_exec_bind_roots_do_not_widen_guard_without_bwrap(tmp_path):
+def test_exec_bind_roots_do_not_widen_guard_without_sandbox(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     tool_bin = tmp_path / "home" / ".local" / "bin"
@@ -430,7 +454,8 @@ def test_exec_bind_roots_do_not_widen_guard_without_bwrap(tmp_path):
     assert "path outside working dir" in blocked
 
 
-def test_exec_bwrap_bind_parent_does_not_widen_workspace_guard(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backend", ["bwrap", "seatbelt"])
+def test_exec_sandbox_bind_parent_does_not_widen_workspace_guard(tmp_path, monkeypatch, backend):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     secret = tmp_path / "config.json"
@@ -439,7 +464,7 @@ def test_exec_bwrap_bind_parent_does_not_widen_workspace_guard(tmp_path, monkeyp
     tool = ExecTool(
         working_dir=str(workspace),
         restrict_to_workspace=True,
-        sandbox="bwrap",
+        sandbox=backend,
         sandbox_ro_binds=[str(tmp_path)],
     )
 

@@ -74,6 +74,20 @@ _SESSION_MENTION_NAME_RE = re.compile(r"^[\w-]+$")
 _SESSION_HANDLE_ID_RE = re.compile(r"^handle_[0-9a-f]{32}$")
 
 
+def _sanitize_turn_usage(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    data = cast(dict[object, object], value)
+    return {
+        key: item
+        for key, item in data.items()
+        if isinstance(key, str)
+        and isinstance(item, int)
+        and not isinstance(item, bool)
+        and item >= 0
+    }
+
+
 def rewrite_local_markdown_images(
     text: str,
     *,
@@ -1706,6 +1720,7 @@ def replay_transcript_to_ui_messages(
     messages: list[dict[str, Any]] = []
     buffer_message_id: str | None = None
     buffer_parts: list[str] = []
+    merge_reasoning_message_id: str | None = None
     suppress_until_turn_end = False
     active_activity_segment_id: str | None = None
     active_file_edit_segment_id: str | None = None
@@ -1802,6 +1817,26 @@ def replay_transcript_to_ui_messages(
         created_at_ms: int | None = None,
     ) -> None:
         turn_fields = turn_fields or {}
+        if buffer_message_id is not None and buffer_message_id == merge_reasoning_message_id:
+            for i in range(len(prev) - 1, -1, -1):
+                candidate = prev[i]
+                if candidate.get("id") != buffer_message_id:
+                    continue
+                if _same_turn(candidate, turn_fields):
+                    # A length continuation shares the same Markdown answer.
+                    # Keep its reasoning with that answer, including on replay.
+                    reasoning = str(candidate.get("reasoning") or "")
+                    separator = "\n\n" if reasoning and not candidate.get("reasoningStreaming") else ""
+                    prev[i] = {
+                        **candidate,
+                        "reasoning": reasoning + separator + chunk,
+                        "reasoningStreaming": True,
+                    }
+                    return
+                break
+        if buffer_message_id is not None:
+            close_interrupted_assistant()
+            close_activity_for_answer()
         for i in range(len(prev) - 1, -1, -1):
             candidate = prev[i]
             if candidate.get("role") == "user":
@@ -1868,7 +1903,7 @@ def replay_transcript_to_ui_messages(
         return str(last.get("id"))
 
     def close_interrupted_assistant() -> None:
-        """Close an answer segment before tool activity without changing its semantics.
+        """Close an answer before a new activity phase without changing its semantics.
 
         The wire protocol already marks answer, reasoning, and activity phases.
         A later tool event does not turn previously emitted answer text into
@@ -1896,6 +1931,20 @@ def replay_transcript_to_ui_messages(
                 buffer_parts = []
             return
 
+    def close_buffer_from_other_turn(turn_fields: dict[str, Any]) -> None:
+        nonlocal buffer_message_id, buffer_parts
+        if buffer_message_id is None:
+            return
+        for message in reversed(messages):
+            if message.get("id") != buffer_message_id:
+                continue
+            if not _same_turn(message, turn_fields):
+                message["isStreaming"] = False
+                buffer_message_id = None
+                buffer_parts = []
+                close_activity_for_answer()
+            return
+
     def close_reasoning(prev: list[dict[str, Any]]) -> None:
         for i in range(len(prev) - 1, -1, -1):
             if prev[i].get("reasoningStreaming"):
@@ -1916,6 +1965,7 @@ def replay_transcript_to_ui_messages(
         *,
         latency_ms: int | None = None,
         usage: dict[str, int] | None = None,
+        round_usages: list[dict[str, int]] | None = None,
         context_window_tokens: int | None = None,
     ) -> None:
         for i in range(len(messages) - 1, -1, -1):
@@ -1925,6 +1975,8 @@ def replay_transcript_to_ui_messages(
                     completion["latencyMs"] = latency_ms
                 if usage:
                     completion["usage"] = usage
+                if round_usages:
+                    completion["roundUsages"] = round_usages
                 if context_window_tokens is not None:
                     completion["contextWindowTokens"] = context_window_tokens
                 messages[i] = {
@@ -2194,6 +2246,7 @@ def replay_transcript_to_ui_messages(
             close_activity_for_answer()
             turn_fields = _turn_fields(rec, "answer")
             source_fields = _source_fields(rec)
+            close_buffer_from_other_turn(turn_fields)
             adopted = find_active_placeholder(messages, turn_fields) if buffer_message_id is None else None
             if buffer_message_id is None:
                 if adopted:
@@ -2234,6 +2287,7 @@ def replay_transcript_to_ui_messages(
             final_text = rec.get("text")
             turn_fields = _turn_fields(rec, "answer")
             source_fields = _source_fields(rec)
+            close_buffer_from_other_turn(turn_fields)
             if isinstance(final_text, str):
                 if buffer_message_id is None:
                     buffer_message_id = find_active_placeholder(messages, turn_fields)
@@ -2270,6 +2324,7 @@ def replay_transcript_to_ui_messages(
             if not merge_next:
                 buffer_message_id = None
                 buffer_parts = []
+            merge_reasoning_message_id = buffer_message_id if merge_next else None
             continue
 
         if ev == "reasoning_delta":
@@ -2302,6 +2357,48 @@ def replay_transcript_to_ui_messages(
                     _created_at_ms(rec, idx),
                 )
             close_reasoning(messages)
+            continue
+
+        if ev == "context_compaction":
+            compaction_id = rec.get("compaction_id")
+            phase = rec.get("phase")
+            if (
+                not isinstance(compaction_id, str)
+                or not compaction_id
+                or phase not in {"started", "succeeded", "failed", "cancelled"}
+            ):
+                continue
+            compaction: dict[str, Any] = {
+                "id": compaction_id,
+                "phase": phase,
+            }
+            payload: dict[str, Any] = {
+                "id": f"compaction-{compaction_id}",
+                "role": "assistant",
+                "content": "",
+                "kind": "compaction",
+                "createdAt": _created_at_ms(rec, idx),
+                "compaction": compaction,
+                **_turn_fields(rec, "activity"),
+            }
+            existing = next(
+                (
+                    message_index
+                    for message_index, message in enumerate(messages)
+                    if message.get("id") == payload["id"]
+                ),
+                None,
+            )
+            if existing is None:
+                messages.append(payload)
+            else:
+                payload["createdAt"] = messages[existing].get(
+                    "createdAt",
+                    payload["createdAt"],
+                )
+                messages[existing] = payload
+            active_activity_segment_id = None
+            active_file_edit_segment_id = None
             continue
 
         if ev == "message":
@@ -2428,19 +2525,23 @@ def replay_transcript_to_ui_messages(
                     messages[i] = {**m, "isStreaming": False}
             lat = rec.get("latency_ms")
             usage = rec.get("usage")
-            sanitized_usage = (
-                {
-                    key: value
-                    for key, value in cast(dict[object, object], usage).items()
-                    if isinstance(key, str) and type(value) is int and value >= 0
-                }
-                if isinstance(usage, dict)
+            sanitized_usage = _sanitize_turn_usage(usage)
+            raw_round_usages = rec.get("round_usages")
+            sanitized_round_usages = (
+                [
+                    sanitized
+                    for item in cast(list[object], raw_round_usages)
+                    if (sanitized := _sanitize_turn_usage(item))
+                    is not None
+                ]
+                if isinstance(raw_round_usages, list)
                 else None
             )
             context_window = rec.get("context_window_tokens")
             stamp_completion(
                 latency_ms=int(lat) if isinstance(lat, (int, float)) and lat >= 0 else None,
                 usage=sanitized_usage,
+                round_usages=sanitized_round_usages,
                 context_window_tokens=(
                     int(context_window)
                     if isinstance(context_window, (int, float)) and context_window >= 0
