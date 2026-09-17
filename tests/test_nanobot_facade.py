@@ -35,7 +35,6 @@ from nanobot.runtime_context import (
     RuntimeContextBlock,
     append_runtime_context,
 )
-from nanobot.session.manager import FILE_MAX_MESSAGES
 from nanobot.utils.llm_runtime import runtime_from_provider_snapshot
 
 
@@ -1475,7 +1474,7 @@ async def test_sessions_ingest_imports_transcript_without_running_model(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_sessions_ingest_archives_overflow_at_persistence_boundary(tmp_path):
+async def test_sessions_ingest_preserves_full_transcript(tmp_path):
     config_path = _write_config(tmp_path)
     bot = Nanobot.from_config(config_path, workspace=tmp_path)
 
@@ -1483,16 +1482,14 @@ async def test_sessions_ingest_archives_overflow_at_persistence_boundary(tmp_pat
         "sdk:overflow",
         [
             {"role": "user", "content": f"message-{index}"}
-            for index in range(FILE_MAX_MESSAGES + 1)
+            for index in range(2_001)
         ],
     )
 
-    assert len(snapshot.messages) == FILE_MAX_MESSAGES
-    assert snapshot.messages[0]["content"] == "message-1"
-    history = bot.memory.read_history(session_key="sdk:overflow")
-    assert len(history) == 1
-    assert "[RAW] 1 messages" in history[0]["content"]
-    assert "message-0" in history[0]["content"]
+    assert len(snapshot.messages) == 2_001
+    assert snapshot.messages[0]["content"] == "message-0"
+    assert snapshot.messages[-1]["content"] == "message-2000"
+    assert bot.memory.read_history(session_key="sdk:overflow") == []
 
 
 @pytest.mark.asyncio
@@ -1524,10 +1521,15 @@ async def test_session_helpers_get_list_export_clear_delete_flush(tmp_path):
     exported.messages[0]["content"] = "mutated copy"
     assert bot.sessions.get("sdk:first").messages[0]["content"] == "hello"
 
+    state_before_clear = bot._loop._file_state_store.for_session("sdk:first")
     cleared = bot.sessions.clear("sdk:first")
     assert cleared.messages == []
+    state_after_clear = bot._loop._file_state_store.for_session("sdk:first")
+    assert state_after_clear is not state_before_clear
     assert bot.sessions.flush() >= 1
+    state_before_delete = state_after_clear
     assert bot.sessions.delete("sdk:first") is True
+    assert bot._loop._file_state_store.for_session("sdk:first") is not state_before_delete
     assert bot.sessions.get("sdk:first") is None
 
 

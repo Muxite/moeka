@@ -20,6 +20,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { AttachmentTile } from "@/components/AttachmentTile";
+import { SessionHandleLabel } from "@/components/SessionHandleLabel";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { MarkdownText } from "@/components/MarkdownText";
 import { SlashCommandText } from "@/components/SlashCommandText";
@@ -36,6 +37,7 @@ import { copyTextToClipboard } from "@/lib/clipboard";
 import { fmtDateTime, formatMessageEndTime } from "@/lib/format";
 import { toMediaAttachment } from "@/lib/media";
 import { matchingSlashCommand } from "@/lib/slash-command";
+import { sessionHandleColor } from "@/lib/session-handle";
 import { parseQuotedUserMessage } from "@/lib/user-message-quote";
 import type {
   CliAppInfo,
@@ -52,6 +54,8 @@ import type {
 
 interface MessageBubbleProps {
   message: UIMessage;
+  /** The containing agent turn has not received turn_end yet. */
+  isTurnStreaming?: boolean;
   /** Give temporary-chat user turns the dashed private-mode treatment. */
   temporary?: boolean;
   /** When false, hide this message's copy button. Default true. */
@@ -257,9 +261,67 @@ function UserDeliveryStatus({
   );
 }
 
+function IncomingSessionMessage({
+  message,
+  showCopyAction,
+  onOpenFilePreview,
+}: {
+  message: UIMessage;
+  showCopyAction: boolean;
+  onOpenFilePreview?: (path: string) => void;
+}) {
+  const handle = message.sessionMessage!.session;
+  const color = sessionHandleColor(handle.id);
+  const createdAtLabel = formatMessageEndTime(message.createdAt);
+  const handleName = `@${handle.name}`;
+
+  return (
+    <div
+      data-session-message
+      className="group w-full text-[15px]"
+      style={{ lineHeight: "var(--cjk-line-height)" }}
+    >
+      <div
+        className="min-w-0 rounded-es-[16px] border-s-2 bg-background pb-1 ps-2.5"
+        style={{ borderInlineStartColor: color }}
+      >
+        <div className="mb-1.5 flex items-center text-[12px] text-muted-foreground">
+          <SessionHandleLabel id={handle.id}>{handleName}</SessionHandleLabel>
+        </div>
+        <div data-assistant-selectable="true" className="min-w-0">
+          <MarkdownText
+            preserveStreamingLayout
+            onOpenFilePreview={onOpenFilePreview}
+          >
+            {message.content}
+          </MarkdownText>
+        </div>
+      </div>
+      {createdAtLabel || showCopyAction ? (
+        <TooltipProvider delayDuration={220} skipDelayDuration={80}>
+          <div
+            className="mt-1 flex min-h-8 items-center gap-1.5 text-muted-foreground"
+          >
+            {showCopyAction ? <MessageCopyButton content={message.content} /> : null}
+            {createdAtLabel ? (
+              <MessageTimestamp
+                timestamp={message.createdAt}
+                tooltipLabel={fmtDateTime(message.createdAt)}
+              >
+                {createdAtLabel}
+              </MessageTimestamp>
+            ) : null}
+          </div>
+        </TooltipProvider>
+      ) : null}
+    </div>
+  );
+}
+
 /** Render user turns as compact bubbles and assistant turns as document-like prose. */
 export function MessageBubble({
   message,
+  isTurnStreaming = false,
   temporary = false,
   showCopyAction = true,
   cliApps = [],
@@ -280,6 +342,16 @@ export function MessageBubble({
 
   if (message.kind === "trace") {
     return <TraceGroup message={message} />;
+  }
+
+  if (message.role === "user" && message.sessionMessage) {
+    return (
+      <IncomingSessionMessage
+        message={message}
+        showCopyAction={showCopyAction}
+        onOpenFilePreview={onOpenFilePreview}
+      />
+    );
   }
 
   if (message.role === "user") {
@@ -331,7 +403,7 @@ export function MessageBubble({
           <p
             data-temporary-message={temporary ? "true" : undefined}
             className={cn(
-              "ml-auto w-fit max-w-full min-w-0 rounded-[18px] px-4 py-2",
+              "ml-auto w-fit max-w-full min-w-0 rounded-floating px-4 py-2",
               "text-left text-[16px]/[1.75] whitespace-pre-wrap [overflow-wrap:anywhere]",
               temporary
                 ? "border border-dashed border-muted-foreground/40 bg-transparent"
@@ -381,7 +453,8 @@ export function MessageBubble({
     : "";
   const automationTriggeredLabel = t("message.automationTriggered");
 
-  const showAssistantActions = message.role === "assistant" && !message.isStreaming && !empty;
+  const showAssistantActions =
+    message.role === "assistant" && !message.isStreaming && !isTurnStreaming && !empty;
   const showCopyButton = showCopyAction && showAssistantActions;
   const showForkButton = showAssistantActions && !!onForkFromHere;
   const forkLabel = t("message.forkFromHere");
@@ -499,7 +572,7 @@ function UserQuotedContext({ text, label }: { text: string; label: string }) {
   return (
     <blockquote
       className={cn(
-        "ml-auto flex w-fit max-w-full min-w-0 items-start gap-2 rounded-[14px]",
+        "ml-auto flex w-fit max-w-full min-w-0 items-start gap-2 rounded-control",
         "border border-border/60 bg-muted/35 px-3 py-2 text-left text-muted-foreground",
       )}
       aria-label={label}
@@ -718,8 +791,8 @@ function UserImageCell({
   const tileClasses = cn(
     "relative overflow-hidden border border-border/60 bg-muted/40",
     size === "large"
-      ? "w-[min(100%,34rem)] rounded-[20px] bg-transparent"
-      : "h-24 w-24 rounded-[14px]",
+      ? "w-[min(100%,34rem)] rounded-panel bg-transparent"
+      : "h-24 w-24 rounded-control",
     "shadow-[0_6px_18px_-14px_rgba(0,0,0,0.45)]",
   );
 

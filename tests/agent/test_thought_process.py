@@ -61,6 +61,8 @@ def _response(content="", tool_calls=(), reasoning_content=None,
         error_type=None,
         provider_state=None,
         preserve_provider_state_on_error=None,
+        generation_ms=None,
+        ttft_ms=None,
     )
 
 

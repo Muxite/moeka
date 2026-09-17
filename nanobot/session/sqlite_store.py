@@ -526,6 +526,45 @@ class SqliteSessionStore:
             logger.warning("Failed to delete session {}: {}", key, e)
             return False
 
+    def update_metadata(
+        self,
+        key: str,
+        updates: dict[str, Any],
+        *,
+        fsync: bool = False,
+    ) -> bool:
+        """Atomically merge ``updates`` into a session's stored metadata.
+
+        Mirrors ``JsonlSessionStore.update_metadata``'s contract: only the
+        metadata blob is touched (messages are left alone), and the
+        reserved ``_provider_state`` key is never disturbed by a caller
+        passing plain metadata updates (callers of this Protocol method
+        never set that key themselves — it's only ever written via
+        ``save()``).
+        """
+        conn = self._conn()
+        with self._write_lock, conn:
+            row = conn.execute(
+                "SELECT metadata FROM sessions WHERE key = ?", (key,)
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                metadata = json.loads(row[0]) if row[0] else {}
+            except json.JSONDecodeError:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.update(updates)
+            conn.execute(
+                "UPDATE sessions SET metadata = ? WHERE key = ?",
+                (json.dumps(metadata, ensure_ascii=False), key),
+            )
+        if fsync:
+            with suppress(sqlite3.OperationalError):
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return True
+
     @staticmethod
     def _session_payload(session: Session) -> SessionPayload:
         return {

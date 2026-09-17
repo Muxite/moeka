@@ -377,14 +377,19 @@ class TestBuildSystemPrompt:
 
     def test_includes_session_summary(self, tmp_path):
         builder = _builder(tmp_path)
-        result = builder.build_system_prompt(session_summary="Previous chat about Python.")
+        summary = {
+            "text": "Previous chat about Python.",
+            "last_active": "2026-08-19T10:00:00",
+        }
+        result = builder.build_system_prompt(session_summary=summary)
         assert "Previous chat about Python." in result
         assert "[Archived Context Summary]" in result
 
     def test_sections_separated_by_separator(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Rules.", encoding="utf-8")
         builder = _builder(tmp_path)
-        result = builder.build_system_prompt(session_summary="Summary.")
+        summary = {"text": "Summary.", "last_active": "2026-08-19T10:00:00"}
+        result = builder.build_system_prompt(session_summary=summary)
         assert "\n\n---\n\n" in result
 
     def test_no_bootstrap_no_summary(self, tmp_path):
@@ -449,15 +454,20 @@ class TestBuildMessages:
         builder = _builder(tmp_path)
 
         messages = builder.build_messages([], "Please $review this patch and use $review carefully.")
+        plain_messages = builder.build_messages([], "Please review this patch carefully.")
 
         system_prompt = messages[0]["content"]
-        assert "# Active Skills" in system_prompt
-        assert "### Skill: review" in system_prompt
-        assert "Follow the unique review checklist." in system_prompt
-        assert system_prompt.count("### Skill: review") == 1
-        assert messages[-1]["content"] == (
-            "Please $review this patch and use $review carefully."
-        )
+        user_prompt = messages[-1]["content"]
+        assert system_prompt == plain_messages[0]["content"]
+        assert "Follow the unique review checklist." not in system_prompt
+        assert "Please $review this patch" in user_prompt
+        assert "[Active Skills — instructions for this user turn]" in user_prompt
+        assert "### Skill: review" in user_prompt
+        assert "Follow the unique review checklist." in user_prompt
+        assert user_prompt.count("### Skill: review") == 1
+        assert messages[-1]["_meta"]["runtime_context"]["sources"] == [
+            "explicit_skills"
+        ]
 
     def test_unknown_skill_reference_does_not_change_active_skills(self, tmp_path):
         messages = _builder(tmp_path).build_messages([], "Keep the shell literal $HOME.")

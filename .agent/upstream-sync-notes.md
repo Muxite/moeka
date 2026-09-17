@@ -574,3 +574,266 @@ to a clean, fully-tested state but did **not** start batch 3. Next batch
 — that decision will shape how `nanobot/session/manager.py` conflicts get
 resolved from here on, since upstream will keep extending the
 `SessionStore` split every batch.
+
+## Batch 3 — 2026-09-17
+
+Merge commit: recorded below after commit (this section is written before
+the commit lands; see the commit that carries this same notes update for
+the final sha — it is the merge commit itself, git-merge on top of
+`51d0f996`, checkpoint `1018bdb7fee35acd6a52e2409d15cec65d3d3c09` (2026-08-19,
+167 commits from `upstream/main`). Worked in worktree
+`/home/muk/projects/moeka-sync` on branch `merge/upstream-main-2026-08-05`;
+`/home/muk/projects/moeka` stayed on `main` throughout (verified before and
+after).
+
+### `nanobot/session/manager.py` (rule 1)
+Auto-merged with **zero conflict markers** in this batch (the file was
+already byte-identical to upstream going in, from the batch-2.5 conversion,
+and this batch's upstream commits to it applied cleanly on top).
+`git diff 1018bdb7... -- nanobot/session/manager.py` is empty — confirmed.
+
+The Protocol did change shape this batch: `SessionStore` gained a new
+`update_metadata(key, updates, *, fsync=False) -> bool` method, consumed by
+a brand-new feature this batch (`nanobot/session/session_handles.py` —
+pronounceable per-session "handles" for the WebUI / cross-session
+mentions, via `SessionManager.update_session_metadata()`). moeka's
+`SqliteSessionStore` did not implement it and would have raised
+`AttributeError` the first time a WebUI session needed a handle. Added
+`SqliteSessionStore.update_metadata()` (merges `updates` into the stored
+metadata JSON blob, deliberately does not touch `updated_at` — matches
+`JsonlSessionStore.update_metadata`'s contract exactly, verified against
+its implementation).
+
+Also discovered and removed, from the same "wholesale upstream" file: the
+entire `enforce_file_cap` / `FILE_MAX_MESSAGES` / `set_file_cap_archiver`
+mechanism (upstream commit `9ef1e292`, "fix(session): preserve complete
+transcripts", deliberately removed a hard 2000-message-count cap in favor
+of token-budget-based replay slicing + Dream/Consolidator archiving for
+unbounded growth). moeka's `AgentLoop.__init__` called
+`self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)`
+unconditionally — this method no longer exists on the upstream
+`SessionManager`, so the merge would have crashed on every `AgentLoop`
+construction. This was a **clean merge with no conflict markers** (loop.py
+had its own separate, unrelated conflict elsewhere) — exactly the "silent
+breakage in a cleanly-merged region" risk flagged going in. Removed the
+call site in `nanobot/agent/loop.py`; `MemoryStore.raw_archive` itself is
+untouched and still used by the Consolidator's own fallback paths in
+`nanobot/agent/memory.py`. Confirmed no other reference to
+`set_file_cap_archiver`/`enforce_file_cap`/`FILE_MAX_MESSAGES`/
+`replay_max_messages_for_context`/`_file_cap_archiver` remains anywhere in
+`nanobot/` or `tests/`. `tests/agent/test_max_messages_config.py` (221
+lines, entirely about the removed cap) was deleted by the same upstream
+commit; kept deleted.
+
+### Conflicts resolved (14 files)
+- `README.md` — kept moeka's (ours) entirely; branding identity, always-keep.
+- `CONTRIBUTING.md` — modify/delete conflict (upstream modified, moeka
+  deleted); kept deleted (moeka policy).
+- `nanobot/agent/context.py` — upstream added a typed `SessionSummary`
+  (`nanobot/session/summary.py`, new file, unconflicted) replacing a bare
+  `str`, plus a `_without_duplicate_session_summary()` dedup pass so the
+  "Recent History" section never repeats text already covered by the
+  archived-context summary. Ported both onto moeka's hybrid
+  recency+semantic `_build_history_section()` (VecStore-backed retrieval,
+  moeka's own): `session_summary` is now typed `SessionSummary | None`
+  throughout, and the dedup filter runs on `_build_history_section`'s
+  combined (recency + semantic) entry list before rendering.
+- `nanobot/agent/loop.py` — import-block and constructor-body conflicts;
+  kept moeka's full constructor (vec_config/vec_store/ContextBuilder
+  wiring, SqliteSessionStore construction with the ADR-0001 ordering
+  comment) and re-attached upstream's `FileStateStore(max_sessions=...)`
+  + `set_delete_observer` wiring, and the new `SessionSummary` import,
+  both wanted. Also the file-cap removal above (not itself a conflict).
+- `nanobot/agent/memory.py` — `prune_dream_sessions`: kept moeka's
+  SQLite-query version (`SELECT key FROM sessions WHERE key LIKE
+  'dream:%'`) over upstream's jsonl-glob-and-mtime-sort version; memory
+  category, moeka's shape is the identity.
+- `nanobot/channels/telegram/runtime.py` — upstream rewrote the polling
+  loop into a proper stale-poll watchdog (`_watch_polling`,
+  `_wait_for_app`, `_teardown_app`, `_note_poll_ok`) replacing moeka's
+  simple "is `self._app` None" loop; took upstream's version wholesale
+  (channels category). `drop_pending_updates` default-True wiring was
+  untouched/unconflicted elsewhere in the same file — reverified intact.
+- `nanobot/channels/websocket/runtime.py` — both sides added an unrelated
+  field to the same outbound payload dict (moeka: inline `buttons`/
+  `button_prompt`; upstream: `turn_id` from `WEBUI_TURN_METADATA_KEY`);
+  kept both.
+- `nanobot/channels/websocket/tests/test_websocket_http_routes.py` — pure
+  import-list conflict (moeka added `SqliteSessionStore`, upstream added
+  `SessionHandleResolver`); kept both.
+- `nanobot/cli/gateway_runtime.py` — one real hunk: kept moeka's
+  `store.reindex_memory()` call after Dream compaction (VecStore refresh).
+  Everything else in this file's diff (`build_default_session_manager`,
+  `GatewayInstance`/`GatewayClientLease` wiring) auto-merged clean.
+- `nanobot/command/builtin.py` — same `store.reindex_memory()` pattern in
+  `/dream`'s command handler; kept moeka's call.
+- `nanobot/cron/service.py` — two hunks. Took upstream's `_store_dirty`
+  flag + `store_path.parent.mkdir()` (durability bookkeeping) and its new
+  try/except around the tick body (keeps in-memory state and retries next
+  tick on any load/persist failure) wholesale. This **dropped** moeka's
+  own "only persist when a job actually ran" optimization (commit
+  `558fe35e`, guards against `jobs.json` being rewritten on every idle
+  tick and clobbering concurrent hand edits) — per rule 3 (not a
+  CLAUDE.md-documented deviation), taking upstream and flagging the drop
+  here rather than silently keeping it. ⚠️ Flagged below for review — this
+  one reads like a real, deliberate moeka bug fix, not an incidental diff.
+- `nanobot/webui/session_list_index.py` — the other big one. Upstream
+  (701 lines, up from ~260) added: a persistent `.webui_session_index.json`
+  scan-cache (same shape as batch 1, already dropped — moeka's SQLite
+  store answers the sidebar query in one statement) **and** a genuinely
+  new, well-tested feature this batch: recovering sessions that exist only
+  as a WebUI transcript file with no matching `sessions.db` row yet (e.g. a
+  crash between the first WebUI turn and the agent's own session save).
+  Rewrote the module from moeka's clean (cache-free) base, porting in just
+  the transcript-recovery logic (`_webui_transcript_sources`,
+  `_scan_transcript_row`, `_valid_transcript_session_key`,
+  `_transcript_preview`/`_transcript_created_at`) — `list_webui_sessions()`
+  now also scans `get_webui_dir()` for transcript files with no matching
+  canonical session key and synthesizes a sidebar row for them. Dropped
+  the cache-mechanics tests (don't apply, no cache); ported 8
+  transcript-recovery tests from upstream's suite, adapted to moeka's
+  `_manager()` SQLite fixture helper — all pass (22/22 in the rebuilt
+  `tests/webui/test_session_list_index.py`).
+- `tests/agent/test_dream_session.py` — kept moeka's 3 SQLite-based
+  `TestPruneDreamSessions` tests; dropped upstream's jsonl-file-glob
+  equivalents (don't apply to the SQLite backend, matches the
+  `prune_dream_sessions` resolution above).
+- `tests/agent/test_session_atomic.py` — kept moeka's SQLite-focused
+  `TestSqliteRoundtrip` tests; additionally kept upstream's 3 new
+  jsonl-mechanics tests (`test_unique_tmp_file_cleaned_up_on_write_failure`,
+  `test_overwrite_preserves_latest_data`,
+  `test_managers_for_same_directory_coordinate_saves`) since they exercise
+  the *unforked*, always-constructed internal `JsonlSessionStore` directly
+  — real reachable code in manager.py, worth testing on its own merits
+  even though moeka's production path doesn't persist through it.
+- `tests/session/test_session_fsync.py` — same reasoning: kept moeka's
+  WAL-checkpoint durability tests as-is, but instead of dropping upstream's
+  2 new directory-fsync-fallback tests (which don't make sense against the
+  SQLite-backed `manager` fixture — patches on `nanobot.session.manager.os.*`
+  would never fire), added a `TestJsonlStoreDirectoryFsync` class with its
+  own bare, jsonl-backed `SessionManager` fixture so they exercise what
+  they're actually meant to.
+- `tests/cli/test_commands.py` — one hunk: kept moeka's already-existing
+  comment explaining why
+  `test_webui_missing_runtime_env_fails_before_starting_gateway` is
+  dropped (documented CLAUDE.md deviation: missing `${VAR}` warns, not
+  hard-fails).
+- `tests/session/test_session_store.py` — modify/delete (moeka deleted it
+  in batch 1 because every test there constructed `SessionManager(...,
+  store=...)` against a Protocol moeka hadn't adopted yet). Since the
+  batch-2.5 conversion, moeka's `SqliteSessionStore` **is** a real
+  `SessionStore` Protocol implementation now, so took upstream's version
+  wholesale — all 5 tests pass unmodified (they use a `MagicMock(spec=
+  SessionStore)`, backend-agnostic by construction).
+
+### Dropped in favor of upstream (rule 3), summary
+- `nanobot/cron/service.py`'s "only persist on a tick that ran a job"
+  optimization (see above) — ⚠️ flagged for review, see below.
+- `test_webui_missing_runtime_env_fails_before_starting_gateway` — not
+  newly dropped this batch, same pre-existing moeka policy, just
+  reconfirmed at the conflict site.
+
+### Real regressions caught and fixed post-merge (Docker-surfaced)
+Both were **clean, unconflicted merges** that broke silently — exactly the
+failure mode flagged going in:
+- `tests/agent/test_thought_process.py` (4 failures) — its `_response()`
+  `SimpleNamespace` mock helper was missing two new `LLMResponse` fields
+  upstream added and `nanobot/agent/runner.py`'s (unconflicted) new
+  `_usage_or_estimate()` now reads unconditionally: `generation_ms` and
+  `ttft_ms` (both `int | None`, streaming telemetry). Added both to the
+  mock with `None` defaults, matching the real dataclass.
+- `tests/tools/test_exec_allow_patterns.py::test_guard_newline_chained_segment_still_hits_deny_patterns`
+  (new test this batch, unconflicted insertion) — asserted a denied-later-
+  segment ("`rm -rf /`" after an allowlisted first line) gets blocked by
+  the *deny pattern* filter. moeka doesn't deny `rm -rf` by default (the
+  permissive-sandbox deviation), so with `allow_patterns` set the same
+  command is still correctly blocked, just via the *allowlist* filter
+  instead. Rewrote the assertion + added a comment explaining why, rather
+  than dropping the test (the underlying blocking behavior is correct,
+  just via a different one of moeka's two independent guard mechanisms).
+
+### "Clean merge, hunt for silent breakage" check — results
+- `git diff HEAD@{1} -- nanobot/core/` (pre-merge state vs. merged/staged
+  tree): **empty**. Matches the survey ("0 upstream commits touch
+  nanobot/core in this window") — no MoekaCore/VecStore regression this
+  batch, unlike batch 2's `AgentLoop.from_config()` incident.
+- `Session` dataclass field set: unchanged between the batch-2 and
+  batch-3 checkpoints (diffed directly) — no drift for `sqlite_store.py`'s
+  row (de)serialization to worry about.
+- `SessionManager.__init__` body: one real diff between checkpoints
+  (`_file_cap_archiver` init line removed, `_delete_observer` init line
+  already present from batch 2) — consistent with the file-cap removal
+  above, no other signature/behavior drift found.
+- Grepped every `nanobot/` and `tests/` reference to
+  `set_file_cap_archiver`/`enforce_file_cap`/`FILE_MAX_MESSAGES`/
+  `replay_max_messages_for_context`/`_file_cap_archiver`: only the
+  explanatory comment left in `loop.py`. Grepped `.get_history(` call
+  sites tree-wide: all already match the new `max_messages: int = 0`
+  default semantics (auto-merged clean, no fixup needed).
+- `sqlite_store.py`'s imports from `manager.py` (`_SESSION_LIST_PREVIEW_*`,
+  `_SESSION_MIGRATION_LOCK_TIMEOUT_SECONDS`, `JsonlSessionStore`,
+  `Session`, `SessionInfo`, `SessionMetadataPayload`, `SessionPayload`,
+  `SessionRestoreResult`, `_message_preview_text`, `_metadata_title`) —
+  all still present, all still same shape; confirmed via direct import
+  (`python -c "import nanobot.session.sqlite_store"` etc.) and via the
+  full Docker suite passing.
+
+### Deviation verification (post-merge, on the final commit)
+- `allow_sudo: bool = False` — default unchanged.
+- `rm -rf`/`dd`/`mkfs`/`shutdown` absent from `_DEFAULT_DENY_PATTERNS`
+  (only the fork-bomb pattern remains there); `_INTERNAL_DENY_PATTERNS`
+  untouched.
+- `tools.exec.allow_patterns` non-empty ⇒ whitelist-only mode — confirmed
+  intact (and re-exercised by the fixed
+  `test_guard_newline_chained_segment_still_hits_deny_patterns` above).
+- `nanobot/session/manager.py`/`sqlite_store.py` both reference
+  `sessions.db` (WAL) — confirmed.
+- `ChannelManager._dispatch_with_watchdog` present and wired
+  (`nanobot/channels/manager.py`).
+- `bg_shell`'s `enabled(ctx)` still hardcoded `return False`.
+- `nanobot channels enable/disable` CLI commands present in
+  `nanobot/cli/commands.py` (untouched by this batch).
+- Telegram `drop_pending_updates: bool = True` — confirmed, survived the
+  polling-loop rewrite above.
+- Lazy `Config`/`ToolsConfig` model_rebuild pattern — untouched by this
+  batch (0 conflicts in `nanobot/config/schema.py` or `loader.py`).
+- No `CONTRIBUTING.md`, no `images/nanobot_logo.png`;
+  `images/GitHub_README.png` present.
+- `.agent/*`, `CLAUDE.md`, `bin/*` launchers untouched by this batch.
+- `git diff 1018bdb7fee35acd6a52e2409d15cec65d3d3c09 -- nanobot/session/manager.py`
+  — empty, confirmed (rule 1 success criterion).
+
+### `ruff check nanobot/ tests/` — clean, no new lint.
+
+### Docker test results
+Full suite (`scripts/test-docker.sh`): **6546 passed, 4 failed, 33
+skipped** (baseline going in: 6348/4/31; +198 passed / +2 skipped from
+this batch's new upstream test coverage, same 4 pre-existing failures, no
+new failure categories). The 4 failures are the same two known
+environment artifacts as every prior batch: `test_exec_guard_allows_public_urls`
+×2 (no DNS/network egress in this sandbox) and the two
+`tests/webui/test_mcp_presets_api.py::test_test_mcp_preset_*` tests (no
+`npx`/playwright on PATH in the test image).
+
+### ⚠️ Needs human review
+- **`nanobot/cron/service.py`'s dropped "only persist when a job ran"
+  optimization** (see above). This was a real moeka bug fix (commit
+  `558fe35e`) protecting `jobs.json` from being rewritten every idle tick
+  and clobbering concurrent hand edits to the file. Upstream's replacement
+  (try/except around the tick, `_store_dirty` flag) is a genuine
+  improvement for crash-resilience but doesn't address the same
+  clobbering scenario. Recommend either: (a) re-adding the `if due_jobs:`
+  guard on top of upstream's try/except in a follow-up commit, or (b)
+  confirming the clobbering scenario no longer applies for some other
+  reason and documenting why. Not re-added here per the merge's explicit
+  "take upstream unless CLAUDE.md-documented" rule, but flagging loudly
+  since dropping it silently would be exactly the kind of regression this
+  whole exercise is trying to avoid.
+- The transcript-recovery feature ported into
+  `nanobot/webui/session_list_index.py` is new, real functionality (not
+  just a shape-preserving port) — worth a closer look/smoke-test in the
+  live WebUI at some point, though it's covered by 8 passing unit tests
+  here.
+- ADR-0001 out-of-workspace session storage: already adopted (batch 2.5),
+  not revisited this batch — no new upstream commits touched that surface
+  area in this window.

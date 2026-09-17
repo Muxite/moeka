@@ -218,6 +218,29 @@ function transitionTurnDelivery(
   return changed ? next : messages;
 }
 
+function appendProjectedSessionInput(
+  messages: UIMessage[],
+  event: Extract<InboundEvent, { event: "user_message" }>,
+): UIMessage[] {
+  const sessionMessage = event.provenance?.session_message;
+  const messageId = sessionMessage?.message_id?.trim();
+  if (!sessionMessage || !messageId) return messages;
+  if (messages.some((message) => message.sessionMessage?.message_id === messageId)) return messages;
+
+  const row: UIMessage = {
+    id: `session-message:${messageId}`,
+    role: "user",
+    content: event.text,
+    createdAt: typeof event.created_at_ms === "number"
+      && Number.isFinite(event.created_at_ms)
+      ? event.created_at_ms
+      : Date.now(),
+    sessionMessage,
+    ...turnFieldsFromEvent(event, "user"),
+  };
+  return [...messages, row];
+}
+
 export function useNanobotStream(
   chatId: string | null,
   initialMessages: UIMessage[] = [],
@@ -709,6 +732,47 @@ export function useNanobotStream(
         setMessages((prev) => transitionTurnDelivery(prev, turnId, "accepted"));
       }
       if (ev.event === "message_accepted") return;
+      if (ev.event === "user_message") {
+        if (ev.provenance?.session_message) {
+          flushPendingStreamEvents({ closeAnswerSegment: true });
+          clearActivitySegment();
+          setIsStreaming(true);
+          setMessages((prev) => appendProjectedSessionInput(prev, ev));
+          return;
+        }
+        setMessages((prev) => {
+          if (ev.turn_id && prev.some((message) => (
+            message.role === "user" && message.turnId === ev.turn_id
+          ))) return prev;
+          return [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              role: "user",
+              content: ev.text,
+              ...(ev.turn_id ? { turnId: ev.turn_id } : {}),
+              turnPhase: "user",
+              turnSeq: 0,
+              deliveryStatus: "accepted",
+              createdAt: typeof ev.created_at_ms === "number"
+                && Number.isFinite(ev.created_at_ms)
+                ? ev.created_at_ms
+                : Date.now(),
+              ...(ev.media_urls?.length ? { media: ev.media_urls } : {}),
+              ...(ev.cli_apps?.length ? { cliApps: ev.cli_apps } : {}),
+              ...(ev.mcp_presets?.length ? { mcpPresets: ev.mcp_presets } : {}),
+              ...(ev.session_mentions?.length
+                ? { sessionMentions: ev.session_mentions }
+                : {}),
+            },
+          ];
+        });
+        if (ev.active_turn_id || ev.starts_turn) {
+          setIsStreaming(true);
+          if (typeof ev.started_at === "number") setRunStartedAt(ev.started_at);
+        }
+        return;
+      }
       const sideChannelEvent = isSideChannelEvent(ev);
       if (
         streamEndTimerRef.current !== null

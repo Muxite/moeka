@@ -80,6 +80,40 @@ def test_guard_allow_patterns_block_single_ampersand_chained_segment():
     assert "allowlist" in result.lower()
 
 
+def test_guard_allow_patterns_block_newline_chained_segment():
+    """A newline separates commands, so each line must match on its own."""
+    tool = ExecTool(allow_patterns=[r"echo\s+allowlisted\s*.*"])
+
+    result = tool._guard_command("echo allowlisted\ntouch /tmp/evil", "/tmp")
+    assert result is not None
+    assert "allowlist" in result.lower()
+
+
+def test_guard_newline_chained_segment_still_hits_deny_patterns():
+    """An allowlisted first line does not exempt a non-matching later line.
+
+    moeka: upstream's version of this test expects the second segment
+    ("rm -rf /") to be blocked by its *deny pattern* list -- but moeka
+    deliberately does not deny `rm -rf` by default (see
+    nanobot/agent/tools/shell.py's module docstring / CLAUDE.md). With
+    `allow_patterns` set, exec is in whitelist-only mode instead, so the
+    non-matching second segment is still correctly blocked, just by the
+    allowlist filter rather than a deny pattern.
+    """
+    tool = ExecTool(allow_patterns=[r"echo\s+allowlisted\s*.*"])
+
+    result = tool._guard_command("echo allowlisted\nrm -rf /", "/tmp")
+    assert result is not None
+    assert "allowlist filter" in result.lower()
+
+
+def test_split_shell_segments_keep_line_continuation_intact():
+    """A backslash-escaped newline continues one command, not a new segment."""
+    assert ExecTool._split_shell_segments("echo allowlisted \\\nextra") == [
+        "echo allowlisted \\\nextra"
+    ]
+
+
 def test_guard_allow_patterns_preserve_trailing_background_operator():
     tool = ExecTool(allow_patterns=[r"echo\s+allowlisted"])
 

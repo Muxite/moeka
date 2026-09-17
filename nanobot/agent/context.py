@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import platform
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
@@ -29,6 +30,10 @@ from nanobot.runtime_context import (
     RuntimeContextBlock,
     append_runtime_context,
 )
+from nanobot.security.workspace_access import WorkspaceScopeResolver
+from nanobot.session.keys import last_channel_from_metadata
+from nanobot.session.manager import Session
+from nanobot.session.summary import SessionSummary
 from nanobot.utils.helpers import (
     detect_image_mime,
     load_bundled_template,
@@ -55,6 +60,27 @@ async def handle_runtime_control(state: Any, msg: InboundMessage, tools: ToolReg
         await state.discard_session(msg.session_key)
         return True
     return await image_generation_tools.handle_runtime_control(state, msg, tools)
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedPromptContextResolver:
+    """Restore prompt routing context when no inbound message is available."""
+
+    workspace_scopes: WorkspaceScopeResolver
+    unified_session: bool = False
+
+    def __call__(self, session: Session) -> tuple[str | None, Path]:
+        channel = session.key.split(":", 1)[0] if ":" in session.key else None
+        if self.unified_session:
+            route = last_channel_from_metadata(session.metadata)
+            if route is not None:
+                channel = route[0]
+        scope = self.workspace_scopes.for_turn(
+            channel=channel,
+            message_metadata=None,
+            session_metadata=session.metadata,
+        )
+        return channel, scope.project_path
 
 
 class ContextBuilder:
@@ -96,10 +122,9 @@ class ContextBuilder:
     def build_system_prompt(
         self,
         *,
-        active_skill_names: Sequence[str] | None = None,
         channel: str | None = None,
         query: str | None = None,
-        session_summary: str | None = None,
+        session_summary: SessionSummary | None = None,
         workspace: Path | None = None,
         include_memory: bool = True,
         include_memory_recent_history: bool = True,
@@ -130,11 +155,6 @@ class ContextBuilder:
                 parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
         active_skills = self.skills.get_always_skills()
-        active_skills.extend(
-            name
-            for name in (active_skill_names or ())
-            if name not in active_skills
-        )
         if active_skills:
             active_content = self.skills.load_skills_for_context(active_skills)
             if active_content:
@@ -149,12 +169,17 @@ class ContextBuilder:
                 query=query,
                 session_key=session_key,
                 unified_session=unified_session,
+                session_summary=session_summary,
             )
             if history_section:
                 parts.append(history_section)
 
         if session_summary:
-            parts.append(f"[Archived Context Summary]\n\n{session_summary}")
+            parts.append(
+                "[Archived Context Summary]\n\n"
+                f"Previous conversation summary (last active {session_summary['last_active']}):\n"
+                f"{session_summary['text']}"
+            )
 
         return "\n\n---\n\n".join(parts)
 
@@ -164,6 +189,7 @@ class ContextBuilder:
         *,
         session_key: str | None = None,
         unified_session: bool = False,
+        session_summary: SessionSummary | None = None,
     ) -> str:
         """Build the Recent History section using hybrid recency + semantic retrieval."""
         vc = self.vec_config
@@ -212,11 +238,37 @@ class ContextBuilder:
             {e["cursor"]: e for e in (semantic_entries + recent)}.values(),
             key=lambda e: e["cursor"],
         )
+        combined = self._without_duplicate_session_summary(
+            combined,
+            session_key=session_key,
+            session_summary=session_summary,
+        )
+        if not combined:
+            return ""
         history_text = "\n".join(
             f"- [{e['timestamp']}] {e['content']}" for e in combined
         )
         history_text = truncate_text_to_tokens(history_text, self._MAX_HISTORY_TOKENS)
         return "# Recent History\n\n" + history_text
+
+    @staticmethod
+    def _without_duplicate_session_summary(
+        entries: list[dict[str, Any]],
+        *,
+        session_key: str | None,
+        session_summary: SessionSummary | None,
+    ) -> list[dict[str, Any]]:
+        """Drop the history entry already represented by the session summary."""
+        if not session_summary:
+            return entries
+        for index in range(len(entries) - 1, -1, -1):
+            entry = entries[index]
+            if (
+                entry.get("session_key") == session_key
+                and entry.get("content") == session_summary["text"]
+            ):
+                return [*entries[:index], *entries[index + 1:]]
+        return entries
 
     @staticmethod
     def _behavioral_guidelines() -> str:
@@ -360,7 +412,7 @@ class ContextBuilder:
         media: list[str] | None = None,
         channel: str | None = None,
         current_role: str = "user",
-        session_summary: str | None = None,
+        session_summary: SessionSummary | None = None,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
         workspace: Path | None = None,
         include_memory: bool = True,
@@ -370,16 +422,10 @@ class ContextBuilder:
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         root = workspace or self.workspace
-        active_skill_names = (
-            self.skills.get_explicitly_invoked_skills(current_message)
-            if current_role == "user"
-            else []
-        )
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
                 "content": self.build_system_prompt(
-                    active_skill_names=active_skill_names,
                     channel=channel,
                     query=current_message or None,
                     session_summary=session_summary,
@@ -424,7 +470,12 @@ class ContextBuilder:
     ) -> dict[str, Any]:
         """Build only the fresh turn message without merging it into history."""
         content = self.build_user_content(current_message, image_paths=media)
-        blocks = list(runtime_context_blocks or ()) if current_role == "user" else []
+        blocks: list[RuntimeContextBlock] = []
+        if current_role == "user":
+            blocks.extend(runtime_context_blocks or ())
+            skill_context = self.skills.build_explicit_skill_runtime_context(current_message)
+            if skill_context is not None and skill_context not in blocks:
+                blocks.append(skill_context)
         merged, runtime_context_meta = append_runtime_context(content, blocks)
         current: dict[str, Any] = {"role": current_role, "content": merged}
         if current_role == "user" and runtime_context_meta is not None:

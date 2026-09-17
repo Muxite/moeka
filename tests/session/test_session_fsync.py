@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
+from unittest.mock import call, patch
 
 import pytest
 
@@ -53,6 +55,63 @@ class TestSaveDurability:
         manager.save(session)
         wal = Path(str(get_store(manager).db_path) + "-wal")
         assert wal.exists() and os.path.getsize(wal) > 0
+
+
+class TestJsonlStoreDirectoryFsync:
+    """upstream's manager.py (taken wholesale) still fsyncs the sessions
+    directory itself on a durable save through the always-real, internal
+    ``JsonlSessionStore``; moeka's live path never persists through it (it
+    passes its own SqliteSessionStore), but the fallback behavior below is
+    still real, reachable code -- exercise it against a bare, jsonl-backed
+    SessionManager rather than the SQLite fixture above.
+    """
+
+    @pytest.fixture
+    def jsonl_manager(self, sessions_dir: Path) -> SessionManager:
+        return SessionManager(workspace=sessions_dir)
+
+    def test_save_ignores_unsupported_directory_fsync(
+        self, jsonl_manager: SessionManager
+    ) -> None:
+        """Shared filesystems may open directories but reject directory fsync."""
+        session = jsonl_manager.get_or_create("test:unsupported-directory-fsync")
+        session.add_message("user", "hello")
+        directory_fd = 987654
+        with (
+            jsonl_manager.locked_session_files(),
+            patch("nanobot.session.manager.os.open", return_value=directory_fd) as open_dir,
+            patch(
+                "nanobot.session.manager.os.fsync",
+                side_effect=[None, OSError(errno.EINVAL, "Invalid argument")],
+            ),
+            patch("nanobot.session.manager.os.close") as close_dir,
+        ):
+            jsonl_manager.save(session, fsync=True)
+
+        assert jsonl_manager._get_session_path(session.key).exists()
+        open_dir.assert_called_once_with(str(jsonl_manager.sessions_dir), os.O_RDONLY)
+        assert close_dir.call_args_list.count(call(directory_fd)) == 1
+
+    def test_save_propagates_other_directory_fsync_errors(
+        self, jsonl_manager: SessionManager
+    ) -> None:
+        """Only EINVAL is an expected unsupported-directory-fsync result."""
+        session = jsonl_manager.get_or_create("test:directory-fsync-io-error")
+        directory_fd = 987654
+        with (
+            jsonl_manager.locked_session_files(),
+            patch("nanobot.session.manager.os.open", return_value=directory_fd),
+            patch(
+                "nanobot.session.manager.os.fsync",
+                side_effect=[None, OSError(errno.EIO, "I/O error")],
+            ),
+            patch("nanobot.session.manager.os.close") as close_dir,
+            pytest.raises(OSError, match="I/O error"),
+        ):
+            jsonl_manager.save(session, fsync=True)
+
+        assert close_dir.call_args_list.count(call(directory_fd)) == 1
+
 
 class TestFlushAll:
     """Verify flush_all re-saves all cached sessions durably."""

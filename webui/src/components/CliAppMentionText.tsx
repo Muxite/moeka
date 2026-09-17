@@ -7,6 +7,7 @@ import {
 } from "@/components/InlineTokenHighlight";
 import { useLogoFallback } from "@/hooks/useLogoFallback";
 import { logoFallbackUrls } from "@/lib/provider-brand";
+import { sessionHandleColor } from "@/lib/session-handle";
 import type { CliAppInfo, McpPresetInfo, SessionMention } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -75,9 +76,9 @@ export function splitCapabilityMentionSegments(
     const prefix = match[1] ?? "";
     const name = match[2] ?? "";
     const key = name.toLowerCase();
-    const app = cliAppsByName.get(key);
-    const preset = app ? null : mcpPresetsByName.get(key);
-    const session = app || preset ? null : sessionsByName.get(key);
+    const session = sessionsByName.get(key);
+    const app = session ? null : cliAppsByName.get(key);
+    const preset = session || app ? null : mcpPresetsByName.get(key);
     if (!app && !preset && !session) continue;
 
     const mentionStart = match.index + prefix.length;
@@ -146,11 +147,14 @@ export function SessionMentionToken({
   variant: "composer" | "message";
 }) {
   const testIdPrefix = variant === "composer" ? "composer" : "message";
+  const color = mention.id
+    ? sessionHandleColor(mention.id)
+    : INLINE_TOKEN_HIGHLIGHT_COLOR;
   const token = (
     <InlineTokenHighlight
       testId={`${testIdPrefix}-session-mention-${mention.name}`}
       title={`Session: ${mention.title || mention.name}`}
-      color={INLINE_TOKEN_HIGHLIGHT_COLOR}
+      color={color}
       className={variant === "composer" ? "font-normal" : undefined}
     >
       {label}
@@ -161,7 +165,7 @@ export function SessionMentionToken({
     <a
       href={`#/chat/${encodeURIComponent(mention.session_key)}`}
       className="rounded-sm underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-      style={{ textDecorationColor: INLINE_TOKEN_HIGHLIGHT_COLOR }}
+      style={{ textDecorationColor: color }}
     >
       {token}
     </a>
@@ -203,7 +207,7 @@ export function CliAppMentionToken({
           <span
             data-testid={`${testIdPrefix}-cli-mention-logo-${app.name}`}
             className={cn(
-              "absolute left-1/2 top-1/2 grid place-items-center overflow-hidden rounded-[3px]",
+              "absolute left-1/2 top-1/2 grid place-items-center overflow-hidden rounded-mark",
               "-translate-x-1/2 -translate-y-1/2",
               isHero ? "h-[0.74em] w-[0.74em]" : "h-[0.72em] w-[0.72em]",
             )}
@@ -260,7 +264,7 @@ export function McpPresetMentionToken({
           <span
             data-testid={`${testIdPrefix}-mcp-mention-logo-${preset.name}`}
             className={cn(
-              "absolute left-1/2 top-1/2 grid place-items-center overflow-hidden rounded-[3px]",
+              "absolute left-1/2 top-1/2 grid place-items-center overflow-hidden rounded-mark",
               "-translate-x-1/2 -translate-y-1/2",
               isHero ? "h-[0.74em] w-[0.74em]" : "h-[0.72em] w-[0.72em]",
             )}

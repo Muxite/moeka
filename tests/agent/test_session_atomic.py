@@ -5,6 +5,9 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+from filelock import Timeout
+
 from nanobot.providers.base import ProviderConversationState
 from nanobot.session.manager import Session, SessionManager
 from nanobot.session.sqlite_store import SqliteSessionStore
@@ -60,6 +63,73 @@ class TestSqliteRoundtrip:
         assert len(loaded.messages) == 1
         assert loaded.messages[0]["content"] == "two"
 
+    # These exercise the internal, always-constructed ``JsonlSessionStore``
+    # mechanics inside upstream's (unforked, byte-identical) manager.py
+    # directly -- moeka's live gateway path never persists through it (it
+    # passes its own ``store=SqliteSessionStore(...)``), but the jsonl store
+    # is still real, reachable code (every ``SessionManager`` builds one
+    # unconditionally for path/locking bookkeeping) so its own correctness
+    # still matters.
+    def test_unique_tmp_file_cleaned_up_on_write_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        mgr = SessionManager(tmp_path)
+        session = Session(key="test:fail")
+        path = mgr._get_session_path("test:fail")
+        stale_shared_tmp = path.with_suffix(".jsonl.tmp")
+        unique_tmp = path.with_name(f".{path.name}.save-failure.tmp")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stale_shared_tmp.write_text("stale", encoding="utf-8")
+        monkeypatch.setattr(
+            "nanobot.session.manager.secrets.token_hex",
+            lambda _length: "save-failure",
+        )
+
+        original_dumps = json.dumps
+
+        def failing_dumps(obj, **kwargs):
+            if isinstance(obj, dict) and obj.get("role") == "assistant":
+                raise OSError("simulated disk full")
+            return original_dumps(obj, **kwargs)
+
+        session = Session(key="test:fail")
+        session.messages = [
+            {"role": "user", "content": "ok"},
+            {"role": "assistant", "content": "will fail"},
+        ]
+
+        import unittest.mock
+        with (
+            unittest.mock.patch(
+                "nanobot.session.manager.json.dumps",
+                side_effect=failing_dumps,
+            ),
+            pytest.raises(OSError, match="simulated disk full"),
+        ):
+            mgr.save(session)
+
+        assert not unique_tmp.exists()
+        assert stale_shared_tmp.read_text(encoding="utf-8") == "stale"
+
+    def test_overwrite_preserves_latest_data(self, tmp_path: Path):
+        mgr = SessionManager(tmp_path)
+        session = Session(key="test:overwrite")
+
+        session.add_message("user", "first")
+        mgr.save(session)
+
+        session.add_message("user", "second")
+        mgr.save(session)
+
+        mgr.invalidate("test:overwrite")
+        loaded = mgr.get_or_create("test:overwrite")
+        assert len(loaded.messages) == 2
+        assert loaded.messages[0]["content"] == "first"
+        assert loaded.messages[1]["content"] == "second"
+
     def test_unicode_content_roundtrip(self, tmp_path: Path):
         mgr = _manager(tmp_path)
         session = mgr.get_or_create("test:uni")
@@ -105,6 +175,21 @@ class TestSqliteRoundtrip:
         assert loaded is not None
         # offset 5 exceeds the single loaded message; reset to avoid hiding history.
         assert loaded.last_consolidated == 0
+
+    def test_managers_for_same_directory_coordinate_saves(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        sessions_root = tmp_path / "runtime"
+        owner = SessionManager(workspace, sessions_root=sessions_root)
+        peer = SessionManager(workspace, sessions_root=sessions_root)
+        assert owner.sessions_dir == peer.sessions_dir
+
+        session = Session(key="test:peer-manager")
+        peer._jsonl_store._session_files_lock.timeout = 0
+        with owner.locked_session_files(), pytest.raises(Timeout):
+            peer.save(session)
+
+        peer.save(session)
+        assert peer._get_session_path(session.key).is_file()
 
     def test_provider_state_round_trips_in_private_record_only(self, tmp_path: Path):
         mgr = _manager(tmp_path)

@@ -293,6 +293,163 @@ def test_webui_session_list_rescans_when_transcript_changes(
     assert rows[0]["updated_at"].startswith("2026-06-15T12:30:00")
 
 
+def test_webui_session_list_recovers_transcript_without_canonical_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WebUI transcript with no matching sessions.db row (e.g. a crash
+    between the first WebUI turn and the agent's own session save) still
+    shows up in the sidebar."""
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
+    key = "websocket:restored"
+    transcript = webui_dir / f"{SessionManager.safe_key(key)}.jsonl"
+    transcript.write_text(
+        '{"event":"user","chat_id":"restored","text":"original question",'
+        '"created_at_ms":1785502800000}\n'
+        '{"event":"message","chat_id":"restored","text":"original answer",'
+        '"created_at_ms":1785502801000}\n'
+        '{"event":"turn_end","chat_id":"restored","created_at_ms":1785502802000}\n',
+        encoding="utf-8",
+    )
+    manager = _manager(tmp_path / "workspace")
+
+    [row] = list_webui_sessions(manager)
+
+    assert row["key"] == key
+    assert row["preview"] == "original question"
+    assert row["created_at"] == datetime.fromtimestamp(1785502800).isoformat()
+    assert manager.list_sessions() == []
+
+
+def test_webui_session_list_recovers_colon_chat_id_from_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
+    key = "websocket:scope:child"
+    transcript = webui_dir / f"{SessionManager.safe_key(key)}.jsonl"
+    transcript.write_text(
+        '{"event":"user","chat_id":"scope:child","text":"scoped history"}\n',
+        encoding="utf-8",
+    )
+
+    [row] = list_webui_sessions(_manager(tmp_path / "workspace"))
+
+    assert row["key"] == key
+    assert row["preview"] == "scoped history"
+
+
+def test_webui_session_list_tolerates_invalid_transcript_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
+    key = "websocket:bad-time"
+    transcript = webui_dir / f"{SessionManager.safe_key(key)}.jsonl"
+    transcript.write_text(
+        '{"event":"user","chat_id":"bad-time","text":"still visible",'
+        '"created_at_ms":1e100}\n',
+        encoding="utf-8",
+    )
+
+    [row] = list_webui_sessions(_manager(tmp_path / "workspace"))
+
+    assert row["preview"] == "still visible"
+    datetime.fromisoformat(row["created_at"])
+
+
+def test_webui_session_list_ignores_invalid_transcript_chat_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
+    transcript = webui_dir / "websocket_.._outside.jsonl"
+    transcript.write_text(
+        '{"event":"user","chat_id":"../outside","text":"do not expose"}\n',
+        encoding="utf-8",
+    )
+
+    assert list_webui_sessions(_manager(tmp_path / "workspace")) == []
+
+
+def test_webui_session_list_recovers_segment_only_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
+    key = "websocket:segmented"
+    segments = webui_dir / f"{SessionManager.safe_key(key)}.segments"
+    segments.mkdir()
+    (segments / "000001.jsonl").write_text(
+        '{"event":"user","chat_id":"segmented","text":"older segment"}\n'
+        '{"event":"turn_end","chat_id":"segmented"}\n',
+        encoding="utf-8",
+    )
+
+    [row] = list_webui_sessions(_manager(tmp_path / "workspace"))
+
+    assert row["key"] == key
+    assert row["preview"] == "older segment"
+
+
+def test_webui_session_list_prefers_canonical_metadata_without_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that has both a canonical sessions.db row *and* a WebUI
+    transcript must be surfaced once, from the canonical row."""
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
+    key = "websocket:canonical"
+    (webui_dir / f"{SessionManager.safe_key(key)}.jsonl").write_text(
+        '{"event":"user","chat_id":"canonical","text":"display copy"}\n',
+        encoding="utf-8",
+    )
+    manager = _manager(tmp_path / "workspace")
+    session = manager.get_or_create(key)
+    session.metadata["title"] = "Canonical title"
+    session.add_message("user", "canonical preview")
+    manager.save(session)
+
+    rows = list_webui_sessions(manager)
+
+    assert len(rows) == 1
+    assert rows[0]["key"] == key
+    assert rows[0]["preview"] == "canonical preview"
+
+
+def test_webui_session_list_drops_deleted_transcript_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(session_list_index, "get_webui_dir", lambda: webui_dir)
+    key = "websocket:deleted-transcript"
+    transcript = webui_dir / f"{SessionManager.safe_key(key)}.jsonl"
+    transcript.write_text(
+        '{"event":"user","chat_id":"deleted-transcript","text":"delete me"}\n',
+        encoding="utf-8",
+    )
+    manager = _manager(tmp_path / "workspace")
+    assert list_webui_sessions(manager)[0]["key"] == key
+
+    transcript.unlink()
+
+    assert list_webui_sessions(manager) == []
+
+
 def test_webui_session_list_sorts_by_message_activity_not_maintenance_timestamp(
     tmp_path: Path,
 ) -> None:
