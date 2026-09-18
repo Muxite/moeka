@@ -186,6 +186,30 @@ ls -ld ~/.nanobot-sessions/fc4b6ee5fa04bad9e8978d18e7237043   # confirm drwx----
 touches `~/.nanobot-sessions` on your behalf; the person running this
 runbook must run it by hand.)
 
+### 5b. Reinstall dependencies into the LIVE checkout's venv
+
+**This step was missing from the first version of this runbook and the
+2026-09-18 deploy crash-looped because of it.** The service runs
+`/home/muk/projects/moeka/bin/moeka.sh run`, which uses *that checkout's*
+`.venv` -- not this worktree's. Moving the code 770 commits forward brings
+new dependencies (`rapidfuzz` was the one that bit) that the live venv does
+not have, so the gateway dies at import with `ModuleNotFoundError` and
+`Restart=on-failure` turns it into a crash loop.
+
+**Do not trust `./bin/moeka.sh install` for this.** It printed
+`install complete` while installing nothing (its own output said
+`moeka : unknown`). Use uv directly and verify by importing:
+
+```bash
+cd /home/muk/projects/moeka
+uv sync --locked
+.venv/bin/python -c "import rapidfuzz, nanobot.cli.commands; print('imports OK')"
+.venv/bin/nanobot sessions --help | grep migrate   # deployed code has the new CLI
+```
+
+Expect `uv sync` to *remove* stale packages as well as add new ones; a long
+removal list means the venv had drifted, which is normal here.
+
 ### 6. Verify before starting the service
 
 ```bash
