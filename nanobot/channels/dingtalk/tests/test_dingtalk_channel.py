@@ -26,6 +26,7 @@ from nanobot.channels.dingtalk.runtime import (
     DingTalkConfig,
     NanobotDingTalkHandler,
 )
+from tests._capabilities import DNS_EGRESS_SKIP_REASON, has_dns_egress
 
 
 class _FakeResponse:
@@ -871,6 +872,7 @@ async def test_read_media_bytes_rejects_private_http_target_before_fetch() -> No
     assert channel._http.calls == []
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_read_media_bytes_rejects_private_redirect_result() -> None:
     """A public-looking media URL must not be accepted after redirecting private."""
@@ -919,6 +921,7 @@ async def test_read_media_bytes_rejects_oversized_remote_response(monkeypatch) -
     assert (data, filename, content_type) == (None, None, None)
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_read_media_bytes_does_not_follow_remote_redirects_by_default() -> None:
     """Redirects are refused by default instead of followed into internal networks."""
@@ -942,6 +945,7 @@ async def test_read_media_bytes_does_not_follow_remote_redirects_by_default() ->
     assert channel._http.calls[0]["kwargs"]["follow_redirects"] is False
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_read_media_bytes_follows_safe_redirect_when_explicitly_enabled() -> None:
     """Operators can opt in to public redirects without enabling private redirects."""
@@ -980,6 +984,7 @@ async def test_read_media_bytes_follows_safe_redirect_when_explicitly_enabled() 
     assert all(call["kwargs"]["follow_redirects"] is False for call in channel._http.calls)
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_read_media_bytes_blocks_cross_host_redirect_without_allowlist() -> None:
     """Redirect opt-in should not allow arbitrary cross-host redirects by default."""
@@ -1014,6 +1019,7 @@ async def test_read_media_bytes_blocks_cross_host_redirect_without_allowlist() -
     assert [call["url"] for call in channel._http.calls] == ["https://example.com/redirect.txt"]
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_read_media_bytes_allows_cross_host_redirect_when_allowlisted() -> None:
     """Operators can explicitly allow a known CDN/download host for redirects."""
@@ -1052,6 +1058,7 @@ async def test_read_media_bytes_allows_cross_host_redirect_when_allowlisted() ->
     ]
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_read_media_bytes_blocks_private_redirect_even_when_redirects_enabled() -> None:
     """Redirect opt-in must still validate each hop before fetching it."""
@@ -1258,6 +1265,7 @@ async def test_send_media_ref_short_circuits_on_transport_error() -> None:
     assert channel._http.calls[0]["method"] == "POST"
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_send_media_ref_short_circuits_on_download_transport_error() -> None:
     """When the image URL send returns an API error (False) but the download
@@ -1291,6 +1299,7 @@ async def test_send_media_ref_short_circuits_on_download_transport_error() -> No
     assert channel._http.calls[1]["method"] == "GET"
 
 
+@pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
 @pytest.mark.asyncio
 async def test_send_media_ref_short_circuits_on_upload_transport_error() -> None:
     """When download succeeds but upload hits a transport error, must re-raise."""

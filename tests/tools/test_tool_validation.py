@@ -19,6 +19,7 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool, ExecToolConfig
 from nanobot.security.network import configure_ssrf_whitelist
+from tests._capabilities import DNS_EGRESS_SKIP_REASON, has_dns_egress
 
 
 class SampleTool(Tool):
@@ -248,12 +249,24 @@ def test_exec_extract_absolute_paths_ignores_urls() -> None:
     assert paths == ["/dev/null"]
 
 
+_needs_dns_egress = pytest.mark.skipif(not has_dns_egress(), reason=DNS_EGRESS_SKIP_REASON)
+
+
 @pytest.mark.parametrize(
     "command",
     [
+        # This one doesn't require a successful resolution to pass the
+        # guard (see _guard_command's trust_remote_dns handling) -- runs
+        # unconditionally.
         'curl -s -o /dev/null -w "%{http_code}" https://www.google.com',
-        'wget -q -O - http://example.com 2>&1 | head -c 100',
-        'python3 -c "import urllib.request; print(urllib.request.urlopen(\'http://example.com\').read()[:100])"',
+        pytest.param(
+            'wget -q -O - http://example.com 2>&1 | head -c 100',
+            marks=_needs_dns_egress,
+        ),
+        pytest.param(
+            'python3 -c "import urllib.request; print(urllib.request.urlopen(\'http://example.com\').read()[:100])"',
+            marks=_needs_dns_egress,
+        ),
     ],
 )
 def test_exec_guard_allows_public_urls(tmp_path, command: str) -> None:

@@ -1205,6 +1205,80 @@ async def test_save_store_failure_retries_without_replaying_job(tmp_path, monkey
     assert persisted.state.next_run_at_ms > persisted.state.last_run_at_ms
 
 
+async def test_idle_tick_does_not_rewrite_the_store(tmp_path, monkeypatch):
+    """A tick with no due jobs must not touch jobs.json at all.
+
+    Regression test for 558fe35e ("only persist when a job ran"), dropped
+    silently during the 2026-09 upstream sync (batch 3) and restored in the
+    post-sync fixes pass -- see .agent/upstream-sync-notes.md. An
+    unconditional save on every tick rewrites jobs.json every
+    ``max_sleep_ms`` (default 5 minutes) even when nothing ran, which is
+    exactly the mechanism that clobbers hand edits landing in the narrow
+    window where ``_load_store`` skips its reload.
+    """
+    store_path = tmp_path / "cron" / "jobs.json"
+    service = CronService(store_path, on_job=None)
+    service._running = True
+    service._load_store()
+
+    # A job that is enabled but not due yet -- next_run_at_ms is in the future.
+    job = service.add_job(
+        name="not-due-yet",
+        schedule=CronSchedule(kind="every", every_ms=3_600_000),
+        message="hello",
+        **_bound_chat(),
+    )
+    job.state.next_run_at_ms = int(time.time() * 1000) + 3_600_000
+    service._save_store()
+    assert store_path.exists()
+    mtime_before = store_path.stat().st_mtime_ns
+
+    save_calls: list[str] = []
+    real_save_store = service._save_store
+
+    def spy_save_store() -> None:
+        save_calls.append("save")
+        real_save_store()
+
+    monkeypatch.setattr(service, "_save_store", spy_save_store)
+
+    await service._on_timer()
+
+    assert save_calls == [], "no job ran this tick -- _save_store must not be called"
+    assert store_path.stat().st_mtime_ns == mtime_before, "jobs.json must be byte-for-byte untouched"
+
+
+async def test_tick_with_a_due_job_still_saves(tmp_path):
+    """The counterpart to the idle-tick test above: a tick that actually runs
+    a job must still persist the result -- the fix must not go too far and
+    stop saving altogether."""
+    store_path = tmp_path / "cron" / "jobs.json"
+    calls: list[str] = []
+
+    async def on_job(job):
+        calls.append(job.id)
+
+    service = CronService(store_path, on_job=on_job)
+    service._running = True
+    service._load_store()
+
+    job = service.add_job(
+        name="due-now",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+        **_bound_chat(),
+    )
+    job.state.next_run_at_ms = max(1, int(time.time() * 1000) - 1_000)
+    service._save_store()
+
+    await service._on_timer()
+
+    assert calls == [job.id]
+    persisted = CronService(store_path).get_job(job.id)
+    assert persisted is not None
+    assert persisted.state.last_run_at_ms is not None
+
+
 @pytest.mark.asyncio
 async def test_timer_execution_is_not_rolled_back_by_list_jobs_reload(tmp_path):
     """list_jobs() during _on_timer should not replace the active store and re-run the same due job."""

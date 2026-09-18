@@ -21,6 +21,7 @@ from nanobot.webui.mcp_presets_api import (
     mcp_presets_test_action,
     normalize_mcp_preset_mentions,
 )
+from tests._capabilities import NPX_SKIP_REASON, has_npx
 
 
 def _use_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -434,6 +435,7 @@ def test_test_mcp_preset_reports_missing_dependency(
     assert "npx" in payload["last_action"]["message"]
 
 
+@pytest.mark.skipif(not has_npx(), reason=NPX_SKIP_REASON)
 def test_test_mcp_preset_connects_and_reports_tools(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -466,6 +468,7 @@ def test_test_mcp_preset_connects_and_reports_tools(
     assert payload["last_action"]["tool_names"] == ["mcp_playwright_browser_navigate"]
 
 
+@pytest.mark.skipif(not has_npx(), reason=NPX_SKIP_REASON)
 def test_test_mcp_preset_inspects_tools_outside_the_enabled_allowlist(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

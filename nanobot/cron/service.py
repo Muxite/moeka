@@ -623,6 +623,7 @@ class CronService:
                 if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
             ]
 
+            executed_any = False
             for candidate in due_jobs:
                 # Earlier callbacks may delete, disable, or reschedule later jobs.
                 job = self.get_job(candidate.id)
@@ -634,8 +635,20 @@ class CronService:
                 ):
                     continue
                 await self._execute_job(job)
+                executed_any = True
 
-            self._save_store()
+            # moeka: only persist when a job actually ran (restored post-batch-3;
+            # see 558fe35e and .agent/upstream-sync-notes.md's "Post-sync fixes"
+            # section). An unconditional save here rewrites jobs.json on every
+            # tick -- every max_sleep_ms (default 5 min) -- even when nothing
+            # changed, which is what clobbered hand edits landing in the window
+            # where _load_store skips its reload. Checking actual executions,
+            # not just whether any candidate was initially due, also covers the
+            # case where every due candidate got skipped in the re-fetch loop
+            # above (deleted/disabled/rescheduled by an earlier job in the same
+            # tick) -- due_jobs alone being non-empty would still count as "ran".
+            if executed_any:
+                self._save_store()
         except Exception:
             # A load/persist failure must not kill the scheduler: keep the
             # in-memory store and retry on the next tick.  This mirrors the
