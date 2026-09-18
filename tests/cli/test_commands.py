@@ -2115,8 +2115,7 @@ def test_heartbeat_empty_response_is_not_evaluated(
     seen: dict[str, object] = {}
 
     class _FakeSession:
-        def retain_recent_legal_suffix(self, limit: int) -> None:
-            seen["retained_limit"] = limit
+        pass
 
     class _FakeSessionManager:
         def __init__(self, _workspace: Path, **_kwargs) -> None:

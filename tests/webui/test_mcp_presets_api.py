@@ -21,7 +21,6 @@ from nanobot.webui.mcp_presets_api import (
     mcp_presets_test_action,
     normalize_mcp_preset_mentions,
 )
-from tests._capabilities import NPX_SKIP_REASON, has_npx
 
 
 def _use_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,13 +434,21 @@ def test_test_mcp_preset_reports_missing_dependency(
     assert "npx" in payload["last_action"]["message"]
 
 
-@pytest.mark.skipif(not has_npx(), reason=NPX_SKIP_REASON)
 def test_test_mcp_preset_connects_and_reports_tools(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _use_config(tmp_path, monkeypatch)
     mcp_presets_action("enable", {"name": ["playwright"]})
+    # The real dependency this test needs is npx on PATH -- but the only
+    # thing that actually checks for it is mcp_presets_test_action()'s own
+    # _command_available(cfg.command) precondition, which runs *before*
+    # connect_mcp_servers (mocked below) is ever reached. Simulate npx being
+    # present the same way test_test_mcp_preset_reports_missing_dependency
+    # above simulates its absence, so this test exercises the real
+    # connect-and-report path unconditionally instead of skipping wherever
+    # npx happens to be missing.
+    monkeypatch.setattr("nanobot.webui.mcp_presets_api.shutil.which", lambda _command: "/usr/bin/npx")
 
     class FakeStack:
         async def aclose(self) -> None:
@@ -468,13 +475,13 @@ def test_test_mcp_preset_connects_and_reports_tools(
     assert payload["last_action"]["tool_names"] == ["mcp_playwright_browser_navigate"]
 
 
-@pytest.mark.skipif(not has_npx(), reason=NPX_SKIP_REASON)
 def test_test_mcp_preset_inspects_tools_outside_the_enabled_allowlist(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _use_config(tmp_path, monkeypatch)
     mcp_presets_action("enable", {"name": ["playwright"]})
+    monkeypatch.setattr("nanobot.webui.mcp_presets_api.shutil.which", lambda _command: "/usr/bin/npx")
     config = load_config()
     config.tools.mcp_servers["playwright"].enabled_tools = [
         "mcp_playwright_browser_navigate",

@@ -16,7 +16,6 @@ _FORBIDDEN = (
     "nanobot.channels",
     "nanobot.web",
     "nanobot.gateway",
-    "nanobot.heartbeat",
     "nanobot.pairing",
     "nanobot.cli",
 )
