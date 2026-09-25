@@ -17,7 +17,6 @@ from nanobot.agent.tools import image_generation as image_generation_tools
 from nanobot.agent.tools import mcp as mcp_tools
 from nanobot.agent.tools import sessions as session_tools
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.apps.cli import utils as cli_app_utils
 from nanobot.bus.events import (
     INBOUND_META_RUNTIME_CONTROL,
     RUNTIME_CONTROL_SESSION_DISCARD,
@@ -47,8 +46,7 @@ if TYPE_CHECKING:
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return persisted kwargs for turn-attached capabilities."""
     return (
-        cli_app_utils.session_extra(metadata)
-        | mcp_tools.session_extra(metadata)
+        mcp_tools.session_extra(metadata)
         | session_tools.session_extra(metadata)
     )
 

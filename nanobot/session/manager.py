@@ -24,7 +24,6 @@ from loguru import logger
 from nanobot.config.paths import get_legacy_sessions_dir, get_runtime_subdir
 from nanobot.providers.base import ProviderConversationState
 from nanobot.runtime_context import (
-    RUNTIME_CONTEXT_HISTORY_META,
     public_history_message,
 )
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META, is_hidden_history_message
@@ -385,10 +384,6 @@ class Session:
         for message in sliced:
             if message.get("_command"):
                 continue
-            has_persisted_runtime_context = isinstance(
-                message.get(RUNTIME_CONTEXT_HISTORY_META),
-                dict,
-            )
             if not include_runtime_context:
                 message = public_history_message(message)
             content = message.get("content", "")
@@ -405,33 +400,6 @@ class Session:
                 content,
                 message.get("media"),
             )
-            cli_apps = cast(object, message.get("cli_apps"))
-            if (
-                include_runtime_context
-                and not has_persisted_runtime_context
-                and role == "user"
-                and isinstance(cli_apps, list)
-                and cli_apps
-                and isinstance(content, str)
-            ):
-                cli_lines: list[str] = []
-                for item in cast(list[object], cli_apps[:8]):
-                    if not isinstance(item, dict):
-                        continue
-                    item_data = cast(dict[object, object], item)
-                    name = str(item_data.get("name") or "").strip().lower()
-                    if not name:
-                        continue
-                    entry_point = (
-                        str(item_data.get("entry_point") or "unknown").strip() or "unknown"
-                    )
-                    cli_lines.append(
-                        f"[CLI App Attachment: @{name}; tool=run_cli_app; entry_point={entry_point}; "
-                        f"skill=skills/cli-app-{name}/SKILL.md]"
-                    )
-                if cli_lines:
-                    breadcrumbs = "\n".join(cli_lines)
-                    content = f"{content}\n{breadcrumbs}" if content else breadcrumbs
             if role == "assistant" and isinstance(content, str) and not content.strip():
                 if not any(key in message for key in ("tool_calls", "reasoning_content", "thinking_blocks")):
                     continue

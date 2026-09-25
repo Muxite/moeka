@@ -408,80 +408,6 @@ def test_get_history_synthesizes_breadcrumb_for_image_only_turn():
     assert history[0] == {"role": "user", "content": "[image: /m/pic.png]"}
 
 
-def test_get_history_synthesizes_cli_app_attachment_breadcrumb():
-    session = Session(key="test:cli-app")
-    session.messages.append(
-        {
-            "role": "user",
-            "content": "please use @drawio",
-            "cli_apps": [{
-                "name": "drawio",
-                "entry_point": "cli-anything-drawio",
-            }],
-        }
-    )
-
-    history = session.get_history(max_messages=500)
-
-    assert history == [{
-        "role": "user",
-        "content": (
-            "please use @drawio\n"
-            "[CLI App Attachment: @drawio; tool=run_cli_app; "
-            "entry_point=cli-anything-drawio; skill=skills/cli-app-drawio/SKILL.md]"
-        ),
-    }]
-
-
-def test_get_history_does_not_duplicate_persisted_cli_app_runtime_context():
-    content, marker = append_runtime_context(
-        "please use @drawio",
-        [RuntimeContextBlock(
-            source="cli_apps",
-            content="[Runtime Context]\nCLI App Attachment: @drawio",
-        )],
-    )
-    session = Session(key="test:cli-app-persisted")
-    session.messages.append({
-        "role": "user",
-        "content": content,
-        "cli_apps": [{
-            "name": "drawio",
-            "entry_point": "cli-anything-drawio",
-        }],
-        RUNTIME_CONTEXT_HISTORY_META: marker,
-    })
-
-    model_history = session.get_history(max_messages=500)
-    public_history = session.get_history(
-        max_messages=500,
-        include_runtime_context=False,
-    )
-
-    assert model_history == [{"role": "user", "content": content}]
-    assert model_history[0]["content"].count("CLI App Attachment: @drawio") == 1
-    assert public_history == [{"role": "user", "content": "please use @drawio"}]
-
-
-def test_public_history_omits_cli_app_breadcrumb():
-    session = Session(key="test:legacy-capabilities")
-    session.messages.append({
-        "role": "user",
-        "content": "please use the attachments",
-        "cli_apps": [{"name": "drawio", "entry_point": "cli-anything-drawio"}],
-    })
-
-    public_history = session.get_history(
-        max_messages=500,
-        include_runtime_context=False,
-    )
-
-    assert public_history == [{
-        "role": "user",
-        "content": "please use the attachments",
-    }]
-
-
 def test_fork_session_before_user_index_copies_only_prefix(tmp_path):
     manager = SessionManager(tmp_path)
     source = manager.get_or_create("websocket:source")
@@ -517,13 +443,11 @@ def test_fork_session_drops_source_runtime_context(tmp_path):
         "round1",
         [
             RuntimeContextBlock(source="goal", content="host-only goal guidance"),
-            RuntimeContextBlock(source="cli_apps", content="attached CLI App context"),
         ],
     )
     source.add_message(
         "user",
         content,
-        cli_apps=[{"name": "drawio", "entry_point": "cli-anything-drawio"}],
         **{RUNTIME_CONTEXT_HISTORY_META: marker},
     )
     source.add_message("assistant", "answer1")
@@ -540,7 +464,6 @@ def test_fork_session_drops_source_runtime_context(tmp_path):
     assert RUNTIME_CONTEXT_HISTORY_META not in forked.messages[0]
     model_content = forked.get_history()[0]["content"]
     assert model_content.startswith("round1")
-    assert "CLI App Attachment: @drawio" in model_content
     assert "host-only goal guidance" not in model_content
 
 

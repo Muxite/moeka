@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -34,7 +33,6 @@ EXPECTED_SLIM_TOOLS = [
     "list_sessions",
     "read_file",
     "read_session",
-    "run_cli_app",
     "search_sessions",
     "send_session_message",
     "spawn",
@@ -61,10 +59,6 @@ def slim_tool_ctx(tmp_path) -> ToolContext:
         sessions=SessionManager(workspace, sessions_root=tmp_path / "runtime"),
         timezone="UTC",
     )
-    # Mirror the legacy gateway wiring, which handed the loop a live cron
-    # service whenever ToolContext still accepted one.
-    if "cron_service" in {f.name for f in fields(ToolContext)}:
-        kwargs["cron_service"] = MagicMock()
     return ToolContext(**kwargs)
 
 
