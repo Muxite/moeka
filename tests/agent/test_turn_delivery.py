@@ -7,7 +7,9 @@ from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import TurnCompleted
 from nanobot.events import RetryStatusEvent
 from nanobot.providers.base import LLMProvider, ProviderCallContext
-from nanobot.webui.metadata import WEBUI_TURN_METADATA_KEY
+
+# Arbitrary per-turn metadata key; turn delivery must pass it through untouched.
+_TURN_METADATA_KEY = "webui_turn_id"
 
 
 @pytest.mark.parametrize("unified", [False, True])
@@ -92,7 +94,7 @@ async def test_retry_event_uses_scoped_channel_delivery() -> None:
         sender_id="user",
         chat_id="chat-a",
         content="hello",
-        metadata={WEBUI_TURN_METADATA_KEY: "turn-1"},
+        metadata={_TURN_METADATA_KEY: "turn-1"},
     )
     delivery = TurnDeliveryFactory(bus).create(msg, msg.session_key)
 
@@ -109,7 +111,7 @@ async def test_retry_event_uses_scoped_channel_delivery() -> None:
     assert isinstance(outbound.event, RetryStatusEvent)
     assert outbound.event.error_kind == "connection"
     assert outbound.event.next_retry_at == 123.5
-    assert outbound.metadata[WEBUI_TURN_METADATA_KEY] == "turn-1"
+    assert outbound.metadata[_TURN_METADATA_KEY] == "turn-1"
 
 
 @pytest.mark.asyncio
@@ -182,13 +184,13 @@ async def test_retry_completion_is_isolated_between_turns_in_one_session() -> No
     factory = TurnDeliveryFactory(bus)
     deliveries = [factory.create(InboundMessage(
         channel="websocket", sender_id="user", chat_id="chat", content="",
-        metadata={WEBUI_TURN_METADATA_KEY: turn},
+        metadata={_TURN_METADATA_KEY: turn},
     ), "websocket:chat") for turn in ("first", "second")]
     await deliveries[0].events.emit(RetryStatusEvent("exhausted", 4, 4, "connection"))
     for delivery in reversed(deliveries):
         delivery.record_stop_reason("error")
         await delivery.complete(None, publish_completion=True)
-    assert [(event.context.metadata[WEBUI_TURN_METADATA_KEY], event.failure_attempts)
+    assert [(event.context.metadata[_TURN_METADATA_KEY], event.failure_attempts)
             for event in seen] == [("second", None), ("first", 4)]
 
 

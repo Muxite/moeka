@@ -15,9 +15,15 @@ import sys
 _FORBIDDEN = (
     "nanobot.channels",
     "nanobot.web",
+    "nanobot.webui",
     "nanobot.gateway",
     "nanobot.pairing",
+    "nanobot.audio",
+    "nanobot.cron",
+    "nanobot.triggers",
+    "nanobot.apps",
     "nanobot.cli",
+    "nanobot.optional_features",
 )
 
 _PROBE = """

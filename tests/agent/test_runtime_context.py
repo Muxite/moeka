@@ -21,7 +21,6 @@ from nanobot.runtime_context import (
 )
 from nanobot.sdk.types import snapshot_from_session
 from nanobot.session.manager import _message_preview_text
-from nanobot.webui.transcript import _session_user_event
 
 
 @pytest.mark.asyncio
@@ -152,7 +151,7 @@ def test_sdk_snapshot_hides_runtime_context() -> None:
     assert snapshot.messages == [{"role": "user", "content": "visible user text"}]
 
 
-def test_webui_preview_title_and_backfill_hide_runtime_context() -> None:
+def test_session_preview_hides_runtime_context() -> None:
     block = RuntimeContextBlock(source="goal", content="private goal context")
     content, marker = append_runtime_context("visible user text", [block])
     persisted = {
@@ -161,6 +160,3 @@ def test_webui_preview_title_and_backfill_hide_runtime_context() -> None:
         RUNTIME_CONTEXT_HISTORY_META: marker,
     }
     assert _message_preview_text(persisted) == "visible user text"
-    event = _session_user_event("websocket:chat", persisted)
-    assert event is not None
-    assert event["text"] == "visible user text"

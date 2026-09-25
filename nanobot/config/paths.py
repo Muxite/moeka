@@ -84,11 +84,6 @@ def get_logs_dir() -> Path:
     return get_runtime_subdir("logs")
 
 
-def get_webui_dir() -> Path:
-    """Return the directory for WebUI-only persisted display threads (JSON)."""
-    return get_runtime_subdir("webui")
-
-
 def _default_workspace() -> Path:
     """
     Resolve the default workspace path for this Moeka instance.
