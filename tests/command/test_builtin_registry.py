@@ -5,7 +5,6 @@ from __future__ import annotations
 from nanobot.command.builtin import register_builtin_commands
 from nanobot.command.router import CommandRouter
 
-
 EXACT = [
     "/__shell", "/compact", "/dream", "/dream-log", "/dream-prompt", "/dream-restore",
     "/evaluator-prompt", "/goal", "/help", "/history", "/model", "/new", "/skill", "/status",
