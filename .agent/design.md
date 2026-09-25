@@ -4,17 +4,17 @@ These rules govern architectural decisions. When adding a feature or fixing a bu
 
 ## Core stays small; extend at the edges
 
-New capabilities should be added via `channels/`, `tools/`, skills, or MCP servers. The files `agent/loop.py` and `agent/runner.py` form the critical core path; changes there should be minimal and justified. If a feature can live in a channel adapter, a tool, or an external MCP server, it should not be inlined into the agent loop.
+New capabilities should be added via `tools/`, skills, or MCP servers (the `core-slim` branch has no `channels/`). The files `agent/loop.py` and `agent/runner.py` form the critical core path; changes there should be minimal and justified. If a feature can live in a tool, a skill, or an external MCP server, it should not be inlined into the agent loop.
 
-Runtime state fan-out follows the same boundary. `MessageBus.publish` awaits local subscribers for turn/run/model/goal state changes; `MessageBus.publish_event` queues routed channel delivery without waiting for network sends. Both carry `AgentEvent` values. Runner hooks publish typed output through the turn's scoped `EventSink`; direct-call callbacks are adapted at the execution boundary. WebUI/WebSocket wire details, title refreshes, and goal-state sync belong in `nanobot.session.webui_turns.WebuiTurnCoordinator` or the relevant channel adapter.
+Runtime state fan-out follows the same boundary. `MessageBus.publish` awaits local subscribers for turn/run/model/goal state changes; `MessageBus.publish_event` queues routed channel delivery without waiting for network sends. Both carry `AgentEvent` values. Runner hooks publish typed output through the turn's scoped `EventSink`; direct-call callbacks are adapted at the execution boundary. Front-end wire details (the WebUI/WebSocket coordinators of the full distribution on `main`) do not belong in the core; `core-slim` has none.
 
 ## Less structure, more intelligence
 
-Prefer simple, readable code over new framework layers and indirection. Add structure only when it removes real complexity, protects an important boundary, or matches an established local pattern. The best fix is often a smaller prompt, a tighter tool contract, a channel-local change, or one focused regression test.
+Prefer simple, readable code over new framework layers and indirection. Add structure only when it removes real complexity, protects an important boundary, or matches an established local pattern. The best fix is often a smaller prompt, a tighter tool contract, a tool-local change, or one focused regression test.
 
 ## Prefer duplication over premature abstraction
 
-Channels and providers are allowed to repeat similar logic (send retries, media handling, message splitting). Do not introduce complex base classes or shared helpers just to eliminate duplication across channel files. Each channel file should remain self-contained and readable on its own. The same applies to provider implementations.
+Providers are allowed to repeat similar logic (retries, request shaping, response parsing). Do not introduce complex base classes or shared helpers just to eliminate duplication across provider files. Each provider file should remain self-contained and readable on its own.
 
 ## Minimal change that solves the real problem
 

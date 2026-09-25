@@ -4,81 +4,81 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repo is **moeka**, a fork of [nanobot](https://github.com/HKUDS/nanobot) (HKUDS) tuned as a CS/server-management bot for homelabs and Linux administration. It is a lightweight Python AI agent framework with a React/TypeScript WebUI, centered on a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
+This repo is **moeka**, a fork of [nanobot](https://github.com/HKUDS/nanobot) (HKUDS). This branch,
+`core-slim`, is the **slim agent core**: the agent loop, LLM providers, tools, skills, prompt templates, memory
+(Dream), the SQLite session store, config, and the embeddable `MoekaCore` library. The chat channels, gateway,
+WebUI, HTTP API server, pairing, audio, cron, triggers, heartbeat, CLI apps and the `message` tool are removed
+here; they live on in the full chat-bot distribution on `main`. The core is driven by a harness (a separate repo
+that pins a `core-slim` commit as a submodule), by `MoekaCore`, or by the `nanobot agent` CLI.
 
-Moeka-specific deviations from upstream nanobot worth knowing:
+Moeka-specific deviations from upstream nanobot that still exist in the core:
 
-- **Sandbox posture is permissive by default** — `nanobot/agent/tools/shell.py` keeps only `_INTERNAL_DENY_PATTERNS` (non-tunable history.jsonl / .dream_cursor guards) and a fork-bomb in `_DEFAULT_DENY_PATTERNS`. `rm -rf`, `dd`, `mkfs`, `format`, `shutdown`, `>/dev/sd*` are *not* blocked by default. `allow_sudo` defaults to False and emits a clear opt-in message when denied.
-- **SQLite session store** — `nanobot/session/manager.py` persists sessions in `<workspace>/sessions.db` (WAL mode); SQLite's own locking replaces the old per-file FileLock for cross-process safety. Legacy per-session `.jsonl` files are imported once at startup (newer-wins) and renamed to `*.jsonl.imported`; `SessionManager.dump_jsonl(key)` exports the old format for debugging.
-- **Dispatcher watchdog** — `ChannelManager._dispatch_with_watchdog` auto-restarts the outbound dispatcher on crashes.
-- **`bg_shell` tool is gated off the auto-loader** — needs a `BackgroundProcessRegistry` wired manually; `enabled(ctx)` returns False.
-- **`nanobot channels enable/disable <name>` CLI** — atomic config flip, defined in `nanobot/cli/commands.py`.
-- **Telegram `drop_pending_updates` defaults to True** to avoid stale floods on restart.
-- **Transcription `api_base` propagation** — Groq/OpenAI Whisper provider honours per-provider `api_base`.
-- **Lazy `Config` / `ToolsConfig` model_rebuild** — `nanobot/config/schema.py` re-tries forward-ref resolution on first instantiation to survive circular-import order.
-- **No CONTRIBUTING.md and no upstream `images/nanobot_logo.png`** — both intentionally removed; moeka uses its own `images/GitHub_README.png`.
-- **Flat workspace layout** — `AgentDefaults.workspace` defaults to `~/.nanobot` directly (state home *is* the workspace), not upstream's nested `~/.nanobot/workspace`.
-- **Missing `${VAR}` config references warn, not hard-fail** — `resolve_config_env_vars` (`nanobot/config/loader.py`) logs a warning with the dotted field path and leaves the placeholder unreplaced instead of raising, since `keys.env` injects secrets at process start and one missing var shouldn't block boot. See `tests/config/test_env_var_warnings.py`.
-- **Lots of upstream features still apply** — model presets + fallback providers, streaming reasoning, pairing-code DM flow, ToolContext plugin system, `/goal` long-running tasks, settings BYOK endpoints, etc.
+- **Permissive shell sandbox** — `nanobot/agent/tools/shell.py` always applies only `_INTERNAL_DENY_PATTERNS`
+  (writes to `history.jsonl` / `.dream_cursor`). `rm -rf`, `dd`, `mkfs`, `shutdown` are not blocked. The class
+  default `_DEFAULT_DENY_PATTERNS` (a fork-bomb guard) applies only when no deny list is passed; `ExecTool.create`
+  passes `tools.exec.denyPatterns` (default `[]`), so config-built exec tools have no fork-bomb guard.
+  `allow_sudo` defaults to False and the denial message explains the opt-in.
+- **SQLite session store outside the workspace** — `nanobot/session/sqlite_store.py`: one `sessions.db` (WAL) at
+  `<workspace parent>/<workspace name>-sessions/<workspace-id>/sessions.db` (e.g. `~/.nanobot-sessions/<id>/`),
+  never inside the workspace. A legacy `<workspace>/sessions.db` is only warned about; moving it is
+  `nanobot sessions migrate`. Legacy `.jsonl` sessions are imported once and renamed `*.jsonl.imported`;
+  `SqliteSessionStore.dump_jsonl(key)` exports the old format.
+- **`bg_shell` is gated off the auto-loader** — `BackgroundShellTool.enabled()` returns False; nothing wires a
+  `BackgroundProcessRegistry`, so it is dormant.
+- **Lazy `Config` / `ToolsConfig` model_rebuild** — `nanobot/config/schema.py` (`_resolve_tool_config_refs`,
+  `Config.__init__`) and `load_config` retry forward-ref resolution to survive circular-import order.
+- **Flat workspace layout** — `AgentDefaults.workspace` defaults to `~/.nanobot` (the state home is the workspace),
+  not upstream's nested `~/.nanobot/workspace`.
+- **Missing `${VAR}` config references warn, not hard-fail** — `resolve_config_env_vars`
+  (`nanobot/config/loader.py`) logs a warning with the dotted field path and leaves the placeholder. See
+  `tests/config/test_env_var_warnings.py`.
+- **Retired config sections are dropped** — `channels`, `gateway`, `api`, `heartbeat`, `transcription` are removed
+  at load with a warning (`_migrate_config`), and saving the config removes them from the file. Do not point slim
+  tooling at a `config.json` shared with a `main` deployment.
+- **Dream runs only when called** — no scheduler: `nanobot/agent/dream.py:run_dream()`, `AgentLoop.run_dream()` or
+  the `/dream` command. `DreamConfig.enabled` / `interval_h` are advice for the caller.
+
+## Documentation for agents
+
+`docs/core-map/README.md` is the authoritative, line-cited map of this core (agent loop, tools, prompts/skills/
+memory, config/providers/sessions) and states what a self-improvement agent may and may not change. On this
+branch the rest of `docs/` describes the full distribution on `main` and is legacy (see the banner in
+`docs/README.md`).
 
 ## Development Commands
 
 ```bash
-# Python: run single test / lint
-pytest tests/test_openai_api.py::test_function -v
-ruff check nanobot/
+# Tests in Docker (preferred: isolated from the live service and the host venv).
+# Dockerfile.test keys its dependency layer on pyproject.toml + uv.lock only, so
+# code edits rebuild quickly. The vec extra (CUDA torch) is skipped by default;
+# --build-arg NO_EXTRA= re-enables it.
+scripts/test-docker.sh                              # build + full suite
+scripts/test-docker.sh pytest tests/agent -v        # build + subset
+scripts/test-docker.sh ruff check nanobot/ tests/   # lint (never ruff format)
 
-# Tests in Docker (preferred for full-suite runs — isolated from the live
-# moeka service and the host venv). Dockerfile.test is layered so the
-# dependency layer is keyed on pyproject.toml + uv.lock only; code edits
-# rebuild in ~2s. The vec extra (CUDA torch) is skipped by default:
-#   --build-arg NO_EXTRA= re-enables it for full CI parity.
-scripts/test-docker.sh                          # build + full suite
-scripts/test-docker.sh pytest tests/agent -v    # build + subset
-
-# WebUI: dev server (proxies API/WS to gateway :8765), build, test
-# Build outputs to ../nanobot/web/dist (bundled into the Python wheel)
-cd webui && bun run dev      # or NANOBOT_API_URL=... bun run dev
-cd webui && bun run build
-cd webui && bun run test
-
-# Gateway
-nanobot gateway
+# CLI (entry point nanobot/cli/entry.py -> nanobot/cli/commands.py)
+nanobot agent [-m "message"]    # interactive chat, or one message
+nanobot status | sessions | provider
 ```
 
-## High-Level Architecture
+## Architecture
 
-### Core Data Flow
-
-Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decouples chat channels from the agent core:
-
-1. **Channels** (`nanobot/channels/`) receive messages from external platforms and publish `InboundMessage` events to the bus.
-2. **`AgentLoop`** (`nanobot/agent/loop.py`) consumes inbound messages, builds context, and coordinates the turn.
-3. **`AgentRunner`** (`nanobot/agent/runner.py`) handles the actual LLM conversation loop: send messages to the provider, receive tool calls, execute tools, and stream responses.
-4. Responses are published as `OutboundMessage` events back to the appropriate channel.
-
-### Key Subsystems
-
-- **Agent Loop** (`nanobot/agent/loop.py`, `runner.py`): The core processing engine. `AgentLoop` manages session keys, hooks, and context building. `AgentRunner` executes the multi-turn LLM conversation with tool execution.
-- **LLM Providers** (`nanobot/providers/`): Provider implementations (Anthropic, OpenAI-compatible, OpenAI Responses API, Azure, Bedrock, GitHub Copilot, OpenAI Codex, etc.) built on a common base (`base.py`). Includes image generation (`image_generation.py`) and audio transcription (`transcription.py`). `factory.py` and `registry.py` handle instantiation and model discovery.
-- **Channels** (`nanobot/channels/`): Platform integrations (Telegram, Discord, Slack, Feishu, Matrix, WhatsApp, QQ, WeChat, WeCom, DingTalk, Email, MoChat, MS Teams, WebSocket). `manager.py` discovers and coordinates them. Channels are auto-discovered via `pkgutil` scan + entry-point plugins.
-- **Tools** (`nanobot/agent/tools/`): Agent capabilities exposed to the LLM: filesystem (read/write/edit/list), shell execution (with sandbox backends), web search/fetch, MCP servers, cron, notebook editing, subagent spawning, long-running tasks / sustained goals (`long_task.py`), image generation, and self-modification. Tools are auto-discovered via `pkgutil` scan + entry-point plugins.
-- **Memory** (`nanobot/agent/memory.py`): Session history persistence with Dream two-phase memory consolidation. Uses atomic writes with fsync for durability.
-- **Session Management** (`nanobot/session/`): Per-session history, context compaction, TTL-based auto-compaction (`manager.py`), and sustained goal state tracking (`goal_state.py`).
-- **Config** (`nanobot/config/schema.py`, `loader.py`): Pydantic-based configuration loaded from `~/.nanobot/config.json`. Supports camelCase aliases for JSON compatibility.
-- **Bridge** (`bridge/`): TypeScript services (e.g. WhatsApp bridge) bundled into the wheel via `pyproject.toml` `force-include`.
-- **WebUI** (`webui/`): Vite-based React SPA that talks to the gateway over a WebSocket multiplex protocol. The dev server proxies `/api`, `/webui`, `/auth`, and WebSocket traffic to the gateway.
-- **API Server** (`nanobot/api/server.py`): OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/models`) for programmatic access.
-- **Command Router** (`nanobot/command/`): Slash command routing and built-in command handlers.
-- **Heartbeat** (`nanobot/heartbeat/`): Periodic agent wake-up service for scheduled task checking.
-- **Pairing** (`nanobot/pairing/`): DM sender approval store with persistent pairing codes per channel.
-- **Skills** (`nanobot/skills/`): Built-in skill definitions (long-goal, cron, github, image-generation, etc.) loaded into agent context.
-- **Security** (`nanobot/security/`): PTH file guard and other security measures activated at CLI entry.
-
-### Entry Points
-
-- **CLI**: `nanobot/cli/commands.py`
-- **Python SDK**: `nanobot/nanobot.py`
+- **Agent loop** (`nanobot/agent/loop.py`): `AgentLoop` owns sessions and runs each turn through fixed stages
+  (restore, compact, command, build, run, save, respond). Entry points: `process_direct()` and the `MessageBus`
+  (`nanobot/bus/`) consumed by `run()`.
+- **Runner** (`nanobot/agent/runner.py`): the LLM/tool iteration loop, error shaping and limits.
+- **Context** (`nanobot/agent/context.py`, `nanobot/templates/`): system-prompt assembly from Jinja templates,
+  workspace bootstrap files, memory and the skills summary.
+- **Providers** (`nanobot/providers/`): Anthropic, OpenAI-compatible (incl. local vLLM/Ollama), OpenAI Responses,
+  Azure, Bedrock, OAuth providers; `factory.py` / `registry.py`; `FallbackProvider`; model presets.
+- **Tools** (`nanobot/agent/tools/`): auto-discovered by `ToolLoader` (pkgutil + entry points); the registered set
+  is pinned by `tests/agent/test_registered_tool_names.py`. MCP servers via `mcp.py`.
+- **Skills** (`nanobot/skills/`, `<workspace>/skills/`) and **memory/Dream** (`nanobot/agent/memory.py`,
+  `nanobot/agent/dream.py`).
+- **Sessions** (`nanobot/session/`), **config** (`nanobot/config/schema.py`, `loader.py`), **commands**
+  (`nanobot/command/builtin.py`), **security** guards (`nanobot/security/`).
+- **Embedding**: `MoekaCore` (`nanobot/core/`; import boundary enforced by `tests/core/test_import_boundary.py`)
+  and the `Nanobot` SDK facade (`nanobot/nanobot.py`).
 
 ## Project-Specific Notes
 
@@ -88,24 +88,23 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 
 ## Branching Strategy
 
-Two branches:
-- `main` — stable; the running systemd unit follows this branch.
-- `nightly` — integrates upstream `HKUDS/nanobot` plus moeka work; merged into `main` when stable.
-
-The `upstream` remote points at `HKUDS/nanobot`. Upstream's own `nightly` branch went stale after 2026-06-03 (HKUDS kept developing on `upstream/main` instead), so moeka now syncs periodically from `upstream/main` directly rather than `upstream/nightly`. Periodic merges of `upstream/main` into local `nightly` pull in new providers, channels, and runtime features; moeka-specific deviations (see *Project Overview*) must be preserved during conflict resolution.
+- `core-slim` (this branch) — the slim core. The harness repo pins a `core-slim` commit as its core submodule.
+  Do not merge it into `main`.
+- `main` — the full chat-bot distribution; the live systemd service follows it.
+- `nightly` — integrates upstream `HKUDS/nanobot` plus moeka work for `main`. The `upstream` remote points at
+  `HKUDS/nanobot`; moeka syncs from `upstream/main` (upstream's `nightly` went stale after 2026-06-03).
+  Moeka deviations must survive conflict resolution.
 
 ## Code Style
 
 - Python 3.11+, asyncio throughout.
 - Line length: 100.
-- Linting: `ruff` with rules E, F, I, N, W (E501 ignored).
-- pytest with `asyncio_mode = "auto"`.
+- Linting: `ruff` with rules E, F, I, N, W (E501 ignored). Never run `ruff format`.
+- pytest with `asyncio_mode = "auto"`. Tests mirror the `nanobot/` package structure.
 
 ## Common File Locations
 
 - Config schema: `nanobot/config/schema.py`
 - Provider base / new provider template: `nanobot/providers/base.py`
-- Channel base / new channel template: `nanobot/channels/base.py`
-- Tool registry: `nanobot/agent/tools/registry.py`
-- WebUI dev proxy config: `webui/vite.config.ts`
-- Tests mirror the `nanobot/` package structure.
+- Tool base / registry / loader: `nanobot/agent/tools/base.py`, `registry.py`, `loader.py`
+- Prompt templates: `nanobot/templates/agent/`
