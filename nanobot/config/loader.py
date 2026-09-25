@@ -442,8 +442,15 @@ def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
     # Sections of the removed chat runtime (channels, gateway, HTTP API, heartbeat,
     # audio transcription). Old config files keep loading; the values are dropped,
     # not migrated. Config forbids unknown top-level keys, so strip them here.
-    for key in _RETIRED_TOP_LEVEL_KEYS:
-        data.pop(key, None)
+    retired = [key for key in _RETIRED_TOP_LEVEL_KEYS if key in data]
+    if retired:
+        logger.warning(
+            "Config: retired top-level section(s) {} are ignored by this version and "
+            "will be removed from config.json if the config is saved",
+            ", ".join(retired),
+        )
+        for key in retired:
+            data.pop(key, None)
 
     # Move tools.exec.restrictToWorkspace → tools.restrictToWorkspace
     tools_value = data.get("tools", {})
