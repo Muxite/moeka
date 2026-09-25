@@ -72,3 +72,26 @@ def test_agent_loop_and_session_recovery_do_not_load_webui():
     assert proc.returncode == 0, proc.stderr
     leaked = [m for m in proc.stdout.strip().split(",") if m]
     assert leaked == [], f"agent loop / session recovery import loaded webui: {leaked}"
+
+
+_TRIGGERS_PROBE = """
+import sys
+import nanobot.agent.loop  # noqa: F401
+leaked = sorted(
+    m for m in sys.modules if m == "nanobot.triggers" or m.startswith("nanobot.triggers.")
+)
+print(",".join(leaked))
+"""
+
+
+def test_agent_loop_does_not_load_triggers():
+    """The agent loop no longer depends on the local-triggers package."""
+    proc = subprocess.run(
+        [sys.executable, "-c", _TRIGGERS_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    leaked = [m for m in proc.stdout.strip().split(",") if m]
+    assert leaked == [], f"agent loop import loaded triggers: {leaked}"

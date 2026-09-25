@@ -99,7 +99,6 @@ from nanobot.session.summary import (
     SessionSummary,
     SessionSummaryCheckpoint,
 )
-from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
 from nanobot.utils.background import log_task_exceptions
 from nanobot.utils.cancellation import task_is_cancelling
 from nanobot.utils.document import reference_non_image_attachments
@@ -117,7 +116,6 @@ if TYPE_CHECKING:
         ProviderConfig,
         ToolsConfig,
     )
-    from nanobot.triggers.local_store import LocalTriggerStore
 
 _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
@@ -307,7 +305,6 @@ class AgentLoop:
         vec_config=None,
         vec_store=None,
         restart_mode: str = "auto",
-        local_trigger_store: LocalTriggerStore | None = None,
         idle_compact_check_interval_seconds: int = 0,
         # moeka: the in-memory bootstrap/inline-skills surface for embedding
         # hosts (6f513ee4). MoekaCore.from_config passes both, so dropping them
@@ -376,7 +373,6 @@ class AgentLoop:
             and "openrouter" not in self._image_generation_provider_configs
         ):
             self._image_generation_provider_configs["openrouter"] = image_generation_provider_config
-        self.local_trigger_store = local_trigger_store
         self.restrict_to_workspace = restrict_to_workspace
         self.workspace_scopes = WorkspaceScopeResolver(
             default_workspace=workspace,
@@ -469,15 +465,9 @@ class AgentLoop:
         self._pending_queues: dict[str, asyncio.Queue[InboundMessage]] = {}
         self._preserve_inflight_turns_on_shutdown = False
         self._deferred_automation_turns: dict[str, list[InboundMessage]] = {}
-        self._local_trigger_turns = LocalTriggerTurnCoordinator(
-            publish_inbound=self.bus.publish_inbound,
-            dispatch=self._dispatch,
-            is_running=lambda: self._running,
-            deferred_queues=self._deferred_automation_turns,
-        )
-        self._automation_turn_coordinators = (
-            ("local trigger", self._local_trigger_turns),
-        )
+        # No automation sources currently register turn coordinators; the
+        # defer/complete hooks in the run loop iterate this (empty) tuple.
+        self._automation_turn_coordinators: tuple[tuple[str, Any], ...] = ()
         # NANOBOT_MAX_CONCURRENT_REQUESTS: unset or <=0 means unlimited.
         _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "0"))
         self._concurrency_gate: asyncio.Semaphore | None = (
@@ -729,12 +719,6 @@ class AgentLoop:
                 self._runtime_context_providers.remove(provider)
 
         return _unsubscribe
-
-    async def submit_local_trigger_turn(self, msg: InboundMessage) -> OutboundMessage | None:
-        return await self._local_trigger_turns.submit(msg)
-
-    def pending_local_trigger_ids_for_session(self, session_key: str) -> set[str]:
-        return self._local_trigger_turns.pending_trigger_ids_for_session(session_key)
 
     async def _publish_next_deferred_automation_turn(self, session_key: str) -> None:
         await publish_next_deferred_turn(

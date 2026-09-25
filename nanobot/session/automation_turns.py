@@ -9,11 +9,12 @@ from typing import Any, cast
 
 AUTOMATION_HISTORY_META = "_automation_turn"
 # Markers written by retired automation sources (the removed cron scheduler
-# stamped ``_cron_turn`` and kind ``"cron"``). Session history persisted before
+# stamped ``_cron_turn`` and kind ``"cron"``; the removed local-trigger
+# subsystem stamped kind ``"local_trigger"``). Session history persisted before
 # their removal must stay hidden and labelled, so these are still honoured when
 # reading history; nothing produces them any more.
 _RETIRED_HISTORY_META_KEYS = ("_cron_turn",)
-_RETIRED_AUTOMATION_KINDS = ("cron",)
+_RETIRED_AUTOMATION_KINDS = ("cron", "local_trigger")
 
 
 @dataclass(frozen=True)
@@ -60,10 +61,8 @@ def automation_history_overrides_for_spec(
 
 @lru_cache(maxsize=1)
 def _automation_specs() -> tuple[AutomationTurnSpec, ...]:
-    # Source modules import the generic helpers above, so keep spec loading lazy.
-    from nanobot.triggers.local_session_turns import LOCAL_TRIGGER_AUTOMATION_SPEC
-
-    return (LOCAL_TRIGGER_AUTOMATION_SPEC,)
+    # No live automation sources remain; retired ones are read-only markers above.
+    return ()
 
 
 def automation_history_overrides(

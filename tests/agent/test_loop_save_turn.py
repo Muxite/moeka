@@ -52,7 +52,6 @@ from nanobot.session.turn_continuation import (
     INTERNAL_CONTINUATION_META,
     INTERNAL_CONTINUATION_RUN_STARTED_AT_META,
 )
-from nanobot.triggers.local_session_turns import LOCAL_TRIGGER_META
 
 
 def _agent_run_result(
@@ -167,44 +166,6 @@ def test_persist_user_message_acknowledges_durable_followup(tmp_path: Path) -> N
 
     assert persisted is True
     assert PENDING_FOLLOWUPS_KEY not in session.metadata
-
-
-def test_persist_local_trigger_turn_uses_hidden_automation_marker(tmp_path: Path) -> None:
-    loop = _make_full_loop(tmp_path)
-    session = loop.sessions.get_or_create("websocket:auto")
-
-    persisted = loop._persist_user_message_early(
-        InboundMessage(
-            channel="websocket",
-            sender_id="trigger",
-            chat_id="auto",
-            content="Review PR #4502",
-            metadata={
-                LOCAL_TRIGGER_META: {
-                    "trigger_id": "trg_123",
-                    "trigger_name": "PR review",
-                    "delivery_id": "tdel_456",
-                    "created_at_ms": 1_700_000_000_000,
-                    "persist_content": "Local trigger received: PR review\n\nReview PR #4502",
-                }
-            },
-        ),
-        session,
-    )
-
-    assert persisted is True
-    message = session.messages[-1]
-    assert message["content"] == "Local trigger received: PR review\n\nReview PR #4502"
-    assert message[AUTOMATION_HISTORY_META] == {
-        "kind": "local_trigger",
-        "trigger_id": "trg_123",
-        "trigger_name": "PR review",
-        "trigger_delivery_id": "tdel_456",
-    }
-    assert LOCAL_TRIGGER_META not in message
-    assert message["trigger_id"] == "trg_123"
-    assert message["trigger_name"] == "PR review"
-    assert message["trigger_delivery_id"] == "tdel_456"
 
 
 @pytest.mark.asyncio
@@ -1048,16 +1009,6 @@ async def test_process_message_persists_unified_session_delivery_route(tmp_path:
                 sender_id="subagent",
                 chat_id="subagent-result",
                 content="subagent result",
-            ),
-            True,
-        ),
-        (
-            InboundMessage(
-                channel="discord",
-                sender_id="u1",
-                chat_id="automation",
-                content="scheduled turn",
-                metadata={LOCAL_TRIGGER_META: {"trigger_id": "trg_1"}},
             ),
             True,
         ),
