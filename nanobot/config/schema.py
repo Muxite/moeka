@@ -9,7 +9,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nanobot.config.timezone import detect_system_timezone
 from nanobot.config_base import Base
-from nanobot.cron.types import CronSchedule
 
 if TYPE_CHECKING:
     from nanobot.agent.runner import RunnerLimits
@@ -52,33 +51,38 @@ class TranscriptionConfig(Base):
 
 
 class DreamConfig(Base):
-    """Dream memory consolidation configuration."""
+    """Dream memory consolidation configuration.
 
-    _HOUR_MS = 3_600_000
+    Core has no scheduler: Dream runs when a caller invokes it directly
+    (``AgentLoop.run_dream()`` or the ``/dream`` command).
+    """
 
-    enabled: bool = True  # Register the periodic Dream consolidation job on startup
-    interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
-    cron: str | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )  # Legacy cron expression override
+    enabled: bool = True  # Whether callers/harnesses should run Dream at all
+    # Advisory cadence in hours; used by the caller/harness that invokes Dream,
+    # core itself never schedules it.
+    interval_h: int = Field(default=2, ge=1)
     model_override: str | None = Field(
         default=None,
         validation_alias=AliasChoices("modelOverride", "model", "model_override"),
     )  # Model preset name for Dream sessions
 
-    def build_schedule(self, timezone: str) -> CronSchedule:
-        """Build the runtime schedule, preferring the legacy cron override if present."""
-        if self.cron:
-            return CronSchedule(kind="cron", expr=self.cron, tz=timezone)
-        return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_cron(cls, data: Any) -> Any:
+        """Accept old configs carrying the retired ``cron`` override, dropping it."""
+        if isinstance(data, dict) and "cron" in data:
+            data = dict(cast(dict[str, Any], data))
+            value = data.pop("cron")
+            if value is not None:
+                from loguru import logger
 
-    def describe_schedule(self) -> str:
-        """Return a human-readable summary for logs and startup output."""
-        if self.cron:
-            return f"cron {self.cron} (legacy)"
-        hours = self.interval_h
-        return f"every {hours}h"
+                logger.warning(
+                    "Ignoring retired config key agents.defaults.dream.cron={!r}: "
+                    "Dream is no longer scheduled by nanobot; the caller invokes it "
+                    "(see dream.intervalH).",
+                    value,
+                )
+        return data
 
 
 class VecConfig(Base):

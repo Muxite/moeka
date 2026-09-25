@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.runtime_control import RuntimeControl
     from nanobot.bus.queue import MessageBus
     from nanobot.config.schema import ProviderConfig, ToolsConfig
-    from nanobot.cron.service import CronService
     from nanobot.providers.factory import ProviderSnapshot
     from nanobot.security.workspace_access import WorkspaceSandboxStatus
     from nanobot.session.manager import SessionManager
@@ -81,7 +80,6 @@ class ToolContext:
     workspace: str
     bus: MessageBus | None = None
     subagent_manager: SubagentManager | None = None
-    cron_service: CronService | None = None
     exec_session_manager: ExecSessionManager | None = None
     sessions: SessionManager | None = None
     file_state_store: FileStates | None = None

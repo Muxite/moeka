@@ -25,7 +25,6 @@ from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.automation_turns import publish_next_deferred_turn
 from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
-from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
 from nanobot.agent.memory import Consolidator
 from nanobot.agent.model_runtime import ModelRuntimeResolver
@@ -39,7 +38,6 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.context import RequestContext, bind_request_context, reset_request_context
 from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
-from nanobot.agent.tools.message import capture_message_deliveries
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.runtime_control import AgentRuntimeControl
 from nanobot.agent.tools.self import MyTool
@@ -113,12 +111,12 @@ from nanobot.utils.runtime import (
 )
 
 if TYPE_CHECKING:
+    from nanobot.agent.dream import DreamRunResult
     from nanobot.config.schema import (
         Config,
         ProviderConfig,
         ToolsConfig,
     )
-    from nanobot.cron.service import CronService
     from nanobot.triggers.local_store import LocalTriggerStore
 
 _T = TypeVar("_T")
@@ -257,6 +255,12 @@ class AgentLoop:
             return None
         return self.runtime_resolver.resolve_preset(self.dream_model_preset)
 
+    async def run_dream(self, *, commit_prefix: str = "dream: manual run") -> DreamRunResult:
+        """Run one Dream memory consolidation pass now (core has no scheduler)."""
+        from nanobot.agent.dream import run_dream
+
+        return await run_dream(self, commit_prefix=commit_prefix)
+
     _RUNTIME_CHECKPOINT_KEY = "runtime_checkpoint"
     _PENDING_USER_TURN_KEY = "pending_user_turn"
     _PROVIDER_STATE_CHECKPOINT_VERSION_KEY = "provider_state_checkpoint_version"
@@ -274,7 +278,6 @@ class AgentLoop:
         max_tool_result_chars: int | None = None,
         provider_retry_mode: str = "standard",
         tool_hint_max_length: int | None = None,
-        cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         tool_registry: ToolRegistry | None = None,
@@ -373,7 +376,6 @@ class AgentLoop:
             and "openrouter" not in self._image_generation_provider_configs
         ):
             self._image_generation_provider_configs["openrouter"] = image_generation_provider_config
-        self.cron_service = cron_service
         self.local_trigger_store = local_trigger_store
         self.restrict_to_workspace = restrict_to_workspace
         self.workspace_scopes = WorkspaceScopeResolver(
@@ -467,12 +469,6 @@ class AgentLoop:
         self._pending_queues: dict[str, asyncio.Queue[InboundMessage]] = {}
         self._preserve_inflight_turns_on_shutdown = False
         self._deferred_automation_turns: dict[str, list[InboundMessage]] = {}
-        self._cron_turns = CronTurnCoordinator(
-            publish_inbound=self.bus.publish_inbound,
-            dispatch=self._dispatch,
-            is_running=lambda: self._running,
-            deferred_queues=self._deferred_automation_turns,
-        )
         self._local_trigger_turns = LocalTriggerTurnCoordinator(
             publish_inbound=self.bus.publish_inbound,
             dispatch=self._dispatch,
@@ -480,7 +476,6 @@ class AgentLoop:
             deferred_queues=self._deferred_automation_turns,
         )
         self._automation_turn_coordinators = (
-            ("cron", self._cron_turns),
             ("local trigger", self._local_trigger_turns),
         )
         # NANOBOT_MAX_CONCURRENT_REQUESTS: unset or <=0 means unlimited.
@@ -528,7 +523,7 @@ class AgentLoop:
 
         Extra keyword arguments are forwarded to ``AgentLoop.__init__``,
         allowing callers to override or extend the standard config-derived
-        parameters (e.g. ``cron_service``, ``session_manager``).
+        parameters (e.g. ``session_manager``).
         """
         from nanobot.providers.factory import make_provider
 
@@ -692,7 +687,6 @@ class AgentLoop:
             workspace=str(self.workspace),
             bus=self.bus,
             subagent_manager=self.subagents,
-            cron_service=self.cron_service,
             exec_session_manager=self._exec_session_manager,
             sessions=self.sessions,
             provider_snapshot_loader=provider_snapshot_loader,
@@ -736,14 +730,8 @@ class AgentLoop:
 
         return _unsubscribe
 
-    async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
-        return await self._cron_turns.submit(msg)
-
     async def submit_local_trigger_turn(self, msg: InboundMessage) -> OutboundMessage | None:
         return await self._local_trigger_turns.submit(msg)
-
-    def pending_cron_job_ids_for_session(self, session_key: str) -> set[str]:
-        return self._cron_turns.pending_job_ids_for_session(session_key)
 
     def pending_local_trigger_ids_for_session(self, session_key: str) -> set[str]:
         return self._local_trigger_turns.pending_trigger_ids_for_session(session_key)
@@ -2073,35 +2061,28 @@ class AgentLoop:
             ctx.visible_run_started_at = time.time()
         await ctx.delivery.running(started_at=ctx.visible_run_started_at)
         assert ctx.transcript_input is not None
-        with capture_message_deliveries() as message_sends:
-            result = await self._run_agent_loop(
-                ctx.transcript_input,
-                runtime=runtime,
-                streaming=ctx.streaming,
-                session=ctx.session,
-                pending_queue=ctx.pending_queue,
-                ephemeral=ctx.ephemeral,
-                run_extra_hooks_for_ephemeral=ctx.run_extra_hooks_for_ephemeral,
-                hooks=ctx.hooks,
-                hook_factories=ctx.hook_factories,
-                turn_scopes=ctx.turn_scopes,
-                tools=ctx.tools,
-                request_context=ctx.request_context,
-                provider_state=ctx.provider_state,
-                events=ctx.events,
-            )
+        result = await self._run_agent_loop(
+            ctx.transcript_input,
+            runtime=runtime,
+            streaming=ctx.streaming,
+            session=ctx.session,
+            pending_queue=ctx.pending_queue,
+            ephemeral=ctx.ephemeral,
+            run_extra_hooks_for_ephemeral=ctx.run_extra_hooks_for_ephemeral,
+            hooks=ctx.hooks,
+            hook_factories=ctx.hook_factories,
+            turn_scopes=ctx.turn_scopes,
+            tools=ctx.tools,
+            request_context=ctx.request_context,
+            provider_state=ctx.provider_state,
+            events=ctx.events,
+        )
         ctx.final_content = result.final_content
         ctx.all_messages = result.messages
         ctx.summary_checkpoint = result.summary_checkpoint
         ctx.provider_compaction_applied = result.provider_compaction_applied
         ctx.stop_reason = result.stop_reason
         ctx.failure_error_kind = result.failure_error_kind
-        if (
-            ctx.kind is TurnKind.USER
-            and (ctx.delivery.route.channel, ctx.delivery.route.chat_id) in message_sends
-            and (not result.had_injections or result.stop_reason == "empty_final_response")
-        ):
-            ctx.suppress_response = True
         ctx.usage = result.usage
         ctx.delivery.record_usage(result.round_usages)
         if ctx.kind is TurnKind.USER:

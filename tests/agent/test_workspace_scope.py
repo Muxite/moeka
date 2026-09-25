@@ -13,7 +13,6 @@ from nanobot.agent.tools.cli_apps import CliAppsTool
 from nanobot.agent.tools.context import RequestContext, ToolContext, request_context
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool
 from nanobot.agent.tools.image_generation import ImageGenerationError, ImageGenerationTool
-from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.search import GrepTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
@@ -409,39 +408,6 @@ def test_image_reference_scope_restricted_blocks_outside_and_full_allows(tmp_pat
     token = bind_workspace_scope(full)
     try:
         assert tool._resolve_reference_image(str(ref)) == str(ref.resolve())
-    finally:
-        reset_workspace_scope(token)
-
-
-def test_message_media_scope_restricted_blocks_outside_and_full_allows(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    outside = tmp_path / "outside"
-    project.mkdir()
-    outside.mkdir()
-    media = outside / "shot.png"
-    media.write_bytes(PNG_BYTES)
-    tool = MessageTool(workspace=tmp_path, restrict_to_workspace=True)
-
-    restricted = validate_workspace_scope_payload(
-        {"project_path": str(project), "access_mode": "restricted"},
-        default_workspace=tmp_path,
-        default_restrict_to_workspace=False,
-    )
-    token = bind_workspace_scope(restricted)
-    try:
-        with pytest.raises(PermissionError):
-            tool._resolve_media([str(media)])
-    finally:
-        reset_workspace_scope(token)
-
-    full = validate_workspace_scope_payload(
-        {"project_path": str(project), "access_mode": "full"},
-        default_workspace=tmp_path,
-        default_restrict_to_workspace=True,
-    )
-    token = bind_workspace_scope(full)
-    try:
-        assert tool._resolve_media([str(media)]) == [str(media)]
     finally:
         reset_workspace_scope(token)
 

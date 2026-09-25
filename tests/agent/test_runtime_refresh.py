@@ -10,7 +10,7 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeModelChanged
-from nanobot.config.loader import save_config
+from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config, ModelPresetConfig
 from nanobot.providers.base import GenerationSettings
 from nanobot.providers.factory import ProviderSnapshot, load_provider_snapshot
@@ -18,7 +18,6 @@ from nanobot.session.model_selection import (
     SESSION_MODEL_PRESET_METADATA_KEY,
     model_preset_from_metadata,
 )
-from nanobot.webui.settings_api import update_agent_settings
 
 
 def _provider(default_model: str, max_tokens: int = 123) -> MagicMock:
@@ -344,10 +343,12 @@ def test_settings_context_window_refreshes_runtime_state(
         provider_snapshot_loader=loader,
     )
 
-    payload = update_agent_settings({"context_window_tokens": ["262144"]})
+    # Persist a settings change to config.json the way a settings writer does.
+    updated = load_config(config_path)
+    updated.agents.defaults.context_window_tokens = 262_144
+    save_config(updated, config_path)
     loop.runtime_resolver.invalidate()
     loop.llm_runtime()
 
-    assert payload["requires_restart"] is False
     assert loop.context_window_tokens == 262_144
     assert loop.llm_runtime().context_window_tokens == 262_144

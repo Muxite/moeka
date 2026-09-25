@@ -273,7 +273,7 @@ def resolve_config_env_vars(
     """Return *config* with ``${VAR}`` env-var references resolved.
 
     Walks in place so fields declared with ``exclude=True`` (e.g.
-    ``DreamConfig.cron``) survive; returns the same instance when no
+    ``ProvidersConfig.openai_codex``) survive; returns the same instance when no
     references are present. Missing variables are logged as warnings and
     their placeholders are left unreplaced so the rest of the system can
     still start (moeka deviation: non-fatal, since keys.env injects secrets

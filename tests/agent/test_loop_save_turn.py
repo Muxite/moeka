@@ -19,7 +19,6 @@ from nanobot.bus.outbound_events import (
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import TurnCompleted, TurnRunStatusChanged
-from nanobot.cron.session_turns import CRON_HISTORY_META, CRON_TRIGGER_META
 from nanobot.providers.base import LLMProvider, LLMResponse, LLMUsage, ProviderConversationState
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.runtime_context import (
@@ -139,48 +138,6 @@ def test_agent_loop_llm_runtime_reflects_current_provider_and_model(tmp_path: Pa
 
     assert runtime.provider is next_provider
     assert runtime.model == "next-model"
-
-
-def test_persist_cron_turn_uses_distinct_history_marker(tmp_path: Path) -> None:
-    loop = _make_full_loop(tmp_path)
-    session = loop.sessions.get_or_create("websocket:auto")
-    prompt_ref = {"id": "cron.agent_turn.reminder", "version": 1, "sha256": "abc"}
-
-    persisted = loop._persist_user_message_early(
-        InboundMessage(
-            channel="websocket",
-            sender_id="cron",
-            chat_id="auto",
-            content="Cron job: internal prompt",
-            metadata={
-                CRON_TRIGGER_META: {
-                    "job_id": "job-1",
-                    "job_name": "Daily check",
-                    "run_id": "job-1:1",
-                    "prompt_ref": prompt_ref,
-                    "persist_content": "Scheduled cron job triggered: Daily check",
-                }
-            },
-        ),
-        session,
-    )
-
-    assert persisted is True
-    message = session.messages[-1]
-    assert message["content"] == "Scheduled cron job triggered: Daily check"
-    assert message[AUTOMATION_HISTORY_META] == {
-        "kind": "cron",
-        "cron_job_id": "job-1",
-        "cron_job_name": "Daily check",
-        "cron_run_id": "job-1:1",
-        "cron_prompt_ref": prompt_ref,
-    }
-    assert message[CRON_HISTORY_META] is True
-    assert CRON_TRIGGER_META not in message
-    assert message["cron_job_id"] == "job-1"
-    assert message["cron_job_name"] == "Daily check"
-    assert message["cron_run_id"] == "job-1:1"
-    assert message["cron_prompt_ref"] == prompt_ref
 
 
 def test_persist_user_message_acknowledges_durable_followup(tmp_path: Path) -> None:
@@ -1100,7 +1057,7 @@ async def test_process_message_persists_unified_session_delivery_route(tmp_path:
                 sender_id="u1",
                 chat_id="automation",
                 content="scheduled turn",
-                metadata={CRON_TRIGGER_META: {"job_id": "job-1"}},
+                metadata={LOCAL_TRIGGER_META: {"trigger_id": "trg_1"}},
             ),
             True,
         ),

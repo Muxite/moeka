@@ -8,6 +8,12 @@ from functools import lru_cache
 from typing import Any, cast
 
 AUTOMATION_HISTORY_META = "_automation_turn"
+# Markers written by retired automation sources (the removed cron scheduler
+# stamped ``_cron_turn`` and kind ``"cron"``). Session history persisted before
+# their removal must stay hidden and labelled, so these are still honoured when
+# reading history; nothing produces them any more.
+_RETIRED_HISTORY_META_KEYS = ("_cron_turn",)
+_RETIRED_AUTOMATION_KINDS = ("cron",)
 
 
 @dataclass(frozen=True)
@@ -55,10 +61,9 @@ def automation_history_overrides_for_spec(
 @lru_cache(maxsize=1)
 def _automation_specs() -> tuple[AutomationTurnSpec, ...]:
     # Source modules import the generic helpers above, so keep spec loading lazy.
-    from nanobot.cron.session_turns import CRON_AUTOMATION_SPEC
     from nanobot.triggers.local_session_turns import LOCAL_TRIGGER_AUTOMATION_SPEC
 
-    return (CRON_AUTOMATION_SPEC, LOCAL_TRIGGER_AUTOMATION_SPEC)
+    return (LOCAL_TRIGGER_AUTOMATION_SPEC,)
 
 
 def automation_history_overrides(
@@ -79,6 +84,8 @@ def is_automation_history_message(message: Mapping[str, Any] | None) -> bool:
     marker = message.get(AUTOMATION_HISTORY_META)
     if marker is True or isinstance(marker, Mapping):
         return True
+    if any(message.get(key) is True for key in _RETIRED_HISTORY_META_KEYS):
+        return True
     return any(
         spec.legacy_history_meta_key
         and message.get(spec.legacy_history_meta_key) is True
@@ -88,5 +95,7 @@ def is_automation_history_message(message: Mapping[str, Any] | None) -> bool:
 
 def is_automation_kind(value: Any) -> bool:
     return isinstance(value, str) and (
-        value == "trigger" or any(spec.kind == value for spec in _automation_specs())
+        value == "trigger"
+        or value in _RETIRED_AUTOMATION_KINDS
+        or any(spec.kind == value for spec in _automation_specs())
     )

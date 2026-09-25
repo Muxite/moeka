@@ -57,7 +57,7 @@ def test_tool_context_has_required_fields():
     field_names = {f.name for f in fields(ToolContext)}
     required = {
         "config", "workspace", "bus", "subagent_manager",
-        "cron_service", "exec_session_manager", "file_state_store",
+        "exec_session_manager", "file_state_store",
         "provider_snapshot_loader", "image_generation_provider_configs", "timezone",
         "runtime_control",
     }
@@ -68,7 +68,6 @@ def test_tool_context_defaults():
     ctx = ToolContext(config=None, workspace="/tmp")
     assert ctx.bus is None
     assert ctx.subagent_manager is None
-    assert ctx.cron_service is None
     assert ctx.exec_session_manager is None
     assert ctx.provider_snapshot_loader is None
     assert ctx.image_generation_provider_configs is None
@@ -92,7 +91,6 @@ def test_discover_finds_concrete_tools():
     assert "ApplyPatchTool" in class_names
     assert "ExecTool" in class_names
     assert "CliAppsTool" in class_names
-    assert "MessageTool" in class_names
     assert "MyTool" in class_names
     assert "SpawnTool" in class_names
     assert "ExecSessionTool" in class_names
@@ -131,7 +129,6 @@ def test_loader_registers_exec_with_real_tools_config(tmp_path):
             get_running_count=lambda: 0,
             max_concurrent_subagents=4,
         ),
-        cron_service=None,
         timezone="UTC",
     )
     registry = ToolRegistry()
@@ -208,16 +205,7 @@ def test_fs_tool_create_respects_sandbox():
     assert tool._allowed_dir == Path("/tmp/test")
 
 
-# --- Task 5: MessageTool, SpawnTool, CronTool ---
-
-
-async def test_message_tool_create():
-    from nanobot.agent.tools.message import MessageTool
-    mock_bus = MagicMock()
-    mock_config = MagicMock()
-    ctx = ToolContext(config=mock_config, workspace="/tmp", bus=mock_bus)
-    tool = MessageTool.create(ctx)
-    assert isinstance(tool, MessageTool)
+# --- Task 5: SpawnTool ---
 
 
 def test_spawn_tool_create():
@@ -227,33 +215,6 @@ def test_spawn_tool_create():
     ctx = ToolContext(config=mock_config, workspace="/tmp", subagent_manager=mock_mgr)
     tool = SpawnTool.create(ctx)
     assert isinstance(tool, SpawnTool)
-
-
-def test_cron_tool_enabled_without_service():
-    from nanobot.agent.tools.cron import CronTool
-    mock_config = MagicMock()
-    ctx = ToolContext(config=mock_config, workspace="/tmp", cron_service=None)
-    assert CronTool.enabled(ctx) is False
-
-
-def test_cron_tool_enabled_with_service():
-    from nanobot.agent.tools.cron import CronTool
-    mock_service = MagicMock()
-    mock_config = MagicMock()
-    ctx = ToolContext(config=mock_config, workspace="/tmp", cron_service=mock_service)
-    assert CronTool.enabled(ctx) is True
-
-
-def test_cron_tool_create():
-    from nanobot.agent.tools.cron import CronTool
-    mock_service = MagicMock()
-    mock_config = MagicMock()
-    ctx = ToolContext(
-        config=mock_config, workspace="/tmp",
-        cron_service=mock_service, timezone="Asia/Shanghai",
-    )
-    tool = CronTool.create(ctx)
-    assert isinstance(tool, CronTool)
 
 
 # --- Task 6: ExecTool, WebTools, ImageGenerationTool ---
@@ -435,7 +396,6 @@ def test_loader_registers_same_tools_as_old_hardcoded():
         workspace="/tmp",
         bus=MagicMock(),
         subagent_manager=MagicMock(),
-        cron_service=MagicMock(),
         timezone="UTC",
         runtime_control=MagicMock(),
     )
@@ -447,7 +407,7 @@ def test_loader_registers_same_tools_as_old_hardcoded():
         "read_file", "write_file", "edit_file", "list_dir",
         "find_files", "grep", "exec", "exec_session", "list_exec_sessions",
         "web_search", "web_fetch",
-        "message", "spawn", "cron",
+        "spawn",
         "my",
     }
     actual = set(registered)
