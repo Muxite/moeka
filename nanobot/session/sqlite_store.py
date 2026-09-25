@@ -76,19 +76,10 @@ if TYPE_CHECKING:
 # etc.) are handled the same defensive way as malformed data.
 _SESSION_DATA_ERRORS = (ValueError, TypeError, AttributeError, KeyError, sqlite3.Error)
 
-# Extra SessionInfo fields for nanobot/webui/session_list_index.py, computed
-# here (from the same metadata row list_sessions() already fetched) rather
-# than via a second per-session read. Upstream's own JsonlSessionStore
-# solves the same "don't re-scan for the WebUI sidebar" problem with a
-# persistent .webui_session_index.json cache file (dropped in favor of
-# moeka's single SQL query — see nanobot/webui/session_list_index.py's
-# module docstring); this mirrors its computed fields (model preset,
-# workspace scope, recovery state) so
-# nanobot/webui/session_list_index.py's _public_row() never needs a second
-# read_session_metadata() call per row (upstream's
-# perf(webui): accelerate JSONL session list and thread loading, #5194,
-# has a regression test for exactly that: a session-list handler that
-# fails if read_session_metadata is called again).
+# Extra SessionInfo fields computed here (from the same metadata row
+# list_sessions() already fetched) rather than via a second per-session read:
+# model preset, workspace scope and recovery state. Session-list consumers can
+# render a row without calling read_session_metadata() again per session.
 _WORKSPACE_SCOPE_PRESENT_FIELD = "_workspace_scope_present"
 _WORKSPACE_SCOPE_VALUE_FIELD = "_workspace_scope_value"
 _INDEXED_WORKSPACE_SCOPE_KEYS = ("project_path", "path", "access_mode")
@@ -638,8 +629,8 @@ class SqliteSessionStore:
                 "path": str(self.db_path),
             })
             # Extra keys beyond the Protocol's SessionInfo TypedDict, kept for
-            # nanobot/webui/session_list_index.py; extra dict keys are fine
-            # for downstream .get() consumers, just not statically declared.
+            # session-list consumers; extra dict keys are fine for downstream
+            # .get() consumers, just not statically declared.
             info["model_preset"] = model_preset_from_metadata(metadata)
             info["recovery_state"] = recovery_state_from_metadata(metadata)
             info.update(_indexed_workspace_scope_fields(metadata))
@@ -1010,11 +1001,8 @@ def build_sqlite_session_store(
 ) -> SqliteSessionStore:
     """Single construction seam for the default ``SqliteSessionStore`` backend.
 
-    Consolidates what used to be three independent eager
-    ``SqliteSessionStore(...)`` call sites (``nanobot/cli/commands.py``'s
-    ``serve`` and ``sessions restore-workspace``, and
-    ``nanobot/cli/gateway_runtime.py``'s ``_run_gateway``) behind one
-    factory the test suite can mock in one place instead of three.
+    Keeps every default ``SqliteSessionStore(...)`` construction behind one
+    factory the test suite can mock in one place.
     """
     resolved_workspace, resolved_root = _resolve_workspace_and_sessions_root(
         workspace, sessions_root,

@@ -565,7 +565,7 @@ class AgentLoop:
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             dream_model_preset=defaults.dream.model_override,
-            restart_mode="auto",  # former GatewayConfig.restart_mode default
+            restart_mode="auto",  # read by the /restart command
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
             tool_registry=tool_registry,

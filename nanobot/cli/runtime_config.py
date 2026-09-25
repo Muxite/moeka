@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import typer
-from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.text import Text
@@ -18,7 +17,6 @@ __all__ = [
     "_print_agent_start_error",
     "_print_config_error",
     "_print_model_setup_steps",
-    "_print_runtime_config_validation_error",
     "_provider_setup_error",
 ]
 
@@ -41,34 +39,6 @@ def _print_config_error(error: Exception) -> None:
     if isinstance(error, ConfigLoadError):
         command = _status_command(error.path)
         console.print(f"[dim]Check again after editing: {escape(command)}[/dim]")
-
-
-def _print_runtime_config_validation_error(
-    error: ValidationError,
-    *,
-    config_path: Path,
-    summary: str,
-    path_prefix: tuple[str | int, ...],
-    retry_command: str,
-) -> None:
-    """Render a runtime-owned Pydantic config error without exposing input values."""
-    from nanobot.config.errors import ConfigIssue, ConfigLoadError, validation_issues
-
-    issues = tuple(
-        ConfigIssue(
-            path=(*path_prefix, *issue.path),
-            message=issue.message,
-        )
-        for issue in validation_issues(error)
-    )
-    diagnostic = ConfigLoadError(
-        config_path,
-        kind="invalid_schema",
-        summary=summary,
-        issues=issues,
-    )
-    console.print(Text(str(diagnostic), style="red"))
-    console.print(f"[dim]Fix the listed setting, then retry: {escape(retry_command)}[/dim]")
 
 
 def _status_command(config_path: Path) -> str:
