@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,12 +19,15 @@ from nanobot.agent.tools.long_task import (
     UpdateGoalTool,
 )
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.bus.outbound_events import GoalStateSyncEvent
 from nanobot.bus.queue import MessageBus
-from nanobot.session.goal_state import GOAL_STATE_KEY, MAX_GOAL_OBJECTIVE_CHARS
+from nanobot.bus.runtime_events import GoalStateChanged
+from nanobot.session.goal_state import (
+    GOAL_STATE_KEY,
+    MAX_GOAL_OBJECTIVE_CHARS,
+    goal_state_ws_blob,
+)
 from nanobot.session.manager import SessionManager
 from nanobot.session.turn_continuation import should_finalize_on_max_iterations
-from nanobot.session.webui_turns import WebuiTurnCoordinator
 
 
 def _goal_metadata() -> dict[str, object]:
@@ -378,13 +381,9 @@ async def test_registry_does_not_reuse_goal_context_after_request_scope(tmp_path
 @pytest.mark.asyncio
 async def test_goal_state_events_publish_active_then_inactive(tmp_path):
     bus = MessageBus()
-    bus.publish_outbound = AsyncMock()
+    events: list[GoalStateChanged] = []
+    bus.subscribe(events.append, GoalStateChanged)
     sm = SessionManager(tmp_path)
-    WebuiTurnCoordinator(
-        bus=bus,
-        sessions=sm,
-        schedule_background=lambda _coro: None,
-    ).subscribe()
     create = CreateGoalTool(sessions=sm, bus=bus)
     update = UpdateGoalTool(sessions=sm, bus=bus)
     rc = _request_context(chat_id="chat-99")
@@ -395,19 +394,17 @@ async def test_goal_state_events_publish_active_then_inactive(tmp_path):
         ui_summary="alpha",
     )
 
-    bus.publish_outbound.assert_awaited_once()
-    call = bus.publish_outbound.await_args.args[0]
-    assert call.channel == "websocket"
-    assert call.chat_id == "chat-99"
-    assert isinstance(call.event, GoalStateSyncEvent)
-    assert call.event.goal_state == {
+    assert len(events) == 1
+    assert events[0].context.channel == "websocket"
+    assert events[0].context.chat_id == "chat-99"
+    assert goal_state_ws_blob(events[0].session_metadata) == {
         "active": True,
         "status": "active",
         "ui_summary": "alpha",
         "objective": "Objective alpha",
     }
 
-    bus.publish_outbound.reset_mock()
+    events.clear()
     await _execute(
         update,
         RequestContext(
@@ -419,10 +416,8 @@ async def test_goal_state_events_publish_active_then_inactive(tmp_path):
         recap="Done.",
     )
 
-    bus.publish_outbound.assert_awaited_once()
-    call = bus.publish_outbound.await_args.args[0]
-    assert isinstance(call.event, GoalStateSyncEvent)
-    assert call.event.goal_state == {"active": False}
+    assert len(events) == 1
+    assert goal_state_ws_blob(events[0].session_metadata) == {"active": False}
 
 
 @pytest.mark.asyncio

@@ -13,13 +13,12 @@ from nanobot.agent.runner import AgentRunResult
 from nanobot.agent.tools.context import RequestContext, request_context
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.outbound_events import (
-    GoalStatusEvent,
     StreamDeltaEvent,
     StreamedResponseEvent,
     StreamEndEvent,
-    TurnEndEvent,
 )
 from nanobot.bus.queue import MessageBus
+from nanobot.bus.runtime_events import TurnCompleted, TurnRunStatusChanged
 from nanobot.cron.session_turns import CRON_HISTORY_META, CRON_TRIGGER_META
 from nanobot.providers.base import LLMProvider, LLMResponse, LLMUsage, ProviderConversationState
 from nanobot.providers.factory import ProviderSnapshot
@@ -53,16 +52,6 @@ from nanobot.session.summary import (
 from nanobot.session.turn_continuation import (
     INTERNAL_CONTINUATION_META,
     INTERNAL_CONTINUATION_RUN_STARTED_AT_META,
-)
-from nanobot.session.webui_turns import (
-    TITLE_GENERATION_MAX_TOKENS,
-    TITLE_GENERATION_REASONING_EFFORT,
-    WEBUI_SESSION_METADATA_KEY,
-    WEBUI_TITLE_METADATA_KEY,
-    WebuiTurnCoordinator,
-    clean_generated_title,
-    maybe_generate_webui_title,
-    maybe_generate_webui_title_after_turn,
 )
 from nanobot.triggers.local_session_turns import LOCAL_TRIGGER_META
 
@@ -124,13 +113,7 @@ def _make_full_loop(tmp_path: Path) -> AgentLoop:
     provider.get_default_model.return_value = "test-model"
     provider.generation = SimpleNamespace(max_tokens=4096)
     provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(content="Test title"))
-    loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, model="test-model")
-    WebuiTurnCoordinator(
-        bus=loop.bus,
-        sessions=loop.sessions,
-        schedule_background=lambda coro: loop.schedule_background(coro),
-    ).subscribe()
-    return loop
+    return AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, model="test-model")
 
 
 def test_agent_loop_llm_runtime_reflects_current_provider_and_model(tmp_path: Path) -> None:
@@ -325,174 +308,6 @@ async def test_invalid_slash_command_is_rejected_without_calling_provider(
         ("user", content, True),
         ("assistant", response.content, True),
     ]
-
-
-def test_clean_generated_title_strips_reasoning_tags() -> None:
-    assert clean_generated_title("<think>reasoning</think> WebUI polish") == "WebUI polish"
-    assert clean_generated_title("Title: <think> The user said hello") == ""
-
-
-@pytest.mark.asyncio
-async def test_generate_webui_title_only_for_marked_webui_sessions(tmp_path: Path) -> None:
-    loop = _make_full_loop(tmp_path)
-    loop.provider.chat_stream_with_retry = AsyncMock(
-        return_value=LLMResponse(content='"优化 WebUI 侧边栏。"', finish_reason="stop")
-    )
-    session = loop.sessions.get_or_create("websocket:chat-title")
-    session.metadata[WEBUI_SESSION_METADATA_KEY] = True
-    session.add_message("user", "帮我优化一下 webui 的 sidebar")
-    session.add_message("assistant", "可以，我会先调整布局和视觉层级。")
-    loop.sessions.save(session)
-
-    generated = await maybe_generate_webui_title(
-        sessions=loop.sessions,
-        session_key="websocket:chat-title",
-        provider=loop.provider,
-        model=loop.model,
-    )
-
-    assert generated is True
-    assert session.metadata[WEBUI_TITLE_METADATA_KEY] == "优化 WebUI 侧边栏"
-    loop.provider.chat_stream_with_retry.assert_awaited_once()
-    assert loop.provider.chat_stream_with_retry.await_args.kwargs["max_tokens"] == TITLE_GENERATION_MAX_TOKENS
-    assert (
-        loop.provider.chat_stream_with_retry.await_args.kwargs["reasoning_effort"]
-        == TITLE_GENERATION_REASONING_EFFORT
-    )
-
-
-@pytest.mark.asyncio
-async def test_generate_webui_title_skips_plain_websocket_sessions(tmp_path: Path) -> None:
-    loop = _make_full_loop(tmp_path)
-    loop.provider.chat_stream_with_retry = AsyncMock(
-        return_value=LLMResponse(content="Plain websocket title", finish_reason="stop")
-    )
-    session = loop.sessions.get_or_create("websocket:custom-client")
-    session.add_message("user", "hello from a custom websocket client")
-    loop.sessions.save(session)
-
-    generated = await maybe_generate_webui_title(
-        sessions=loop.sessions,
-        session_key="websocket:custom-client",
-        provider=loop.provider,
-        model=loop.model,
-    )
-
-    assert generated is False
-    assert WEBUI_TITLE_METADATA_KEY not in session.metadata
-    loop.provider.chat_stream_with_retry.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_generate_webui_title_ignores_command_only_sessions(tmp_path: Path) -> None:
-    loop = _make_full_loop(tmp_path)
-    session = loop.sessions.get_or_create("websocket:command-title")
-    session.metadata[WEBUI_SESSION_METADATA_KEY] = True
-    session.add_message("user", "/model deep", _command=True)
-    session.add_message(
-        "assistant",
-        "Switched model preset to `deep`.\n- Model: `deepseek-v4-pro`",
-        _command=True,
-    )
-    loop.sessions.save(session)
-
-    generated = await maybe_generate_webui_title(
-        sessions=loop.sessions,
-        session_key="websocket:command-title",
-        provider=loop.provider,
-        model=loop.model,
-    )
-
-    assert generated is False
-    assert WEBUI_TITLE_METADATA_KEY not in session.metadata
-    loop.provider.chat_stream_with_retry.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_generate_webui_title_ignores_cron_internal_turns(tmp_path: Path) -> None:
-    loop = _make_full_loop(tmp_path)
-    session = loop.sessions.get_or_create("websocket:cron-title")
-    session.metadata[WEBUI_SESSION_METADATA_KEY] = True
-    session.add_message(
-        "user",
-        "Scheduled cron job triggered: 30s-test\n\nInternal reminder prompt",
-        **{CRON_HISTORY_META: True},
-    )
-    session.add_message("assistant", "提醒已经到期。")
-    loop.sessions.save(session)
-
-    generated = await maybe_generate_webui_title(
-        sessions=loop.sessions,
-        session_key="websocket:cron-title",
-        provider=loop.provider,
-        model=loop.model,
-    )
-
-    assert generated is False
-    assert WEBUI_TITLE_METADATA_KEY not in session.metadata
-    loop.provider.chat_stream_with_retry.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_generate_webui_title_projects_onto_chat_session_under_unified_routing(
-    tmp_path: Path,
-) -> None:
-    loop = _make_full_loop(tmp_path)
-    loop.provider.chat_stream_with_retry = AsyncMock(
-        return_value=LLMResponse(content='"查询临期 IP"', finish_reason="stop")
-    )
-    unified = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
-    unified.metadata[WEBUI_SESSION_METADATA_KEY] = True
-    unified.metadata[WEBUI_TITLE_METADATA_KEY] = "开启私聊Topic功能"
-    unified.add_message("user", "很早以前的问题")
-    unified.add_message("assistant", "很久以前的回答。")
-    unified.add_message("user", "帮我查一下临期IP有哪些")
-    unified.add_message("assistant", "以下是临期 IP 列表。")
-    loop.sessions.save(unified)
-
-    generated = await maybe_generate_webui_title_after_turn(
-        channel="websocket",
-        chat_id="chat-projection",
-        metadata={WEBUI_SESSION_METADATA_KEY: True},
-        sessions=loop.sessions,
-        session_key=UNIFIED_SESSION_KEY,
-        provider=loop.provider,
-        model=loop.model,
-    )
-
-    assert generated is True
-    chat = loop.sessions.get_or_create("websocket:chat-projection")
-    assert chat.metadata[WEBUI_TITLE_METADATA_KEY] == "查询临期 IP"
-    assert unified.metadata[WEBUI_TITLE_METADATA_KEY] == "开启私聊Topic功能"
-    prompt = loop.provider.chat_stream_with_retry.await_args.args[0][1]["content"]
-    assert "帮我查一下临期IP有哪些" in prompt
-    assert "很早以前的问题" not in prompt
-
-
-@pytest.mark.asyncio
-async def test_projected_title_generation_skips_existing_chat_title(tmp_path: Path) -> None:
-    loop = _make_full_loop(tmp_path)
-    unified = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
-    unified.metadata[WEBUI_SESSION_METADATA_KEY] = True
-    unified.add_message("user", "帮我查一下临期IP有哪些")
-    unified.add_message("assistant", "以下是临期 IP 列表。")
-    chat = loop.sessions.get_or_create("websocket:chat-existing")
-    chat.metadata[WEBUI_TITLE_METADATA_KEY] = "Existing title"
-    loop.sessions.save(unified)
-
-    generated = await maybe_generate_webui_title_after_turn(
-        channel="websocket",
-        chat_id="chat-existing",
-        metadata={WEBUI_SESSION_METADATA_KEY: True},
-        sessions=loop.sessions,
-        session_key=UNIFIED_SESSION_KEY,
-        provider=loop.provider,
-        model=loop.model,
-    )
-
-    assert generated is False
-    assert chat.metadata[WEBUI_TITLE_METADATA_KEY] == "Existing title"
-    loop.provider.chat_stream_with_retry.assert_not_awaited()
 
 
 def test_save_turn_keeps_multimodal_runtime_context_for_model_replay() -> None:
@@ -1586,6 +1401,10 @@ async def test_websocket_internal_continuation_keeps_single_visible_run(
         )
 
     loop._run_agent_loop = fake_run_agent_loop  # type: ignore[method-assign]
+    statuses: list[TurnRunStatusChanged] = []
+    completions: list[TurnCompleted] = []
+    loop.bus.subscribe(statuses.append, TurnRunStatusChanged)
+    loop.bus.subscribe(completions.append, TurnCompleted)
 
     await loop._dispatch(InboundMessage(
         channel="websocket",
@@ -1595,30 +1414,21 @@ async def test_websocket_internal_continuation_keeps_single_visible_run(
         metadata={"webui": True},
     ))
 
-    first_outbound = []
-    while loop.bus.outbound_size:
-        first_outbound.append(await loop.bus.consume_outbound())
-    first_statuses = [m.event for m in first_outbound if isinstance(m.event, GoalStatusEvent)]
-    assert [m.status for m in first_statuses] == ["running"]
-    assert not [m for m in first_outbound if isinstance(m.event, TurnEndEvent)]
-    started_at = first_statuses[0].started_at
+    assert [event.status for event in statuses] == ["running"]
+    assert not completions
+    started_at = statuses[0].started_at
 
     queued = await asyncio.wait_for(loop.bus.consume_inbound(), timeout=0.5)
     assert queued.metadata[INTERNAL_CONTINUATION_META] is True
     assert queued.metadata[INTERNAL_CONTINUATION_RUN_STARTED_AT_META] == started_at
 
+    statuses.clear()
     await loop._dispatch(queued)
 
-    second_outbound = []
-    while loop.bus.outbound_size:
-        second_outbound.append(await loop.bus.consume_outbound())
-    second_statuses = [m.event for m in second_outbound if isinstance(m.event, GoalStatusEvent)]
-    assert [m.status for m in second_statuses] == ["running", "idle"]
-    assert second_statuses[0].started_at == started_at
-    turn_end = [m for m in second_outbound if isinstance(m.event, TurnEndEvent)]
-    assert len(turn_end) == 1
-    assert isinstance(turn_end[0].event, TurnEndEvent)
-    assert isinstance(turn_end[0].event.latency_ms, int)
+    assert [event.status for event in statuses] == ["running", "idle"]
+    assert statuses[0].started_at == started_at
+    assert len(completions) == 1
+    assert isinstance(completions[0].latency_ms, int)
 
 
 @pytest.mark.asyncio

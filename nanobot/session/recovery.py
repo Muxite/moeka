@@ -27,8 +27,6 @@ from nanobot.bus.queue import MessageBus
 from nanobot.session import turn_continuation
 from nanobot.session.keys import UNIFIED_SESSION_KEY, last_channel_from_metadata
 from nanobot.session.manager import Session, SessionManager
-from nanobot.webui.metadata import WEBUI_TURN_METADATA_KEY
-from nanobot.webui.session_identity import webui_chat_id, webui_session_key
 
 RUNTIME_CHECKPOINT_KEY = "runtime_checkpoint"
 PENDING_USER_TURN_KEY = "pending_user_turn"
@@ -44,6 +42,8 @@ _UNCERTAIN_TOOL_PHASES = frozenset({"awaiting_tools"})
 _KNOWN_CHECKPOINT_PHASES = frozenset(
     {"final_response", "tools_completed", "awaiting_tools", "error"}
 )
+# Session keys of the websocket channel are ``websocket:<chat_id>``.
+_WEBSOCKET_SESSION_KEY_PREFIX = "websocket:"
 
 
 class RecoveryActionError(ValueError):
@@ -490,8 +490,7 @@ class RecoveryCoordinator:
             route = self._websocket_route_for(key, metadata)
             if route is None:
                 continue
-            unfinished = self._has_unfinished_webui_transcript(key)
-            if not self._needs_recovery(metadata) and not unfinished:
+            if not self._needs_recovery(metadata):
                 continue
             session = self.sessions.get_or_create(key)
             try:
@@ -512,27 +511,14 @@ class RecoveryCoordinator:
                 await self._publish(route[1], failed)
 
     def _recovery_candidates(self) -> list[str]:
-        """Discover canonical and transcript-only WebUI sessions cheaply."""
-        candidates = dict.fromkeys(
-            key
-            for item in self.sessions.list_sessions()
-            if isinstance((key := item.get("key")), str)
+        """Discover persisted sessions cheaply."""
+        return list(
+            dict.fromkeys(
+                key
+                for item in self.sessions.list_sessions()
+                if isinstance((key := item.get("key")), str)
+            )
         )
-        try:
-            # Imported lazily because the sidebar index also projects recovery
-            # metadata.  The index is the owner of transcript-only discovery;
-            # duplicating its filename and migration rules here would drift.
-            from nanobot.webui.session_list_index import list_webui_sessions
-
-            for item in list_webui_sessions(self.sessions):
-                key = item.get("key")
-                if isinstance(key, str):
-                    candidates.setdefault(key, None)
-        except Exception:
-            # Canonical checkpoint recovery remains available even if the
-            # optional display-history index is corrupt or unavailable.
-            logger.exception("failed to discover transcript-only WebUI sessions")
-        return list(candidates)
 
     @staticmethod
     def _needs_recovery(metadata: Mapping[str, Any]) -> bool:
@@ -671,28 +657,6 @@ class RecoveryCoordinator:
                     )
                 self.sessions.save(session)
                 await self._publish(chat_id, next_state)
-            elif self._has_unfinished_webui_transcript(session.key):
-                # A normal last-client shutdown can materialize the checkpoint
-                # before the process exits.  In that path there is no pending
-                # marker left to classify, but the append-only transcript still
-                # contains an activity row without a turn_end.  Treat it as an
-                # interrupted turn instead of letting the UI resurrect it as a
-                # forever-running spinner.
-                can_continue = self._has_saved_continuation_context(session)
-                waiting = self._set_state(
-                    session,
-                    status="awaiting_user",
-                    recovery_id=uuid4().hex,
-                    attempts=0,
-                    reason=(
-                        "interrupted_with_saved_context"
-                        if can_continue
-                        else "interrupted_without_checkpoint"
-                    ),
-                    can_continue=can_continue,
-                )
-                self.sessions.save(session)
-                await self._publish(chat_id, waiting)
             return
         if state and state["status"] in {"awaiting_user", "failed"}:
             await self._publish(chat_id, state)
@@ -800,7 +764,6 @@ class RecoveryCoordinator:
                 metadata={
                     "webui": True,
                     "_wants_stream": True,
-                    WEBUI_TURN_METADATA_KEY: f"recovery:{recovery_id}",
                     RECOVERY_INBOUND_METADATA_KEY: recovery_id,
                     turn_continuation.INTERNAL_CONTINUATION_META: True,
                     turn_continuation.SKIP_USER_PERSIST_META: True,
@@ -878,48 +841,9 @@ class RecoveryCoordinator:
         return state
 
     def _session_key(self, chat_id: str) -> str:
-        return UNIFIED_SESSION_KEY if self.unified_session else webui_session_key(chat_id)
-
-    @staticmethod
-    def _has_unfinished_webui_transcript(session_key: str) -> bool:
-        """Detect a stale WebUI activity tail after an unclean gateway stop.
-
-        The transcript is intentionally consulted only as a last-resort signal:
-        a durable pending turn or runtime checkpoint always takes precedence.
-        This keeps browser disconnects harmless while preventing a materialized
-        partial turn from being presented as active forever after a restart.
-        """
-        try:
-            from nanobot.webui.transcript import has_unfinished_transcript_tail
-
-            return has_unfinished_transcript_tail(session_key)
-        except (OSError, ValueError, TypeError):
-            # Recovery must fail closed if the optional display transcript is
-            # corrupt or unavailable; the normal checkpoint path still applies.
-            return False
-
-    @staticmethod
-    def _has_saved_continuation_context(session: Session) -> bool:
-        """Whether an interrupted turn left model-visible context to continue from."""
-        last_user = next(
-            (
-                index
-                for index in range(len(session.messages) - 1, -1, -1)
-                if session.messages[index].get("role") == "user"
-            ),
-            None,
-        )
-        if last_user is None:
-            return False
-        tail = session.messages[last_user + 1 :]
-        return bool(tail) and (
-            tail[-1].get("role") == "tool"
-            or any(message.get("_recovery_interrupted") is True for message in tail)
-            or any(
-                message.get("role") == "assistant" and bool(message.get("tool_calls"))
-                for message in tail
-            )
-        )
+        if self.unified_session:
+            return UNIFIED_SESSION_KEY
+        return f"{_WEBSOCKET_SESSION_KEY_PREFIX}{chat_id}"
 
     @staticmethod
     def _websocket_route(session: Session) -> tuple[str, str] | None:
@@ -930,9 +854,11 @@ class RecoveryCoordinator:
         session_key: str,
         metadata: Mapping[str, Any],
     ) -> tuple[str, str] | None:
-        chat_id = webui_chat_id(session_key)
-        if chat_id is not None:
-            return ("websocket", chat_id)
+        if session_key.startswith(_WEBSOCKET_SESSION_KEY_PREFIX):
+            chat_id = session_key.removeprefix(_WEBSOCKET_SESSION_KEY_PREFIX)
+            if chat_id:
+                return ("websocket", chat_id)
+            return None
         if session_key == UNIFIED_SESSION_KEY:
             route = last_channel_from_metadata(metadata)
             if route and route[0] == "websocket":
