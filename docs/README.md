@@ -1,5 +1,11 @@
 # nanobot Documentation
 
+> **Branch note (`core-slim`).** On the `core-slim` branch only [`docs/core-map/`](./core-map/README.md) is
+> authoritative: it describes the slim agent core with line-cited references. Every other page in `docs/`
+> (including this index) describes the full chat-bot distribution on `main` (channels, gateway, WebUI, HTTP API,
+> cron, heartbeat, onboarding) and is legacy here; commands and features it mentions may not exist on this
+> branch.
+
 Use these docs to get a working agent first, then open a task guide only when you need the next capability. Source-level design and extension details are kept in the contributor section.
 
 Repository docs follow the current source tree and can be newer than the latest package release. For published release docs, visit [nanobot.wiki](https://nanobot.wiki/docs/latest/getting-started/nanobot-overview).

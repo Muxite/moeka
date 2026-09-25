@@ -170,7 +170,9 @@ jobs:
 
       # NANOBOT_MIN_TESTS: if an optional extra fails to resolve, its whole
       # test file vanishes from collection and CI would pass with fewer
-      # tests. Raise as the suite grows; never lower it.
+      # tests. 4500 is the floor for the core-slim suite (last known count:
+      # 4549 passed, 50 skipped in Docker at the Task 12 acceptance run).
+      # Raise as the suite grows; never lower it.
       - name: Run tests with coverage
         if: matrix.coverage
         env:
