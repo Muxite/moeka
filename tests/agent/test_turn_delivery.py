@@ -437,3 +437,23 @@ def test_late_subagent_route_requires_webui_owned_session(tmp_path: Path) -> Non
         "injected_event": "subagent_result",
         "subagent_task_id": "sub-1",
     }
+
+
+def test_turn_delivery_does_not_import_channels():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, nanobot.agent.turn_delivery;"
+        "print(any(m.startswith('nanobot.channels') for m in sys.modules))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.stdout.strip() == "False"
+
+
+def test_remember_session_route_keeps_thread_fields(tmp_path):
+    from nanobot.agent.turn_delivery import notification_metadata
+
+    assert notification_metadata("telegram", {"message_thread_id": 7, "sender": "x"}) == {
+        "message_thread_id": 7
+    }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -25,6 +25,24 @@ from nanobot.session.keys import UNIFIED_SESSION_KEY, last_channel_from_metadata
 
 if TYPE_CHECKING:
     from nanobot.utils.llm_runtime import LLMRuntime
+
+
+def notification_metadata(channel: str, source: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep thread addresses without retaining sender data or a completed turn owner."""
+    channel_type = channel.split(".", 1)[0]
+    fields = {
+        "telegram": ("message_thread_id",),
+        "matrix": ("thread_root_event_id", "thread_reply_to_event_id"),
+        "feishu": ("message_id", "thread_id", "chat_type"),
+    }.get(channel_type, ())
+    metadata = {key: source[key] for key in fields if key in source}
+    if channel_type in {"slack", "mattermost"}:
+        nested = source.get(channel_type)
+        if isinstance(nested, dict):
+            nested = cast(dict[str, Any], nested)
+            fields = ("thread_ts",) if channel_type == "slack" else ("root_id", "thread_ts")
+            metadata[channel_type] = {key: nested[key] for key in fields if key in nested}
+    return deepcopy(metadata)
 
 
 @dataclass(frozen=True)
@@ -215,13 +233,6 @@ class TurnDelivery:
 
     def remember_session_route(self, session_metadata: dict[str, Any]) -> None:
         """Keep only routing fields needed to deliver a later idle notification."""
-        # moeka: import lazily -- nanobot.channels/__init__.py pulls in BaseChannel
-        # and its full runtime deps (pairing, etc.); nanobot.agent.loop (and this
-        # module transitively) is on the always-imported path for the embeddable
-        # moeka-core surface (`from nanobot.core import MoekaCore`), which must
-        # stay free of channel/gateway imports. See tests/core/test_import_boundary.py.
-        from nanobot.channels.notification_routes import notification_metadata
-
         # Keep the storage key readable by older gateways.
         session_metadata["_compaction_route"] = {
             "channel": self.route.channel,
