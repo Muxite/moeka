@@ -124,14 +124,6 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         accepts_args=True,
     ),
     BuiltinCommandSpec(
-        "/trigger",
-        "Create named local trigger",
-        "Create a named CLI trigger bound to this chat session.",
-        "zap",
-        "<name>",
-        accepts_args=True,
-    ),
-    BuiltinCommandSpec(
         "/dream",
         "Run Dream",
         "Manually trigger memory consolidation.",
@@ -178,14 +170,6 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Show help",
         "List available slash commands.",
         "circle-help",
-    ),
-    BuiltinCommandSpec(
-        "/pairing",
-        "Manage pairing",
-        "List, approve, deny or revoke pairing requests.",
-        "shield",
-        "[list|approve <code>|deny <code>|revoke <user_id>]",
-        accepts_args=True,
     ),
 )
 
@@ -904,19 +888,6 @@ async def cmd_goal(ctx: CommandContext) -> OutboundMessage | None:
     return None
 
 
-async def cmd_pairing(ctx: CommandContext) -> OutboundMessage:
-    """List, approve, deny or revoke pairing requests."""
-    from nanobot.pairing import PAIRING_COMMAND_META_KEY, handle_pairing_command
-
-    reply = handle_pairing_command(ctx.msg.channel, ctx.args)
-    return OutboundMessage(
-        channel=ctx.msg.channel,
-        chat_id=ctx.msg.chat_id,
-        content=reply,
-        metadata={PAIRING_COMMAND_META_KEY: True},
-    )
-
-
 async def cmd_skill(ctx: CommandContext) -> OutboundMessage:
     """List all enabled skills (name and description only)."""
     loop = ctx.loop
@@ -936,54 +907,6 @@ async def cmd_skill(ctx: CommandContext) -> OutboundMessage:
         metadata=dict(ctx.msg.metadata or {}),
     )
 
-
-async def cmd_trigger(ctx: CommandContext) -> OutboundMessage:
-    """Create a local trigger bound to the current session."""
-    name = ctx.args.strip()
-    if not name:
-        return OutboundMessage(
-            channel=ctx.msg.channel,
-            chat_id=ctx.msg.chat_id,
-            content=(
-                "Usage: /trigger <name>\n\n"
-                "Create a named local trigger bound to this chat session."
-            ),
-            metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
-        )
-
-    from nanobot.triggers.local_store import LocalTriggerStore
-
-    loop = ctx.loop
-    store = loop.local_trigger_store
-    if store is None:
-        store = LocalTriggerStore(loop.workspace)
-
-    from nanobot.session.keys import UNIFIED_SESSION_KEY
-
-    session_key = (
-        ctx.msg.session_key
-        if ctx.key == UNIFIED_SESSION_KEY
-        else ctx.key
-    )
-    trigger = store.create(
-        name=name,
-        channel=ctx.msg.channel,
-        chat_id=ctx.msg.chat_id,
-        session_key=session_key,
-        sender_id="trigger",
-        origin_metadata=dict(ctx.msg.metadata or {}),
-    )
-    command = f'nanobot trigger {trigger.id} "message"'
-    return OutboundMessage(
-        channel=ctx.msg.channel,
-        chat_id=ctx.msg.chat_id,
-        content=(
-            f"Trigger created: {trigger.name}\n"
-            f"ID: {trigger.id}\n\n"
-            f"Command:\n{command}"
-        ),
-        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
-    )
 
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
@@ -1044,8 +967,6 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/history ", cmd_history)
     router.exact("/goal", cmd_goal)
     router.prefix("/goal ", cmd_goal)
-    router.exact("/trigger", cmd_trigger)
-    router.prefix("/trigger ", cmd_trigger)
     router.exact("/dream", cmd_dream)
     router.exact("/dream-log", cmd_dream_log)
     router.prefix("/dream-log ", cmd_dream_log)
@@ -1057,7 +978,5 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/evaluator-prompt ", cmd_evaluator_prompt)
     router.exact("/skill", cmd_skill)
     router.exact("/help", cmd_help)
-    router.exact("/pairing", cmd_pairing)
-    router.prefix("/pairing ", cmd_pairing)
     router.exact(USER_SHELL_COMMAND, cmd_user_shell)
     router.prefix(f"{USER_SHELL_COMMAND} ", cmd_user_shell)
