@@ -29,7 +29,6 @@ from nanobot.runtime_context import (
     append_runtime_context,
     public_history_message,
 )
-from nanobot.session.automation_turns import AUTOMATION_HISTORY_META
 from nanobot.session.goal_state import GOAL_STATE_KEY
 from nanobot.session.keys import (
     LAST_CHANNEL_METADATA_KEY,

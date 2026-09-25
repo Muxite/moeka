@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent.runner_helpers import make_run_spec
-from nanobot.agent.automation_turns import publish_next_deferred_turn
 from nanobot.agent.context import TranscriptInput
 from nanobot.agent.tools.context import RequestContext
 from nanobot.config.schema import AgentDefaults
