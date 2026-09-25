@@ -94,3 +94,12 @@ def test_exec_shell_parameter_guidance_matches_platform() -> None:
         assert "zsh" in shell_parameter
         assert "powershell" not in shell_parameter
         assert "cmd" not in shell_parameter
+
+
+def test_exec_description_is_truthful_about_followup_and_guards() -> None:
+    description = ExecTool().description
+    assert "exec_session" in description
+    assert "write_stdin" not in description
+    assert "Hard-blocked" not in description
+    assert "fork-bomb" not in description
+    assert "fork bomb" not in description.lower()

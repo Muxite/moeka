@@ -64,7 +64,7 @@ The pre-slim `templates/HEARTBEAT.md` was deleted.
 
 | Location | What | Safe? |
 |---|---|---|
-| agent/context.py:295-323 `_behavioral_guidelines()` | "# Working style" block, injected into every main system prompt (agent/context.py:153) | Python edit (out of your edit scope). It tells the model to use `bg_shell`, which is not auto-loaded (agent/tools/bg_shell.py:271-275), so the instruction points at a normally missing tool |
+| agent/context.py:295-324 `_behavioral_guidelines()` | "# Working style" block, injected into every main system prompt (agent/context.py:153) | Python edit (out of your edit scope). It tells the model to run long jobs with `exec` + `yield_time_ms` and poll via `exec_session` (both registered); `bg_shell` (not auto-loaded, agent/tools/bg_shell.py:271-275) is deliberately not named, pinned by tests/agent/test_context_builder.py |
 | agent/context.py:199-204 | `[Archived Context Summary]` wrapper | Python; tests assert it (tests/agent/test_context_builder.py:388,406) |
 | agent/context.py:156-162 | `# Current Project` block when the project workspace differs from the agent workspace | Python |
 | agent/loop.py:2178-2187 | Planning-step system prompt and `[Planning note ...]` prefix (only with `planning: true`) | Python |
@@ -245,7 +245,7 @@ Function: `ContextBuilder.build_system_prompt` (agent/context.py:133-206). Parts
 |---|---|---|---|
 | 1 | Identity: runtime, workspace paths, platform policy, CLI format hint, external-content notes | `templates/agent/identity.md` via `_get_identity` (agent/context.py:147,325-340) | always |
 | 2 | Bootstrap files, each as `## <NAME>\n\n<content>`: `AGENTS.md` (from project root), `SOUL.md`, `USER.md` (from agent workspace) (agent/context.py:377-381); plus host in-memory overrides (agent/context.py:388-392,410-414) | Workspace files | Included only if non-empty; AGENTS.md/USER.md skipped when byte-equal (stripped) to bundled template (agent/context.py:103,404-407); SOUL.md replaced by new default if it equals legacy default (agent/context.py:397-401). Note `BOOTSTRAP_FILES` (agent/context.py:102) also lists the three names but the loop uses `sources` (agent/context.py:377). A `TOOLS.md` in the workspace is NOT loaded (not in `sources`) |
-| 3 | `# Working style` | Hard-coded Python `_behavioral_guidelines` (agent/context.py:153,295-323) | always |
+| 3 | `# Working style` | Hard-coded Python `_behavioral_guidelines` (agent/context.py:153,295-324) | always |
 | 4 | `# Tool Usage Notes` | `templates/agent/tool_contract.md` (agent/context.py:154) | always |
 | 5 | `# Current Project` working dir | Python (agent/context.py:156-162) | only if project workspace differs from agent workspace |
 | 6 | `# Memory\n\n## Long-term Memory\n...` (MEMORY.md, or top-k semantic chunks if it exceeds `semantic_threshold` chars (default 2048) AND a VecStore is available) | `MemoryStore.get_memory_context` (agent/memory.py:265-301, agent/context.py:164-174) | `include_memory` and MEMORY.md non-empty and not equal to the template. Cosmetic quirk: `get_memory_context` already returns a `## Long-term Memory` heading (agent/memory.py:301) and agent/context.py:174 adds another, so the heading appears twice. `AgentLoop.from_config` passes no VecStore (agent/loop.py:542-573), so the full MEMORY.md is injected, uncapped, unless the host (e.g. `MoekaCore.from_config`) supplies one |
@@ -459,8 +459,7 @@ skills are now checked by tests/agent/test_prompts_no_removed_features.py). What
 
 Chat/consumer flavoured:
 - `templates/agent/subagent_announce.md:8` ("Summarize this naturally for the user ...") assumes a human reader.
-- agent/context.py:295-323 working-style block: co-worker tone plus `bg_shell` instructions for a tool that is not
-  registered (Python).
+- agent/context.py:295-324 working-style block: co-worker tone plus long-job etiquette (Python).
 - Skills: `weather`, `update-setup` (nanobot upgrade wizard, Chinese triggers, skills/update-setup/SKILL.md:3),
   `clawhub`, `image-generation`.
 - `SOUL.md` template: emoji persona "nanobot" (templates/SOUL.md:3); `legacy/SOUL.md` has execution rules that

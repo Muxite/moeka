@@ -298,8 +298,8 @@ class ExecTool(Tool):
             "Destructive operations (rm -rf, dd, mkfs, shutdown) are permitted by default — "
             "this is a server-management agent. "
             "sudo is gated by tools.exec.allow_sudo in config. "
-            "Hard-blocked (not configurable): writes to nanobot internal state files "
-            "(history.jsonl, .dream_cursor) and the classic fork-bomb pattern. "
+            "Writes to nanobot internal state files (history.jsonl, .dream_cursor) "
+            "are always blocked. "
             "Use this for tests, builds, package commands, git commands, and "
             "other process execution. Prefer read_file/find_files/grep for "
             "inspection and apply_patch/write_file/edit_file for file changes "
@@ -307,8 +307,8 @@ class ExecTool(Tool):
             "Use -y or --yes flags to avoid interactive prompts. "
             f"{platform_note}"
             "For long-running or interactive commands, pass yield_time_ms; "
-            "if the command keeps running, exec returns a session_id that can "
-            "be polled or written to with write_stdin. Output is truncated at "
+            "if the command keeps running, exec returns a session_id; poll it, "
+            "send input, or terminate it with exec_session. Output is truncated at "
             "10 000 chars; timeout defaults to 60s."
         )
 

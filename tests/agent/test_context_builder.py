@@ -568,3 +568,12 @@ class TestBuildMessages:
         user_msg = messages[-1]["content"]
         assert isinstance(user_msg, list)
         assert any(b.get("type") == "image_url" for b in user_msg)
+
+
+def test_working_style_names_only_registered_tools(tmp_path):
+    prompt = _builder(tmp_path).build_system_prompt()
+    assert "# Working style" in prompt
+    assert "bg_shell" not in prompt
+    assert "exec_session" in prompt
+    assert "yield_time_ms" in prompt
+    assert "woken automatically" not in prompt
