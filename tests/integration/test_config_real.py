@@ -61,19 +61,6 @@ class TestLoadConfigReal:
         with pytest.raises(ValueError, match="JSON syntax error"):
             load_config(cfg_file)
 
-    def test_loads_channels_enabled_flag(self, tmp_path: Path) -> None:
-        cfg_file = tmp_path / "config.json"
-        cfg_file.write_text(
-            json.dumps({"channels": {"telegram": {"enabled": True, "token": "tok"}}}),
-            encoding="utf-8",
-        )
-        config = load_config(cfg_file)
-        section = getattr(config.channels, "telegram", None)
-        if isinstance(section, dict):
-            assert section["enabled"] is True
-        else:
-            assert getattr(section, "enabled", None) is True
-
     def test_loads_tools_exec_config(self, tmp_path: Path) -> None:
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
@@ -121,22 +108,6 @@ class TestSaveConfigReal:
         save_config(Config(), cfg_file)
         # Atomic write uses .json.tmp — must be gone after success
         assert not (tmp_path / "config.json.tmp").exists()
-
-    def test_save_preserves_extra_channel_config(self, tmp_path: Path) -> None:
-        """Channel sections with extra keys survive a save/load cycle."""
-        cfg_file = tmp_path / "config.json"
-        cfg_file.write_text(
-            json.dumps({
-                "channels": {
-                    "telegram": {"enabled": True, "token": "tok", "allowFrom": ["*"]}
-                }
-            }),
-            encoding="utf-8",
-        )
-        config = load_config(cfg_file)
-        save_config(config, cfg_file)
-        data = json.loads(cfg_file.read_text(encoding="utf-8"))
-        assert data["channels"]["telegram"]["token"] == "tok"
 
 
 # ---------------------------------------------------------------------------

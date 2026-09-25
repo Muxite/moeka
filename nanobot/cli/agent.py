@@ -157,7 +157,7 @@ def agent(
             reasoning: bool = False,
             **_kwargs: Any,
         ) -> None:
-            ch = runtime_config.channels
+            ch = runtime_config.display
 
             if _kwargs.get("reasoning_end"):
                 if ch and not ch.show_reasoning:
@@ -290,7 +290,7 @@ def agent(
                         if await cli_terminal._maybe_print_interactive_progress(
                             msg,
                             None,
-                            runtime_config.channels,
+                            runtime_config.display,
                             renderer,
                             reasoning_buffer,
                         ):

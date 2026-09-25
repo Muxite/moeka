@@ -1,9 +1,8 @@
 """Provider-specific voice transcription adapters.
 
 This module only knows how to call external transcription APIs such as Groq,
-OpenAI Whisper, OpenRouter, Xiaomi MiMo ASR, and AssemblyAI. Product-level config fallback,
-WebUI upload validation, and channel integration live in
-``nanobot.audio.transcription``.
+OpenAI Whisper, OpenRouter, Xiaomi MiMo ASR, and AssemblyAI. Callers choose the
+provider and pass credentials; no config resolution happens here.
 """
 
 import asyncio

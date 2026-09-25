@@ -80,7 +80,7 @@ def _ensure_interactive_tty_mode() -> None:
         attrs[3] |= required_lflag
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
         termios.tcflush(fd, termios.TCIFLUSH)
-        logger.debug("Restored foreground gateway TTY mode")
+        logger.debug("Restored foreground TTY mode")
 
 
 class SafeFileHistory(FileHistory):
@@ -364,7 +364,7 @@ async def _print_interactive_progress_line(
 async def _maybe_print_interactive_progress(
     msg: Any,
     thinking: ThinkingSpinner | None,
-    channels_config: Any,
+    display_config: Any,
     renderer: StreamRenderer | None = None,
     reasoning_buffer: _ReasoningBuffer | None = None,
 ) -> bool:
@@ -382,7 +382,7 @@ async def _maybe_print_interactive_progress(
     reasoning_buffer = reasoning_buffer or _ReasoningBuffer()
 
     if event.reasoning_end:
-        if channels_config and not channels_config.show_reasoning:
+        if display_config and not display_config.show_reasoning:
             reasoning_buffer.clear()
         else:
             _flush_cli_reasoning(reasoning_buffer, thinking, renderer)
@@ -391,16 +391,16 @@ async def _maybe_print_interactive_progress(
     is_tool_hint = event.tool_hint
     is_reasoning = event.reasoning or event.reasoning_delta
     if is_reasoning:
-        if channels_config and not channels_config.show_reasoning:
+        if display_config and not display_config.show_reasoning:
             reasoning_buffer.clear()
             return True
         text = reasoning_buffer.add(msg.content)
         if text:
             _print_cli_reasoning(text, thinking, renderer)
         return True
-    if channels_config and is_tool_hint and not channels_config.send_tool_hints:
+    if display_config and is_tool_hint and not display_config.send_tool_hints:
         return True
-    if channels_config and not is_tool_hint and not channels_config.send_progress:
+    if display_config and not is_tool_hint and not display_config.send_progress:
         return True
 
     await _print_interactive_progress_line(msg.content, thinking, renderer)

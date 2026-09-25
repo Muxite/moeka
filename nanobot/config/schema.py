@@ -19,34 +19,12 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.web import WebToolsConfig
 
 
-class ChannelsConfig(Base):
-    """Configuration for chat channels.
+class DisplayConfig(Base):
+    """How the interactive CLI surfaces progress while the agent works."""
 
-    Built-in and plugin channel configs are stored as extra fields (dicts).
-    Each channel parses its own config in __init__.
-    Per-channel "streaming": true enables streaming output (requires send_delta impl).
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    send_progress: bool = True  # stream agent's text progress to the channel
-    send_tool_hints: bool = True  # stream tool-call hints (e.g. read_file("…"))
-    show_reasoning: bool = True  # surface model reasoning when channel implements it
-    extract_document_text: bool = True  # Deprecated and ignored; documents are read on demand
-    send_max_retries: int = Field(default=3, ge=0, le=10)  # Max delivery attempts (initial send included)
-    transcription_provider: str = "groq"  # Deprecated: use top-level transcription.provider
-    transcription_language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}$")  # Deprecated: use top-level transcription.language
-
-
-class TranscriptionConfig(Base):
-    """Cross-channel audio transcription configuration."""
-
-    enabled: bool = True
-    provider: str | None = None  # Validated by nanobot.audio.transcription_registry.
-    model: str | None = None
-    language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}$")
-    max_duration_sec: int = Field(default=120, ge=1, le=600)
-    max_upload_mb: int = Field(default=25, ge=1, le=100)
+    send_progress: bool = True  # print the agent's text progress
+    send_tool_hints: bool = True  # print tool-call hints (e.g. read_file("…"))
+    show_reasoning: bool = True  # print model reasoning when the provider streams it
 
 
 class DreamConfig(Base):
@@ -394,42 +372,6 @@ class ProvidersConfig(Base):
         return self
 
 
-class HeartbeatConfig(Base):
-    """Heartbeat service configuration (now backed by cron)."""
-
-    enabled: bool = True
-    interval_s: int = 30 * 60  # 30 minutes
-
-
-class ApiConfig(Base):
-    """OpenAI-compatible API server configuration."""
-
-    host: str = "127.0.0.1"  # Safer default: local-only bind.
-    port: int = 8900
-    timeout: float = 120.0  # Per-request timeout in seconds.
-    api_key: str = Field(default="", repr=False)
-
-    @model_validator(mode="after")
-    def wildcard_host_requires_auth(self) -> "ApiConfig":
-        if self.host not in ("0.0.0.0", "::"):
-            return self
-        if self.api_key.strip():
-            return self
-        raise ValueError(
-            "host is 0.0.0.0 (all interfaces) but api_key is not set "
-            "- set api.api_key to prevent unauthenticated access"
-        )
-
-
-class GatewayConfig(Base):
-    """Gateway/server configuration."""
-
-    host: str = "127.0.0.1"  # Safer default: local-only bind.
-    port: int = 18790
-    restart_mode: Literal["auto", "exec", "spawn", "exit"] = "auto"
-    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
-
-
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -478,13 +420,6 @@ class ToolsConfig(Base):
             "allow_local_preview_access",
         ),
     )  # allow WebUI Full Access shell checks against localhost services; legacy allowLocalPreviewAccess still reads
-    webui_allow_remote_package_install: bool = Field(
-        default=False,
-        validation_alias=AliasChoices(
-            "webuiAllowRemotePackageInstall",
-            "webui_allow_remote_package_install",
-        ),
-    )  # allow non-local WebUI clients to install optional packages and agent skills
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 
@@ -495,11 +430,8 @@ class Config(BaseSettings):
     _source_path: Path | None = PrivateAttr(default=None)
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
-    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
-    transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
+    display: DisplayConfig = Field(default_factory=DisplayConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
-    api: ApiConfig = Field(default_factory=ApiConfig)
-    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     model_presets: dict[str, ModelPresetConfig] = Field(
         default_factory=dict,

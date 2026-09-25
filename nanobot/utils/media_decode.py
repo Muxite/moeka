@@ -1,8 +1,7 @@
 """Shared helpers for decoding ``data:...;base64,...`` URLs to disk.
 
-Historically lived in ``nanobot.api.server``; now shared by the WebSocket
-channel so the ``api`` + ``websocket`` ingress paths apply the same parsing,
-size guard, and filesystem layout.
+Keeps the parsing, size guard, and filesystem layout for inline media in
+one place.
 """
 
 from __future__ import annotations
