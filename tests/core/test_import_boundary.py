@@ -46,3 +46,29 @@ def test_core_import_has_no_runtime_deps():
     assert proc.returncode == 0, proc.stderr
     leaked = [m for m in proc.stdout.strip().split(",") if m]
     assert leaked == [], f"moeka-core import leaked runtime modules: {leaked}"
+
+
+_WEBUI_PROBE = """
+import sys
+import nanobot.agent.loop        # noqa: F401
+import nanobot.session.recovery  # noqa: F401
+import nanobot.agent.tools.sessions  # noqa: F401
+import nanobot.utils.restart     # noqa: F401
+leaked = sorted(
+    m for m in sys.modules if m == "nanobot.webui" or m.startswith("nanobot.webui.")
+)
+print(",".join(leaked))
+"""
+
+
+def test_agent_loop_and_session_recovery_do_not_load_webui():
+    """The agent loop and session recovery no longer depend on the WebUI package."""
+    proc = subprocess.run(
+        [sys.executable, "-c", _WEBUI_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    leaked = [m for m in proc.stdout.strip().split(",") if m]
+    assert leaked == [], f"agent loop / session recovery import loaded webui: {leaked}"
