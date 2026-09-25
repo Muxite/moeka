@@ -31,7 +31,6 @@ def _make_mock_loop(**overrides):
     loop.restrict_to_workspace = False
     loop._start_time = 1000.0
     loop.exec_config = ExecToolConfig()
-    loop.channels_config = MagicMock()
     loop.provider_retry_mode = "standard"
     loop.max_tool_result_chars = 16000
     loop.model_preset = None
@@ -1007,13 +1006,6 @@ class TestSecurityAttributeProtection:
         tool = _make_tool()
         result = await tool.execute(action="set", key="web_config", value=MagicMock())
         assert "read-only" in result
-
-    @pytest.mark.asyncio
-    async def test_modify_channels_config_blocked(self):
-        """channels_config is BLOCKED — cannot be modified."""
-        tool = _make_tool()
-        result = await tool.execute(action="set", key="channels_config", value={})
-        assert "protected" in result
 
     @pytest.mark.asyncio
     async def test_inspect_restrict_to_workspace_blocked(self):

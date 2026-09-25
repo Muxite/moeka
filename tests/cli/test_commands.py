@@ -1553,7 +1553,6 @@ def mock_agent_runtime(tmp_path):
          patch("nanobot.cron.service.CronService"), \
          patch("nanobot.cli.agent.AgentLoop.from_config") as mock_from_config:
         agent_loop = MagicMock()
-        agent_loop.channels_config = None
         agent_loop.process_direct = AsyncMock(
             return_value=OutboundMessage(channel="cli", chat_id="direct", content="mock-response"),
         )

@@ -114,7 +114,6 @@ from nanobot.utils.runtime import (
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
-        ChannelsConfig,
         Config,
         ProviderConfig,
         ToolsConfig,
@@ -279,7 +278,6 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         tool_registry: ToolRegistry | None = None,
-        channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         session_ttl_minutes: int = 0,
         hooks: list[AgentHook] | None = None,
@@ -329,7 +327,6 @@ class AgentLoop:
         else:
             self.turn_delivery_factory = TurnDeliveryFactory(bus)
         self.runtime_event_publisher = self.turn_delivery_factory.runtime_event_publisher
-        self.channels_config = channels_config
         self.restart_mode = restart_mode
         self._runtime_model_publisher = runtime_model_publisher
         self.workspace = workspace
@@ -569,7 +566,6 @@ class AgentLoop:
             provider_retry_mode=defaults.provider_retry_mode,
             tool_hint_max_length=defaults.tool_hint_max_length,
             restrict_to_workspace=config.tools.restrict_to_workspace,
-            channels_config=config.channels,
             timezone=defaults.timezone,
             unified_session=defaults.unified_session,
             disabled_skills=defaults.disabled_skills,
@@ -584,7 +580,7 @@ class AgentLoop:
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             dream_model_preset=defaults.dream.model_override,
-            restart_mode=config.gateway.restart_mode,
+            restart_mode="auto",  # former GatewayConfig.restart_mode default
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
             tool_registry=tool_registry,

@@ -11,14 +11,12 @@ from nanobot.agent.tools.context import RequestContext
 from nanobot.agent.tools.filesystem import ReadFileTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import ChannelsConfig
 from nanobot.providers.base import LLMResponse
 from nanobot.utils.document import reference_non_image_attachments
 
 
 def _make_loop(
     workspace: Path,
-    channels_config: ChannelsConfig | None = None,
 ) -> AgentLoop:
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
@@ -28,7 +26,6 @@ def _make_loop(
         provider=provider,
         workspace=workspace,
         model="test-model",
-        channels_config=channels_config,
     )
 
 
@@ -44,11 +41,9 @@ def _turn_context(loop: AgentLoop, msg: InboundMessage) -> TurnContext:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extract_document_text", [True, False])
 async def test_document_attachment_is_referenced_and_read_on_demand(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    extract_document_text: bool,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -58,10 +53,7 @@ async def test_document_attachment_is_referenced_and_read_on_demand(
     csv_path.write_text("name,value\nnanobot,1", encoding="utf-8")
     monkeypatch.setattr("nanobot.agent.tools.path_utils.get_media_dir", lambda: media_dir)
 
-    loop = _make_loop(
-        workspace,
-        ChannelsConfig(extract_document_text=extract_document_text),
-    )
+    loop = _make_loop(workspace)
     msg = InboundMessage(
         channel="websocket",
         sender_id="u",

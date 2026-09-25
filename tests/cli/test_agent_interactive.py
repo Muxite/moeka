@@ -53,8 +53,6 @@ def test_interactive_agent_routes_a_complete_user_turn(
             return None
 
     class _AgentLoop:
-        channels_config = None
-
         @classmethod
         def from_config(cls, _config, bus, **_kwargs):
             instance = cls(bus)
