@@ -13,7 +13,6 @@ ruff check nanobot/
 
 # Strict type checking (matches CI)
 uv sync --all-extras --dev
-uv run --no-sync python -m scripts.install_channel_dependencies --all-channels
 uv run --no-sync basedpyright
 
 # WebUI: dev server (proxies API/WS to gateway :8765), build, test
