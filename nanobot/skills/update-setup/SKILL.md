@@ -63,7 +63,7 @@ If the user selected `source (git clone)`, ask for the local checkout path:
 **Question 2 — Optional dependencies:**
 
 ```
-question: "Which optional dependencies do you need? List names separated by spaces, or reply 'none'. Available: api, azure, bedrock, langfuse, olostep. Channel dependencies are installed from their manifests when the gateway starts."
+question: "Which optional dependencies do you need? List names separated by spaces, or reply 'none'. Available: api, azure, bedrock, langfuse, olostep."
 ```
 
 Parse the reply. If the user says "none" or similar, set extras to empty. Otherwise collect the valid names.
@@ -120,7 +120,7 @@ description: "Upgrade nanobot to the latest version. Triggers: upgrade nanobot, 
 2. Use `exec` to run the preflight check: <PREFLIGHT_CHECK>. If it fails, stop and tell the user to rerun `update-setup` because the saved install method no longer matches this environment.
 3. Use `exec` to run the upgrade command: <UPGRADE_COMMAND>
 4. Use `exec` to verify: `nanobot --version`
-5. Tell the user the new version. Say: "Run `/restart` to restart nanobot and apply the update. If `/restart` is unavailable in this channel, restart the nanobot process manually."
+5. Tell the user the new version. Say: "Restart the nanobot process to apply the update."
 ```
 
 ## Step 5: Confirm

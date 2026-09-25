@@ -41,8 +41,7 @@ class AskUserTool(Tool):
     def description(self) -> str:
         return (
             "Pause and ask the user a question when their answer is required to continue. "
-            "Use options for likely answers; the user's reply, typed or selected, is returned as the tool result. "
-            "For non-blocking notifications or buttons, use the message tool instead."
+            "Use options for likely answers; the user's reply, typed or selected, is returned as the tool result."
         )
 
     @property

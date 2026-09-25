@@ -271,8 +271,9 @@ class TestBundledToolContract:
         assert "clear user request as authorization" in content
         assert "Never invent missing records or measurements" in content
         assert "## Web and External Information" in content
-        assert "## Messaging and Media" in content
-        assert "## Scheduling and Background Work" in content
+        assert "## Media" in content
+        assert "## Messaging and Media" not in content
+        assert "## Scheduling and Background Work" not in content
 
     def test_tool_contract_is_injected_without_workspace_file(self, tmp_path):
         builder = _builder(tmp_path)

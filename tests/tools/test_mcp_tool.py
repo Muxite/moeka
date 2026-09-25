@@ -603,7 +603,7 @@ async def test_execute_persists_image_block_as_artifact(tmp_path: Path) -> None:
     assert Path(artifact["path"]).is_file()
     # The base64 payload must NOT leak into the model-facing result.
     assert _PNG_B64 not in result
-    assert "message tool" in payload["next_step"]
+    assert "message tool" not in payload["next_step"]
 
 
 @pytest.mark.asyncio

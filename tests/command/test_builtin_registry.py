@@ -7,10 +7,10 @@ from nanobot.command.router import CommandRouter
 
 EXACT = [
     "/__shell", "/compact", "/dream", "/dream-log", "/dream-prompt", "/dream-restore",
-    "/evaluator-prompt", "/goal", "/help", "/history", "/model", "/new", "/skill", "/status",
+    "/goal", "/help", "/history", "/model", "/new", "/skill", "/status",
 ]
 PREFIX = [
-    "/__shell ", "/dream-log ", "/dream-prompt ", "/dream-restore ", "/evaluator-prompt ",
+    "/__shell ", "/dream-log ", "/dream-prompt ", "/dream-restore ",
     "/goal ", "/history ", "/model ",
 ]
 

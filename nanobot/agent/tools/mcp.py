@@ -574,16 +574,14 @@ def _mcp_image_tool_result(text_parts: list[str], artifacts: list[dict[str, Any]
     """Build the compact tool result for an MCP call that returned image(s).
 
     The base64 stays out of the model context entirely — only artifact paths and
-    metadata are returned, so the result is small and the channel can deliver the
-    saved file via the message tool.
+    metadata are returned, so the result is small.
     """
     payload: dict[str, Any] = {
         "artifacts": artifacts,
         "next_step": (
             "These images were returned by an MCP tool and saved as local artifacts. "
-            "Call the message tool with the artifact 'path' values in the media "
-            "parameter to deliver the images to the user. Do not paste base64 or raw "
-            "paths into your reply unless the user asks for debug details."
+            "Do not paste base64 or raw paths into your reply unless the user asks "
+            "for debug details."
         ),
     }
     text = "\n".join(part for part in text_parts if part)
@@ -706,7 +704,7 @@ class MCPToolWrapper(_MCPWrapperBase):
 
         Text is concatenated as before. Image blocks are decoded and saved as
         local artifacts (mirroring the built-in image generation tool) so the
-        model can deliver them via the message tool instead of trying to forward
+        model can reference them by path instead of trying to forward
         base64 — which would be truncated and bloat the context window.
         """
         from mcp import types

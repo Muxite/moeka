@@ -15,7 +15,6 @@ If the `generate_image` tool is not available in the current tool list, tell the
 - Image editing: pass the saved artifact path or user image path in `reference_images`.
 - Iterative edits in the same conversation: prefer the most recent generated image artifact if the user says things like "make it brighter", "change the background", or "try another version".
 - Ambiguous edits: ask a short clarifying question if multiple recent images could be the target.
-- After generating images, call the `message` tool with the artifact paths in the `media` parameter to deliver them to the user.
 
 ## Prompt Rules
 
@@ -40,7 +39,7 @@ In normal user-facing replies, do not expose local filesystem paths. Keep the re
 
 For follow-up edits, pass the prior artifact `path` to `reference_images`. If the user provides a new uploaded image, use that path as the reference instead.
 
-Do not include internal replay markers such as `[Message Time: ...]`, `[image: /local/path]`, `generate_image(...)`, or `message(...)` in user-facing replies.
+Do not include internal replay markers such as `[Message Time: ...]`, `[image: /local/path]` or `generate_image(...)` in user-facing replies.
 
 ## Examples
 

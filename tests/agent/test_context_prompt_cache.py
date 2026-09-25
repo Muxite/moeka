@@ -156,24 +156,14 @@ def test_default_soul_template_keeps_execution_policy_in_tool_contract() -> None
     assert "irreversible action needs confirmation" in contract
 
 
-def test_channel_format_hint_telegram(tmp_path) -> None:
-    """Telegram channel should get messaging-app format hint."""
+def test_channel_format_hint_cli(tmp_path) -> None:
+    """The CLI channel should get the terminal format hint."""
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
-    prompt = builder.build_system_prompt(channel="telegram")
+    prompt = builder.build_system_prompt(channel="cli")
     assert "Format Hint" in prompt
-    assert "messaging app" in prompt
-
-
-def test_channel_format_hint_whatsapp(tmp_path) -> None:
-    """WhatsApp should get plain-text format hint."""
-    workspace = _make_workspace(tmp_path)
-    builder = ContextBuilder(workspace)
-
-    prompt = builder.build_system_prompt(channel="whatsapp")
-    assert "Format Hint" in prompt
-    assert "plain text only" in prompt
+    assert "rendered in a terminal" in prompt
 
 
 def test_channel_format_hint_absent_for_unknown(tmp_path) -> None:
@@ -184,7 +174,7 @@ def test_channel_format_hint_absent_for_unknown(tmp_path) -> None:
     prompt = builder.build_system_prompt(channel=None)
     assert "Format Hint" not in prompt
 
-    prompt2 = builder.build_system_prompt(channel="feishu")
+    prompt2 = builder.build_system_prompt(channel="telegram")
     assert "Format Hint" not in prompt2
 
 
@@ -195,22 +185,21 @@ def test_build_messages_passes_channel_to_system_prompt(tmp_path) -> None:
 
     messages = builder.build_messages(
         history=[], current_message="hi",
-        channel="telegram",
+        channel="cli",
     )
     system = messages[0]["content"]
     assert "Format Hint" in system
-    assert "messaging app" in system
+    assert "rendered in a terminal" in system
 
 
-def test_system_prompt_keeps_message_tool_out_of_current_chat_replies(tmp_path) -> None:
+def test_system_prompt_has_no_message_tool_guidance(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
-    prompt = builder.build_system_prompt(channel="slack")
+    prompt = builder.build_system_prompt(channel="cli")
 
-    assert "Do not use the 'message' tool for normal replies in the current chat" in prompt
-    assert "When 'generate_image' creates images" in prompt
-    assert "call 'message' with the artifact paths in the 'media' parameter" in prompt
+    assert "'message' tool" not in prompt
+    assert "`message` tool" not in prompt
     assert "Wait for the tool results, then answer once" in prompt
 
 
@@ -239,7 +228,7 @@ def test_fresh_workspace_omits_default_prompt_scaffolding(tmp_path) -> None:
     assert "## USER.md" not in prompt
     assert "8281248569" not in prompt
     assert "(your name)" not in prompt
-    assert prompt.count("Do not use the 'message' tool for normal replies") == 1
+    assert prompt.count("Wait for the tool results, then answer once") == 1
 
 
 def test_template_memory_md_is_skipped(tmp_path) -> None:
