@@ -14,7 +14,6 @@ __all__ = [
     "_load_config_for_cli",
     "_load_inspection_config",
     "_load_runtime_config",
-    "_migrate_cron_store",
     "_model_display",
     "_print_agent_start_error",
     "_print_config_error",
@@ -78,12 +77,11 @@ def _status_command(config_path: Path) -> str:
 
 def _print_model_setup_steps(config_path: Path) -> None:
     """Show the shortest setup routes shared by Status and Agent startup."""
-    config_arg = f'--config "{config_path}"'
     console.print(
-        f"  WebUI: run [cyan]nanobot webui {escape(config_arg)}[/cyan], "
-        "then open Settings → Models"
+        f"  Edit:  [cyan]{escape(str(config_path))}[/cyan] and set "
+        "agents.defaults.model plus a providers.<name>.apiKey"
     )
-    console.print(f"  CLI:   run [cyan]nanobot onboard --wizard {escape(config_arg)}[/cyan]")
+    console.print("  OAuth: run [cyan]nanobot provider login <provider>[/cyan]")
     console.print(f"  Check: [cyan]{escape(_status_command(config_path))}[/cyan]")
 
 
@@ -159,19 +157,6 @@ def _load_inspection_config(
     if workspace:
         loaded.agents.defaults.workspace = workspace
     return display_path, loaded
-
-
-def _migrate_cron_store(config: "Config") -> None:
-    """One-time migration: move legacy global cron store into the workspace."""
-    from nanobot.config.paths import get_cron_dir
-
-    legacy_path = get_cron_dir() / "jobs.json"
-    new_path = config.workspace_path / "cron" / "jobs.json"
-    if legacy_path.is_file() and not new_path.exists():
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-
-        shutil.move(str(legacy_path), str(new_path))
 
 
 def _provider_setup_error(config: Config) -> str | None:

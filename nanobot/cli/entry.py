@@ -1,4 +1,4 @@
-"""Low-overhead console entrypoint for the native terminal client."""
+"""Low-overhead console entrypoint for the terminal agent."""
 
 from __future__ import annotations
 
@@ -31,20 +31,6 @@ def _agent_invocation_args(args: list[str]) -> list[str] | None:
     return None
 
 
-def _native_tui_candidate(args: list[str]) -> bool:
-    """Return whether ``agent`` can start without the classic agent stack."""
-    if not args or args[0] != "agent":
-        return False
-    for argument in args[1:]:
-        if argument in {"--classic", "--no-tui", "-m", "--message"}:
-            return False
-        if argument.startswith("--message=") or (
-            argument.startswith("-m") and not argument.startswith("--")
-        ):
-            return False
-    return True
-
-
 def _configure_windows_console() -> None:
     if sys.platform != "win32" or sys.stdout.encoding == "utf-8":
         return
@@ -69,7 +55,7 @@ def _run_agent(args: list[str], *, prog_name: str) -> None:
 
 
 def main() -> None:
-    """Dispatch native TUI startup without importing the complete CLI graph."""
+    """Dispatch ``agent`` startup without importing the complete CLI graph."""
     raw_args = sys.argv[1:]
     # Installed completion scripts call ``nanobot`` without positional arguments
     # and pass the request through this environment variable. Keep those requests
@@ -79,20 +65,10 @@ def main() -> None:
     dispatch_args = ["agent", *agent_args] if agent_args is not None else raw_args
     set_cli_process_identity(dispatch_args)
     _configure_windows_console()
-    if not shell_completion and not raw_args:
-        from nanobot.cli.desktop_target import dispatch_bare_desktop_target
-
-        desktop_exit = dispatch_bare_desktop_target(raw_args)
-        if desktop_exit is not None:
-            if desktop_exit:
-                raise SystemExit(desktop_exit)
-            return
-    root_agent_alias = agent_args is not None and raw_args[:1] != ["agent"]
-    if agent_args is not None and (
-        root_agent_alias or _native_tui_candidate(dispatch_args)
-    ):
-        prog_name = "nanobot" if root_agent_alias else "nanobot agent"
-        _run_agent(agent_args, prog_name=prog_name)
+    if agent_args is not None and raw_args[:1] != ["agent"]:
+        # Root alias (``nanobot``, ``nanobot -m ...``): run the agent directly.
+        # An explicit ``nanobot agent`` goes through the full Typer app below.
+        _run_agent(agent_args, prog_name="nanobot")
         return
 
     from nanobot.cli.commands import app

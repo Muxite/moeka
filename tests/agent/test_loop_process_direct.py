@@ -84,3 +84,40 @@ async def test_process_direct_applies_per_run_hooks(tmp_path) -> None:
     assert response is not None
     assert response.content == "done"
     assert events == [("before", None), ("after", "done")]
+
+
+@pytest.mark.asyncio
+async def test_process_direct_accepts_media() -> None:
+    """process_direct should forward media paths to _process_message."""
+    from nanobot.bus.runtime_events import RuntimeEventPublisher
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop._session_locks = {}
+    loop.runtime_event_publisher = RuntimeEventPublisher(MessageBus())
+
+    captured_msg = None
+
+    async def fake_process(
+        msg,
+        *,
+        session_key="",
+        on_progress=None,
+        on_stream=None,
+        on_stream_end=None,
+        ephemeral=False,
+    ):
+        nonlocal captured_msg
+        captured_msg = msg
+        return None
+
+    loop._process_message = fake_process
+
+    await loop.process_direct(
+        content="analyze this",
+        media=["/tmp/image.png", "/tmp/report.pdf"],
+        session_key="test:1",
+    )
+
+    assert captured_msg is not None
+    assert captured_msg.media == ["/tmp/image.png", "/tmp/report.pdf"]
+    assert captured_msg.content == "analyze this"
