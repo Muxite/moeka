@@ -888,19 +888,27 @@ async def test_grep_risky_looking_patterns_still_return_correct_results(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_grep_literal_matches_beyond_50k_but_regex_over_long_lines_is_capped(
+async def test_grep_regex_matches_past_50k_chars_and_anchors_see_the_real_line_end(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "min.txt").write_text("a" * 60_000 + "NEEDLE\n", encoding="utf-8")
-    tool = GrepTool(workspace=tmp_path)
-    literal = await tool.execute(
-        pattern="NEEDLE", fixed_strings=True, output_mode="files_with_matches"
+    (tmp_path / "anchor.txt").write_text(
+        "a" * 49_997 + "foo" + "b" * 20_000 + "\n", encoding="utf-8"
     )
-    assert literal.strip() == "min.txt"
-    # Regexes over lines longer than 10 000 chars run in the worker, which only
-    # matches the first 50 000 chars of each line (documented limitation).
-    capped = await tool.execute(pattern="NEED[L]E", output_mode="files_with_matches")
-    assert "No matches" in capped
+    tool = GrepTool(workspace=tmp_path)
+    found = await tool.execute(
+        pattern="NEED[L]E", path="min.txt", output_mode="files_with_matches"
+    )
+    assert found.strip() == "min.txt"
+    # foo ends exactly at char 50 000 of a 70k line: `$` must not see a fake line end.
+    anchored = await tool.execute(
+        pattern="foo$", path="anchor.txt", output_mode="files_with_matches"
+    )
+    assert "No matches" in anchored
+    lookahead = await tool.execute(
+        pattern=r"foo(?!b)", path="anchor.txt", output_mode="files_with_matches"
+    )
+    assert "No matches" in lookahead
 
 
 # ---------------------------------------------------------------------------
@@ -993,6 +1001,7 @@ async def test_grep_worker_ignores_cwd_shadow_modules_and_gets_no_env(
     assert len(spawned) == 1
     args, kwargs, _proc = spawned[0]
     assert "-I" in args[0]
+    assert "-S" in args[0]
     assert "FAKE_API_KEY" not in kwargs["env"]
     assert not any("sk-should-not-leak" in v for v in kwargs["env"].values())
     assert Path(kwargs["cwd"]) != ws
@@ -1052,13 +1061,18 @@ async def test_grep_quadratic_pattern_on_long_line_does_not_block_the_loop(
     (tmp_path / "long.txt").write_text("e" * 40_000 + "\n", encoding="utf-8")
     tool = GrepTool(workspace=tmp_path, regex_timeout_s=5)
     ticks = 0
+    max_gap = 0.0
     stop = False
 
     async def ticker() -> None:
-        nonlocal ticks
+        nonlocal ticks, max_gap
+        last = time.monotonic()
         while not stop:
             ticks += 1
             await asyncio.sleep(0)
+            now = time.monotonic()
+            max_gap = max(max_gap, now - last)
+            last = now
 
     task = asyncio.create_task(ticker())
     result = await asyncio.wait_for(tool.execute(pattern=r".*error.*timeout"), timeout=30)
@@ -1066,6 +1080,7 @@ async def test_grep_quadratic_pattern_on_long_line_does_not_block_the_loop(
     await task
     assert "No matches found" in result or "timed out" in result
     assert ticks > 10
+    assert max_gap < 0.3
 
 
 @pytest.mark.asyncio
@@ -1123,3 +1138,92 @@ async def test_grep_cancellation_kills_the_worker(tmp_path: Path, spawned) -> No
             break
         await asyncio.sleep(0.05)
     assert all(proc.poll() is not None for _a, _k, proc in spawned)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pattern", "line", "expect_timeout"),
+    [
+        (r"(a*)(a*)(a*)b", "a" * 600, True),
+        (r"(.*)x(.*)y", "x" * 3000, False),
+        (r"a{0,2000}a{0,2000}a{0,2000}b", "a" * 1500, True),
+    ],
+    ids=["grouped-stars", "grouped-dotstar", "bounded-big"],
+)
+async def test_grep_grouped_and_bounded_repeats_are_routed_to_the_worker(
+    tmp_path: Path, spawned, pattern: str, line: str, expect_timeout: bool
+) -> None:
+    (tmp_path / "poly.txt").write_text(line + "\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=1)
+    max_gap = 0.0
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal max_gap
+        last = time.monotonic()
+        while not stop:
+            await asyncio.sleep(0)
+            now = time.monotonic()
+            max_gap = max(max_gap, now - last)
+            last = now
+
+    task = asyncio.create_task(ticker())
+    started = time.monotonic()
+    result = await asyncio.wait_for(tool.execute(pattern=pattern), timeout=60)
+    elapsed = time.monotonic() - started
+    stop = True
+    await task
+
+    assert len(spawned) == 1
+    if expect_timeout:
+        assert result.startswith("Error: grep timed out after 1s")
+    assert elapsed < 5
+    assert max_gap < 0.5
+    assert all(proc.poll() is not None for _a, _k, proc in spawned)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pattern", [r"foo.*bar", r"import .* from", r"foo|bar", r"(?i)error", r".*", r"\d{1,3}\.\d{1,3}"]
+)
+async def test_grep_ordinary_patterns_are_not_routed_to_the_worker(
+    tmp_path: Path, spawned, pattern: str
+) -> None:
+    (tmp_path / "a.txt").write_text("import x from y\nfoo and bar\nError 1.2\n", encoding="utf-8")
+    await GrepTool(workspace=tmp_path).execute(pattern=pattern)
+    assert spawned == []
+
+
+@pytest.mark.asyncio
+async def test_grep_long_document_line_routes_to_the_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned
+) -> None:
+    from nanobot.utils.document import LocatedDocumentLine
+
+    (tmp_path / "report.docx").write_bytes(b"placeholder")
+
+    def fake_source(path, pages=None):
+        lines = iter([LocatedDocumentLine("e" * 40_000 + "NEEDLE", 1, "")])
+        return SimpleNamespace(lines=lines, continuation=None)
+
+    monkeypatch.setattr("nanobot.agent.tools.search.open_document_line_source", fake_source)
+    result = await GrepTool(workspace=tmp_path).execute(
+        pattern="NEED[L]E", output_mode="files_with_matches"
+    )
+    assert result.strip() == "report.docx"
+    assert len(spawned) == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_worker_batches_lines_and_matches_the_in_process_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned
+) -> None:
+    monkeypatch.setattr("nanobot.agent.tools.search._GREP_WORKER_BATCH_CHARS", 200)
+    text = "".join(f"line {i} \u00e9t\u00e9 {'hit' if i % 7 == 0 else 'miss'}\n" for i in range(300))
+    (tmp_path / "b.txt").write_text(text, encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path)
+    isolated = await tool.execute(pattern=r".*hit.*\u00e9", context_before=0, context_after=0)
+    monkeypatch.setattr("nanobot.agent.tools.search._regex_may_backtrack_badly", lambda *_: False)
+    inline = await tool.execute(pattern=r".*hit.*\u00e9", context_before=0, context_after=0)
+    assert len(spawned) == 1
+    assert isolated == inline

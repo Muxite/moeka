@@ -527,6 +527,8 @@ class FindFilesTool(_SearchTool):
 
 _GREP_DEADLINE_CHECK_EVERY = 64
 _GREP_LONG_LINE_CHARS = 10_000
+_GREP_BIG_REPEAT = 100  # bounded repeats with a larger max are treated as unbounded
+_GREP_WORKER_BATCH_CHARS = 4 * 1024 * 1024
 _GREP_WORKER_SCRIPT = Path(__file__).with_name("_grep_worker.py")
 
 
@@ -547,8 +549,9 @@ def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
 
     Flags a repeat whose body holds another repeat, an alternation under a repeat
     whose branches do not start with distinct literals (``(a+)+$``, ``(a|aa)*``), and
-    two or more unbounded repeats side by side in one sequence (``a*a*b``,
-    ``.*error.*timeout``, polynomial but quadratic or worse on long lines).
+    two or more large repeats (unbounded, or bounded with max > 100) anywhere on one
+    path, including inside capturing groups (``a*a*b``, ``(a*)(a*)b``,
+    ``a{0,2000}a{0,2000}b``, ``.*error.*timeout``: polynomial, quadratic or worse).
     Over-approximate on purpose: a flagged pattern only costs a worker process,
     never a wrong answer.
     """
@@ -568,16 +571,25 @@ def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
             firsts.append(alt[0][1])
         return len(set(firsts)) == len(firsts)
 
+    def big_repeats(seq: Any) -> int:
+        """Most large repeats met along one path, descending into groups and branches."""
+        total = 0
+        for op, av in seq:
+            if op in repeats:
+                total += (1 if av[1] > _GREP_BIG_REPEAT else 0) + big_repeats(av[2])
+            elif op is sre_parse.BRANCH:
+                total += max((big_repeats(alt) for alt in av[1]), default=0)
+            elif op is sre_parse.SUBPATTERN:
+                total += big_repeats(av[3])
+            elif op in (sre_parse.ASSERT, sre_parse.ASSERT_NOT):
+                total += big_repeats(av[1])
+        return total
+
     def walk(seq: Any, in_repeat: bool) -> bool:
-        unbounded_here = 0
         for op, av in seq:
             if op in repeats:
                 _lo, hi, sub = av
                 iterates = hi > 1
-                if hi == sre_parse.MAXREPEAT:
-                    unbounded_here += 1
-                    if unbounded_here >= 2:
-                        return True
                 if iterates and in_repeat:
                     return True
                 if walk(sub, in_repeat or iterates):
@@ -595,7 +607,7 @@ def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
                     return True
         return False
 
-    return walk(parsed, False)
+    return big_repeats(parsed) >= 2 or walk(parsed, False)
 
 
 class _Hit:
@@ -650,7 +662,7 @@ class _RegexWorker:
             if self._proc is None:
                 try:
                     self._proc = subprocess.Popen(
-                        [sys.executable, "-I", str(_GREP_WORKER_SCRIPT)],
+                        [sys.executable, "-I", "-S", str(_GREP_WORKER_SCRIPT)],
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,
@@ -699,7 +711,25 @@ class _RegexWorker:
             proc.wait()
 
     def match_starts(self, texts: list[str]) -> list[int]:
-        """Return the match start (or -1) of every text; raise on timeout or failure."""
+        """Return the match start (or -1) of every text; raise on timeout or failure.
+
+        Texts go out in bounded batches (about ``_GREP_WORKER_BATCH_CHARS`` chars per
+        request); each reply is read in full before the next request is written.
+        """
+        starts: list[int] = []
+        batch: list[str] = []
+        size = 0
+        for text in texts:
+            if batch and size + len(text) > _GREP_WORKER_BATCH_CHARS:
+                starts.extend(self._match_batch(batch))
+                batch, size = [], 0
+            batch.append(text)
+            size += len(text)
+        if batch or not texts:
+            starts.extend(self._match_batch(batch))
+        return starts
+
+    def _match_batch(self, texts: list[str]) -> list[int]:
         remaining = None if self._deadline is None else self._deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
             raise _GrepTimeoutError
@@ -710,14 +740,17 @@ class _RegexWorker:
                 timer = threading.Timer(remaining, self._on_timeout)
                 timer.daemon = True
                 timer.start()
-            request = json.dumps({"texts": texts}).encode("ascii") + b"\n"
-            self._write(proc, request)
+            request = json.dumps({"texts": texts}, ensure_ascii=False)
+            self._write(proc, request.encode("utf-8", "surrogatepass") + b"\n")
             assert proc.stdout is not None
             line = proc.stdout.readline()
-        except _GrepWorkerError:
+        except (_GrepWorkerError, OSError, ValueError) as exc:
+            # A closed pipe (kill on timeout or cancellation) surfaces as ValueError/OSError.
             if self.timed_out:
                 raise _GrepTimeoutError from None
-            raise
+            if isinstance(exc, _GrepWorkerError):
+                raise
+            raise _GrepWorkerError(f"worker pipe failed: {exc}") from exc
         finally:
             if timer is not None:
                 timer.cancel()
@@ -735,6 +768,10 @@ class _RegexWorker:
         except (ValueError, KeyError, TypeError) as exc:
             raise _GrepWorkerError(f"unusable worker reply: {exc}") from exc
         return starts
+
+
+def _any_long_line(texts: Iterable[str]) -> bool:
+    return any(len(text) > _GREP_LONG_LINE_CHARS for text in texts)
 
 
 def _with_deadline(
@@ -1095,6 +1132,10 @@ class GrepTool(_SearchTool):
                             continue
                         source_iterator = source.lines
                         source_lines: Iterable[LocatedDocumentLine] = source_iterator
+                        if worker is not None:
+                            # Long-line check needs the whole document text.
+                            source_lines = list(source_iterator)
+                            long_line = _any_long_line(ln.text for ln in source_lines)
                         if source.continuation:
                             document_continuations.append(
                                 f"({display_path}: continue PDF search with "
@@ -1112,9 +1153,7 @@ class GrepTool(_SearchTool):
                             skipped_binary += 1
                             continue
                         text_lines = content.splitlines()
-                        long_line = worker is not None and any(
-                            len(text) > _GREP_LONG_LINE_CHARS for text in text_lines
-                        )
+                        long_line = worker is not None and _any_long_line(text_lines)
                         source_lines = (
                             LocatedDocumentLine(text, line_no, "")
                             for line_no, text in enumerate(text_lines, 1)
