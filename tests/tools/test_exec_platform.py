@@ -14,6 +14,7 @@ import pytest
 
 from nanobot.agent.tools.exec_session import ExecSessionManager, ExecSessionTool
 from nanobot.agent.tools.shell import ExecTool
+from tests.tools._exec_mock_streams import set_output
 
 _WINDOWS_ENV_KEYS = {
     "APPDATA", "LOCALAPPDATA", "ProgramData",
@@ -335,7 +336,7 @@ class TestPathAppendPlatform:
     async def test_unix_uses_env_var_in_fixed_export(self):
         """On Unix, path_append must not be interpolated into shell source."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok", b"")
+        set_output(mock_proc, b"ok", b"")
         mock_proc.returncode = 0
 
         captured_cmd = None
@@ -366,7 +367,7 @@ class TestPathAppendPlatform:
     async def test_unix_path_prepend_uses_env_var_in_fixed_export(self):
         """On Unix, path_prepend must not be interpolated into shell source."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok", b"")
+        set_output(mock_proc, b"ok", b"")
         mock_proc.returncode = 0
 
         captured_cmd = None
@@ -396,7 +397,7 @@ class TestPathAppendPlatform:
     @pytest.mark.asyncio
     async def test_unix_path_prepend_and_append_order(self):
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok", b"")
+        set_output(mock_proc, b"ok", b"")
         mock_proc.returncode = 0
 
         captured_cmd = None
@@ -429,7 +430,7 @@ class TestPathAppendPlatform:
     async def test_windows_modifies_env(self):
         """On Windows, path_append is appended to PATH in the env dict."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok", b"")
+        set_output(mock_proc, b"ok", b"")
         mock_proc.returncode = 0
 
         captured_env = {}
@@ -454,7 +455,7 @@ class TestPathAppendPlatform:
     @pytest.mark.asyncio
     async def test_windows_path_prepend_and_append_order(self):
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok", b"")
+        set_output(mock_proc, b"ok", b"")
         mock_proc.returncode = 0
 
         captured_env = {}
@@ -491,7 +492,7 @@ class TestSandboxPlatform:
     async def test_sandbox_skipped_on_windows(self, backend):
         """Configured Unix backends preserve the Windows native fallback."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok", b"")
+        set_output(mock_proc, b"ok", b"")
         mock_proc.returncode = 0
 
         with (
@@ -511,7 +512,7 @@ class TestSandboxPlatform:
     async def test_sandbox_applied_on_unix(self, backend):
         """On Unix, sandbox wrapping should still happen normally."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"sandboxed", b"")
+        set_output(mock_proc, b"sandboxed", b"")
         mock_proc.returncode = 0
 
         with (
@@ -532,7 +533,7 @@ class TestSandboxPlatform:
     async def test_sandbox_receives_configured_bind_roots(self, tmp_path, backend):
         """Configured bind roots should be forwarded to the sandbox wrapper."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"sandboxed", b"")
+        set_output(mock_proc, b"sandboxed", b"")
         mock_proc.returncode = 0
         tool_bin = tmp_path / "tool-bin"
         tool_cache = tmp_path / "tool-cache"
@@ -570,7 +571,7 @@ class TestExecuteEndToEnd:
     async def test_windows_full_path(self):
         """Full execute() flow on Windows: env, spawn, output formatting."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"hello world\r\n", b"")
+        set_output(mock_proc, b"hello world\r\n", b"")
         mock_proc.returncode = 0
 
         with (
@@ -588,7 +589,7 @@ class TestExecuteEndToEnd:
     async def test_unix_full_path(self):
         """Full execute() flow on Unix: env, spawn, output formatting."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"hello world\n", b"")
+        set_output(mock_proc, b"hello world\n", b"")
         mock_proc.returncode = 0
 
         with (
@@ -606,7 +607,7 @@ class TestExecuteEndToEnd:
     async def test_execute_defaults_to_non_login_shell(self):
         """The public execute path must not silently request a login shell."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"ok\n", b"")
+        set_output(mock_proc, b"ok\n", b"")
         mock_proc.returncode = 0
         captured_login = []
 
@@ -697,7 +698,7 @@ class TestWindowsMultilineExec:
     @pytest.mark.asyncio
     async def test_multiline_python_uses_powershell(self):
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"1\n2\n", b"")
+        set_output(mock_proc, b"1\n2\n", b"")
         mock_proc.returncode = 0
 
         with (
@@ -719,7 +720,7 @@ class TestWindowsMultilineExec:
     @pytest.mark.asyncio
     async def test_multiline_node_uses_powershell(self):
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"1\n", b"")
+        set_output(mock_proc, b"1\n", b"")
         mock_proc.returncode = 0
 
         with (
@@ -740,7 +741,7 @@ class TestWindowsMultilineExec:
     async def test_single_line_uses_powershell(self):
         """Single-line commands also route through PowerShell now."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"1\n", b"")
+        set_output(mock_proc, b"1\n", b"")
         mock_proc.returncode = 0
 
         with (
@@ -757,7 +758,7 @@ class TestWindowsMultilineExec:
     @pytest.mark.asyncio
     async def test_unix_unchanged(self):
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"1\n2\n", b"")
+        set_output(mock_proc, b"1\n2\n", b"")
         mock_proc.returncode = 0
 
         with (
@@ -783,7 +784,7 @@ class TestResolveShellWindows:
     async def test_shell_powershell_accepted(self):
         """shell='powershell' should resolve and route through PowerShell."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b"hello\n", b"")
+        set_output(mock_proc, b"hello\n", b"")
         mock_proc.returncode = 0
 
         with (
@@ -805,7 +806,7 @@ class TestResolveShellWindows:
     async def test_shell_cmd_accepted(self):
         """shell='cmd' should preserve the command string for cmd.exe parsing."""
         mock_proc = AsyncMock()
-        mock_proc.communicate.return_value = (b'"a & b"\n', b"")
+        set_output(mock_proc, b'"a & b"\n', b"")
         mock_proc.returncode = 0
 
         with (

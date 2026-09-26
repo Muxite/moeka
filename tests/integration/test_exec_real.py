@@ -227,3 +227,191 @@ async def test_create_and_list_dir(tmp_path: Path) -> None:
     assert subdir.is_dir()
     output = await _run(_tool(), f"ls {tmp_path}")
     assert "new_dir" in output
+
+
+# ---------------------------------------------------------------------------
+# bounded one-shot output capture (P0.8): a flood must not be buffered in RAM
+# ---------------------------------------------------------------------------
+
+_needs_proc = pytest.mark.skipif(
+    not Path("/proc/self/status").exists(), reason="/proc RSS sampling required"
+)
+_CAPPED = "bytes discarded after the capture limit"
+_MIB = 1024 * 1024
+
+
+def _vmrss_kb() -> int:
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1])
+    raise AssertionError("VmRSS missing from /proc/self/status")
+
+
+async def _run_measuring_rss(tool: ExecTool, cmd: str) -> tuple[str, float]:
+    """Run *cmd* and return (output, peak RSS growth of this process in MiB).
+
+    VmRSS is sampled every 10 ms while the command runs (so an earlier peak in
+    the same pytest process cannot hide the growth, unlike ru_maxrss alone),
+    and the ru_maxrss delta is folded in to catch a short spike between samples.
+    """
+    import asyncio
+    import gc
+    import resource
+
+    gc.collect()
+    base_kb = _vmrss_kb()
+    base_max_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_kb = base_kb
+    done = asyncio.Event()
+
+    async def _sample() -> None:
+        nonlocal peak_kb
+        while not done.is_set():
+            peak_kb = max(peak_kb, _vmrss_kb())
+            await asyncio.sleep(0.01)
+
+    sampler = asyncio.create_task(_sample())
+    try:
+        output = await tool.execute(cmd)
+    finally:
+        done.set()
+        await sampler
+    peak_kb = max(peak_kb, _vmrss_kb())
+    maxrss_delta_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base_max_kb
+    growth_kb = max(peak_kb - base_kb, maxrss_delta_kb)
+    return output, growth_kb / 1024
+
+
+def _live_pids_with(marker: str) -> list[int]:
+    """PIDs (not zombies) whose command line contains *marker*."""
+    import os
+
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+            state = (entry / "stat").read_text().rsplit(")", 1)[1].split()[0]
+        except OSError:
+            continue
+        if marker.encode() in cmdline and state != "Z":
+            found.append(int(entry.name))
+    return found
+
+
+def _old_format(stdout: str, max_len: int = 10_000) -> str:
+    """The pre-cap one-shot format for a stdout-only command exiting 0."""
+    result = f"{stdout}\n\nExit code: 0"
+    if len(result) > max_len:
+        half = max_len // 2
+        result = (
+            result[:half]
+            + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
+            + result[-half:]
+        )
+    return result
+
+
+@_needs_proc
+@pytest.mark.asyncio
+async def test_stdout_flood_is_capped_and_memory_bounded() -> None:
+    output, growth_mib = await _run_measuring_rss(
+        _tool(timeout=60), "head -c 300000000 /dev/zero | tr '\\0' x"
+    )
+    assert growth_mib < 150, f"exec buffered the flood: RSS grew {growth_mib:.0f} MiB"
+    assert "chars truncated" in output
+    assert f"... ({300_000_000 - 4 * _MIB:,} {_CAPPED}) ..." in output
+    assert output.endswith("x" * 100 + "\n\nExit code: 0")
+    assert len(output) < 12_000
+
+
+@_needs_proc
+@pytest.mark.asyncio
+async def test_stderr_flood_is_capped_and_memory_bounded() -> None:
+    output, growth_mib = await _run_measuring_rss(
+        _tool(timeout=60), "head -c 300000000 /dev/zero | tr '\\0' x >&2"
+    )
+    assert growth_mib < 150, f"exec buffered the flood: RSS grew {growth_mib:.0f} MiB"
+    assert output.startswith("STDERR:\nxxxx")
+    assert "chars truncated" in output
+    assert f"... ({300_000_000 - 4 * _MIB:,} {_CAPPED}) ..." in output
+    assert output.endswith("\n\nExit code: 0")
+
+
+@_needs_proc
+@pytest.mark.asyncio
+async def test_both_streams_flooding_at_once_is_bounded() -> None:
+    cmd = (
+        "head -c 200000000 /dev/zero | tr '\\0' x & "
+        "head -c 200000000 /dev/zero | tr '\\0' y >&2; wait"
+    )
+    output, growth_mib = await _run_measuring_rss(_tool(timeout=60), cmd)
+    assert growth_mib < 150, f"exec buffered the flood: RSS grew {growth_mib:.0f} MiB"
+    assert output.startswith("xxxx")
+    assert output.endswith("y" * 100 + "\n\nExit code: 0")
+    assert f"... ({2 * (200_000_000 - 4 * _MIB):,} {_CAPPED}) ..." in output
+
+
+@_needs_proc
+@pytest.mark.asyncio
+async def test_timeout_still_kills_a_flooding_process_group() -> None:
+    import uuid
+
+    marker = f"moekaflood{uuid.uuid4().hex}"
+    output, growth_mib = await _run_measuring_rss(_tool(timeout=2), f"yes {marker} | cat")
+    assert output == "Error: Command timed out after 2 seconds"
+    assert growth_mib < 150, f"exec buffered the flood: RSS grew {growth_mib:.0f} MiB"
+    assert _live_pids_with(marker) == []
+
+
+@pytest.mark.asyncio
+async def test_ordinary_output_format_is_unchanged() -> None:
+    tool = _tool()
+    assert await tool.execute("echo ok") == "ok\n\n\nExit code: 0"
+    assert await tool.execute("printf 'line1\\nline2\\nline3\\n'") == (
+        "line1\nline2\nline3\n\n\nExit code: 0"
+    )
+    assert await tool.execute("printf 'a\\nb\\n'; echo boom >&2; exit 3") == (
+        "a\nb\n\nSTDERR:\nboom\n\n\nExit code: 3"
+    )
+    assert await tool.execute("printf '\\377\\376ok'") == "��ok\n\nExit code: 0"
+    assert await tool.execute("true") == "\nExit code: 0"
+    ls = await tool.execute("ls /nonexistent")
+    assert ls.startswith("STDERR:\nls: ") and "/nonexistent" in ls
+    assert ls.endswith("\n\n\nExit code: 2")
+
+
+@pytest.mark.parametrize(
+    ("size", "kwargs"),
+    [(3_000_000, {}), (5_000_000, {"max_capture_bytes": 8 * _MIB})],
+)
+@pytest.mark.asyncio
+async def test_output_under_the_capture_cap_keeps_the_standard_truncation(
+    size: int, kwargs: dict
+) -> None:
+    output = await _tool(**kwargs).execute(f"head -c {size} /dev/zero | tr '\\0' x")
+    assert _CAPPED not in output
+    assert output == _old_format("x" * size)
+
+
+@pytest.mark.asyncio
+async def test_capped_output_is_cut_on_utf8_boundaries() -> None:
+    # 3,000,000 x U+20AC (3 bytes each): a 2 MiB head/tail split lands mid-char.
+    cmd = (
+        "python3 -c \"import sys; "
+        "sys.stdout.buffer.write('\\u20ac'.encode('utf-8') * 3000000)\""
+    )
+    output = await _tool().execute(cmd)
+    assert "�" not in output
+    assert output.startswith("€" * 100)
+    # 9,000,000 bytes minus a 2 MiB head (-2 bytes) and 2 MiB tail (-2 bytes).
+    assert f"... ({9_000_000 - 4 * _MIB + 4:,} {_CAPPED}) ..." in output
+
+
+@pytest.mark.asyncio
+async def test_capture_cap_is_never_below_four_times_the_output_limit() -> None:
+    output = await _tool(max_capture_bytes=10).execute("head -c 100000 /dev/zero | tr '\\0' x")
+    # Effective cap: max(10, 4 * 10_000) = 40,000 bytes.
+    assert f"... ({100_000 - 40_000:,} {_CAPPED}) ..." in output
+    assert "chars truncated" in output

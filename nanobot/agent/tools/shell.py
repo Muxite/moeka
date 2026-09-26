@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -79,6 +80,82 @@ def _reap_pid(pid: int) -> None:
         pass
     except OSError as exc:
         logger.debug("_reap_pid({}): {}", pid, exc)
+
+
+def _utf8_safe_end(buf: bytes) -> int:
+    """Length of *buf* without a trailing incomplete UTF-8 sequence."""
+    end = len(buf)
+    i = end
+    while i > 0 and end - i < 3 and (buf[i - 1] & 0xC0) == 0x80:
+        i -= 1
+    if i > 0 and buf[i - 1] >= 0xC0:
+        lead = buf[i - 1]
+        need = 2 if lead < 0xE0 else 3 if lead < 0xF0 else 4
+        if end - (i - 1) < need:
+            return i - 1
+    return end
+
+
+def _utf8_safe_start(buf: bytes) -> int:
+    """Offset of the first byte of *buf* that is not a stray continuation byte."""
+    start = 0
+    while start < min(3, len(buf)) and (buf[start] & 0xC0) == 0x80:
+        start += 1
+    return start
+
+
+class _BoundedCapture:
+    """Byte-capped capture of one output stream of a one-shot exec.
+
+    Keeps the first ``cap // 2`` and the last ``cap - cap // 2`` bytes and only
+    counts what falls in between, so a command printing gigabytes costs at most
+    ``cap`` bytes of memory. The caller keeps draining the pipe past the cap
+    (the child never blocks on a full pipe and exits normally with its real
+    exit code); the timeout still bounds how long that can take.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self._head_cap = cap // 2
+        self._tail_cap = cap - self._head_cap
+        self._head = bytearray()
+        self._tail: deque[bytes] = deque()
+        self._tail_len = 0
+        self.total = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self.total += len(chunk)
+        room = self._head_cap - len(self._head)
+        if room > 0:
+            self._head += chunk[:room]
+            chunk = chunk[room:]
+            if not chunk:
+                return
+        self._tail.append(chunk)
+        self._tail_len += len(chunk)
+        # Drop whole chunks that are entirely older than the tail window.
+        while self._tail and self._tail_len - len(self._tail[0]) >= self._tail_cap:
+            self._tail_len -= len(self._tail.popleft())
+
+    def decode(self) -> tuple[str, int]:
+        """Return (decoded text, number of bytes discarded in the middle)."""
+        head = bytes(self._head)
+        tail = b"".join(self._tail)
+        if len(tail) > self._tail_cap:
+            tail = tail[-self._tail_cap:]
+        discarded = self.total - len(head) - len(tail)
+        if discarded == 0:
+            # Under the cap: exactly the bytes communicate() would have
+            # returned, decoded exactly as before.
+            return (head + tail).decode("utf-8", errors="replace"), 0
+        # Cut both sides of the gap on UTF-8 character boundaries so the seam
+        # does not produce replacement characters.
+        end = _utf8_safe_end(head)
+        start = _utf8_safe_start(tail)
+        discarded += (len(head) - end) + start
+        text = head[:end].decode("utf-8", errors="replace") + tail[start:].decode(
+            "utf-8", errors="replace"
+        )
+        return text, discarded
 
 
 # Policy note appended to recoverable workspace-boundary guard errors.
@@ -238,8 +315,12 @@ class ExecTool(Tool):
         allowed_env_keys: list[str] | None = None,
         allow_sudo: bool = False,
         session_manager: ExecSessionManager | None = None,
+        max_capture_bytes: int = 4 * 1024 * 1024,
     ):
         self.timeout = timeout
+        # Per-stream byte cap for one-shot output capture (see _BoundedCapture);
+        # execute() never lets it drop below 4x the effective output limit.
+        self.max_capture_bytes = max_capture_bytes
         self.working_dir = working_dir
         self.sandbox = sandbox
         self.allow_sudo = allow_sudo
@@ -271,6 +352,7 @@ class ExecTool(Tool):
 
     _MAX_TIMEOUT = 600
     _MAX_OUTPUT = 10_000
+    _READ_CHUNK = 64 * 1024
 
     # Kernel device files safe as stdio redirect targets (#3599).
     _BENIGN_DEVICE_PATHS: frozenset[str] = frozenset({
@@ -351,9 +433,11 @@ class ExecTool(Tool):
                 process_tree=True,
             )
 
+            max_len = clamp_session_int(max_output_chars, self._MAX_OUTPUT, 1000, MAX_OUTPUT_CHARS)
+            capture_cap = max(self.max_capture_bytes, 4 * max_len)
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    self._communicate_bounded(process, capture_cap),
                     timeout=prepared.timeout,
                 )
             except asyncio.TimeoutError:
@@ -364,42 +448,79 @@ class ExecTool(Tool):
                 raise
 
             # Safety-net reap: asyncio *should* have reaped the child via
-            # communicate(), but in containers the child-watcher sometimes
+            # process.wait(), but in containers the child-watcher sometimes
             # misses it, leaving a zombie.
             _reap_pid(process.pid)
 
             output_parts: list[str] = []
 
-            if stdout:
-                output_parts.append(stdout.decode("utf-8", errors="replace"))
+            stdout_text, stdout_discarded = stdout.decode()
+            stderr_text, stderr_discarded = stderr.decode()
+            discarded = stdout_discarded + stderr_discarded
 
-            if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-                if stderr_text.strip():
-                    output_parts.append(f"STDERR:\n{stderr_text}")
+            if stdout_text:
+                output_parts.append(stdout_text)
+
+            if stderr_text.strip():
+                output_parts.append(f"STDERR:\n{stderr_text}")
 
             output_parts.append(f"\nExit code: {process.returncode}")
 
             result = "\n".join(output_parts) if output_parts else "(no output)"
 
-            max_len = clamp_session_int(max_output_chars, self._MAX_OUTPUT, 1000, MAX_OUTPUT_CHARS)
+            capped_note = (
+                f"... ({discarded:,} bytes discarded after the capture limit) ..."
+                if discarded
+                else ""
+            )
             if len(result) > max_len:
                 half = max_len // 2
-                result = (
-                    result[:half]
-                    + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
-                    + result[-half:]
-                )
+                marker = f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n"
+                if capped_note:
+                    marker += capped_note + "\n"
+                result = result[:half] + marker + "\n" + result[-half:]
+            elif capped_note:
+                result += "\n\n" + capped_note
 
             self._release_process_tree(process)
             return result
 
         except Exception as e:
             # Kill and reap the child if it was spawned but an unexpected
-            # error prevented communicate() from completing.
+            # error prevented the output capture from completing.
             if process is not None:
                 await self._kill_process_tree(process)
             return ToolResult.error(f"Error executing command: {str(e)}")
+
+    async def _communicate_bounded(
+        self, process: asyncio.subprocess.Process, cap: int
+    ) -> tuple[_BoundedCapture, _BoundedCapture]:
+        """Like ``process.communicate()`` but with at most *cap* bytes kept per stream.
+
+        stdout and stderr are read concurrently in ``_READ_CHUNK`` pieces until
+        EOF. Past the cap the bytes are drained and discarded (counted, not
+        stored), so the child keeps running to its natural exit and its real
+        exit code is reported; the caller's timeout still bounds the drain.
+        """
+        stdout, stderr = _BoundedCapture(cap), _BoundedCapture(cap)
+
+        async def _drain(stream: asyncio.StreamReader | None, sink: _BoundedCapture) -> None:
+            if stream is None:
+                return
+            while chunk := await stream.read(self._READ_CHUNK):
+                sink.feed(chunk)
+
+        readers = [
+            asyncio.ensure_future(_drain(process.stdout, stdout)),
+            asyncio.ensure_future(_drain(process.stderr, stderr)),
+        ]
+        try:
+            await asyncio.gather(*readers)
+        finally:
+            for reader in readers:
+                reader.cancel()
+        await process.wait()
+        return stdout, stderr
 
     async def _execute_session(
         self,

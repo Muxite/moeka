@@ -13,6 +13,7 @@ import pytest
 
 from nanobot.agent.tools.exec_session import _ExecSession
 from nanobot.agent.tools.shell import ExecTool, _reap_pid
+from tests.tools._exec_mock_streams import set_output, set_read_error
 
 
 def _python_command(code: str) -> str:
@@ -99,7 +100,7 @@ async def test_kill_process_reaps_even_if_kill_races_exit():
 async def test_execute_reaps_after_normal_completion():
     mock_proc = AsyncMock()
     mock_proc.pid = 1001
-    mock_proc.communicate.return_value = (b"ok\n", b"")
+    set_output(mock_proc, b"ok\n", b"")
     mock_proc.returncode = 0
 
     with (
@@ -120,7 +121,7 @@ async def test_execute_timeout_kills_and_reaps():
     mock_proc = AsyncMock()
     mock_proc.pid = 1002
     mock_proc.returncode = None
-    mock_proc.communicate.side_effect = asyncio.TimeoutError()
+    set_read_error(mock_proc, asyncio.TimeoutError())
 
     with (
         patch.object(ExecTool, "_spawn", return_value=mock_proc) as spawn,
@@ -140,7 +141,7 @@ async def test_execute_cancellation_kills_process_tree():
     mock_proc = AsyncMock()
     mock_proc.pid = 1005
     mock_proc.returncode = None
-    mock_proc.communicate.side_effect = asyncio.CancelledError()
+    set_read_error(mock_proc, asyncio.CancelledError())
 
     with (
         patch.object(ExecTool, "_spawn", return_value=mock_proc) as spawn,
@@ -159,7 +160,7 @@ async def test_execute_exception_after_success_does_not_raise_on_dead_process():
     """Generic except must return ToolResult.error, not ProcessLookupError."""
     mock_proc = AsyncMock()
     mock_proc.pid = 1003
-    mock_proc.communicate = AsyncMock(return_value=(b"out\n", b""))
+    set_output(mock_proc, b"out\n", b"")
     mock_proc.returncode = 0
     mock_proc.kill = MagicMock(side_effect=ProcessLookupError("already dead"))
 
@@ -186,7 +187,7 @@ async def test_execute_exception_during_communicate_kills_live_process():
     mock_proc = AsyncMock()
     mock_proc.pid = 1004
     mock_proc.returncode = None
-    mock_proc.communicate.side_effect = OSError("pipe broken")
+    set_read_error(mock_proc, OSError("pipe broken"))
 
     with (
         patch.object(ExecTool, "_spawn", return_value=mock_proc),
