@@ -25,6 +25,11 @@ from nanobot.security.network import (
     resolve_url_target,
     validate_url_target,
 )
+from nanobot.security.untrusted import (
+    mark_untrusted,
+    sanitize_description,
+    sanitize_schema_descriptions,
+)
 from nanobot.utils.cancellation import task_is_cancelling
 
 if TYPE_CHECKING:
@@ -586,7 +591,7 @@ def _mcp_image_tool_result(text_parts: list[str], artifacts: list[dict[str, Any]
     }
     text = "\n".join(part for part in text_parts if part)
     if text:
-        payload["text"] = text
+        payload["text"] = mark_untrusted(text)
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -605,9 +610,9 @@ class MCPToolWrapper(_MCPWrapperBase):
         self._set_mcp_connection(session, server_name)
         self._original_name = tool_def.name
         self._name = _sanitize_mcp_tool_name(f"mcp_{server_name}_{tool_def.name}")
-        self._description = tool_def.description or tool_def.name
+        self._description = sanitize_description(tool_def.description or tool_def.name)
         raw_schema = tool_def.inputSchema or {"type": "object", "properties": {}}
-        self._parameters = _normalize_schema_for_openai(raw_schema)
+        self._parameters = sanitize_schema_descriptions(_normalize_schema_for_openai(raw_schema))
         self._tool_timeout = tool_timeout
 
     @property
@@ -727,7 +732,7 @@ class MCPToolWrapper(_MCPWrapperBase):
 
         if artifacts:
             return _mcp_image_tool_result(text_parts, artifacts)
-        return "\n".join(text_parts) or "(no output)"
+        return mark_untrusted("\n".join(text_parts) or "(no output)")
 
     def _store_image_block(
         self, data_url: str, arguments: Mapping[str, Any]
@@ -768,7 +773,7 @@ class MCPResourceWrapper(_MCPWrapperBase):
         self._uri = resource_def.uri
         self._name = _sanitize_mcp_tool_name(f"mcp_{server_name}_resource_{resource_def.name}")
         desc = resource_def.description or resource_def.name
-        self._description = f"[MCP Resource] {desc}\nURI: {self._uri}"
+        self._description = sanitize_description(f"[MCP Resource] {desc}\nURI: {self._uri}")
         self._parameters: dict[str, Any] = {
             "type": "object",
             "properties": {},
@@ -853,7 +858,7 @@ class MCPResourceWrapper(_MCPWrapperBase):
                         parts.append(f"[Binary resource: {len(block.blob)} bytes]")
                     else:
                         parts.append(str(block))
-                return "\n".join(parts) or "(no output)"
+                return mark_untrusted("\n".join(parts) or "(no output)")
 
 
 class MCPPromptWrapper(_MCPWrapperBase):
@@ -872,7 +877,7 @@ class MCPPromptWrapper(_MCPWrapperBase):
         self._prompt_name = prompt_def.name
         self._name = _sanitize_mcp_tool_name(f"mcp_{server_name}_prompt_{prompt_def.name}")
         desc = prompt_def.description or prompt_def.name
-        self._description = (
+        self._description = sanitize_description(
             f"[MCP Prompt] {desc}\n"
             "Returns a filled prompt template that can be used as a workflow guide."
         )
@@ -884,7 +889,7 @@ class MCPPromptWrapper(_MCPWrapperBase):
         for arg in prompt_def.arguments or []:
             prop: dict[str, Any] = {"type": "string"}
             if getattr(arg, "description", None):
-                prop["description"] = arg.description
+                prop["description"] = sanitize_description(str(arg.description))
             properties[arg.name] = prop
             if arg.required:
                 required.append(arg.name)
@@ -992,7 +997,7 @@ class MCPPromptWrapper(_MCPWrapperBase):
                                 parts.append(str(block))
                     else:
                         parts.append(str(content))
-                return "\n".join(parts) or "(no output)"
+                return mark_untrusted("\n".join(parts) or "(no output)")
 
 
 async def connect_mcp_servers(

@@ -920,3 +920,29 @@ async def test_olostep_package_missing_returns_install_hint(monkeypatch):
     assert result == (
         "Error: Olostep support is not installed. Run `nanobot plugins enable olostep`."
     )
+
+
+@pytest.mark.asyncio
+async def test_successful_search_result_carries_untrusted_banner(monkeypatch):
+    from nanobot.agent.tools.web import _UNTRUSTED_BANNER
+
+    async def mock_get(self, url, **kw):
+        return _response(json={
+            "web": {"results": [{"title": "T", "url": "https://e.com", "description": "d"}]}
+        })
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    result = await _tool(provider="brave", api_key="k").execute(query="q", count=1)
+    assert result.startswith(_UNTRUSTED_BANNER + "\n\n")
+    assert result.count(_UNTRUSTED_BANNER) == 1
+    assert "Results for: q" in result
+
+
+@pytest.mark.asyncio
+async def test_search_without_results_has_no_banner(monkeypatch):
+    async def mock_get(self, url, **kw):
+        return _response(json={"web": {"results": []}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    result = await _tool(provider="brave", api_key="k").execute(query="q", count=1)
+    assert result == "No results for: q"

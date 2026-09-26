@@ -504,7 +504,7 @@ async def test_execute_returns_text_blocks() -> None:
 
     result = await wrapper.execute(value=1)
 
-    assert result == "hello\n42"
+    assert result == f"{_banner()}\n\nhello\n42"
 
 
 @pytest.mark.asyncio
@@ -519,7 +519,7 @@ async def test_execute_wraps_mcp_is_error_result() -> None:
 
     result = await wrapper.execute()
 
-    assert result == "Error: server-side MCP failure"
+    assert result == f"{_banner()}\n\nError: server-side MCP failure"
     assert is_tool_error_result(result)
 
 
@@ -564,7 +564,7 @@ async def test_execute_preserves_success_text_that_starts_with_error() -> None:
 
     result = await wrapper.execute()
 
-    assert result == "Error: generated report successfully"
+    assert result == f"{_banner()}\n\nError: generated report successfully"
     assert not is_tool_error_result(result)
 
 
@@ -594,7 +594,7 @@ async def test_execute_persists_image_block_as_artifact(tmp_path: Path) -> None:
     result = await wrapper.execute(prompt="a cat", model="sdxl")
 
     payload = json.loads(result)
-    assert payload["text"] == "here you go"
+    assert payload["text"] == f"{_banner()}\n\nhere you go"
     assert len(payload["artifacts"]) == 1
     artifact = payload["artifacts"][0]
     assert artifact["mime"] == "image/png"
@@ -619,7 +619,7 @@ async def test_execute_notes_unstorable_image_block(tmp_path: Path) -> None:
 
     result = await wrapper.execute()
 
-    assert result == "(MCP tool returned an image that could not be stored)"
+    assert result == f"{_banner()}\n\n(MCP tool returned an image that could not be stored)"
 
 
 @pytest.mark.asyncio
@@ -1588,7 +1588,7 @@ async def test_resource_wrapper_execute_returns_text() -> None:
 
     wrapper = _make_resource_wrapper(SimpleNamespace(read_resource=read_resource))
     result = await wrapper.execute()
-    assert result == "line1\nline2"
+    assert result == f"{_banner()}\n\nline1\nline2"
 
 
 @pytest.mark.asyncio
@@ -1963,3 +1963,76 @@ def test_long_server_name_tools_are_matched_by_server_name() -> None:
     assert removed == 1
     assert wrapper.name not in registry.tool_names
     assert other_wrapper.name in registry.tool_names
+
+
+def _banner() -> str:
+    from nanobot.security.untrusted import UNTRUSTED_BANNER
+
+    return UNTRUSTED_BANNER
+
+
+@pytest.mark.asyncio
+async def test_tool_result_carries_untrusted_banner_once() -> None:
+    async def call_tool(_name: str, arguments: dict) -> object:
+        return SimpleNamespace(content=[_FakeTextContent(f"{_banner()}\n\nalready")])
+
+    wrapper = _make_wrapper(SimpleNamespace(call_tool=call_tool))
+    result = await wrapper.execute()
+    assert result == f"{_banner()}\n\nalready"
+
+
+@pytest.mark.asyncio
+async def test_tool_image_result_banners_text_field_and_stays_json(tmp_path: Path) -> None:
+    async def call_tool(_name: str, arguments: dict) -> object:
+        return SimpleNamespace(content=[_FakeTextContent("caption")])
+
+    wrapper = _make_wrapper(SimpleNamespace(call_tool=call_tool))
+    payload = json.loads(
+        mcp_mod._mcp_image_tool_result(["caption"], [{"path": "x"}])
+    )
+    assert payload["text"] == f"{_banner()}\n\ncaption"
+    assert (await wrapper.execute()).startswith(_banner())
+
+
+@pytest.mark.asyncio
+async def test_resource_result_carries_untrusted_banner(fake_mcp_runtime) -> None:
+    async def read_resource(_uri: str) -> object:
+        return SimpleNamespace(contents=[_FakeTextResourceContents("resource body")])
+
+    resource_def = SimpleNamespace(uri="file:///x", name="x", description="d")
+    wrapper = mcp_mod.MCPResourceWrapper(
+        SimpleNamespace(read_resource=read_resource), "test", resource_def
+    )
+    result = await wrapper.execute()
+    assert result == f"{_banner()}\n\nresource body"
+
+
+@pytest.mark.asyncio
+async def test_prompt_result_carries_untrusted_banner(fake_mcp_runtime) -> None:
+    async def get_prompt(_name: str, arguments: dict) -> object:
+        msg = SimpleNamespace(content=_FakeTextContent("prompt body"))
+        return SimpleNamespace(messages=[msg])
+
+    prompt_def = SimpleNamespace(name="p", description="d", arguments=[])
+    wrapper = mcp_mod.MCPPromptWrapper(
+        SimpleNamespace(get_prompt=get_prompt), "test", prompt_def
+    )
+    result = await wrapper.execute()
+    assert result == f"{_banner()}\n\nprompt body"
+
+
+def test_tool_description_is_capped_and_control_chars_stripped() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string", "description": "x\x00y" + "z" * 3000}},
+    }
+    tool_def = SimpleNamespace(
+        name="demo", description="d\x07e\n\t" + "w" * 3000, inputSchema=schema
+    )
+    wrapper = MCPToolWrapper(SimpleNamespace(), "test", tool_def)
+    assert wrapper.description.startswith("de\n\tw")
+    assert len(wrapper.description) == 2001 and wrapper.description.endswith("…")
+    param_desc = wrapper.parameters["properties"]["a"]["description"]
+    assert param_desc.startswith("xyz") and param_desc.endswith("…")
+    # the server's schema object is not mutated
+    assert schema["properties"]["a"]["description"].startswith("x\x00y")
