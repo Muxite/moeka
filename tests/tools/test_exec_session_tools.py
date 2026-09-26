@@ -1291,3 +1291,14 @@ def test_manager_without_input_guard_is_unchanged(tmp_path):
 
     asyncio.run(run())
     assert marker.exists()
+
+
+def test_check_session_input_screens_text_with_nul_bytes_removed():
+    # bash drops NUL, so a NUL-prefixed command must not slip past the guard.
+    tool = ExecTool()
+    assert "sudo is not enabled" in (tool.check_session_input("\x00sudo id\n") or "")
+    floor = tool.check_session_input(":\x00(){ :|:& };:\n")
+    assert floor is not None and _FLOOR_WORDING in floor
+    assert tool.check_session_input("\x00echo ok\n") is None
+    assert tool.check_session_input("\x00") is None
+    assert tool.check_session_input("\x04\x00\x03") is None

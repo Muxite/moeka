@@ -1164,7 +1164,9 @@ class ExecTool(Tool):
         other interpreter can still receive anything; real containment is the
         sandbox / host layer.
         """
-        cmd = text.strip()
+        # bash drops NUL bytes, so screen a NUL-stripped copy (the original
+        # text is still what gets sent on a pass).
+        cmd = text.replace("\x00", "").strip()
         if not cmd:
             return None
         lower = cmd.lower()
