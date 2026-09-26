@@ -464,3 +464,49 @@ async def test_dream_scoped_writes_still_work(
     assert "# Soul v2" in (ws / "SOUL.md").read_text(encoding="utf-8")
     assert "# User v2" in (ws / "USER.md").read_text(encoding="utf-8")
     assert (ws / "skills" / "demo" / "SKILL.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# config.json as a symlink: auth/sessions live next to the LINK (get_data_dir)
+# while plugin-data lives next to the TARGET; both bases are protected.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("symlinked", [True, False])
+async def test_symlinked_config_protects_link_and_target_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlinked: bool,
+) -> None:
+    link_dir = tmp_path / "home-nanobot"
+    target_dir = tmp_path / "dotfiles"
+    bases = [link_dir, target_dir] if symlinked else [link_dir]
+    for base in (link_dir, target_dir):
+        (base / "auth").mkdir(parents=True)
+        (base / "auth" / "mcp.json").write_text(f'{{"token": "{SECRET}"}}\n', encoding="utf-8")
+        (base / "notes.txt").write_text("public note\n", encoding="utf-8")
+    (target_dir / "config.json").write_text("{}\n", encoding="utf-8")
+    if symlinked:
+        (link_dir / "config.json").symlink_to(target_dir / "config.json")
+    else:
+        (link_dir / "config.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", link_dir / "config.json")
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    read = ReadFileTool(workspace=ws, restrict_to_workspace=False)
+    write = WriteFileTool(workspace=ws, restrict_to_workspace=False)
+
+    for base in bases:
+        mcp = base / "auth" / "mcp.json"
+        result = await read.execute(path=str(mcp))
+        assert DENIAL in str(result), mcp
+        assert SECRET not in str(result)
+        assert DENIAL in str(await write.execute(path=str(mcp), content="{}")), mcp
+        assert SECRET in mcp.read_text(encoding="utf-8")
+        sessions = base / "sessions" / "x.jsonl"
+        assert DENIAL in str(await write.execute(path=str(sessions), content="x")), sessions
+        assert "public note" in str(await read.execute(path=str(base / "notes.txt")))
+
+    if not symlinked:
+        # A plain config keeps exactly the old behaviour: an unrelated dir is untouched.
+        other = target_dir / "auth" / "mcp.json"
+        assert SECRET in str(await read.execute(path=str(other)))

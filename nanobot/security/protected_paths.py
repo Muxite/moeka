@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from nanobot.security.workspace_policy import WORKSPACE_BOUNDARY_NOTE, WorkspaceBoundaryError
@@ -61,16 +62,30 @@ def _is_within(path: Path, root: Path) -> bool:
     return path == root or path.is_relative_to(root)
 
 
-def _protected_roots(data_dir: Path | None, workspace: Path | None) -> list[Path]:
+DataDirs = Path | Sequence[Path] | None
+
+
+def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
     from nanobot.session.sqlite_store import default_sessions_root
 
+    if data_dir is None:
+        bases: Sequence[Path] = ()
+    elif isinstance(data_dir, Path):
+        bases = (data_dir,)
+    else:
+        bases = data_dir
+    resolved_bases: list[Path] = []
+    for base in bases:
+        resolved = _safe_resolve(base)
+        if resolved is not None and resolved not in resolved_bases:
+            resolved_bases.append(resolved)
+
     roots: list[Path] = []
-    resolved_data = _safe_resolve(data_dir) if data_dir is not None else None
-    if resolved_data is not None:
+    for resolved_data in resolved_bases:
         roots.extend(resolved_data / name for name in PROTECTED_READ)
         roots.append(default_sessions_root(resolved_data))
     resolved_ws = _safe_resolve(workspace) if workspace is not None else None
-    if resolved_ws is not None and resolved_ws != resolved_data:
+    if resolved_ws is not None and resolved_ws not in resolved_bases:
         roots.append(default_sessions_root(resolved_ws))
     return roots
 
@@ -89,7 +104,7 @@ def _match(candidate: Path, *, write: bool, roots: list[Path]) -> bool:
 class ProtectedFloor:
     """Precomputed floor for one (data dir, workspace) pair; cheap per path."""
 
-    def __init__(self, *, data_dir: Path | None, workspace: Path | None) -> None:
+    def __init__(self, *, data_dir: DataDirs, workspace: Path | None) -> None:
         self._roots = _protected_roots(data_dir, workspace)
 
     def matches(self, path: Path, *, write: bool, resolve: bool = True) -> bool:
@@ -119,7 +134,7 @@ def protected_reason(
     path: Path,
     *,
     write: bool,
-    data_dir: Path | None,
+    data_dir: DataDirs,
     workspace: Path | None,
 ) -> str | None:
     """Return a denial message if *path* is protected, else ``None``.
@@ -131,14 +146,28 @@ def protected_reason(
     return ProtectedFloor(data_dir=data_dir, workspace=workspace).reason(path, write=write)
 
 
-def default_data_dir() -> Path | None:
-    """The instance data dir (``get_data_dir()`` without creating it)."""
+def default_data_dirs() -> list[Path]:
+    """The instance data dir(s), computed without creating anything.
+
+    Two conventions coexist when ``config.json`` is a symlink: ``get_data_dir()``
+    (auth stores, sessions) uses the directory holding the LINK, while
+    ``_plugin_data_dir`` (plugin-data) uses the directory holding the resolved
+    TARGET. Both are returned (deduplicated) so the floor covers either.
+    """
     try:
         from nanobot.config.paths import get_config_path
 
-        return get_config_path().expanduser().resolve(strict=False).parent
+        config = get_config_path().expanduser()
     except Exception:
-        return None
+        return []
+    link_base = _safe_resolve(config.parent)  # get_data_dir() convention
+    target = _safe_resolve(config)
+    target_base = target.parent if target is not None else None  # plugin-data convention
+    dirs: list[Path] = []
+    for base in (link_base, target_base):
+        if base is not None and base not in dirs:
+            dirs.append(base)
+    return dirs
 
 
 def check_protected(
@@ -146,13 +175,13 @@ def check_protected(
     *,
     write: bool,
     workspace: Path | None,
-    data_dir: Path | None = None,
+    data_dir: DataDirs = None,
 ) -> None:
     """Raise ``ProtectedPathError`` when *path* is protected."""
     reason = protected_reason(
         path,
         write=write,
-        data_dir=data_dir if data_dir is not None else default_data_dir(),
+        data_dir=data_dir if data_dir is not None else default_data_dirs(),
         workspace=workspace,
     )
     if reason is not None:
