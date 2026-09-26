@@ -201,11 +201,16 @@ SearchSessions, SendSessionMessage, Spawn, UpdateGoal, WebFetch, WebSearch, Writ
   `_WORKSPACE_BOUNDARY_NOTE` (agent/tools/shell.py:87-94), which says so: an application-level path check,
   not OS-level isolation, plus "Do NOT retry" (pinned by tests/tools/test_exec_security.py
   `test_workspace_boundary_note_is_truthful`).
-- SSRF: `security/network.py` `resolve_url_target` (security/network.py:78-145) blocks non-http(s), unresolvable
-  hosts, and any address in `_BLOCKED_NETWORKS` (security/network.py:16-28: 0/8, 10/8, 100.64/10, 127/8,
-  169.254/16, 172.16/12, 192.168/16, ::1, fc00::/7, fe80::/10) unless whitelisted by `configure_ssrf_whitelist`
-  (security/network.py:46-53, config `tools.ssrfWhitelist`, config/schema.py:424). web_fetch uses it
-  (agent/tools/web.py:114-118); exec scans command URLs with `contains_internal_url` (security/network.py:323).
+- SSRF: `security/network.py` `resolve_url_target` (security/network.py:99-166) blocks non-http(s), unresolvable
+  hosts, and any address in `_BLOCKED_NETWORKS` (security/network.py:16-41: 0/8, 10/8, 100.64/10, 127/8,
+  169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, 224/4, 240/4, ::1, fc00::/7, fe80::/10, fec0::/10,
+  ff00::/8) unless whitelisted by `configure_ssrf_whitelist` (security/network.py:58-65, config
+  `tools.ssrfWhitelist`, config/schema.py:424). TEST-NET-1/2/3 (incl. 203.0.113.0/24, used by
+  `scripts/test-docker.sh` for example.com) are deliberately not blocked. `_normalize_addr`
+  (security/network.py:68-90) maps IPv4-mapped, NAT64 `64:ff9b::/96` and 6to4 `2002::/16` addresses to the
+  embedded IPv4 before the check. `validate_resolved_url` (redirect targets, security/network.py:312-348) fails
+  closed on unparseable, hostless or unresolvable targets. web_fetch uses it (agent/tools/web.py:114-118);
+  exec scans command URLs with `contains_internal_url` (security/network.py:351).
 
 ## 3. Writing good tool descriptions in this codebase
 

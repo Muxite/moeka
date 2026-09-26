@@ -20,12 +20,24 @@ _BLOCKED_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
     ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.0.0.0/24"),     # IETF protocol assignments
     ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),    # benchmarking
+    ipaddress.ip_network("224.0.0.0/4"),      # multicast
+    ipaddress.ip_network("240.0.0.0/4"),      # reserved (includes 255.255.255.255)
+    # Deliberately NOT blocked: TEST-NET-1/2/3 (192.0.2.0/24, 198.51.100.0/24,
+    # 203.0.113.0/24). scripts/test-docker.sh maps example.com/example.org to
+    # 203.0.113.10/11 and tests rely on them resolving as public.
     ipaddress.ip_network("::/128"),            # unspecified; may route to local host
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),          # unique local
     ipaddress.ip_network("fe80::/10"),         # link-local v6
+    ipaddress.ip_network("fec0::/10"),         # deprecated site-local
+    ipaddress.ip_network("ff00::/8"),          # IPv6 multicast
 ]
+
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+_6TO4_PREFIX = ipaddress.ip_network("2002::/16")
 
 _URL_RE = re.compile(r"https?://[^\s\"'`;|<>]+", re.IGNORECASE)
 _allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
@@ -56,7 +68,11 @@ def configure_ssrf_whitelist(cidrs: list[str]) -> None:
 def _normalize_addr(
     addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    """Normalize IPv6-mapped IPv4 addresses to their IPv4 form.
+    """Normalize IPv6 addresses that embed an IPv4 address to that IPv4 form.
+
+    Handles IPv4-mapped (``::ffff:0:0/96``), NAT64 well-known prefix
+    (``64:ff9b::/96``, IPv4 in the low 32 bits) and 6to4 (``2002::/16``, IPv4 in
+    bits 16-48), so a blocked IPv4 cannot be smuggled through a translator.
 
     ``::ffff:127.0.0.1`` is semantically identical to ``127.0.0.1`` but
     Python's ipaddress treats it as an IPv6Address that matches neither
@@ -65,6 +81,11 @@ def _normalize_addr(
     """
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
         return addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr in _NAT64_PREFIX:
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+        if addr in _6TO4_PREFIX:
+            return ipaddress.IPv4Address((int(addr) >> 80) & 0xFFFFFFFF)
     return addr
 
 
@@ -289,26 +310,30 @@ class PinnedDNSAsyncTransport(httpx.AsyncBaseTransport):
 
 
 def validate_resolved_url(url: str) -> tuple[bool, str]:
-    """Validate an already-fetched URL (e.g. after redirect). Only checks the IP, skips DNS."""
+    """Validate an already-fetched URL (e.g. after redirect).
+
+    Fails closed: an unparseable URL, a missing hostname, or a host that cannot
+    be resolved is rejected rather than allowed.
+    """
     try:
         p = urlparse(url)
+        hostname = p.hostname
     except Exception:
-        return True, ""
+        return False, "Redirect target could not be parsed"
 
-    hostname = p.hostname
     if not hostname:
-        return True, ""
+        return False, "Redirect target has no hostname"
 
     try:
         addr = ipaddress.ip_address(hostname)
-        if _is_private(addr):
-            return False, f"Redirect target is a private address: {addr}"
     except ValueError:
         # hostname is a domain name, resolve it
         try:
             infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        except socket.gaierror:
-            return True, ""
+        except (socket.gaierror, UnicodeError, OSError):
+            return False, f"Redirect target {hostname} could not be resolved"
+        if not infos:
+            return False, f"Redirect target {hostname} could not be resolved"
         for info in infos:
             try:
                 addr = ipaddress.ip_address(info[4][0])
@@ -316,6 +341,9 @@ def validate_resolved_url(url: str) -> tuple[bool, str]:
                 continue
             if _is_private(addr):
                 return False, f"Redirect target {hostname} resolves to private address {addr}"
+    else:
+        if _is_private(addr):
+            return False, f"Redirect target is a private address: {addr}"
 
     return True, ""
 
