@@ -98,7 +98,7 @@ Other sections:
   `logRetrievals` False.
 - `ToolsConfig` (config/schema.py:397-424): `maxSessionMessagesPerMinute` 6, `restrictToWorkspace` False,
   `webuiAllowLocalServiceAccess` True (legacy name, still read by exec), `mcpServers` {}, `ssrfWhitelist` [].
-  Tool sub-configs: `exec` (agent/tools/shell.py:94-108), `web` (agent/tools/web.py:63-83), `file`
+  Tool sub-configs: `exec` (agent/tools/shell.py:97-111), `web` (agent/tools/web.py:63-83), `file`
   (agent/tools/filesystem.py:33-36), `my` (agent/tools/self.py:30-33), `imageGeneration`
   (agent/tools/image_generation.py:50-58). Doc 02 has the per-tool keys.
 - `ProviderConfig` (config/schema.py:242-279): `apiKey`, `apiBase`, `apiType` (only `providers.openai` may set it
@@ -108,20 +108,20 @@ Other sections:
   `vec_collections` (config/schema.py:231) has no consumer (grep): **unverified/unused**.
 
 Gotchas read from code (not runtime-tested):
-- `ExecTool.create` passes `cfg.deny_patterns` (default `[]`, agent/tools/shell.py:105,194); `__init__` builds
-  `self.deny_patterns = _FLOOR_DENY_PATTERNS + deny_patterns` (agent/tools/shell.py:244), so config/constructor
-  patterns only ADD to the always-on floor (fork bomb + history.jsonl/.dream_cursor guards, shell.py:203-219),
-  which `_guard_command` checks before the allow-pattern exemption (shell.py:879-892) so `allowPatterns` cannot
+- `ExecTool.create` passes `cfg.deny_patterns` (default `[]`, agent/tools/shell.py:108,197); `__init__` builds
+  `self.deny_patterns = _FLOOR_DENY_PATTERNS + deny_patterns` (agent/tools/shell.py:247), so config/constructor
+  patterns only ADD to the always-on floor (fork bomb + history.jsonl/.dream_cursor guards, shell.py:206-222),
+  which `_guard_command` checks before the allow-pattern exemption (shell.py:873-876,965-979) so `allowPatterns` cannot
   exempt it. Pinned by tests/tools/test_exec_security.py (`test_fork_bomb_*`) and
   tests/tools/test_exec_allow_patterns.py::test_extra_deny_patterns_add_to_the_floor.
-- Non-empty `tools.exec.allowPatterns` = whitelist-only exec (agent/tools/shell.py:248-256).
+- Non-empty `tools.exec.allowPatterns` = whitelist-only exec (agent/tools/shell.py:251-259).
 - `tools.restrictToWorkspace: false` does not open everything to the file tools: a non-configurable floor
   (security/protected_paths.py, wired in `_FsTool._resolve_read/_resolve_write`, agent/tools/filesystem.py:156-218)
   always denies `/proc/<pid>/{environ,mem,maps,root,cwd,exe}`, `<data dir>/auth`, `<data dir>/plugin-data`,
   `<data dir>/sessions` and the default sessions root, and denies WRITES to `memory/history.jsonl`,
   `memory/.dream_cursor` and `.nanobot/workspace-id`. No config key or `extra_*` list lifts it. It does not
   apply to `exec` (see the exec caveat in doc 02, "Workspace and network guards tools enforce").
-- sudo is blocked unless `tools.exec.allowSudo` (agent/tools/shell.py:502-514).
+- sudo is blocked unless `tools.exec.allowSudo` (agent/tools/shell.py:506-508,1018-1031).
 
 ## 3. Provider layer
 

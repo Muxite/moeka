@@ -17,8 +17,10 @@ Moeka-specific deviations from upstream nanobot that still exist in the core:
   `_FLOOR_DENY_PATTERNS` = `_INTERNAL_DENY_PATTERNS` (writes to `history.jsonl` / `.dream_cursor`) plus the fork
   bomb. The floor is checked before the allow-pattern exemption, so `allowPatterns` cannot exempt it, and
   `tools.exec.denyPatterns` (config or constructor, `[]`/None included) can only ADD to it. `rm -rf`, `dd`,
-  `mkfs`, `shutdown` are not blocked. Known gap: `exec_session` calls `ExecTool._spawn` directly and never
-  `_guard_command`, so a fork bomb can still be fed to a running shell through `exec_session` stdin.
+  `mkfs`, `shutdown` are not blocked. `exec_session` stdin is screened with the same floor, deny, sudo and
+  internal-URL checks (`ExecTool.check_session_input`, passed as the session's `input_guard`; no allowlist or
+  path checks). That is a hint for line-oriented shells only: REPLs can still receive anything, and real
+  containment is the sandbox/host.
   `allow_sudo` defaults to False and the denial message explains the opt-in.
 - **SQLite session store outside the workspace** — `nanobot/session/sqlite_store.py`: one `sessions.db` (WAL) at
   `<workspace parent>/<workspace name>-sessions/<workspace-id>/sessions.db` (e.g. `~/.nanobot-sessions/<id>/`),

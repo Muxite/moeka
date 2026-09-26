@@ -353,7 +353,7 @@ def test_exec_guard_blocks_home_path_outside_workspace(tmp_path) -> None:
     assert error.startswith(
         "Error: Command blocked by safety guard (path outside working dir)"
     )
-    assert "hard policy boundary" in error
+    assert "application-level path check" in error
 
 
 def test_exec_guard_blocks_bare_tilde_cwd_escape(tmp_path) -> None:
@@ -423,7 +423,7 @@ def test_exec_guard_blocks_quoted_home_path_outside_workspace(tmp_path) -> None:
     assert error.startswith(
         "Error: Command blocked by safety guard (path outside working dir)"
     )
-    assert "hard policy boundary" in error
+    assert "application-level path check" in error
 
 
 def test_exec_guard_allows_media_path_outside_workspace(tmp_path, monkeypatch) -> None:
@@ -479,7 +479,7 @@ def test_exec_guard_blocks_windows_drive_root_outside_workspace(monkeypatch) -> 
     assert error.startswith(
         "Error: Command blocked by safety guard (path outside working dir)"
     )
-    assert "hard policy boundary" in error
+    assert "application-level path check" in error
 
 
 def test_exec_guard_allows_dev_null_redirect(tmp_path) -> None:

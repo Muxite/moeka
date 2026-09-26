@@ -7,6 +7,7 @@ import codecs
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -114,6 +115,20 @@ class _BoundedOutputBuffer:
         return output, truncated_chars
 
 
+# Screens stdin text before it is written to a session: returns a denial
+# message, or None to let the input through. ExecTool supplies
+# ExecTool.check_session_input for the sessions it starts.
+InputGuard = Callable[[str], str | None]
+
+
+class ExecSessionInputBlockedError(Exception):
+    """Session input was refused by the session's input guard."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class _ExecSession:
     def __init__(
         self,
@@ -125,12 +140,14 @@ class _ExecSession:
         timeout: int | None,
         owner_session_key: str | None = None,
         process_tree: bool = False,
+        input_guard: InputGuard | None = None,
     ) -> None:
         self.session_id = session_id
         self.process = process
         self.command = command
         self.cwd = cwd
         self.owner_session_key = owner_session_key
+        self.input_guard = input_guard
         self._process_tree = process_tree
         self.started_at = time.monotonic()
         # timeout None/0 means no limit; an infinite deadline is never reached.
@@ -289,6 +306,7 @@ class ExecSessionManager:
         yield_time_ms: int,
         max_output_chars: int,
         owner_session_key: str | None = None,
+        input_guard: InputGuard | None = None,
     ) -> tuple[str, _SessionPoll]:
         async with self._lock:
             if self._closed:
@@ -306,6 +324,7 @@ class ExecSessionManager:
                 timeout=timeout,
                 owner_session_key=owner_session_key,
                 process_tree=True,
+                input_guard=input_guard,
             )
             self._sessions[session_id] = session
 
@@ -335,6 +354,10 @@ class ExecSessionManager:
             raise KeyError(session_id)
 
         if chars:
+            if session.input_guard is not None:
+                denial = session.input_guard(chars)
+                if denial:
+                    raise ExecSessionInputBlockedError(denial)
             error = await session.write(chars)
             if error:
                 raise RuntimeError(error)
@@ -566,7 +589,10 @@ class ExecSessionTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Manage a session returned by exec."
+        return (
+            "Manage a session returned by exec. Input is screened with exec's safety "
+            "checks as a best-effort hint for line-oriented shells, not a sandbox."
+        )
 
     async def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
@@ -631,6 +657,8 @@ class ExecSessionTool(Tool):
             )
         except KeyError:
             return ToolResult.error(f"Error: exec session not found: {session_id!r}")
+        except ExecSessionInputBlockedError as exc:
+            return ToolResult.error(exc.message)
         except Exception as exc:
             return ToolResult.error(f"Error managing exec session: {exc}")
 

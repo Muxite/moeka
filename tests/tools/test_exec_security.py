@@ -808,3 +808,14 @@ def test_user_deny_patterns_add_to_floor():
     tool = ExecTool(deny_patterns=[r"\brm\s+-rf\b"])
     assert "blocked by safety guard" in tool._guard_command(FORK_BOMB, "/tmp")
     assert "blocked by safety guard" in tool._guard_command("rm -rf /tmp/x", "/tmp")
+
+
+def test_workspace_boundary_note_is_truthful():
+    from nanobot.agent.tools.shell import _WORKSPACE_BOUNDARY_NOTE
+
+    note = _WORKSPACE_BOUNDARY_NOTE
+    assert "application-level path check" in note
+    assert "not OS-level isolation" in note
+    assert "Do NOT retry" in note
+    assert "hard policy boundary" not in note
+    assert "hard" not in note.lower()

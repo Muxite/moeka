@@ -1048,3 +1048,245 @@ def test_agent_loop_shutdown_preserves_single_cleanup_error():
         loop._exec_session_manager.close_all.assert_awaited_once()
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# P0.2: exec_session stdin goes through the same floor/deny/sudo/URL checks as
+# a fresh exec command. It is a hint for line-oriented shells only.
+# ---------------------------------------------------------------------------
+
+_DENY_MARKER = "blocked by safety guard (dangerous pattern detected)"
+_FLOOR_WORDING = "This guard is not configurable."
+
+_posix_only = pytest.mark.skipif(sys.platform == "win32", reason="drives a bash session")
+
+
+async def _start_bash(tmp_path, **exec_kwargs) -> tuple[ExecTool, ExecSessionTool, str]:
+    manager = ExecSessionManager()
+    exec_tool = ExecTool(
+        working_dir=str(tmp_path), timeout=30, session_manager=manager, **exec_kwargs
+    )
+    session_tool = ExecSessionTool(manager=manager)
+    initial = await exec_tool.execute(command="bash", yield_time_ms=200)
+    return exec_tool, session_tool, _session_id(initial)
+
+
+async def _sync_and_stop(session_tool: ExecSessionTool, sid: str) -> str:
+    """Prove the shell is alive and has drained earlier input, then terminate."""
+    synced = await session_tool.execute(
+        session_id=sid, input="echo sync-$((40+2))\n", wait_for="sync-42", timeout_ms=5000
+    )
+    await session_tool.execute(session_id=sid, terminate=True)
+    return synced
+
+
+@_posix_only
+def test_exec_session_input_fork_bomb_shape_is_denied_and_never_reaches_shell(tmp_path):
+    marker = tmp_path / "forked"
+    # Matches the floor fork-bomb pattern but is harmless if it ever ran:
+    # it defines ':' to touch a marker file and calls it once.
+    payload = f":(){{ touch {marker}; }};:\n"
+
+    async def run() -> tuple[str, str]:
+        _, session_tool, sid = await _start_bash(tmp_path)
+        denied = await session_tool.execute(session_id=sid, input=payload)
+        synced = await _sync_and_stop(session_tool, sid)
+        return denied, synced
+
+    denied, synced = asyncio.run(run())
+
+    assert _DENY_MARKER in denied
+    assert _FLOOR_WORDING in denied
+    assert is_tool_error_result(denied)
+    assert "sync-42" in synced
+    assert not marker.exists()
+
+
+@_posix_only
+def test_exec_session_input_history_jsonl_write_is_denied(tmp_path):
+    (tmp_path / "memory").mkdir()
+    target = tmp_path / "memory" / "history.jsonl"
+
+    async def run() -> tuple[str, str]:
+        _, session_tool, sid = await _start_bash(tmp_path)
+        denied = await session_tool.execute(
+            session_id=sid, input=f"echo '{{}}' >> {target}\n"
+        )
+        synced = await _sync_and_stop(session_tool, sid)
+        return denied, synced
+
+    denied, synced = asyncio.run(run())
+
+    assert _DENY_MARKER in denied
+    assert _FLOOR_WORDING in denied
+    assert "sync-42" in synced
+    assert not target.exists()
+
+
+@_posix_only
+def test_exec_session_input_user_deny_pattern_is_denied(tmp_path):
+    marker = tmp_path / "denied-marker"
+
+    async def run() -> tuple[str, str]:
+        _, session_tool, sid = await _start_bash(tmp_path, deny_patterns=[r"\btouch\s"])
+        denied = await session_tool.execute(session_id=sid, input=f"touch {marker}\n")
+        synced = await _sync_and_stop(session_tool, sid)
+        return denied, synced
+
+    denied, synced = asyncio.run(run())
+
+    assert _DENY_MARKER in denied
+    assert _FLOOR_WORDING not in denied
+    assert "sync-42" in synced
+    assert not marker.exists()
+
+
+@_posix_only
+def test_exec_session_input_sudo_is_denied_when_not_allowed(tmp_path):
+    marker = tmp_path / "sudo-marker"
+
+    async def run() -> tuple[str, str]:
+        _, session_tool, sid = await _start_bash(tmp_path)
+        denied = await session_tool.execute(
+            session_id=sid, input=f"touch {marker} && sudo id\n"
+        )
+        synced = await _sync_and_stop(session_tool, sid)
+        return denied, synced
+
+    denied, synced = asyncio.run(run())
+
+    assert "sudo is not enabled" in denied
+    assert "sync-42" in synced
+    assert not marker.exists()
+
+
+@_posix_only
+def test_exec_session_input_internal_url_is_denied(tmp_path):
+    marker = tmp_path / "url-marker"
+
+    async def run() -> tuple[str, str]:
+        _, session_tool, sid = await _start_bash(tmp_path)
+        denied = await session_tool.execute(
+            session_id=sid,
+            input=f"touch {marker}; curl -s http://169.254.169.254/latest/meta-data\n",
+        )
+        synced = await _sync_and_stop(session_tool, sid)
+        return denied, synced
+
+    denied, synced = asyncio.run(run())
+
+    assert "internal/private URL detected" in denied
+    assert "sync-42" in synced
+    assert not marker.exists()
+
+
+@_posix_only
+def test_exec_session_input_ordinary_commands_still_work(tmp_path):
+    async def run() -> tuple[str, str, str]:
+        _, session_tool, sid = await _start_bash(tmp_path)
+        single = await session_tool.execute(
+            session_id=sid, input="echo ok\n", wait_for="ok", timeout_ms=5000
+        )
+        multi = await session_tool.execute(
+            session_id=sid,
+            input="echo line-one\necho line-two\n",
+            wait_for="line-two",
+            timeout_ms=5000,
+        )
+        empty = await session_tool.execute(session_id=sid, input="")
+        await session_tool.execute(session_id=sid, terminate=True)
+        return single, multi, empty
+
+    single, multi, empty = asyncio.run(run())
+
+    assert "ok" in single
+    assert "line-one" in multi and "line-two" in multi
+    for result in (single, multi, empty):
+        assert "blocked" not in result
+        assert not is_tool_error_result(result)
+
+
+@_posix_only
+def test_exec_session_input_allowlist_is_not_applied(tmp_path):
+    # Whitelist mode governs exec commands only: session input is not a command.
+    async def run() -> str:
+        _, session_tool, sid = await _start_bash(tmp_path, allow_patterns=[r"bash"])
+        result = await session_tool.execute(
+            session_id=sid, input="echo not-whitelisted\n", wait_for="not-whitelisted",
+            timeout_ms=5000,
+        )
+        await session_tool.execute(session_id=sid, terminate=True)
+        return result
+
+    result = asyncio.run(run())
+
+    assert "allowlist filter" not in result
+    assert "not-whitelisted" in result
+
+
+@_posix_only
+def test_exec_session_python_repl_input_and_control_chars_pass(tmp_path):
+    async def run() -> tuple[str, str]:
+        manager = ExecSessionManager()
+        exec_tool = ExecTool(working_dir=str(tmp_path), timeout=30, session_manager=manager)
+        session_tool = ExecSessionTool(manager=manager)
+        initial = await exec_tool.execute(
+            command=f"{shlex.quote(sys.executable)} -u -i -q", yield_time_ms=200
+        )
+        sid = _session_id(initial)
+        printed = await session_tool.execute(
+            session_id=sid, input="print(20 + 22)\n", wait_for="42", timeout_ms=5000
+        )
+        eof = await session_tool.execute(session_id=sid, input="\x04", until_exit=True,
+                                         timeout_ms=5000)
+        if "Process running" in eof:
+            await session_tool.execute(session_id=sid, terminate=True)
+        return printed, eof
+
+    printed, eof = asyncio.run(run())
+
+    assert "42" in printed
+    assert "blocked" not in printed
+    assert "blocked" not in eof
+
+
+def test_check_session_input_passes_benign_and_control_input():
+    tool = ExecTool()
+    for text in ("", "\n", "\x04", "\x03", "\x1b[A", "print(1)\n", "echo ok\n",
+                 "for i in range(3):\n    print(i)\n\n"):
+        assert tool.check_session_input(text) is None, repr(text)
+
+
+def test_check_session_input_denials_keep_existing_markers():
+    tool = ExecTool(deny_patterns=[r"\brm\s+-rf\b"])
+    floor = tool.check_session_input("echo hi\n:(){ :|:& };:\n")
+    assert floor is not None
+    assert _DENY_MARKER in floor and _FLOOR_WORDING in floor
+    deny = tool.check_session_input("ls\nrm -rf build\n")
+    assert deny is not None and _DENY_MARKER in deny
+    # Same denial class as exec, so the runner's throttle escalates repeats.
+    from nanobot.utils.runtime import exec_guard_violation_signature
+    assert exec_guard_violation_signature(floor) == "violation:exec-denyguard"
+    assert exec_guard_violation_signature(deny) == "violation:exec-denyguard"
+    assert "sudo is not enabled" in (tool.check_session_input("sudo id\n") or "")
+    assert ExecTool(allow_sudo=True).check_session_input("sudo id\n") is None
+
+
+def test_manager_without_input_guard_is_unchanged(tmp_path):
+    """Direct manager use (no ExecTool) keeps the old pass-through behaviour."""
+    if sys.platform == "win32":
+        pytest.skip("drives a bash session")
+    marker = tmp_path / "unguarded"
+
+    async def run() -> None:
+        manager = ExecSessionManager()
+        session_tool = ExecSessionTool(manager=manager)
+        sid, _ = await manager.start(
+            command="bash", cwd=str(tmp_path), env=ExecTool()._build_env(), timeout=30,
+            shell_program=None, login=False, yield_time_ms=200, max_output_chars=10_000,
+        )
+        await session_tool.execute(session_id=sid, input=f"touch {marker}\n")
+        await _sync_and_stop(session_tool, sid)
+
+    asyncio.run(run())
+    assert marker.exists()

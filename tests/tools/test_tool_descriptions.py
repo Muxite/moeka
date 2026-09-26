@@ -61,7 +61,8 @@ def test_exec_tool_descriptions_are_concise() -> None:
     # model doesn't need to rediscover that via trial and error. See
     # nanobot/agent/tools/shell.py's description property.
     assert ExecTool().description.startswith("Execute a shell command and return its output.")
-    assert ExecSessionTool().description == "Manage a session returned by exec."
+    assert ExecSessionTool().description.startswith("Manage a session returned by exec.")
+    assert "best-effort hint" in ExecSessionTool().description
     assert ListExecSessionsTool().description == "List active exec sessions."
 
     exec_parameters = ExecTool().parameters["properties"]

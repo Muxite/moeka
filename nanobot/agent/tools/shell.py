@@ -82,12 +82,15 @@ def _reap_pid(pid: int) -> None:
 
 
 # Policy note appended to recoverable workspace-boundary guard errors.
+# It is an application-level path check on the command text, not OS-level
+# isolation (that is the sandbox's job), so the wording must not claim more.
 _WORKSPACE_BOUNDARY_NOTE = (
-    "\n\nNote: this is a hard policy boundary, not a transient failure. "
-    "Do NOT retry with shell tricks (symlinks, base64 piping, alternative "
-    "tools, working_dir overrides). If the user genuinely needs this "
-    "resource, tell them you cannot reach it under the current "
-    "restrict_to_workspace policy and ask how to proceed."
+    "\n\nNote: this is a policy decision, not a transient failure. The "
+    "restrict_to_workspace setting is enforced by an application-level path "
+    "check, not OS-level isolation. Do NOT retry with shell tricks (symlinks, "
+    "base64 piping, alternative tools, working_dir overrides). If the user "
+    "genuinely needs this resource, tell them you cannot reach it under the "
+    "current restrict_to_workspace policy and ask how to proceed."
 )
 
 
@@ -414,6 +417,7 @@ class ExecTool(Tool):
                 login=prepared.login,
                 yield_time_ms=clamp_session_int(yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
                 owner_session_key=current_request_session_key(),
+                input_guard=self.check_session_input,
                 max_output_chars=clamp_session_int(
                     max_output_chars,
                     DEFAULT_MAX_OUTPUT_CHARS,
@@ -499,19 +503,9 @@ class ExecTool(Tool):
         if guard_error:
             return guard_error
 
-        # moeka: sudo is gated by tools.exec.allow_sudo (defaults False) with a
-        # clear opt-in denial message. Destructive commands stay permitted by
-        # default (server-management agent); only privilege escalation is gated.
-        if self._SUDO_PATTERN.search(command):
-            if not self.allow_sudo:
-                logger.warning(
-                    "exec: sudo command rejected (allow_sudo=False): {!r}", command[:120]
-                )
-                return (
-                    "Error: Command blocked - sudo is not enabled. "
-                    "Set tools.exec.allow_sudo = true in your config "
-                    "(e.g. ~/.nanobot/config.json) to permit elevated commands."
-                )
+        sudo_error = self._sudo_violation(command)
+        if sudo_error:
+            return sudo_error
 
         if self.sandbox:
             if _IS_WINDOWS:
@@ -878,37 +872,15 @@ class ExecTool(Tool):
 
         # The floor (fork bomb, internal state files) is checked first and is
         # never exempted by allow_patterns.
-        for pattern in self._FLOOR_DENY_PATTERNS:
-            if re.search(pattern, lower):
-                logger.warning("exec: command blocked by floor pattern {!r}: {!r}", pattern, cmd[:120])
-                what = (
-                    "is a fork bomb"
-                    if pattern == self._FORK_BOMB_PATTERN
-                    else "would write to a nanobot internal state file"
-                )
-                return ToolResult.error(
-                    "Error: Command blocked by safety guard (dangerous pattern detected) — "
-                    f"{what}. Matched {pattern!r}. This guard is not configurable."
-                )
+        floor_error = self._floor_violation(cmd, lower)
+        if floor_error:
+            return floor_error
 
-        # allow_patterns take priority over deny_patterns so that users can
-        # exempt specific commands (e.g. "rm -rf" inside a build directory)
-        # from the hardcoded deny list via configuration. A chained command is
-        # only explicitly allowed when every top-level shell segment matches.
-        segments = self._split_shell_segments(lower)
-        explicitly_allowed = bool(self.allow_patterns) and bool(segments) and all(
-            any(re.fullmatch(pattern, segment) for pattern in self.allow_patterns)
-            for segment in segments
-        )
+        explicitly_allowed = self._explicitly_allowed(lower)
         if not explicitly_allowed:
-            for pattern in self.deny_patterns:
-                if re.search(pattern, lower):
-                    logger.warning("exec: command blocked by deny pattern {!r}: {!r}", pattern, cmd[:120])
-                    return ToolResult.error(
-                        "Error: Command blocked by safety guard (dangerous pattern detected). "
-                        f"Matched {pattern!r}. "
-                        f"Adjust tools.exec.deny_patterns in config to permit it."
-                    )
+            deny_error = self._deny_violation(cmd, lower)
+            if deny_error:
+                return deny_error
 
             if self.allow_patterns:
                 return ToolResult.error(
@@ -921,15 +893,9 @@ class ExecTool(Tool):
                     "cleared or extended."
                 )
 
-        from nanobot.security.network import contains_internal_url
-        if contains_internal_url(
-            cmd,
-            allow_loopback=current_scope_allows_loopback(
-                enabled=self.webui_allow_local_service_access,
-            ),
-        ):
-            # The runner turns this marker into a non-retryable security hint.
-            return ToolResult.error("Error: Command blocked by safety guard (internal/private URL detected)")
+        url_error = self._internal_url_violation(cmd)
+        if url_error:
+            return url_error
 
         should_restrict = self.restrict_to_workspace if restrict_to_workspace is None else restrict_to_workspace
         if should_restrict:
@@ -995,6 +961,106 @@ class ExecTool(Tool):
                     )
 
         return None
+
+    def _floor_violation(self, cmd: str, lower: str) -> str | None:
+        """Non-configurable floor: fork bomb and internal state file writes."""
+        for pattern in self._FLOOR_DENY_PATTERNS:
+            if re.search(pattern, lower):
+                logger.warning("exec: command blocked by floor pattern {!r}: {!r}", pattern, cmd[:120])
+                what = (
+                    "is a fork bomb"
+                    if pattern == self._FORK_BOMB_PATTERN
+                    else "would write to a nanobot internal state file"
+                )
+                return ToolResult.error(
+                    "Error: Command blocked by safety guard (dangerous pattern detected) — "
+                    f"{what}. Matched {pattern!r}. This guard is not configurable."
+                )
+        return None
+
+    def _explicitly_allowed(self, lower: str) -> bool:
+        """True when every top-level shell segment matches an allow pattern.
+
+        allow_patterns take priority over deny_patterns so that users can
+        exempt specific commands (e.g. "rm -rf" inside a build directory)
+        from the deny list via configuration. A chained command is only
+        explicitly allowed when every top-level shell segment matches.
+        """
+        segments = self._split_shell_segments(lower)
+        return bool(self.allow_patterns) and bool(segments) and all(
+            any(re.fullmatch(pattern, segment) for pattern in self.allow_patterns)
+            for segment in segments
+        )
+
+    def _deny_violation(self, cmd: str, lower: str) -> str | None:
+        for pattern in self.deny_patterns:
+            if re.search(pattern, lower):
+                logger.warning("exec: command blocked by deny pattern {!r}: {!r}", pattern, cmd[:120])
+                return ToolResult.error(
+                    "Error: Command blocked by safety guard (dangerous pattern detected). "
+                    f"Matched {pattern!r}. "
+                    f"Adjust tools.exec.deny_patterns in config to permit it."
+                )
+        return None
+
+    def _internal_url_violation(self, cmd: str) -> str | None:
+        from nanobot.security.network import contains_internal_url
+        if contains_internal_url(
+            cmd,
+            allow_loopback=current_scope_allows_loopback(
+                enabled=self.webui_allow_local_service_access,
+            ),
+        ):
+            # The runner turns this marker into a non-retryable security hint.
+            return ToolResult.error("Error: Command blocked by safety guard (internal/private URL detected)")
+        return None
+
+    def _sudo_violation(self, command: str) -> str | None:
+        # moeka: sudo is gated by tools.exec.allow_sudo (defaults False) with a
+        # clear opt-in denial message. Destructive commands stay permitted by
+        # default (server-management agent); only privilege escalation is gated.
+        if self._SUDO_PATTERN.search(command) and not self.allow_sudo:
+            logger.warning(
+                "exec: sudo command rejected (allow_sudo=False): {!r}", command[:120]
+            )
+            return (
+                "Error: Command blocked - sudo is not enabled. "
+                "Set tools.exec.allow_sudo = true in your config "
+                "(e.g. ~/.nanobot/config.json) to permit elevated commands."
+            )
+        return None
+
+    def check_session_input(self, text: str) -> str | None:
+        """Screen stdin sent to an exec session with exec's command checks.
+
+        Runs the floor, deny patterns (honouring the allow-pattern exemption),
+        the sudo gate and the internal-URL check on the input text, exactly as a
+        fresh exec command would get them. The allowlist (whitelist-only mode)
+        and workspace path checks are NOT applied: session input is not a
+        command and may be REPL code, a password prompt answer or keystrokes.
+
+        This is a best-effort hint for line-oriented shells only. A REPL or any
+        other interpreter can still receive anything; real containment is the
+        sandbox / host layer.
+        """
+        cmd = text.strip()
+        if not cmd:
+            return None
+        lower = cmd.lower()
+        error = self._floor_violation(cmd, lower)
+        if error is None and not self._explicitly_allowed(lower):
+            error = self._deny_violation(cmd, lower)
+        if error is None:
+            error = self._sudo_violation(cmd)
+        if error is None:
+            error = self._internal_url_violation(cmd)
+        if error is None:
+            return None
+        return ToolResult.error(
+            f"{error}\n\n(exec_session input was not sent. It is screened with the same "
+            "checks as exec commands; this is a best-effort check on line-oriented "
+            "input, not a sandbox.)"
+        )
 
     @staticmethod
     def _split_shell_segments(command: str) -> list[str]:
