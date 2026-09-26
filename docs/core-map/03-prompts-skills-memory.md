@@ -126,7 +126,7 @@ by the `quick_validate.py` script (skills/skill-creator/scripts/quick_validate.p
   NAME (agent/skills.py:342-348). So a broken/missing description makes the summary line show just the name, and
   the skill is still listed.
 - The loader does NOT call `valid_skill_metadata` for workspace or builtin skills. In the slim core that function
-  is used only for agent-plugin skills (agent/plugins.py:479). Still, follow its rules for every skill, and run
+  is used only for agent-plugin skills (agent/plugins.py:475). Still, follow its rules for every skill, and run
   `quick_validate.py` (2.8) because nothing else validates a workspace skill.
 
 ### 2.3 Validation rules

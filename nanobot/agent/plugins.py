@@ -431,10 +431,6 @@ def _enabled_package_fingerprint(workspace: Path, plugin: AgentPlugin) -> str | 
             return None
         if current == activation:
             return fingerprint
-        if current == str(plugin.root):
-            marker.write_text(activation, encoding="utf-8")
-            marker.chmod(0o600)
-            return fingerprint
         marker.unlink(missing_ok=True)
         _invalidate_skill_cache(workspace)
         return None

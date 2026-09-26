@@ -190,6 +190,12 @@ SearchSessions, SendSessionMessage, Spawn, UpdateGoal, WebFetch, WebSearch, Writ
   `cat ~/.nanobot/auth/mcp.json` or a write into `plugin-data/` still work. Exec's only file floor is the
   internal-state regexes for history.jsonl and .dream_cursor (agent/tools/shell.py:206-222), which can be evaded.
   Exec containment needs host-layer isolation (sandbox, separate uid, read-only mounts).
+- **Plugin activation markers**: `<config dir>/plugin-data/<workspace-id>/<name>/enabled` enables a workspace Agent
+  Plugin and its stdio MCP servers. Legacy path-only markers (content equal to `str(plugin.root)`) are no longer
+  upgraded: they are ignored and removed (agent/plugins.py `_enabled_package_fingerprint`; pinned by
+  tests/agent/test_agent_plugins.py `test_legacy_path_marker_is_not_honoured_and_is_removed`). The current JSON
+  `{fingerprint, root}` marker is still computable by anything that can write files, including `exec`;
+  host-authenticated activation is planned (P3, .agent/host-plugin-permissions-design.md).
 - Exec: `restrict_to_workspace` checks working_dir and absolute paths/`../` in the command text
   (agent/tools/shell.py:477-490). Not process isolation; use `tools.exec.sandbox`. Its denials append
   `_WORKSPACE_BOUNDARY_NOTE` (agent/tools/shell.py:87-94), which says so: an application-level path check,

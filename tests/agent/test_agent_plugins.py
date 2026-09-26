@@ -399,14 +399,58 @@ def test_plugin_activation_requires_one_stable_package_identity(tmp_path: Path) 
     assert agent_plugin_mcp_servers(tmp_path) == {}
 
 
-def test_legacy_path_activation_is_upgraded_to_package_fingerprint(tmp_path: Path) -> None:
-    plugin = _plugin(tmp_path)
-    set_agent_plugin_enabled(tmp_path, "demo", True)
-    marker = next((tmp_path / "config" / "plugin-data").glob("*/demo/enabled"))
+def _plugin_with_mcp_and_skill(workspace: Path, name: str = "demo") -> Path:
+    plugin = _plugin(workspace, name)
+    _skill(plugin / "skills", "demo")
+    _write_json(
+        plugin / "mcp.json",
+        {
+            "$schema": AGENT_PLUGIN_MCP_SCHEMA,
+            "mcpServers": {"server": {"type": "stdio", "command": "echo", "args": ["x"]}},
+        },
+    )
+    return plugin
+
+
+def _marker_path(workspace: Path) -> Path:
+    set_agent_plugin_enabled(workspace, "demo", True)
+    return next((workspace / "config" / "plugin-data").glob("*/demo/enabled"))
+
+
+def test_legacy_path_marker_is_not_honoured_and_is_removed(tmp_path: Path) -> None:
+    """A path-only marker (str(plugin.root)) must not enable the plugin: an agent that can
+    write a file could otherwise self-enable it and its stdio MCP servers."""
+    plugin = _plugin_with_mcp_and_skill(tmp_path)
+    marker = _marker_path(tmp_path)
     marker.write_text(str(plugin), encoding="utf-8")
 
-    assert discover_agent_plugins(tmp_path)[0].enabled is True
+    assert discover_agent_plugins(tmp_path)[0].enabled is False
+    assert not marker.exists()
+    assert agent_plugin_mcp_servers(tmp_path) == {}
+    assert enabled_agent_plugin_skill_dirs(tmp_path) == ()
+    assert _loaded_skills(tmp_path) == []
+
+
+def test_current_json_marker_from_enable_path_still_enables(tmp_path: Path) -> None:
+    plugin = _plugin_with_mcp_and_skill(tmp_path)
+    marker = _marker_path(tmp_path)
+
     assert marker.read_text(encoding="utf-8").startswith('{"fingerprint":')
+    assert discover_agent_plugins(tmp_path)[0].enabled is True
+    assert "demo" in agent_plugin_mcp_servers(tmp_path)
+    assert enabled_agent_plugin_skill_dirs(tmp_path) == (plugin / "skills" / "demo",)
+
+
+def test_marker_with_wrong_fingerprint_is_removed(tmp_path: Path) -> None:
+    _plugin_with_mcp_and_skill(tmp_path)
+    marker = _marker_path(tmp_path)
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["fingerprint"] = "0" * len(payload["fingerprint"])
+    marker.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+
+    assert discover_agent_plugins(tmp_path)[0].enabled is False
+    assert not marker.exists()
+    assert agent_plugin_mcp_servers(tmp_path) == {}
 
 
 def test_plugin_activation_does_not_survive_in_place_contract_replacement(
