@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from loguru import logger
 
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.subagent import SubagentManager, SubagentStatus
@@ -886,8 +888,238 @@ async def test_grep_risky_looking_patterns_still_return_correct_results(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_grep_plain_patterns_still_match_beyond_50k_chars(tmp_path: Path) -> None:
+async def test_grep_literal_matches_beyond_50k_but_regex_over_long_lines_is_capped(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "min.txt").write_text("a" * 60_000 + "NEEDLE\n", encoding="utf-8")
     tool = GrepTool(workspace=tmp_path)
-    result = await tool.execute(pattern="NEEDLE", output_mode="files_with_matches")
-    assert result.strip() == "min.txt"
+    literal = await tool.execute(
+        pattern="NEEDLE", fixed_strings=True, output_mode="files_with_matches"
+    )
+    assert literal.strip() == "min.txt"
+    # Regexes over lines longer than 10 000 chars run in the worker, which only
+    # matches the first 50 000 chars of each line (documented limitation).
+    capped = await tool.execute(pattern="NEED[L]E", output_mode="files_with_matches")
+    assert "No matches" in capped
+
+
+# ---------------------------------------------------------------------------
+# Regex-only worker isolation (expensive patterns and long lines)
+# ---------------------------------------------------------------------------
+
+_SECRET_TEXT = "secret-token-value-0123456789"
+
+
+@pytest.fixture()
+def spawned(monkeypatch: pytest.MonkeyPatch) -> list[tuple[tuple, dict, subprocess.Popen]]:
+    """Record every worker process the grep tool spawns."""
+    calls: list[tuple[tuple, dict, subprocess.Popen]] = []
+    real_popen = subprocess.Popen
+
+    def spy(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        calls.append((args, kwargs, proc))
+        return proc
+
+    monkeypatch.setattr("nanobot.agent.tools.search.subprocess.Popen", spy)
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pattern", [r".*secret.*value", r"(s+)+ecret-token"])
+async def test_grep_worker_path_keeps_the_protected_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
+) -> None:
+    from nanobot.security.protected_paths import ProtectedFloor  # noqa: F401
+
+    inst = tmp_path / "inst"
+    (inst / "auth").mkdir(parents=True)
+    (inst / "auth" / "token.txt").write_text(_SECRET_TEXT, encoding="utf-8")
+    (inst / "plugin-data" / "x").mkdir(parents=True)
+    (inst / "plugin-data" / "x" / "state.txt").write_text(_SECRET_TEXT, encoding="utf-8")
+    (inst / "notes.txt").write_text("public " + _SECRET_TEXT + "\n", encoding="utf-8")
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", inst / "config.json")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tool = GrepTool(workspace=ws, restrict_to_workspace=False)
+
+    result = await tool.execute(pattern=pattern, path=str(inst))
+
+    assert "notes.txt" in result
+    assert "token.txt" not in result
+    assert "state.txt" not in result
+    assert result.count(_SECRET_TEXT) == 1  # only the public notes.txt line
+
+
+@pytest.mark.asyncio
+async def test_grep_long_line_worker_path_keeps_the_protected_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inst = tmp_path / "inst"
+    (inst / "auth").mkdir(parents=True)
+    (inst / "auth" / "token.txt").write_text(_SECRET_TEXT, encoding="utf-8")
+    (inst / "long.txt").write_text("x" * 20_000 + "\n", encoding="utf-8")
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", inst / "config.json")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tool = GrepTool(workspace=ws, restrict_to_workspace=False)
+
+    result = await tool.execute(pattern=r"secret|xxxx", path=str(inst))
+
+    assert "long.txt" in result
+    assert "token.txt" not in result
+    assert _SECRET_TEXT not in result
+
+
+@pytest.mark.asyncio
+async def test_grep_worker_ignores_cwd_shadow_modules_and_gets_no_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned
+) -> None:
+    ws = tmp_path / "ws"
+    (ws / "nanobot").mkdir(parents=True)
+    marker = tmp_path / "PWNED"
+    payload = f"open({str(marker)!r}, 'w').write('x')\n"
+    for name in ("nanobot/__init__.py", "re.py", "json.py", "sitecustomize.py"):
+        (ws / name).write_text(payload, encoding="utf-8")
+    (ws / "data.txt").write_text("error one timeout\n", encoding="utf-8")
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("FAKE_API_KEY", "sk-should-not-leak")
+    tool = GrepTool(workspace=ws, regex_timeout_s=10)
+
+    result = await tool.execute(pattern=r".*error.*timeout", path="data.txt")
+
+    assert "error one timeout" in result
+    assert not marker.exists()
+    assert len(spawned) == 1
+    args, kwargs, _proc = spawned[0]
+    assert "-I" in args[0]
+    assert "FAKE_API_KEY" not in kwargs["env"]
+    assert not any("sk-should-not-leak" in v for v in kwargs["env"].values())
+    assert Path(kwargs["cwd"]) != ws
+
+
+@pytest.mark.asyncio
+async def test_grep_ordinary_patterns_stay_in_process(tmp_path: Path, spawned) -> None:
+    (tmp_path / "a.txt").write_text("hello world\nfoo bar\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path)
+    assert "hello world" in await tool.execute(pattern=r"hel+o")
+    assert "foo bar" in await tool.execute(pattern="foo", fixed_strings=True)
+    assert spawned == []
+
+
+@pytest.mark.asyncio
+async def test_grep_long_line_routes_any_regex_to_the_worker(tmp_path: Path, spawned) -> None:
+    (tmp_path / "a.txt").write_text("x" * 12_000 + "NEEDLE\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path)
+    result = await tool.execute(pattern="NEED[L]E", output_mode="files_with_matches")
+    assert result.strip() == "a.txt"
+    assert len(spawned) == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_polynomial_pattern_times_out_and_loop_stays_responsive(
+    tmp_path: Path, spawned
+) -> None:
+    (tmp_path / "poly.txt").write_text("a" * 1500 + "\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=1)
+
+    ticks = 0
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    started = time.monotonic()
+    result = await asyncio.wait_for(tool.execute(pattern=r"a*a*a*b"), timeout=30)
+    elapsed = time.monotonic() - started
+    stop = True
+    await task
+
+    assert result.startswith("Error: grep timed out after 1s")
+    assert elapsed < 4
+    assert ticks > 10
+    assert all(proc.poll() is not None for _a, _k, proc in spawned)
+
+
+@pytest.mark.asyncio
+async def test_grep_quadratic_pattern_on_long_line_does_not_block_the_loop(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "long.txt").write_text("e" * 40_000 + "\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=5)
+    ticks = 0
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    result = await asyncio.wait_for(tool.execute(pattern=r".*error.*timeout"), timeout=30)
+    stop = True
+    await task
+    assert "No matches found" in result or "timed out" in result
+    assert ticks > 10
+
+
+@pytest.mark.asyncio
+async def test_grep_fails_closed_when_worker_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.txt").write_text("error timeout\n", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise OSError("no fork for you")
+
+    monkeypatch.setattr("nanobot.agent.tools.search.subprocess.Popen", boom)
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        result = await GrepTool(workspace=tmp_path).execute(pattern=r".*error.*timeout")
+    finally:
+        logger.remove(sink_id)
+
+    assert result.startswith("Error: grep could not isolate an expensive pattern")
+    assert "error timeout" not in result
+    assert any("regex worker unavailable" in m for m in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("script_body", ["", "print('garbage')\n", "import sys; sys.exit(3)\n"])
+async def test_grep_worker_garbage_or_dead_worker_is_a_tool_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script_body: str
+) -> None:
+    fake = tmp_path / "fake_worker.py"
+    fake.write_text(script_body, encoding="utf-8")
+    monkeypatch.setattr("nanobot.agent.tools.search._GREP_WORKER_SCRIPT", fake)
+    (tmp_path / "a.txt").write_text("error timeout\n", encoding="utf-8")
+
+    result = await GrepTool(workspace=tmp_path).execute(pattern=r".*error.*timeout")
+
+    assert result.startswith("Error: grep could not isolate an expensive pattern")
+
+
+@pytest.mark.asyncio
+async def test_grep_cancellation_kills_the_worker(tmp_path: Path, spawned) -> None:
+    (tmp_path / "poly.txt").write_text("a" * 1500 + "\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=60)
+    task = asyncio.create_task(tool.execute(pattern=r"a*a*a*b"))
+    for _ in range(200):
+        if spawned:
+            break
+        await asyncio.sleep(0.05)
+    assert spawned
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if all(proc.poll() is not None for _a, _k, proc in spawned):
+            break
+        await asyncio.sleep(0.05)
+    assert all(proc.poll() is not None for _a, _k, proc in spawned)

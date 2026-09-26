@@ -5,13 +5,14 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import fnmatch
 import heapq
+import json
 import os
-import pickle
 import re
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -19,6 +20,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, TypeVar
+
+from loguru import logger
 
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.filesystem import ListDirTool, _FsTool
@@ -522,23 +525,32 @@ class FindFilesTool(_SearchTool):
         return result
 
 
-_GREP_MAX_MATCH_CHARS = 50_000
 _GREP_DEADLINE_CHECK_EVERY = 64
-_GREP_WORKER_STARTUP_S = 60.0
+_GREP_LONG_LINE_CHARS = 10_000
+_GREP_WORKER_SCRIPT = Path(__file__).with_name("_grep_worker.py")
 
 
-class _GrepTimeoutError(Exception):
-    """Raised inside the scan when the cooperative deadline passes."""
+class _GrepAbortError(Exception):
+    """Base for exceptions that must unwind the whole scan (never swallowed per file)."""
+
+
+class _GrepTimeoutError(_GrepAbortError):
+    """The cooperative deadline passed, or the regex worker was killed on timeout."""
+
+
+class _GrepWorkerError(_GrepAbortError):
+    """The regex worker could not start or returned nothing usable."""
 
 
 def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
-    """Cheap static screen for patterns prone to catastrophic backtracking.
+    """Cheap static screen for patterns prone to super-linear backtracking.
 
-    Flags a repeat (``*``/``+``/``{n,m>1}``) whose body holds another repeat, or an
-    alternation whose branches do not start with distinct literals (``(a+)+$``,
-    ``(a|aa)*``). Over-approximate on purpose: a flagged pattern only costs a
-    subprocess start, never a wrong answer. Sequential repeats such as ``a*a*a*$``
-    are polynomial rather than exponential and are not flagged.
+    Flags a repeat whose body holds another repeat, an alternation under a repeat
+    whose branches do not start with distinct literals (``(a+)+$``, ``(a|aa)*``), and
+    two or more unbounded repeats side by side in one sequence (``a*a*b``,
+    ``.*error.*timeout``, polynomial but quadratic or worse on long lines).
+    Over-approximate on purpose: a flagged pattern only costs a worker process,
+    never a wrong answer.
     """
     try:
         import re._parser as sre_parse  # Python 3.11+
@@ -557,10 +569,15 @@ def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
         return len(set(firsts)) == len(firsts)
 
     def walk(seq: Any, in_repeat: bool) -> bool:
+        unbounded_here = 0
         for op, av in seq:
             if op in repeats:
                 _lo, hi, sub = av
                 iterates = hi > 1
+                if hi == sre_parse.MAXREPEAT:
+                    unbounded_here += 1
+                    if unbounded_here >= 2:
+                        return True
                 if iterates and in_repeat:
                     return True
                 if walk(sub, in_repeat or iterates):
@@ -581,14 +598,143 @@ def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
     return walk(parsed, False)
 
 
-class _BoundedRegex:
-    """Wrap a compiled risky pattern: match at most the first 50 000 chars of a line."""
+class _Hit:
+    def __init__(self, start: int) -> None:
+        self._start = start
 
-    def __init__(self, regex: re.Pattern[str]) -> None:
-        self._regex = regex
+    def start(self) -> int:
+        return self._start
 
-    def search(self, text: str) -> re.Match[str] | None:
-        return self._regex.search(text[:_GREP_MAX_MATCH_CHARS])
+
+class _PrecomputedRegex:
+    """Stand-in for a compiled pattern: replays match starts computed by the worker.
+
+    Callers search searchable lines in the same order the starts were computed in.
+    """
+
+    def __init__(self, starts: list[int]) -> None:
+        self._starts = iter(starts)
+
+    def search(self, text: str) -> _Hit | None:
+        start = next(self._starts)
+        return _Hit(start) if start >= 0 else None
+
+
+class _RegexWorker:
+    """Regex-only child process, started lazily, killable from any thread.
+
+    The worker gets no cwd on ``sys.path`` (``-I``), a pinned cwd, an empty
+    environment, and only text over stdin. It is killed on timeout, cancellation
+    and ``close()``, and every kill is followed by ``wait()``.
+    """
+
+    def __init__(self, pattern: str, flags: int, deadline: float | None) -> None:
+        self._pattern = pattern
+        self._flags = flags
+        self._deadline = deadline
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._lock = threading.Lock()
+        self._closed = False
+        self.timed_out = False
+
+    @staticmethod
+    def _minimal_env() -> dict[str, str]:
+        if sys.platform == "win32":
+            return {k: v for k, v in os.environ.items() if k.upper() in {"SYSTEMROOT", "PATH"}}
+        return {}
+
+    def _start(self) -> subprocess.Popen[bytes]:
+        with self._lock:
+            if self._closed:
+                raise _GrepWorkerError("worker closed")
+            if self._proc is None:
+                try:
+                    self._proc = subprocess.Popen(
+                        [sys.executable, "-I", str(_GREP_WORKER_SCRIPT)],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        cwd=tempfile.gettempdir(),
+                        env=self._minimal_env(),
+                    )
+                except OSError as exc:
+                    raise _GrepWorkerError(f"cannot start worker: {exc}") from exc
+                setup = json.dumps({"pattern": self._pattern, "flags": self._flags})
+                self._write(self._proc, setup.encode("ascii") + b"\n")
+            return self._proc
+
+    @staticmethod
+    def _write(proc: subprocess.Popen[bytes], data: bytes) -> None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(data)
+            proc.stdin.flush()
+        except (OSError, ValueError) as exc:
+            raise _GrepWorkerError(f"worker stdin failed: {exc}") from exc
+
+    def kill(self) -> None:
+        with self._lock:
+            self._closed = True
+            proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _on_timeout(self) -> None:
+        self.timed_out = True
+        self.kill()
+
+    def close(self) -> None:
+        self.kill()
+        proc = self._proc
+        if proc is not None:
+            for stream in (proc.stdin, proc.stdout):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except (OSError, ValueError):
+                    pass
+            proc.wait()
+
+    def match_starts(self, texts: list[str]) -> list[int]:
+        """Return the match start (or -1) of every text; raise on timeout or failure."""
+        remaining = None if self._deadline is None else self._deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise _GrepTimeoutError
+        timer = None
+        try:
+            proc = self._start()
+            if remaining is not None:
+                timer = threading.Timer(remaining, self._on_timeout)
+                timer.daemon = True
+                timer.start()
+            request = json.dumps({"texts": texts}).encode("ascii") + b"\n"
+            self._write(proc, request)
+            assert proc.stdout is not None
+            line = proc.stdout.readline()
+        except _GrepWorkerError:
+            if self.timed_out:
+                raise _GrepTimeoutError from None
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
+        if self.timed_out:
+            raise _GrepTimeoutError
+        try:
+            reply = json.loads(line)
+            starts = reply["starts"]
+            if not (
+                isinstance(starts, list)
+                and len(starts) == len(texts)
+                and all(isinstance(v, int) for v in starts)
+            ):
+                raise ValueError("bad reply shape")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise _GrepWorkerError(f"unusable worker reply: {exc}") from exc
+        return starts
 
 
 def _with_deadline(
@@ -726,7 +872,7 @@ class GrepTool(_SearchTool):
     @staticmethod
     def _matching_contexts(
         lines: Iterable[LocatedDocumentLine],
-        regex: re.Pattern[str] | _BoundedRegex,
+        regex: re.Pattern[str] | _PrecomputedRegex,
         before: int,
         after: int,
     ) -> Iterable[tuple[list[LocatedDocumentLine], int, int]]:
@@ -826,59 +972,30 @@ class GrepTool(_SearchTool):
             context_after=context_after, max_matches=max_matches, max_results=max_results,
             head_limit=head_limit, offset=offset,
         )
-        timeout = self._regex_timeout_s
-        flags = re.IGNORECASE if case_insensitive else 0
-        if not fixed_strings and _regex_may_backtrack_badly(pattern, flags):
-            # ``re`` holds the GIL while matching, so a thread cannot be timed out:
-            # scan such patterns in a child process that can be killed.
-            isolated = await self._execute_isolated(scan_kwargs, timeout)
-            if isolated is not None:
-                return isolated
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + self._regex_timeout_s
+        worker: _RegexWorker | None = None
+        if not fixed_strings:
+            flags = re.IGNORECASE if case_insensitive else 0
+            worker = _RegexWorker(pattern, flags, deadline)
         try:
-            return await asyncio.to_thread(self._execute_sync, deadline=deadline, **scan_kwargs)
+            return await asyncio.to_thread(
+                self._execute_sync, deadline=deadline, worker=worker, **scan_kwargs
+            )
+        except asyncio.CancelledError:
+            if worker is not None:
+                worker.kill()
+            raise
         except _GrepTimeoutError:
             return self._timeout_error()
-
-    async def _execute_isolated(self, scan_kwargs: dict[str, Any], timeout: float) -> str | None:
-        """Run the scan in a killable child process; None means "not possible, use a thread"."""
-        from nanobot.security.workspace_access import current_workspace_scope
-
-        worker_tool = copy.copy(self)
-        worker_tool._explicit_file_states = None
-        try:
-            payload = pickle.dumps((worker_tool, current_workspace_scope(), scan_kwargs))
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "nanobot.agent.tools._grep_worker",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+        except _GrepWorkerError as exc:
+            logger.warning("grep regex worker unavailable ({}); failing closed", exc)
+            return ToolResult.error(
+                "Error: grep could not isolate an expensive pattern; "
+                "use a simpler pattern or narrower path."
             )
-        except Exception:
-            return None
-        assert proc.stdin is not None and proc.stdout is not None
-        try:
-            try:
-                proc.stdin.write(payload)
-                await proc.stdin.drain()
-                proc.stdin.close()
-                ready = await asyncio.wait_for(proc.stdout.readline(), _GREP_WORKER_STARTUP_S)
-            except (asyncio.TimeoutError, OSError):
-                ready = b""
-            if ready.strip() != b"READY":
-                return None  # worker could not start: fall back to the thread path
-            try:
-                raw = await asyncio.wait_for(proc.stdout.read(), timeout)
-            except asyncio.TimeoutError:
-                return self._timeout_error()
-            status, text = pickle.loads(raw)
-            if status == "ok":
-                return text
-            return ToolResult.error(f"Error searching files: {text}")
         finally:
-            if proc.returncode is None:
-                proc.kill()
-            await proc.wait()
+            if worker is not None:
+                worker.close()
 
     def _execute_sync(
         self,
@@ -898,6 +1015,7 @@ class GrepTool(_SearchTool):
         head_limit: int | None = None,
         offset: int = 0,
         deadline: float | None = None,
+        worker: _RegexWorker | None = None,
     ) -> str:
         try:
             target = self._resolve(path or ".")
@@ -909,9 +1027,7 @@ class GrepTool(_SearchTool):
             flags = re.IGNORECASE if case_insensitive else 0
             try:
                 needle = re.escape(pattern) if fixed_strings else pattern
-                regex: re.Pattern[str] | _BoundedRegex = re.compile(needle, flags)
-                if not fixed_strings and _regex_may_backtrack_badly(pattern, flags):
-                    regex = _BoundedRegex(regex)
+                regex: re.Pattern[str] | _PrecomputedRegex = re.compile(needle, flags)
             except re.error as e:
                 return ToolResult.error(f"Error: invalid regex pattern: {e}")
 
@@ -939,6 +1055,11 @@ class GrepTool(_SearchTool):
             max_file_bytes = (
                 self._MAX_EXPLICIT_FILE_BYTES if target.is_file() else self._MAX_FILE_BYTES
             )
+            # Expensive patterns (and any regex over very long lines) are matched by the
+            # killable regex-only worker; everything else stays in-process.
+            screened = worker is not None and _regex_may_backtrack_badly(
+                pattern, re.IGNORECASE if case_insensitive else 0
+            )
 
             for file_path in self._iter_files(target):
                 if deadline is not None and time.monotonic() > deadline:
@@ -964,6 +1085,8 @@ class GrepTool(_SearchTool):
                     mtime = 0.0
                 source_iterator: Iterator[LocatedDocumentLine] | None = None
                 is_document = file_path.suffix.lower() in _DOCUMENT_EXTENSIONS
+                long_line = False
+                file_regex = regex
                 try:
                     if is_document:
                         source = open_document_line_source(file_path, pages=pages)
@@ -988,17 +1111,27 @@ class GrepTool(_SearchTool):
                         except UnicodeDecodeError:
                             skipped_binary += 1
                             continue
+                        text_lines = content.splitlines()
+                        long_line = worker is not None and any(
+                            len(text) > _GREP_LONG_LINE_CHARS for text in text_lines
+                        )
                         source_lines = (
                             LocatedDocumentLine(text, line_no, "")
-                            for line_no, text in enumerate(content.splitlines(), 1)
+                            for line_no, text in enumerate(text_lines, 1)
                         )
 
+                    if worker is not None and (screened or long_line):
+                        located = list(source_lines)
+                        file_regex = _PrecomputedRegex(
+                            worker.match_starts([ln.text for ln in located if ln.searchable])
+                        )
+                        source_lines = iter(located)
                     source_lines = _with_deadline(source_lines, deadline)
                     file_had_match = False
                     if output_mode == "content":
                         contexts = self._matching_contexts(
                             source_lines,
-                            regex,
+                            file_regex,
                             context_before,
                             context_after,
                         )
@@ -1024,7 +1157,7 @@ class GrepTool(_SearchTool):
                             result_chars += extra_sep + len(block)
                     else:
                         for line in source_lines:
-                            if not line.searchable or regex.search(line.text) is None:
+                            if not line.searchable or file_regex.search(line.text) is None:
                                 continue
                             file_had_match = True
                             if output_mode == "count":
@@ -1035,7 +1168,7 @@ class GrepTool(_SearchTool):
                                 file_mtimes[display_path] = mtime
                             break
                 except Exception as e:
-                    if not is_document or isinstance(e, _GrepTimeoutError):
+                    if not is_document or isinstance(e, _GrepAbortError):
                         raise
                     if target.is_file():
                         if isinstance(e, PdfPageRangeError):
@@ -1121,7 +1254,7 @@ class GrepTool(_SearchTool):
             if notes:
                 result += "\n\n" + "\n".join(notes)
             return result
-        except _GrepTimeoutError:
+        except _GrepAbortError:
             raise
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")

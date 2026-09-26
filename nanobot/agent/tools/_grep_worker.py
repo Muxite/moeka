@@ -1,39 +1,49 @@
-"""Child-process entry point for grep patterns that may backtrack catastrophically.
+"""Regex-only worker for grep patterns that may be expensive to match.
 
-CPython's ``re`` never releases the GIL while matching, so a runaway regex
-cannot be timed out from a thread: it freezes the whole event loop. For the
-patterns ``GrepTool`` flags as risky the scan runs here instead, in a process
-the parent can kill on timeout.
+CPython's ``re`` never releases the GIL while matching, so a runaway regex cannot
+be timed out from a thread: it freezes the whole event loop. ``GrepTool`` therefore
+sends such patterns here, to a child process it can kill.
 
-Protocol: the parent writes one pickle ``(tool, scope, kwargs)`` to stdin. The
-child imports and unpickles it, prints ``READY\\n`` on stdout, runs the scan
-and writes one pickle ``("ok" | "err", str)`` after it. Stray prints go to
-stderr so the framing on stdout stays clean.
+This file is deliberately stdlib-only and is run BY PATH (``python -I <this file>``)
+with an empty environment, so nothing from the parent's cwd, ``PYTHONPATH`` or
+secrets is reachable. The worker never touches the filesystem: the parent reads and
+decodes the files and only sends text.
+
+Protocol (one JSON object per line, both directions):
+  request 1:  {"pattern": str, "flags": int}           (no reply)
+  request N:  {"texts": [str, ...]}
+  reply N:    {"starts": [int, ...]}  (match start per text, -1 for no match)
+              or {"error": str}
 """
 
-from __future__ import annotations
-
-import pickle
+import json
+import re
 import sys
+
+MAX_MATCH_CHARS = 50_000
 
 
 def main() -> int:
+    stdin = sys.stdin.buffer
     out = sys.stdout.buffer
-    sys.stdout = sys.stderr
-    tool, scope, kwargs = pickle.loads(sys.stdin.buffer.read())
-
-    from nanobot.security.workspace_access import bind_workspace_scope
-
-    if scope is not None:
-        bind_workspace_scope(scope)
-    out.write(b"READY\n")
-    out.flush()
+    setup = json.loads(stdin.readline())
     try:
-        message = ("ok", tool._execute_sync(deadline=None, **kwargs))
-    except BaseException as exc:  # noqa: BLE001 - reported to the parent verbatim
-        message = ("err", f"{type(exc).__name__}: {exc}")
-    out.write(pickle.dumps(message))
-    out.flush()
+        regex = re.compile(setup["pattern"], setup["flags"])
+    except re.error as exc:
+        regex = None
+        setup_error = str(exc)
+    for raw in stdin:
+        if regex is None:
+            reply = {"error": f"invalid regex pattern: {setup_error}"}
+        else:
+            texts = json.loads(raw)["texts"]
+            starts = []
+            for text in texts:
+                match = regex.search(text[:MAX_MATCH_CHARS])
+                starts.append(match.start() if match else -1)
+            reply = {"starts": starts}
+        out.write(json.dumps(reply).encode("ascii") + b"\n")
+        out.flush()
     return 0
 
 
