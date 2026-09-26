@@ -1731,6 +1731,7 @@ class AgentRunner:
                 tool_call.name,
                 tool_call.arguments,
                 workspace_violation_counts,
+                raw_text=raw_text,
             )
             event["detail"] = self._event_detail("workspace_violation: ", raw_text)
             if escalation is not None:

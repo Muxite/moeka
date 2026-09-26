@@ -1264,9 +1264,10 @@ def test_check_session_input_denials_keep_existing_markers():
     assert _DENY_MARKER in floor and _FLOOR_WORDING in floor
     deny = tool.check_session_input("ls\nrm -rf build\n")
     assert deny is not None and _DENY_MARKER in deny
-    # Same denial class as exec, so the runner's throttle escalates repeats.
+    # Same denial classes as exec, so the runner's throttle escalates repeats
+    # (the floor has its own class: no config change can lift it).
     from nanobot.utils.runtime import exec_guard_violation_signature
-    assert exec_guard_violation_signature(floor) == "violation:exec-denyguard"
+    assert exec_guard_violation_signature(floor) == "violation:exec-floor"
     assert exec_guard_violation_signature(deny) == "violation:exec-denyguard"
     assert "sudo is not enabled" in (tool.check_session_input("sudo id\n") or "")
     assert ExecTool(allow_sudo=True).check_session_input("sudo id\n") is None

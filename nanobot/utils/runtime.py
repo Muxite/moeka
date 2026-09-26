@@ -188,8 +188,14 @@ def repeated_workspace_violation_error(
     tool_name: str,
     arguments: Any,
     seen_counts: dict[str, int],
+    raw_text: str = "",
 ) -> str | None:
-    """Return an escalated error after repeated bypass attempts."""
+    """Return an escalated error after repeated bypass attempts.
+
+    *raw_text* is the denial the tool returned. When it is a fixed
+    protected-path denial the wording must not suggest a config change or a
+    workspace workaround, since neither can change the answer.
+    """
     signature = workspace_violation_signature(tool_name, arguments)
     if signature is None:
         return None
@@ -203,6 +209,15 @@ def repeated_workspace_violation_error(
         count,
     )
     target = signature.split("violation:", 1)[1] if "violation:" in signature else signature
+    if _PROTECTED_PATH_MARKER in (raw_text or "").lower():
+        return (
+            "Error: refusing repeated access to a protected internal path.\n"
+            f"You have tried to access '{target}' (or an equivalent path) "
+            f"{count} times in this turn. It is a protected internal path that "
+            "cannot be accessed by any tool, and no configuration change or "
+            "workaround (other tools, shell tricks, symlinks) allows it. "
+            "Stop retrying. Tell the user you cannot access it."
+        )
     return (
         "Error: refusing repeated workspace-bypass attempts.\n"
         f"You have tried to access '{target}' (or an equivalent path) "
@@ -220,6 +235,13 @@ def repeated_workspace_violation_error(
 # counting above never trips. Key on the denial class instead so the counter
 # accumulates across distinct commands within a turn.
 
+_PROTECTED_PATH_MARKER = "protected internal path"
+
+# Denials from the always-on exec floor (fork bomb, internal state files) carry
+# this phrase; no configuration can change them, so they get their own class,
+# counter and wording. Checked BEFORE the generic deny-guard marker.
+_EXEC_FLOOR_TEXT = "this guard is not configurable."
+
 _EXEC_GUARD_MARKERS: tuple[tuple[str, str], ...] = (
     ("blocked by allowlist filter", "violation:exec-allowlist"),
     ("blocked by safety guard (dangerous pattern detected)", "violation:exec-denyguard"),
@@ -231,6 +253,11 @@ def exec_guard_violation_signature(raw_text: str) -> str | None:
     if not raw_text:
         return None
     lowered = raw_text.lower()
+    if (
+        _EXEC_FLOOR_TEXT in lowered
+        and "blocked by safety guard (dangerous pattern detected)" in lowered
+    ):
+        return "violation:exec-floor"
     for marker, signature in _EXEC_GUARD_MARKERS:
         if marker in lowered:
             return signature
@@ -254,6 +281,14 @@ def repeated_exec_guard_error(
         signature,
         count,
     )
+    if signature == "violation:exec-floor":
+        return (
+            "Error: refusing repeated exec attempts against a fixed safety guard.\n"
+            f"{count} commands have been blocked by a fixed safety guard this turn "
+            "(fork bomb or nanobot internal state). No configuration change allows "
+            "it, and different commands, tools, or quoting tricks will NOT change "
+            "the answer. Stop retrying and use a different approach."
+        )
     kind = "allow" if signature == "violation:exec-allowlist" else "deny"
     return (
         "Error: refusing repeated exec attempts against the command guard.\n"

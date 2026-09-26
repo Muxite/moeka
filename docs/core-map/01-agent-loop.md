@@ -356,7 +356,7 @@ Declared in `config/schema.py:118-167`. Doc 04 has the full knob table.
 | Tool-failure reflection threshold | 3 consecutive all-failed iterations; 0 disables | `limits.toolFailureReflectionThreshold` | agent/runner.py:123,660-680 |
 | Microcompact keep/min chars | 10 / 500 | `limits.microcompactKeepRecent`, `limits.microcompactMinChars` | **No effect (verified).** The fields are declared at agent/runner.py:119-120 and nothing in `nanobot/` reads them: `grep -rn microcompact nanobot/` hits only agent/runner.py:86,119-120, and the comment at agent/runner.py:86-91 says `ContextGovernor` uses its own constants |
 | Repeat-lookup throttle | 2 free repeats per identical `web_fetch` URL / `web_search` query per turn | code constant | utils/runtime.py:13,123-144 |
-| Repeat boundary/exec-guard throttle | third same-target violation escalates | code constant | utils/runtime.py:16,187-215,240-260 |
+| Repeat boundary/exec-guard throttle | third same-target violation escalates | code constant | utils/runtime.py:16,187-230,251-300 |
 | Idle compaction TTL | 15 min (0 = off) | `idleCompactAfterMinutes` / `sessionTtlMinutes` | config/schema.py:149-154 |
 | Idle scan interval | 60 s | `idleCompactCheckIntervalSeconds` | config/schema.py:155-158 |
 | Concurrent subagents | 4 | `maxConcurrentSubagents` | config/schema.py:132 |
@@ -394,8 +394,8 @@ the space left for history, and system messages are never snipped (agent/context
 | Tool returns an error result (`ToolResult.is_error`) | Result text + hint returned as the tool message; event status `error` | agent/runner.py:1617-1633; agent/tools/registry.py:15-16 |
 | Same web_fetch URL / web_search query more than twice in one turn | Blocked: `Error: repeated external lookup blocked...` | agent/runner.py:1543-1554; utils/runtime.py:134-144 |
 | Private/internal URL (SSRF markers) | Non-retryable error with a boundary note; the model is told to stop trying | agent/runner.py:1647-1659,1699-1706 |
-| Workspace boundary violation | Soft error + hint; escalation message after repeated attempts on the same target | agent/runner.py:1662-1670,1729-1746; utils/runtime.py:187-215 |
-| exec deny-pattern or allowlist denial | Returned verbatim (no "try a different approach" hint); after more than 2 denials of the same class the message escalates | agent/runner.py:1708-1727; utils/runtime.py:223-260 |
+| Workspace boundary violation | Soft error + hint; escalation message after repeated attempts on the same target | agent/runner.py:1662-1670,1729-1747; utils/runtime.py:187-230 (a `protected internal path` denial gets its own no-workaround wording) |
+| exec deny-pattern or allowlist denial | Returned verbatim (no "try a different approach" hint); after more than 2 denials of the same class the message escalates. Fixed-floor denials (`This guard is not configurable.`) are a separate class `violation:exec-floor` with separate counter and wording that does not mention config | agent/runner.py:1708-1727; utils/runtime.py:233-300 |
 | N consecutive iterations where every tool call failed (default 3) | One `[System note] Tool calls have now failed for N iterations in a row. Stop and reassess...` user message injected, only once per run | agent/runner.py:658-680; utils/runtime.py:93-104 |
 | Model returns empty content (no tools) | Retry up to `maxEmptyRetries` (2, so one actual retry since check is `< 2`); then a no-tools "Please provide your response to the user based on the conversation above." call; if still blank, stop_reason `empty_final_response` with the fixed message "I completed the tool steps but couldn't produce a final answer..." | agent/runner.py:699-740,848-865; utils/runtime.py:19-26 |
 | Output cut by max_tokens (`finish_reason == "length"`) | Up to 3 continuation rounds, each asking to continue from the exact endpoint and passing the last 64 chars as an immutable tail | agent/runner.py:742-767; utils/runtime.py:17,36-41,78-90 |
