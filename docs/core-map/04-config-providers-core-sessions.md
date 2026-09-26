@@ -29,6 +29,9 @@ code is marked **unverified**. Vendor behaviour (vLLM flags etc.) is outside thi
 - Env resolution: `resolve_config_env_vars` (config/loader.py:271-287) walks the whole model; regex `${VAR}`
   (config/loader.py:268); a missing variable logs a warning with the dotted field path and leaves the placeholder
   (config/loader.py:425-437). It never raises (moeka deviation; tests/config/test_env_var_warnings.py).
+- Log hygiene: `nanobot/security/redact.py` (`redact_text`, `redact_value`) masks `sk-` tokens, Authorization/Bearer
+  headers and key/token/secret/password `name=value` pairs. Anything that logs request bodies, headers, URLs, error
+  bodies or tool arguments must go through it (image-generation clients and the subagent hook do; tests/security/test_redact.py).
   `resolve_env_refs` (config/loader.py:299-314) is the lenient single-string variant and returns `""` if any
   referenced variable is unset. Its docstring (config/loader.py:302-303) still says the whole-config variant
   "raises on a missing variable"; that is stale. `load_config` itself does not resolve `${VAR}`; callers do:

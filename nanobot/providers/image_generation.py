@@ -22,6 +22,7 @@ from nanobot.security.network import (
     UnsafeURLRequestError,
     resolve_url_target,
 )
+from nanobot.security.redact import redact_text, redact_value
 from nanobot.utils.helpers import detect_image_mime
 
 _OPENROUTER_ATTRIBUTION_HEADERS = {
@@ -678,7 +679,7 @@ class OllamaImageGenerationClient(ImageGenerationProvider):
             logger.error(
                 "Ollama image generation failed (HTTP {}): {}",
                 response.status_code,
-                detail,
+                redact_text(detail),
             )
             raise ImageGenerationError(
                 f"Ollama image generation failed (HTTP {response.status_code}): {detail}"
@@ -774,7 +775,11 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = _http_error_detail(response)
-            logger.error("Gemini Imagen generation failed (HTTP {}): {}", response.status_code, detail)
+            logger.error(
+                "Gemini Imagen generation failed (HTTP {}): {}",
+                response.status_code,
+                redact_text(detail),
+            )
             raise ImageGenerationError(
                 f"Gemini Imagen generation failed (HTTP {response.status_code}): {detail}"
             ) from exc
@@ -833,7 +838,11 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = _http_error_detail(response)
-            logger.error("Gemini image generation failed (HTTP {}): {}", response.status_code, detail)
+            logger.error(
+                "Gemini image generation failed (HTTP {}): {}",
+                response.status_code,
+                redact_text(detail),
+            )
             raise ImageGenerationError(
                 f"Gemini image generation failed (HTTP {response.status_code}): {detail}"
             ) from exc
@@ -1235,10 +1244,10 @@ class OpenAIImageGenerationClient(ImageGenerationProvider):
                     "use a GPT Image model"
                 )
             edit_body = _openai_multipart_form_body(body)
-            logger.info(
+            logger.debug(
                 "OpenAI Images API request: POST {}/images/edits body={} reference_images={}",
-                self.api_base,
-                edit_body,
+                redact_value(self.api_base),
+                redact_value(edit_body),
                 len(refs),
             )
             response = await self._post_image_edit(
@@ -1247,10 +1256,10 @@ class OpenAIImageGenerationClient(ImageGenerationProvider):
                 reference_images=refs,
             )
         else:
-            logger.info(
+            logger.debug(
                 "OpenAI Images API request: POST {}/images/generations body={}",
-                self.api_base,
-                body,
+                redact_value(self.api_base),
+                redact_value(body),
             )
 
             response = await self._http_post(
@@ -1263,14 +1272,16 @@ class OpenAIImageGenerationClient(ImageGenerationProvider):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = response.text[:1000]
-            logger.error("OpenAI Images API error ({}): {}", response.status_code, detail)
+            logger.error(
+                "OpenAI Images API error ({}): {}", response.status_code, redact_text(detail)
+            )
             raise ImageGenerationError(
                 f"OpenAI image generation failed (HTTP {response.status_code}): {detail}"
             ) from exc
 
         payload = response.json()
         logger.info("OpenAI Images API response ({}): {}", response.status_code,
-                       {k: v for k, v in payload.items() if k != "data"})
+                       redact_value({k: v for k, v in payload.items() if k != "data"}))
 
         images = await self._parse_images_response(payload)
         self._require_images(images, payload)
@@ -1335,7 +1346,11 @@ class CustomImageGenerationClient(ImageGenerationProvider):
         }
         body.update(self.extra_body)
 
-        logger.info("Custom Images API request: POST {}/images/generations body={}", self.api_base, body)
+        logger.debug(
+            "Custom Images API request: POST {}/images/generations body={}",
+            redact_value(self.api_base),
+            redact_value(body),
+        )
 
         response = await self._http_post(
             f"{self.api_base}/images/generations",
@@ -1347,14 +1362,16 @@ class CustomImageGenerationClient(ImageGenerationProvider):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = response.text[:1000]
-            logger.error("Custom Images API error ({}): {}", response.status_code, detail)
+            logger.error(
+                "Custom Images API error ({}): {}", response.status_code, redact_text(detail)
+            )
             raise ImageGenerationError(
                 f"Custom image generation failed (HTTP {response.status_code}): {detail}"
             ) from exc
 
         payload = response.json()
         logger.info("Custom Images API response ({}): {}", response.status_code,
-                       {k: v for k, v in payload.items() if k != "data"})
+                       redact_value({k: v for k, v in payload.items() if k != "data"}))
 
         images = await _openai_images_from_payload(payload, proxy=self.proxy)
 
@@ -1450,8 +1467,11 @@ class CodexImageGenerationClient(ImageGenerationProvider):
         }
         body.update(self.extra_body)
 
-        logger.info("Codex Responses API request: POST {}/codex/responses body={}",
-                       self.api_base, {k: v for k, v in body.items() if k != "input"})
+        logger.debug(
+            "Codex Responses API request: POST {}/codex/responses body={}",
+            redact_value(self.api_base),
+            redact_value({k: v for k, v in body.items() if k != "input"}),
+        )
 
         response = await self._http_post(
             f"{self.api_base}/codex/responses",
@@ -1463,7 +1483,9 @@ class CodexImageGenerationClient(ImageGenerationProvider):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = response.text[:1000]
-            logger.error("Codex Responses API error ({}): {}", response.status_code, detail)
+            logger.error(
+                "Codex Responses API error ({}): {}", response.status_code, redact_text(detail)
+            )
             raise ImageGenerationError(
                 f"Codex image generation failed (HTTP {response.status_code}): {detail}"
             ) from exc
@@ -1606,7 +1628,7 @@ async def _parse_codex_sse_images(
                         continue
                     ev_type = event.get("type", "")
                     if ev_type in ("error", "response.failed"):
-                        logger.error("Codex SSE failure: {}", raw[:2000])
+                        logger.error("Codex SSE failure: {}", redact_text(raw[:2000]))
                     _collect_images_from_sse_event(event, images)
                     _collect_text_from_sse_event(event, text_parts)
                     if ev_type == "response.completed":

@@ -30,6 +30,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.llm_usage.context import LLMUsageSource, current_llm_usage_source
 from nanobot.providers.base import LLMProvider, LLMUsage
+from nanobot.security.redact import redact_value
 from nanobot.security.workspace_access import (
     WorkspaceScope,
     bind_workspace_scope,
@@ -74,7 +75,7 @@ class _SubagentHook(AgentHook):
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         for tool_call in context.tool_calls:
-            args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+            args_str = json.dumps(redact_value(tool_call.arguments), ensure_ascii=False)
             logger.debug(
                 "Subagent [{}] executing: {} with arguments: {}",
                 self._task_id, tool_call.name, args_str,
