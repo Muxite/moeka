@@ -119,10 +119,12 @@ Gotchas read from code (not runtime-tested):
   tests/tools/test_exec_allow_patterns.py::test_extra_deny_patterns_add_to_the_floor.
 - Non-empty `tools.exec.allowPatterns` = whitelist-only exec (agent/tools/shell.py:332-340).
 - `tools.restrictToWorkspace: false` does not open everything to the file tools: a non-configurable floor
-  (security/protected_paths.py, wired in `_FsTool._resolve_read/_resolve_write`, agent/tools/filesystem.py:156-218)
+  (security/protected_paths.py, wired in `_FsTool._resolve_read/_resolve_write`, agent/tools/filesystem.py:172-238)
   always denies `/proc/<pid>/{environ,mem,maps,root,cwd,exe}`, `<data dir>/auth`, `<data dir>/plugin-data`,
   `<data dir>/sessions` and the default sessions root, and denies WRITES to `memory/history.jsonl`,
-  `memory/.dream_cursor` and `.nanobot/workspace-id`. No config key or `extra_*` list lifts it. It does not
+  `memory/.dream_cursor`, `.nanobot/workspace-id` and the config file itself (`get_config_path()` and its
+  symlink target; reading it stays allowed, and `save_config`/CLI writes are unaffected because they bypass the
+  file tools; `exec` can still edit it until phase 1). No config key or `extra_*` list lifts it. It does not
   apply to `exec` (see the exec caveat in doc 02, "Workspace and network guards tools enforce").
 - sudo is blocked unless `tools.exec.allowSudo` (agent/tools/shell.py:627-629,1139-1152).
 

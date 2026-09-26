@@ -510,3 +510,100 @@ async def test_symlinked_config_protects_link_and_target_dirs(
         # A plain config keeps exactly the old behaviour: an unrelated dir is untouched.
         other = target_dir / "auth" / "mcp.json"
         assert SECRET in str(await read.execute(path=str(other)))
+
+
+# ---------------------------------------------------------------------------
+# config.json is never agent-writable through the file tools (P0.1b); reads stay
+# allowed and code-level writers (save_config) are untouched.
+# ---------------------------------------------------------------------------
+
+CONFIG_BODY = '{"tools": {"web": {"apiKey": "${SEARCH_KEY}"}}}\n'
+
+
+def _make_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, symlinked: bool,
+) -> tuple[Path, list[Path], Path]:
+    """Return (configured path, every path that must be write-protected, workspace)."""
+    link_dir = tmp_path / "home-nanobot"
+    target_dir = tmp_path / "dotfiles"
+    link_dir.mkdir()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (link_dir / "notes.txt").write_text("public note\n", encoding="utf-8")
+    config = link_dir / "config.json"
+    if symlinked:
+        target_dir.mkdir()
+        (target_dir / "config.json").write_text(CONFIG_BODY, encoding="utf-8")
+        config.symlink_to(target_dir / "config.json")
+        protected = [config, target_dir / "config.json"]
+    else:
+        config.write_text(CONFIG_BODY, encoding="utf-8")
+        protected = [config]
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config)
+    return config, protected, ws
+
+
+@pytest.mark.parametrize("symlinked", [False, True])
+@pytest.mark.parametrize("allowlisted", [False, True])
+async def test_config_file_write_denied_read_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlinked: bool, allowlisted: bool,
+) -> None:
+    config, protected, ws = _make_config(tmp_path, monkeypatch, symlinked=symlinked)
+    extra = [config.parent.resolve(), *(p.parent for p in protected)] if allowlisted else None
+    kwargs = {"workspace": ws, "restrict_to_workspace": False}
+    if extra:
+        kwargs["extra_write_allowed_dirs"] = extra
+    write = WriteFileTool(**kwargs)
+    edit = EditFileTool(**kwargs)
+    patch = ApplyPatchTool(**kwargs)
+    read = ReadFileTool(workspace=ws, restrict_to_workspace=False)
+
+    for path in protected:
+        result = await write.execute(path=str(path), content="{}")
+        assert DENIAL in str(result), path
+        assert DENIAL in str(await edit.execute(
+            path=str(path), old_text="SEARCH_KEY", new_text="pwned",
+        )), path
+        for edits in (
+            [{"path": str(path), "action": "add", "new_text": "{}"}],
+            [{"path": str(path), "action": "replace",
+              "old_text": "SEARCH_KEY", "new_text": "pwned"}],
+        ):
+            assert DENIAL in str(await patch.execute(edits=edits)), path
+        assert path.read_text(encoding="utf-8") == CONFIG_BODY
+        # reading stays allowed and returns the (non-secret) content
+        assert "SEARCH_KEY" in str(await read.execute(path=str(path))), path
+
+    assert config.is_symlink() is symlinked
+    await write.execute(path=str(config.parent / "notes.txt"), content="edited\n")
+    assert (config.parent / "notes.txt").read_text(encoding="utf-8") == "edited\n"
+
+
+async def test_repeated_config_write_escalates_with_fixed_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _, ws = _make_config(tmp_path, monkeypatch, symlinked=False)
+    write = WriteFileTool(workspace=ws, restrict_to_workspace=False)
+    arguments = {"path": str(config), "content": "{}"}
+    denial = await write.execute(**arguments)
+    assert DENIAL in str(denial)
+    assert AgentRunner._is_workspace_violation(str(denial))
+    counts: dict[str, int] = {}
+    assert repeated_workspace_violation_error("write_file", arguments, counts) is None
+    assert repeated_workspace_violation_error("write_file", arguments, counts) is None
+    assert repeated_workspace_violation_error("write_file", arguments, counts) is not None
+    assert config.read_text(encoding="utf-8") == CONFIG_BODY
+
+
+async def test_save_config_still_writes_and_read_file_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nanobot.config.loader import save_config
+    from nanobot.config.schema import Config
+
+    config, _, ws = _make_config(tmp_path, monkeypatch, symlinked=False)
+    save_config(Config())
+    assert config.read_text(encoding="utf-8") != CONFIG_BODY
+    assert '"tools"' in config.read_text(encoding="utf-8")
+    read = ReadFileTool(workspace=ws, restrict_to_workspace=False)
+    assert '"tools"' in str(await read.execute(path=str(config)))

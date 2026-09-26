@@ -23,6 +23,7 @@ from nanobot.config_base import Base
 from nanobot.security.protected_paths import (
     ProtectedFloor,
     ProtectedPathError,
+    default_config_files,
     default_data_dirs,
 )
 from nanobot.security.workspace_access import current_tool_workspace
@@ -170,7 +171,11 @@ class _FsTool(Tool):
 
     def _protected_floor(self) -> ProtectedFloor:
         """The non-configurable floor (applies whatever the allow settings say)."""
-        return ProtectedFloor(data_dir=default_data_dirs(), workspace=self._workspace)
+        return ProtectedFloor(
+            data_dir=default_data_dirs(),
+            workspace=self._workspace,
+            config_files=default_config_files(),
+        )
 
     def _check_floor(self, resolved: Path, *, write: bool) -> Path:
         reason = self._protected_floor().reason(resolved, write=write)

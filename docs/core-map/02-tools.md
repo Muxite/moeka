@@ -124,7 +124,7 @@ behaviour; "Do not change" = names/keys/types/enums/required/error marker phrase
 
 | Tool (model name) | Description | Schema | Params (type, required*) | Returns | Config keys | Failure modes / surfacing | Safe to edit / do not change |
 |---|---|---|---|---|---|---|---|
-| read_file | agent/tools/filesystem.py:314 | agent/tools/filesystem.py:281-299 | path str*, offset int>=1, limit int>=1, pages str, force bool | Line-numbered text `N| line` (default 2000 lines, 128k char cap, agent/tools/filesystem.py:304-306), tail note "(Showing lines a-b of N. Use offset=K to continue.)"; images as content blocks; PDFs (max 20 pages); docx/xlsx/pptx | tools.file.enable (agent/tools/filesystem.py:33-36,49-50); tools.restrictToWorkspace | ToolResult.error: not found, not a file, blocked device path, >100MiB, binary, offset past EOF, workspace violation (`... is outside allowed directory`, security/workspace_policy.py:122), fs floor (`... is a protected internal path (not configurable) ...`, security/protected_paths.py:123-130) | Safe: description + property descriptions. Test pins: len(description)<160 and phrases (tests/tools/test_tool_descriptions.py:37-40). Do not change: param names, `required`. |
+| read_file | agent/tools/filesystem.py:314 | agent/tools/filesystem.py:281-299 | path str*, offset int>=1, limit int>=1, pages str, force bool | Line-numbered text `N| line` (default 2000 lines, 128k char cap, agent/tools/filesystem.py:304-306), tail note "(Showing lines a-b of N. Use offset=K to continue.)"; images as content blocks; PDFs (max 20 pages); docx/xlsx/pptx | tools.file.enable (agent/tools/filesystem.py:33-36,49-50); tools.restrictToWorkspace | ToolResult.error: not found, not a file, blocked device path, >100MiB, binary, offset past EOF, workspace violation (`... is outside allowed directory`, security/workspace_policy.py:122), fs floor (`... is a protected internal path (not configurable) ...`, security/protected_paths.py:152-159) | Safe: description + property descriptions. Test pins: len(description)<160 and phrases (tests/tools/test_tool_descriptions.py:37-40). Do not change: param names, `required`. |
 | write_file | agent/tools/filesystem.py:594 | agent/tools/filesystem.py:578-583 | path str*, content str* | "Successfully wrote N characters to PATH" | tools.file.enable | error on empty path/None content, permission, workspace, fs floor (write); content over `max_write_bytes` (constructor arg on `_FsTool`, default 10 MiB of UTF-8, agent/tools/filesystem.py:93-101,608) is rejected BEFORE anything is written with the plain tool error `Error: content too large (N bytes, limit L bytes). Split the file or write it in parts.` (no runner marker: it is not a policy denial, and the message tells the model to split rather than retry) | Safe: description; test requires "replace an entire file" and "prefer apply_patch" (tests/tools/test_tool_descriptions.py:28-29). |
 | edit_file | agent/tools/filesystem.py:919 | agent/tools/filesystem.py:878-906 | path str*, old_text str*, new_text str*, replace_all bool, occurrence int>=1 nullable, line_hint int>=1 nullable, expected_replacements int>=1 nullable | "Patch applied:\n- update PATH (+a/-d)"; multi-match returns non-error "Warning: old_text appears N times..." (agent/tools/filesystem.py:1023-1027) | tools.file.enable | not found + similar-text hint, old==new, occurrence/line_hint conflicts, fs floor (write); `new_text` over `max_write_bytes` (10 MiB UTF-8) -> `content too large` before the file is touched (agent/tools/filesystem.py:956; only the payload is measured, so small edits to an already-large file still work) | Test pins "small, exact replacement", "prefer apply_patch", "occurrence, line_hint, and replace_all=true are mutually exclusive", param descs "copy it from read_file", "must differ from old_text" (tests/tools/test_tool_descriptions.py:22-26). Do not change the mutual-exclusion sentence without changing code (agent/tools/filesystem.py:1004-1014). |
 | list_dir | agent/tools/filesystem.py:1144 | agent/tools/filesystem.py:1117-1127 | path str*, recursive bool, max_entries int>=1 | entries, cap default 200 (agent/tools/filesystem.py:1132), "(truncated, showing first N of M entries)" | tools.file.enable | not found / not a directory / permission / fs floor; entries under the floor are left out of the listing (agent/tools/filesystem.py:1172-1192) | Safe: description (lists ignored dirs, agent/tools/filesystem.py:1133-1137: keep in sync). |
@@ -168,26 +168,34 @@ SearchSessions, SendSessionMessage, Spawn, UpdateGoal, WebFetch, WebSearch, Writ
   `memory/history.jsonl` (agent/tools/filesystem.py:102-106); these are read-only, writes go through
   `_resolve_write` which has no such extras (agent/tools/filesystem.py:211-218).
 - Filesystem floor (not configurable; applies even with restriction off and even when an `extra_*` list covers
-  the path): after resolution `_resolve_read/_resolve_write` call `_check_floor` (agent/tools/filesystem.py:156-165,
-  209,218), which checks the path as given and after `resolve()` (so symlinks count) against
+  the path): after resolution `_resolve_read/_resolve_write` call `_check_floor` (agent/tools/filesystem.py:172-185,
+  229,238), which checks the path as given and after `resolve()` (so symlinks count) against
   security/protected_paths.py. READ and WRITE denied: `/proc/<pid>/` and `/proc/<pid>/task/<tid>/`
   `environ|mem|maps|root|cwd|exe` (`_PROC_SECRET_RE`, security/protected_paths.py:30-32; `/proc/self` and
   `/proc/thread-self` resolve into these), `<data dir>/auth`, `<data dir>/plugin-data`, `<data dir>/sessions`
-  (`PROTECTED_READ`, security/protected_paths.py:38; under BOTH data-dir bases from `default_data_dirs`, security/protected_paths.py:149-170: the dir holding config.json itself, as `get_data_dir()` uses for auth/sessions, and the dir holding its resolved target when config.json is a symlink, as plugin-data uses; neither is created) and the
+  (`PROTECTED_READ`, security/protected_paths.py:38; under BOTH data-dir bases from `default_data_dirs`, security/protected_paths.py:178-200: the dir holding config.json itself, as `get_data_dir()` uses for auth/sessions, and the dir holding its resolved target when config.json is a symlink, as plugin-data uses; neither is created) and the
   SQLite sessions root `default_sessions_root(...)` of each data-dir base and of the tool's workspace
-  (security/protected_paths.py:68-90). WRITE only denied: any path ending in `memory/history.jsonl`,
+  (security/protected_paths.py:77-100). WRITE only denied: any path ending in `memory/history.jsonl`,
   `memory/.dream_cursor` or `.nanobot/workspace-id` (`PROTECTED_WRITE`, security/protected_paths.py:43-47), in
-  any workspace; reading them stays allowed. The error is a `ProtectedPathError` (a `WorkspaceBoundaryError`)
+  any workspace; reading them stays allowed. Also WRITE only denied: the config file itself, the path from
+  `get_config_path()` plus its resolved symlink target if config.json is a symlink (`default_config_files`,
+  security/protected_paths.py:202-218, passed as `config_files` to `ProtectedFloor` by `_FsTool._protected_floor`,
+  agent/tools/filesystem.py:172-178; matched in `_match`, security/protected_paths.py:102-114; neither path is
+  created). Reading config.json stays allowed (the model may inspect non-secret config; secrets are `${VAR}`
+  references). The loader creates no `.bak`; its atomic write uses a transient random `.config.json.<uuid>.tmp`
+  inside `save_config`, so no sibling names are listed. `save_config`, `nanobot provider` login and the CLI write
+  config from Python, not through the file tools, and are unaffected. The error is a `ProtectedPathError` (a `WorkspaceBoundaryError`)
   containing "protected internal path (not configurable)" plus the boundary note; the marker is in the runner's
   list, so a third identical attempt escalates (`repeated_workspace_violation_error`). grep, find_files and
-  list_dir skip floor entries during a walk (`_floor_hides`, agent/tools/filesystem.py:167-177), and
+  list_dir skip floor entries during a walk (`_floor_hides`, agent/tools/filesystem.py:186-197), and
   image-generation reference images are checked too (agent/tools/image_generation.py:168-172). The floor does
   not govern code paths such as `MemoryStore` (which writes history.jsonl and .dream_cursor itself) or Dream's
   scoped writes to MEMORY.md/SOUL.md/USER.md/skills. A host-supplied non-default `sessions_root` is not known
   to the tools and is not covered. Pinned by tests/tools/test_fs_floor.py.
 - **Exec caveat**: the fs floor governs only the file tools (read_file, write_file, edit_file, list_dir,
   apply_patch, find_files, grep, image-generation references). It does NOT stop `exec`: `cat /proc/$PPID/environ`,
-  `cat ~/.nanobot/auth/mcp.json` or a write into `plugin-data/` still work. Exec's only file floor is the
+  `cat ~/.nanobot/auth/mcp.json`, a write into `plugin-data/` or an edit of `config.json` (e.g. `sed -i`) still work
+  (config is denied to the file tools only until phase 1 moves it out of reach or the harness mounts it read-only). Exec's only file floor is the
   internal-state regexes for history.jsonl and .dream_cursor (agent/tools/shell.py:283-299), which can be evaded.
   Exec containment needs host-layer isolation (sandbox, separate uid, read-only mounts).
 - **Plugin activation markers**: `<config dir>/plugin-data/<workspace-id>/<name>/enabled` enables a workspace Agent

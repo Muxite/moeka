@@ -47,6 +47,15 @@ PROTECTED_WRITE: tuple[tuple[str, str], ...] = (
 )
 
 
+# WRITE only denied: the instance config file itself (``get_config_path()``,
+# plus its resolved symlink target). Reading stays allowed: the model may
+# inspect non-secret config (secrets are ``${VAR}`` references, not values).
+# The loader's atomic write uses a random ``.config.json.<uuid>.tmp`` name that
+# exists only inside ``save_config``; no ``.bak`` is ever created, so there are
+# no sibling names to protect. Code-level writers (``save_config``, the CLI)
+# do not go through the file tools and are unaffected.
+
+
 class ProtectedPathError(WorkspaceBoundaryError):
     """Raised when a file tool targets a protected internal path."""
 
@@ -90,7 +99,9 @@ def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
     return roots
 
 
-def _match(candidate: Path, *, write: bool, roots: list[Path]) -> bool:
+def _match(
+    candidate: Path, *, write: bool, roots: list[Path], config_files: Sequence[Path] = (),
+) -> bool:
     posix = candidate.as_posix()
     if _PROC_SECRET_RE.match(posix):
         return True
@@ -98,14 +109,28 @@ def _match(candidate: Path, *, write: bool, roots: list[Path]) -> bool:
         return True
     if write and tuple(candidate.parts[-2:]) in PROTECTED_WRITE:
         return True
+    if write and candidate in config_files:
+        return True
     return False
 
 
 class ProtectedFloor:
     """Precomputed floor for one (data dir, workspace) pair; cheap per path."""
 
-    def __init__(self, *, data_dir: DataDirs, workspace: Path | None) -> None:
+    def __init__(
+        self,
+        *,
+        data_dir: DataDirs,
+        workspace: Path | None,
+        config_files: Sequence[Path] = (),
+    ) -> None:
         self._roots = _protected_roots(data_dir, workspace)
+        self._config_files: list[Path] = []
+        for cfg in config_files:
+            resolved = _safe_resolve(cfg)
+            for candidate in (Path(os.path.abspath(cfg.expanduser())), resolved):
+                if candidate is not None and candidate not in self._config_files:
+                    self._config_files.append(candidate)
 
     def matches(self, path: Path, *, write: bool, resolve: bool = True) -> bool:
         """True when *path* (as given, and after ``resolve()``) is protected."""
@@ -113,12 +138,16 @@ class ProtectedFloor:
             logical = Path(os.path.abspath(Path(path).expanduser()))
         except (OSError, ValueError):
             logical = None
-        if logical is not None and _match(logical, write=write, roots=self._roots):
+        if logical is not None and _match(
+            logical, write=write, roots=self._roots, config_files=self._config_files,
+        ):
             return True
         if not resolve:
             return False
         resolved = _safe_resolve(Path(path))
-        return resolved is not None and _match(resolved, write=write, roots=self._roots)
+        return resolved is not None and _match(
+            resolved, write=write, roots=self._roots, config_files=self._config_files,
+        )
 
     def reason(self, path: Path, *, write: bool) -> str | None:
         if not self.matches(path, write=write):
@@ -170,6 +199,24 @@ def default_data_dirs() -> list[Path]:
     return dirs
 
 
+def default_config_files() -> list[Path]:
+    """The configured config file path and its resolved symlink target.
+
+    Computed without creating anything; empty when the path cannot be read.
+    """
+    try:
+        from nanobot.config.loader import get_config_path
+
+        config = get_config_path().expanduser()
+    except Exception:
+        return []
+    files = [Path(os.path.abspath(config))]
+    target = _safe_resolve(config)
+    if target is not None and target not in files:
+        files.append(target)
+    return files
+
+
 def check_protected(
     path: Path,
     *,
@@ -178,11 +225,10 @@ def check_protected(
     data_dir: DataDirs = None,
 ) -> None:
     """Raise ``ProtectedPathError`` when *path* is protected."""
-    reason = protected_reason(
-        path,
-        write=write,
+    reason = ProtectedFloor(
         data_dir=data_dir if data_dir is not None else default_data_dirs(),
         workspace=workspace,
-    )
+        config_files=default_config_files() if data_dir is None else (),
+    ).reason(path, write=write)
     if reason is not None:
         raise ProtectedPathError(reason)
