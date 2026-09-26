@@ -88,7 +88,7 @@ decision for the owner (section 11). The "Phase" column uses the numbering in se
 | E1 | High | `exec_session` stdin is never guarded. `exec bash` with a yield, then `input:"<anything>\n"`, bypasses the floor, sudo and SSRF checks. Tests cover only the start command | agent/tools/exec_session.py:143-150,337-360; tests/tools/test_exec_session_tools.py:638 | exec.session_input | T (P0.2) + G (P2) + H (sandbox, rlimits) | P0, P2 |
 | E2 | Med | The internal-state patterns are regexes and can be evaded (`truncate`, `rm`, `python -c`, `ln -s`, `perl -i`). The allow-pattern exemption was fixed in f56ec68a | agent/tools/shell.py:283-299,982-1101 | fs.write | T (resolved-path floor in fs tools, P0.1a) + H (sandbox) | P0, P2 |
 | E3 | High | The exec SSRF check only sees `http(s)://` strings (`curl 127.1`, `nc` and scheme-less `wget` pass). The blocklist lacks 192.0.0.0/24, 198.18/15, 224/4, 240/4, NAT64, 6to4 and fec0::/10. bwrap has no `--unshare-net` | security/network.py:16-44,351-372; agent/tools/sandbox.py:84-100 | net.fetch | H (netns/firewall) + T (P0.6) | P0, harness |
-| E4 | Med | Sudo detection is a regex and misses `sh -c "sudo id"` and `/usr/bin/sudo`. `su`, `doas`, `pkexec` and `docker run -v /:/h` are not covered. The "inline safety justification" comment was never implemented | agent/tools/shell.py:279,1139-1150,1154-1180 | exec.run | H (no NOPASSWD, no docker group) + O | host |
+| E4 | Med | Sudo detection is a regex and misses `sh -c "sudo id"` and `/usr/bin/sudo`. `su`, `doas`, `pkexec` and `docker run -v /:/h` are not covered. The "inline safety justification" comment was never implemented | agent/tools/shell.py:279,1139-1150,1154-1186 | exec.run | H (no NOPASSWD, no docker group) + O | host |
 | E5 | Med | Exec `restrict_to_workspace` is best-effort: it checks only absolute paths and `../`. The sandbox is off by default. `_WORKSPACE_BOUNDARY_NOTE` calls it a "hard policy boundary" | agent/tools/shell.py:164-171,596-621,982-1085 | exec.run, fs.* | H (sandbox/container) + T (P0.4 wording) | P0, P2 |
 | E6 | Med | No rlimits on spawn. One-shot `communicate()` buffers all output before truncating. Session timeouts are only checked lazily. The 8-session cap is shared with subagents | agent/tools/shell.py:107-160,437-440,495-520; agent/tools/exec_session.py:290-316; agent/subagent.py:158 | budget.exec_sessions, budget.output_bytes | H (rlimits/cgroups) + T (P0.8) + G (P2) | P0, P2 |
 | F1 | High | File tools can write internal state, `~/.ssh`, rc files, systemd units and the package dir, which the loader auto-imports at the next start. No size limits. Writes are not atomic | agent/tools/filesystem.py:607-617,948-998; agent/tools/apply_patch.py:122,129,170; agent/tools/loader.py:43-63 | fs.write | T (P0.1a, P0.8; file tools only, exec writes need G/H) + G (P2) + H | P0, P2 |
@@ -191,7 +191,7 @@ patterns; the `config.json` write deny.
 regex cannot stand in for that.
 
 **Deferred limits** (full list with owners in `.agent/phase0-followups.md`):
-- `exec_session` input guard: NUL bytes are not stripped (`\x00sudo id` runs), each write is screened on its own
+- `exec_session` input guard: NUL is now stripped from the checked copy, but each write is screened on its own
   so a pattern split across two writes passes, and `s''udo`, multi-line splits and a full-width colon evade it
   (as they do for exec).
 - MCP descriptions: zero-width and bidi format characters (category Cf) are not stripped; the cap yields 2001 chars.
@@ -720,8 +720,12 @@ Each question comes with a recommended default. None blocks P0 items that are no
   not run for the original documentation-only change. After phase 0 (fde43f18) it was run as a compatibility gate
   with `PYTHONPATH` pointing at this worktree: 3796 passed, 8 failed, 4 skipped, 1 xfailed; against awork's own
   vendored moeka: 3808 passed, 1 xfailed, 0 failed. The 8 failures are not phase-0 regressions (the same 8 fail
-  against the base 093cc228 tree): 7 are `Config`/`AgentProfileConfig` `PydanticUserError` (forward reference to
-  `RunnerLimits` not rebuilt when awork imports the schema first) and 1 is a missing `rapidfuzz` module.
+  against the base 093cc228 tree). Corrected root cause: awork's venv lacks `rapidfuzz` (synced from its vendored
+  moeka pin b9e0f080, which predates main commit 1c3c6826 that added the import and the dependency). The lazy
+  `model_rebuild` hook in config/schema.py swallows the `ModuleNotFoundError`, so 7 failures surface late as
+  `PydanticUserError` (`RunnerLimits` not defined) and 1 (test_phrase_cache) is the missing module directly. With
+  `rapidfuzz` importable all 8 pass on unmodified core-slim HEAD. Remedy: bump awork's submodule and `uv sync`;
+  optional hardening (owner decision, not done): re-raise `ModuleNotFoundError` outside `nanobot` in that hook.
 - **Phase 0 re-verification (fde43f18).** After phase 0 every `path:line` for shell.py, filesystem.py, search.py,
   web.py, mcp.py, network.py, runtime.py, runner.py, plugins.py and exec_session.py was re-extracted by script and
   compared with the source. The plugins.py cites changed: the legacy `str(plugin.root)` auto-upgrade branch (was

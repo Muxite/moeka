@@ -9,7 +9,6 @@ deferred by the reviewer or by a ruling (R1-R3) in the ledger.
 
 | Item | Found | Suggested owner / phase |
 |---|---|---|
-| NUL bytes evade the `exec_session` input guard (`\x00sudo id` runs in bash); one-line fix: strip `\x00` before the checks (`shell.py` `check_session_input`) | T2, f623064 | Small fix, next hardening pass |
 | Split-write evasion: a pattern split across two `exec_session` writes passes (no per-session buffering); also `s''udo`, multi-line splits and a full-width colon evade it, as they do for exec | T2, f623064 | Accept (guard is a hint, E4); real fix is host-layer isolation (H) |
 | Hard links to protected files (incl. `config.json`) evade the path-based file-tool floor; FIFOs not covered | T1 6313a20, T10 fde43f1 | P1 host seams / host mounts |
 | TOCTOU symlink swap between resolve and open | T1, 2e93751 | P2 gate or host layer |
@@ -52,13 +51,13 @@ deferred by the reviewer or by a ruling (R1-R3) in the ledger.
 | Leftover "hard policy boundary" wording at `utils/runtime.py:209` and `security/workspace_policy.py:14` (the latter is the model-visible `WORKSPACE_BOUNDARY_NOTE`, deliberately not reworded) | T2 f623064, T3 7eb5108 | Decide with the owner; not pinned by tests |
 | Docs cited `protected_paths.py:123-130` for the floor denial message (`reason()` starts near 152 now) | T1, 6313a20 | Re-check when the file changes |
 | Spec section 2.3 rows describe pre-phase-0 behaviour, so their cites land on the fix rather than the old flaw | T11 | Rewrite when the findings table is next revised |
-| Pre-existing, not from phase 0: 8 awork tests fail against core-slim and against the base tree (7 `RunnerLimits` forward-ref `PydanticUserError`s when awork imports the schema first; 1 missing `rapidfuzz`) | T11 gate | Owner: fix the lazy `model_rebuild` order in `config/schema.py` in a separate change |
+| Pre-existing, not from phase 0: 8 awork tests fail against core-slim and against the base tree. Root cause (corrected; earlier notes blamed the lazy `model_rebuild` order): awork's venv (Python 3.12) lacks `rapidfuzz`, because it was `uv sync`ed from awork's vendored moeka pin b9e0f080 (2026-07-14), which predates main commit 1c3c6826 (2026-09-15) that added `from rapidfuzz.distance import ...` to `nanobot/utils/file_edit_events.py` (reached from `agent/tools/filesystem.py`, imported by `_resolve_tool_config_refs` in `config/schema.py`) and declared `rapidfuzz>=3.14.6,<4.0.0` in pyproject. The lazy hook swallows every `ImportError` including `ModuleNotFoundError`, so `model_rebuild()` never runs and 7 tests surface `PydanticUserError: Config is not fully defined; you should define RunnerLimits`; the 8th (test_phrase_cache) is the missing module directly. With `rapidfuzz` importable all 8 pass on unmodified core-slim HEAD. Not a slimming, phase-0 or packaging regression (`rapidfuzz` is a declared main dependency) | T11 gate | Remedy: bump awork's moeka submodule, then `uv sync`. Optional hardening is an OWNER DECISION (not done): in `_ensure_tool_config_refs_resolved` and the module-level retry (`config/schema.py` ~734-748) re-raise `ModuleNotFoundError` whose `.name` does not start with `nanobot` (~8 lines, proven in a throwaway copy), so a missing dependency fails honestly |
 
 ## 4. Design decisions for the owner
 
 | Item | Found | Suggested owner / phase |
 |---|---|---|
-| Session-input guard: strip NULs and buffer across writes, or accept as a hint given E4 | T2 | Owner; P2 gate makes it moot for the harness |
+| Session-input guard: buffer across writes (NUL stripping is done), or accept as a hint given E4 | T2 | Owner; P2 gate makes it moot for the harness |
 | Strip zero-width/bidi characters from MCP descriptions (and possibly other model-visible external text) | T6 | Owner; P0.7 follow-up |
 | One classifier: remove `execution.py` duplicate versus keep it in sync | T3 | Owner; next cleanup |
 | Redaction name cap of 64 chars versus a linear-time unbounded name match | T5 | Owner |
