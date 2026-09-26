@@ -8,7 +8,7 @@ section 9 is its own later plan. Citations are `path:line`, relative to `nanobot
 
 Inputs: the guard audit (distilled in `.superpowers/sdd/exec-guard-and-host-design/guard-audit-findings.md`,
 git-ignored), `docs/core-map/`, `.agent/security.md`, `.agent/design.md`, the RSI harness design and
-feasibility notes (on `main`: `.agent/rsi-harness-design.md`, `.agent/rsi-daemon-feasibility.md`), and hive's
+feasibility notes (on branch `rsi-harness-spec`: `.agent/rsi-harness-design.md`, `.agent/rsi-daemon-feasibility.md`), and hive's
 design (`~/projects/hive/docs/specs/2026-09-15-hive-design.md`, `hive/trace/redact.py`).
 
 ## Contents
@@ -56,7 +56,7 @@ Three rules follow:
 | Injected text: web pages (`web_fetch`, `web_search` snippets), files the agent reads, tool output, MCP tool descriptions and results, messages from other sessions (`send_session_message`) | Text in the model's context | Make the agent exfiltrate secrets, widen its own permissions, persist the injection (skills, `SOUL.md`), or attack another session |
 | A careless small model (the RSI target: 7-32B local) | Tool calls | Nothing malicious. It loops, retries denied actions, writes into internal state, runs expensive commands. This is the June 2026 incident class (`.agent/gotchas.md:16-18`) |
 | A compromised or buggy plugin (entry-point tool, workspace Agent Plugin, MCP server) | Code running in the core process or as a child | Read secrets from process memory or env, shadow built-in tools, run unsandboxed |
-| The RSI mutator | Edits to skills, prompts, tool descriptions and config in `core/` | Raise its score by weakening the gate, the policy, the sandbox or the evaluator (DGM/STOP behaviour, `.agent/rsi-harness-design.md` section 3 on `main`) |
+| The RSI mutator | Edits to skills, prompts, tool descriptions and config in `core/` | Raise its score by weakening the gate, the policy, the sandbox or the evaluator (DGM/STOP behaviour, `.agent/rsi-harness-design.md` section 3, branch `rsi-harness-spec`) |
 
 Out of scope: a malicious host, and kernel escapes. The owner's own CLI input is trusted.
 
@@ -80,10 +80,10 @@ decision for the owner (section 11). The "Phase" column uses the numbering in se
 
 | ID | Sev | Finding (current tree) | Evidence | Capability | Layer | Phase |
 |---|---|---|---|---|---|---|
-| S1 | Crit | Workspace == state/config dir, and restriction is off by default. Config, OAuth tokens, `plugin-data/`, `media/` and `logs/` are all "inside the workspace". The same uid means file modes do not help. Pinned by `tests/tools/test_exec_security.py:309` | config/paths.py:15-48,66-84,87-97; config/schema.py:121,413; agent/tools/filesystem.py:89-94 | fs.read, fs.write, secret.read | T (P0.1a) + H (separate `Paths`, P1; harness mounts) + O (Q5, Q6) | P0, P1 |
+| S1 | Crit | Workspace == state/config dir, and restriction is off by default. Config, OAuth tokens, `plugin-data/`, `media/` and `logs/` are all "inside the workspace". The same uid means file modes do not help. Pinned by `tests/tools/test_exec_security.py:309` | config/paths.py:15-48,66-84,87-97; config/schema.py:121,413; agent/tools/filesystem.py:89-94 | fs.read, fs.write, secret.read | T (P0.1a; file tools only, exec can still reach these paths) + H (separate `Paths`, P1; harness mounts) + O (Q5, Q6) | P0, P1 |
 | S2 | Crit | `/proc/self/environ` is readable through `read_file` (**verified by probe**). Bedrock copies its key into `os.environ` | agent/tools/filesystem.py:210-231; providers/bedrock_provider.py:75 | secret.read, fs.read | T (P0.1a) + H (no secrets in the process env: resolver, P1) | P0, P1 |
-| S3 | Crit | Guard config is agent-writable. `${VAR}` expansion copies any env var into any config string, so exfiltration works through `mcpServers.*.headers` or `apiBase`. Edits apply on the next start (live reload is unwired in the slim tree, 2.4) | config/loader.py:45-49,99,155,213-217,268-437 | fs.write, secret.read | H (`ConfigSource` outside agent reach, P1) + T interim (P0.1b) + O (Q13) | P0, P1 |
-| S4 | Crit | Plugin self-enable leads to an unsandboxed stdio MCP server. The activation marker lives in `<config dir>/plugin-data/...`. Its content is a JSON of `{fingerprint, root}` that the agent can compute. The legacy marker `str(plugin.root)` is auto-upgraded. `permissions` is parsed but never read | agent/plugins.py:56,209,397-413,416-445,436-439,448-461; agent/tools/mcp.py:1071-1077; tests/agent/test_agent_plugins.py:402 | plugin.load, exec.run | G (`plugin.load` is host-only, P3) + T interim (P0.5) + O (Q12) | P0, P3 |
+| S3 | Crit | Guard config is agent-writable. `${VAR}` expansion copies any env var into any config string, so exfiltration works through `mcpServers.*.headers` or `apiBase`. Edits apply on the next start (live reload is unwired in the slim tree, 2.4) | config/loader.py:45-49,99,155,213-217,268-437 | fs.write, secret.read | H (`ConfigSource` outside agent reach, P1) + T interim (P0.1b; file tools only, `exec` can still write config) + O (Q13) | P0, P1 |
+| S4 | Crit | Plugin self-enable leads to an unsandboxed stdio MCP server. The activation marker lives in `<config dir>/plugin-data/...`. Its content is a JSON of `{fingerprint, root}` that the agent can compute. The legacy marker `str(plugin.root)` is auto-upgraded. `permissions` is parsed but never read | agent/plugins.py:56,209,397-413,416-445,436-439,448-461; agent/tools/mcp.py:1071-1077; tests/agent/test_agent_plugins.py:402 | plugin.load, exec.run | G (`plugin.load` is host-only; host-authenticated activation, P3) + T interim (P0.5 + P0.1a; file tools only, `exec` can still write the marker) + O (Q12) | P0, P3 |
 | S5 | Crit | No central gate. Both paths call `tool.execute` directly, and hooks cannot veto. Violation handling is substring matching. Default allow-all. A plugin-vs-plugin name collision overwrites the earlier tool | agent/tools/registry.py:187-201; agent/runner.py:1582-1592,1647-1669; agent/hook.py:107; agent/tools/loader.py:117-139; config/schema.py:161 | all | G | P2, P3 |
 | E1 | High | `exec_session` stdin is never guarded. `exec bash` with a yield, then `input:"<anything>\n"`, bypasses the floor, sudo and SSRF checks. Tests cover only the start command | agent/tools/exec_session.py:162-172,318,446-456; tests/tools/test_exec_session_tools.py:638 | exec.session_input | T (P0.2) + G (P2) + H (sandbox, rlimits) | P0, P2 |
 | E2 | Med | The internal-state patterns are regexes and can be evaded (`truncate`, `rm`, `python -c`, `ln -s`, `perl -i`). The allow-pattern exemption was fixed in f56ec68a | agent/tools/shell.py:203-219,879-892 | fs.write | T (resolved-path floor in fs tools, P0.1a) + H (sandbox) | P0, P2 |
@@ -91,7 +91,7 @@ decision for the owner (section 11). The "Phase" column uses the numbering in se
 | E4 | Med | Sudo detection is a regex and misses `sh -c "sudo id"` and `/usr/bin/sudo`. `su`, `doas`, `pkexec` and `docker run -v /:/h` are not covered. The "inline safety justification" comment was never implemented | agent/tools/shell.py:106-108,199,505-514 | exec.run | H (no NOPASSWD, no docker group) + O | host |
 | E5 | Med | Exec `restrict_to_workspace` is best-effort: it checks only absolute paths and `../`. The sandbox is off by default. `_WORKSPACE_BOUNDARY_NOTE` calls it a "hard policy boundary" | agent/tools/shell.py:85-91,100,467-484,934-995 | exec.run, fs.* | H (sandbox/container) + T (P0.4 wording) | P0, P2 |
 | E6 | Med | No rlimits on spawn. One-shot `communicate()` buffers all output before truncating. Session timeouts are only checked lazily. The 8-session cap is shared with subagents | agent/tools/shell.py:353,579-665; agent/tools/exec_session.py:273-298,439; agent/subagent.py:158 | budget.exec_sessions, budget.output_bytes | H (rlimits/cgroups) + T (P0.8) + G (P2) | P0, P2 |
-| F1 | High | File tools can write internal state, `~/.ssh`, rc files, systemd units and the package dir, which the loader auto-imports at the next start. No size limits. Writes are not atomic | agent/tools/filesystem.py:557-565,896-946; agent/tools/apply_patch.py:122,235; agent/tools/loader.py:43-63 | fs.write | T (P0.1a, P0.8) + G (P2) + H | P0, P2 |
+| F1 | High | File tools can write internal state, `~/.ssh`, rc files, systemd units and the package dir, which the loader auto-imports at the next start. No size limits. Writes are not atomic | agent/tools/filesystem.py:557-565,896-946; agent/tools/apply_patch.py:122,235; agent/tools/loader.py:43-63 | fs.write | T (P0.1a, P0.8; file tools only, exec writes need G/H) + G (P2) + H | P0, P2 |
 | F2 | Low | `grep` compiles a model regex on the event loop (ReDoS, unverified). `read_file` loads up to 100 MiB | agent/tools/search.py:383,718; agent/tools/filesystem.py:275,322 | budget.* | T (P0.8) | P0 |
 | W1 | Med | `web_fetch` reads whole bodies and `maxChars` is uncapped. The untrusted banner covers only `web_fetch`, not `web_search` or MCP results. It is an exfiltration channel (data in URLs) with no host allowlist | agent/tools/web.py:34,304-315,1158,1188,1245,1279-1300; agent/tools/mcp.py:608 | net.fetch | T (P0.7, P0.8) + G (optional host rules, P2) | P0, P2 |
 | W2 | Med | Pinned-DNS holes: the proxy path skips pinning, pinning monkey-patches the global `socket.getaddrinfo` under a lock, and `validate_resolved_url` fails open | agent/tools/web.py:133-144; security/network.py:215-257,267,291-320 | net.fetch | H (egress firewall) + T (P0.6) | P0, P4 |
@@ -146,16 +146,24 @@ phrase; `tests/utils/test_workspace_violation_throttle.py` must stay green throu
 | P0.2 | **Guard `exec_session` input.** Run `input` through `ExecTool`'s floor, deny patterns, sudo and URL checks before `manager.write`. Update the known-gap wording in docs/core-map/02-tools.md. This check is a hint for line-oriented shells only; a REPL can still receive anything, so real containment is H | agent/tools/exec_session.py:162-172,318 | Start `bash` via exec with `yield_time_ms`, send the fork bomb as input: denied with the "dangerous pattern detected" marker; `echo ok\n` still works | no |
 | P0.3 | **Stop floor escalations from telling the model to edit config.** `repeated_exec_guard_error` always says the configured `tools.exec.{allow,deny}_patterns` "must be updated". Give floor denials (those containing "This guard is not configurable.") their own signature `violation:exec-floor` and wording that says no config change allows it | utils/runtime.py:223-265 | Three floor denials escalate without "must be updated"; the existing allow/deny escalation tests (tests/utils/test_workspace_violation_throttle.py:139-175) are unchanged | no |
 | P0.4 | **Make `_WORKSPACE_BOUNDARY_NOTE` truthful.** It is an application-level check, not OS isolation. Keep "Do NOT retry" | agent/tools/shell.py:85-91 | Unit test on the note text; the throttle tests are unchanged | no |
-| P0.5 | **Refuse agent-authored plugin enablement.** Drop the legacy `str(plugin.root)` auto-upgrade and flip its test. Sign the marker with an HMAC key the host keeps outside the workspace. P0.1a's `plugin-data/` write deny covers the fs tools. Exec as the same uid can still read the key, so the full fix is P3 | agent/plugins.py:416-445,448-461; tests/agent/test_agent_plugins.py:402 | A marker written with the unsigned JSON is rejected and the plugin's MCP servers are not merged (agent/plugins.py:213-234) | **[owner]** Q12 |
+| P0.5 | **Narrow agent-authored plugin enablement.** Drop the legacy auto-upgrade of a marker equal to `str(plugin.root)` and flip its test. Together with P0.1a's `plugin-data/` write deny, the file tools can then no longer create or upgrade a marker. This is only partial: the `{fingerprint, root}` JSON marker is still computable, and exec can still write it (see the exec caveat below). Host-authenticated markers (an HMAC key or host-held activation state) need a host to supply the key, so they move to P3 | agent/plugins.py:416-445 (legacy branch 436-439); tests/agent/test_agent_plugins.py:402 | A marker whose content equals `str(plugin.root)` is removed, not upgraded, and the plugin's MCP servers are not merged (agent/plugins.py:213-234); write_file to the marker path is denied by P0.1a | no (Q12 governs P3) |
 | P0.6 | **Complete the `NET` blocklist.** Add 192.0.0.0/24, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4, fec0::/10 and ff00::/8. Map NAT64 (64:ff9b::/96) and 6to4 (2002::/16) to their embedded IPv4 in `_normalize_addr`. Make `validate_resolved_url` fail closed on parse errors and `gaierror` | security/network.py:16-30,56-69,291-320 | Parametrized block test per range; the redirect-to-unresolvable case is blocked | no |
 | P0.7 | **Untrusted-content banner** (`_UNTRUSTED_BANNER`) on `web_search` results and on MCP tool/resource/prompt results. Cap and strip control characters from MCP descriptions | agent/tools/web.py:304-315; agent/tools/mcp.py:608,625,795,913 (wrapper `execute` methods) | The banner is present in each result type; the MCP description is capped | no |
 | P0.8 | **Caps.** `web_fetch` `maxChars` at most 200000, and read the body with a byte cap instead of `aread()`. Size caps for write_file/edit_file/apply_patch content (default 10 MiB). Exec one-shot reads its pipes incrementally with a cap instead of `communicate()`. `grep` runs `re` in `to_thread` with a timeout | agent/tools/web.py:1158,1188; agent/tools/filesystem.py:557-565; agent/tools/apply_patch.py:235; agent/tools/shell.py:353; agent/tools/search.py:718 | `yes \| head -c 2G` exec keeps RSS bounded and truncates; oversize write denied; catastrophic regex returns a timeout error | thresholds only |
 | P0.9 | **Log hygiene.** Log the image-gen body at DEBUG through `redact_value`, and redact the subagent tool args | providers/image_generation.py:1338; agent/subagent.py:76-80 | caplog test with a fake `sk-...` key shows `<redacted>` | no |
 | P0.1b | **Deny agent writes to `config.json`** (the path from `get_config_path()`) until P1 moves config out of reach | same as P0.1a | write_file/apply_patch to the config path denied | **[owner]** Q13 |
 
-Suggested shipping order: P0.1a, P0.2, P0.3, P0.4 (the small ones together), P0.9, P0.7, P0.6, P0.8, then
-P0.5 and P0.1b after the owner decides. E4 (sudo) gets no regex work: the fix is OS privilege (H), and the
-regex stays as a hint.
+**Exec caveat.** P0.1a, P0.1b and P0.5 govern only the file tools (read_file, write_file, edit_file, list_dir,
+apply_patch, find_files, grep, image-gen references). They do **not** stop `exec`. A command such as
+`echo ... > config.json`, `cat /proc/$PPID/environ`, `cat auth/mcp.json` or a write to the plugin marker still
+works. Exec's only file floor is the internal-state regexes, which cover just `history.jsonl` and `.dream_cursor`
+and can be evaded (agent/tools/shell.py:203-219; finding E2). Exec containment stays with host-layer isolation
+(sandbox, separate uid, read-only mounts: layer H) and with the P2 gate. Phase 0 raises the cost of the easy
+path and removes the file-tool leaks; it does not make these paths unreachable.
+
+Suggested shipping order: P0.1a, P0.2, P0.3, P0.4 (the small ones together), P0.5, P0.9, P0.7, P0.6, P0.8, then
+P0.1b after the owner decides. E4 (sudo) gets no regex work: the fix is OS privilege (H), and the regex stays as
+a hint.
 
 ## 4. The host contract (`CoreEnvironment`)
 
@@ -345,7 +353,7 @@ skills, prompts, tool descriptions and config:
 | Tier | Content | Who may change it |
 |---|---|---|
 | 1 | Skill text, prompt templates, tool description files, tuning config sections (presets, sampling, skill toggles) | Automated, behind the harness gate |
-| 2 | Tool/plugin code | Sandboxed and gated, not in RSI v1 (`.agent/rsi-harness-design.md` section 7 on `main`) |
+| 2 | Tool/plugin code | Sandboxed and gated, not in RSI v1 (`.agent/rsi-harness-design.md` section 7, branch `rsi-harness-spec`) |
 | 3 | Core/harness code | Human-reviewed proposal only |
 | 4 | Permissions/policy, sandbox, evaluator, the gate, `CoreEnvironment` construction, the credential resolver, the plugin list and hash pins | Never self-editable |
 
@@ -569,12 +577,13 @@ clean, and the awork suite green (section 8). The numbering is used everywhere i
 - **Scope:**
   - Manifests, the per-plugin `config_cls`, the host plugin list plus entry points, and hash pins with quarantine.
   - Collisions become errors; `plugin.load` is host-only.
+  - Host-authenticated plugin activation: activation state is held by the host (the plugin list and `PluginSpec.state`), or a marker is signed with an HMAC key supplied through `CredentialResolver` (`SecretRef("host/plugin_activation_key")`). The unsigned `{fingerprint, root}` marker is no longer accepted.
   - Tool descriptions move to data files referenced by the manifest, so the RSI mutator edits data, not Python.
   - `bg_shell` is routed through `ExecTool` or deleted.
 - **Accept:**
   - `tests/agent/test_registered_tool_names.py` and `tests/tools/test_tool_descriptions.py` pass unchanged (same names, same text).
   - A changed description hash quarantines the plugin.
-  - A workspace Agent Plugin cannot activate itself.
+  - A workspace Agent Plugin cannot activate itself: an unsigned or agent-written marker (written via exec in the test) is rejected, and the plugin's MCP servers are not merged.
   - An unknown config key in a plugin section fails validation for that plugin only.
 
 ### P4 (B3/B4): backends as plugins
@@ -598,7 +607,7 @@ and `TraceSink` for audit. P3 needs P2, because manifests declare capabilities.
 
 ## 10. Harness deployment implications
 
-This section covers how the RSI harness (`.agent/rsi-harness-design.md` on `main`, sections 3, 7, 11, 12)
+This section covers how the RSI harness (`.agent/rsi-harness-design.md` on branch `rsi-harness-spec`, sections 3, 7, 11, 12)
 should run this core.
 
 - **Separate directories and mounts per rollout container:**
@@ -650,8 +659,8 @@ Each question comes with a recommended default. None blocks P0 items that are no
 | Q9 | Cross-session search/send as a feature | Keep it, but scope it: `session.read`/`session.send` allowed only toward sessions of the same or lower trust `channel_class`; `untrusted` sessions cannot send into `owner` sessions; content cap 4000 chars |
 | Q10 | Allow-all tools by default and MCP `enabled_tools=["*"]` | Keep allow-all for built-ins. MCP defaults to tools only (no resources/prompts), and new servers enter `quarantined` |
 | Q11 | 200 iterations and no cost caps | Keep 200 for the CLI. Add `budget.policy_denials=6`/turn always, and `budget.tokens` off in the CLI but required in the harness |
-| Q12 | Should plugin activation be agent-reachable? | No. `plugin.load` is host-only. Until P3, sign the marker with a host HMAC key (P0.5) |
-| Q13 | May the self-improvement daemon or the agent edit `config.json`? | No. Config is tier 4. Tunables move to a separate tier-1 tuning file (section 10). Interim: P0.1b write deny |
+| Q12 | Should plugin activation be agent-reachable? | No. `plugin.load` is host-only, and P3 makes activation host-authenticated. Until then, P0.5 drops the legacy marker upgrade and P0.1a denies file-tool writes to `plugin-data/`; exec can still write the marker |
+| Q13 | May the self-improvement daemon or the agent edit `config.json`? | No. Config is tier 4. Tunables move to a separate tier-1 tuning file (section 10). Interim: P0.1b write deny, which covers only the file tools; `exec` can still write `config.json` until P1 moves config out of reach (or a read-only mount in the harness) |
 | Q14 | Tool descriptions as data files so the mutator never edits Python | Yes, in P3, with a byte-identical parity test |
 | Q15 | Hide wholly denied tools at registration, or deny at call time? | Hide at registration (`registrable`). Deny at call time only for resource-dependent rules |
 
