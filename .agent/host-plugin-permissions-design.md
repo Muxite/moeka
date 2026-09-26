@@ -64,11 +64,11 @@ Out of scope: a malicious host, and kernel escapes. The owner's own CLI input is
 
 | Resource | Default reach | Evidence |
 |---|---|---|
-| Any file the uid can read or write | Yes. `restrict_to_workspace` is False, so `allowed_dir=None` | config/schema.py:413; agent/tools/filesystem.py:89-94 |
-| Process env: every secret loaded by systemd `EnvironmentFile` (keys.env) | Yes. `read_file /proc/self/environ` returned a planted variable in a probe run with the current tree (section 12). Exec children get a minimal env (agent/tools/shell.py:854-865) but can `cat /proc/$PPID/environ` (unverified by run) | agent/tools/filesystem.py:210-231 blocks only `/dev/*` and fds 0-2 |
+| Any file the uid can read or write | Yes. `restrict_to_workspace` is False, so `allowed_dir=None` | config/schema.py:413; agent/tools/filesystem.py:59-92 |
+| Process env: every secret loaded by systemd `EnvironmentFile` (keys.env) | Yes. `read_file /proc/self/environ` returned a planted variable in a probe run with the current tree (section 12). Exec children get a minimal env (agent/tools/shell.py:933-960) but can `cat /proc/$PPID/environ` (unverified by run) | agent/tools/filesystem.py:199-257 blocks only `/dev/*` and fds 0-2 |
 | `config.json`, OAuth token stores, plugin activation markers | Inside the workspace, because workspace == state home == config dir by default | config/schema.py:121; config/paths.py:15-48,87-97; config/loader.py:45-49; agent/tools/mcp_oauth.py:101-102; providers/xai_oauth.py:256-258; agent/plugins.py:397-413 |
 | Session database | Outside the workspace (`<workspace>-sessions/<id>/sessions.db`), but same uid, so readable while unrestricted | session/sqlite_store.py:115-134,158-162,176-181 |
-| Network | Any public host through `web_fetch`, exec and MCP. Loopback and private ranges are blocked only for `http(s)://` strings and `web_fetch` | security/network.py:16-30,323-330 |
+| Network | Any public host through `web_fetch`, exec and MCP. Loopback and private ranges are blocked only for `http(s)://` strings and `web_fetch` | security/network.py:16-44,351-372 |
 | Other sessions | Read any session; post into any session as a user message | agent/tools/sessions.py:173-230; agent/tools/session_messages.py:255-265 |
 | Tools | All discovered tools, plus entry-point plugins and modules dropped into the package dir | config/schema.py:161; agent/tools/loader.py:36-90 |
 
@@ -80,23 +80,23 @@ decision for the owner (section 11). The "Phase" column uses the numbering in se
 
 | ID | Sev | Finding (current tree) | Evidence | Capability | Layer | Phase |
 |---|---|---|---|---|---|---|
-| S1 | Crit | Workspace == state/config dir, and restriction is off by default. Config, OAuth tokens, `plugin-data/`, `media/` and `logs/` are all "inside the workspace". The same uid means file modes do not help. Pinned by `tests/tools/test_exec_security.py:309` | config/paths.py:15-48,66-84,87-97; config/schema.py:121,413; agent/tools/filesystem.py:89-94 | fs.read, fs.write, secret.read | T (P0.1a; file tools only, exec can still reach these paths) + H (separate `Paths`, P1; harness mounts) + O (Q5, Q6) | P0, P1 |
-| S2 | Crit | `/proc/self/environ` is readable through `read_file` (**verified by probe**). Bedrock copies its key into `os.environ` | agent/tools/filesystem.py:210-231; providers/bedrock_provider.py:75 | secret.read, fs.read | T (P0.1a) + H (no secrets in the process env: resolver, P1) | P0, P1 |
+| S1 | Crit | Workspace == state/config dir, and restriction is off by default. Config, OAuth tokens, `plugin-data/`, `media/` and `logs/` are all "inside the workspace". The same uid means file modes do not help. Pinned by `tests/tools/test_exec_security.py:309` | config/paths.py:15-48,66-84,87-97; config/schema.py:121,413; agent/tools/filesystem.py:59-92 | fs.read, fs.write, secret.read | T (P0.1a; file tools only, exec can still reach these paths) + H (separate `Paths`, P1; harness mounts) + O (Q5, Q6) | P0, P1 |
+| S2 | Crit | `/proc/self/environ` is readable through `read_file` (**verified by probe**). Bedrock copies its key into `os.environ` | agent/tools/filesystem.py:199-257; providers/bedrock_provider.py:75 | secret.read, fs.read | T (P0.1a) + H (no secrets in the process env: resolver, P1) | P0, P1 |
 | S3 | Crit | Guard config is agent-writable. `${VAR}` expansion copies any env var into any config string, so exfiltration works through `mcpServers.*.headers` or `apiBase`. Edits apply on the next start (live reload is unwired in the slim tree, 2.4) | config/loader.py:45-49,99,155,213-217,268-437 | fs.write, secret.read | H (`ConfigSource` outside agent reach, P1) + T interim (P0.1b; file tools only, `exec` can still write config) + O (Q13) | P0, P1 |
-| S4 | Crit | Plugin self-enable leads to an unsandboxed stdio MCP server. The activation marker lives in `<config dir>/plugin-data/...`. Its content is a JSON of `{fingerprint, root}` that the agent can compute. The legacy marker `str(plugin.root)` is auto-upgraded. `permissions` is parsed but never read | agent/plugins.py:56,209,397-413,416-445,436-439,448-461; agent/tools/mcp.py:1071-1077; tests/agent/test_agent_plugins.py:402 | plugin.load, exec.run | G (`plugin.load` is host-only; host-authenticated activation, P3) + T interim (P0.5 + P0.1a; file tools only, `exec` can still write the marker) + O (Q12) | P0, P3 |
+| S4 | Crit | Plugin self-enable leads to an unsandboxed stdio MCP server. The activation marker lives in `<config dir>/plugin-data/...`. Its content is a JSON of `{fingerprint, root}` that the agent can compute. The legacy marker `str(plugin.root)` was auto-upgraded until 197b118, which removed that branch (a legacy marker is now deleted, not honoured). `permissions` is parsed but never read | agent/plugins.py:56,209,397-413,416-441,446-455; agent/tools/mcp.py:1071-1077; tests/agent/test_agent_plugins.py:420 | plugin.load, exec.run | G (`plugin.load` is host-only; host-authenticated activation, P3) + T interim (P0.5 + P0.1a; file tools only, `exec` can still write the marker) + O (Q12) | P0, P3 |
 | S5 | Crit | No central gate. Both paths call `tool.execute` directly, and hooks cannot veto. Violation handling is substring matching. Default allow-all. A plugin-vs-plugin name collision overwrites the earlier tool | agent/tools/registry.py:187-201; agent/runner.py:1582-1592,1647-1669; agent/hook.py:107; agent/tools/loader.py:117-139; config/schema.py:161 | all | G | P2, P3 |
-| E1 | High | `exec_session` stdin is never guarded. `exec bash` with a yield, then `input:"<anything>\n"`, bypasses the floor, sudo and SSRF checks. Tests cover only the start command | agent/tools/exec_session.py:162-172,318,446-456; tests/tools/test_exec_session_tools.py:638 | exec.session_input | T (P0.2) + G (P2) + H (sandbox, rlimits) | P0, P2 |
-| E2 | Med | The internal-state patterns are regexes and can be evaded (`truncate`, `rm`, `python -c`, `ln -s`, `perl -i`). The allow-pattern exemption was fixed in f56ec68a | agent/tools/shell.py:203-219,879-892 | fs.write | T (resolved-path floor in fs tools, P0.1a) + H (sandbox) | P0, P2 |
-| E3 | High | The exec SSRF check only sees `http(s)://` strings (`curl 127.1`, `nc` and scheme-less `wget` pass). The blocklist lacks 192.0.0.0/24, 198.18/15, 224/4, 240/4, NAT64, 6to4 and fec0::/10. bwrap has no `--unshare-net` | security/network.py:16-30,323-330; agent/tools/sandbox.py:84-100 | net.fetch | H (netns/firewall) + T (P0.6) | P0, harness |
-| E4 | Med | Sudo detection is a regex and misses `sh -c "sudo id"` and `/usr/bin/sudo`. `su`, `doas`, `pkexec` and `docker run -v /:/h` are not covered. The "inline safety justification" comment was never implemented | agent/tools/shell.py:106-108,199,505-514 | exec.run | H (no NOPASSWD, no docker group) + O | host |
-| E5 | Med | Exec `restrict_to_workspace` is best-effort: it checks only absolute paths and `../`. The sandbox is off by default. `_WORKSPACE_BOUNDARY_NOTE` calls it a "hard policy boundary" | agent/tools/shell.py:85-91,100,467-484,934-995 | exec.run, fs.* | H (sandbox/container) + T (P0.4 wording) | P0, P2 |
-| E6 | Med | No rlimits on spawn. One-shot `communicate()` buffers all output before truncating. Session timeouts are only checked lazily. The 8-session cap is shared with subagents | agent/tools/shell.py:353,579-665; agent/tools/exec_session.py:273-298,439; agent/subagent.py:158 | budget.exec_sessions, budget.output_bytes | H (rlimits/cgroups) + T (P0.8) + G (P2) | P0, P2 |
-| F1 | High | File tools can write internal state, `~/.ssh`, rc files, systemd units and the package dir, which the loader auto-imports at the next start. No size limits. Writes are not atomic | agent/tools/filesystem.py:557-565,896-946; agent/tools/apply_patch.py:122,235; agent/tools/loader.py:43-63 | fs.write | T (P0.1a, P0.8; file tools only, exec writes need G/H) + G (P2) + H | P0, P2 |
-| F2 | Low | `grep` compiles a model regex on the event loop (ReDoS, unverified). `read_file` loads up to 100 MiB | agent/tools/search.py:383,718; agent/tools/filesystem.py:275,322 | budget.* | T (P0.8) | P0 |
-| W1 | Med | `web_fetch` reads whole bodies and `maxChars` is uncapped. The untrusted banner covers only `web_fetch`, not `web_search` or MCP results. It is an exfiltration channel (data in URLs) with no host allowlist | agent/tools/web.py:34,304-315,1158,1188,1245,1279-1300; agent/tools/mcp.py:608 | net.fetch | T (P0.7, P0.8) + G (optional host rules, P2) | P0, P2 |
-| W2 | Med | Pinned-DNS holes: the proxy path skips pinning, pinning monkey-patches the global `socket.getaddrinfo` under a lock, and `validate_resolved_url` fails open | agent/tools/web.py:133-144; security/network.py:215-257,267,291-320 | net.fetch | H (egress firewall) + T (P0.6) | P0, P4 |
-| W3 | Low | The Jina reader is on by default and forwards URLs to a third party | agent/tools/web.py:74,153-184,1204-1205 | net.fetch | O (Q8) | P4 |
-| M1 | Med | MCP `enabled_tools` defaults to `["*"]`, which includes resources and prompts. Descriptions are unsanitised model-visible text. One auto-retry even for non-idempotent calls | config/schema.py:387; agent/tools/mcp.py:608,656-664 | mcp.call | G (P2) + manifest/hash pin (P3) + T banner (P0.7) | P0, P2, P3 |
+| E1 | High | `exec_session` stdin is never guarded. `exec bash` with a yield, then `input:"<anything>\n"`, bypasses the floor, sudo and SSRF checks. Tests cover only the start command | agent/tools/exec_session.py:143-150,337-360; tests/tools/test_exec_session_tools.py:638 | exec.session_input | T (P0.2) + G (P2) + H (sandbox, rlimits) | P0, P2 |
+| E2 | Med | The internal-state patterns are regexes and can be evaded (`truncate`, `rm`, `python -c`, `ln -s`, `perl -i`). The allow-pattern exemption was fixed in f56ec68a | agent/tools/shell.py:283-299,982-1101 | fs.write | T (resolved-path floor in fs tools, P0.1a) + H (sandbox) | P0, P2 |
+| E3 | High | The exec SSRF check only sees `http(s)://` strings (`curl 127.1`, `nc` and scheme-less `wget` pass). The blocklist lacks 192.0.0.0/24, 198.18/15, 224/4, 240/4, NAT64, 6to4 and fec0::/10. bwrap has no `--unshare-net` | security/network.py:16-44,351-372; agent/tools/sandbox.py:84-100 | net.fetch | H (netns/firewall) + T (P0.6) | P0, harness |
+| E4 | Med | Sudo detection is a regex and misses `sh -c "sudo id"` and `/usr/bin/sudo`. `su`, `doas`, `pkexec` and `docker run -v /:/h` are not covered. The "inline safety justification" comment was never implemented | agent/tools/shell.py:279,1139-1150,1154-1180 | exec.run | H (no NOPASSWD, no docker group) + O | host |
+| E5 | Med | Exec `restrict_to_workspace` is best-effort: it checks only absolute paths and `../`. The sandbox is off by default. `_WORKSPACE_BOUNDARY_NOTE` calls it a "hard policy boundary" | agent/tools/shell.py:164-171,596-621,982-1085 | exec.run, fs.* | H (sandbox/container) + T (P0.4 wording) | P0, P2 |
+| E6 | Med | No rlimits on spawn. One-shot `communicate()` buffers all output before truncating. Session timeouts are only checked lazily. The 8-session cap is shared with subagents | agent/tools/shell.py:107-160,437-440,495-520; agent/tools/exec_session.py:290-316; agent/subagent.py:158 | budget.exec_sessions, budget.output_bytes | H (rlimits/cgroups) + T (P0.8) + G (P2) | P0, P2 |
+| F1 | High | File tools can write internal state, `~/.ssh`, rc files, systemd units and the package dir, which the loader auto-imports at the next start. No size limits. Writes are not atomic | agent/tools/filesystem.py:607-617,948-998; agent/tools/apply_patch.py:122,129,170; agent/tools/loader.py:43-63 | fs.write | T (P0.1a, P0.8; file tools only, exec writes need G/H) + G (P2) + H | P0, P2 |
+| F2 | Low | `grep` compiles a model regex on the event loop (ReDoS, unverified). `read_file` loads up to 100 MiB | agent/tools/search.py:532-830,1043; agent/tools/filesystem.py:325,372 | budget.* | T (P0.8) | P0 |
+| W1 | Med | `web_fetch` reads whole bodies and `maxChars` is uncapped. The untrusted banner covers only `web_fetch`, not `web_search` or MCP results. It is an exfiltration channel (data in URLs) with no host allowlist | agent/tools/web.py:34-35,305-330,1099-1101,1179-1197,1247,1258-1300; agent/tools/mcp.py:630-680 | net.fetch | T (P0.7, P0.8) + G (optional host rules, P2) | P0, P2 |
+| W2 | Med | Pinned-DNS holes: the proxy path skips pinning, pinning monkey-patches the global `socket.getaddrinfo` under a lock, and `validate_resolved_url` fails open | agent/tools/web.py:128-144; security/network.py:195-218,236-280,312-350 | net.fetch | H (egress firewall) + T (P0.6) | P0, P4 |
+| W3 | Low | The Jina reader is on by default and forwards URLs to a third party | agent/tools/web.py:75,153-184,1204-1205 | net.fetch | O (Q8) | P4 |
+| M1 | Med | MCP `enabled_tools` defaults to `["*"]`, which includes resources and prompts. Descriptions are unsanitised model-visible text. One auto-retry even for non-idempotent calls | config/schema.py:387; agent/tools/mcp.py:630-680 | mcp.call | G (P2) + manifest/hash pin (P3) + T banner (P0.7) | P0, P2, P3 |
 | M2 | Med | Persistent injection: `AGENTS.md`/`SOUL.md`/`USER.md` are injected every turn and `always` skills every prompt. Both are agent-writable (F1). Dream is well scoped | agent/context.py:102,149; agent/skills.py:391-399; agent/memory.py:667-708 | fs.write | G (bootstrap/skills paths as a principal-scoped `fs.write` rule, P2) + O | P2 |
 | M3 | Low | `my` tool: with `allow_set`, `max_iterations` up to 100 and the preset switch are cost levers | agent/tools/self.py:30-33,122-126 | budget.* | G | P2 |
 | A1 | Med | No per-turn token or cost budget. The `spawn` queue is unbounded (semaphore admission only). 200 iterations | config/schema.py:131-132; agent/subagent.py:156 | budget.* | G + H (harness budgets) | P2 |
@@ -105,8 +105,8 @@ decision for the owner (section 11). The "Phase" column uses the numbering in se
 | A4 | Med | Secret leaks: image gen logs the request body at INFO, the subagent hook logs tool args, raw keys sit in the fallback signature tuple, and Langfuse is enabled by an env var. `NANOBOT_WORKSPACE_SANDBOX_ENFORCED` only relabels status | providers/image_generation.py:1338; agent/subagent.py:76-80; providers/factory.py:327-336; providers/openai_compat_provider.py:624; security/workspace_access.py:396-411 | secret.read | T (P0.9 redact) + P1 (resolver, redacting `TraceSink`) | P0, P1 |
 
 Keep (the audit's "well done" list, re-checked where cited): the minimal exec child env
-(agent/tools/shell.py:854-865), the exec `working_dir` check (agent/tools/shell.py:467-484), the sandbox forcing
-restriction on (agent/tools/filesystem.py:89-93), per-hop redirect validation and DNS pinning in `web_fetch`, MCP
+(agent/tools/shell.py:933-960), the exec `working_dir` check (agent/tools/shell.py:596-621), the sandbox forcing
+restriction on (agent/tools/filesystem.py:59-92), per-hop redirect validation and DNS pinning in `web_fetch`, MCP
 URL SSRF checks, session DB outside the workspace, Dream's tool scoping (agent/memory.py:667-708), and the
 subagent recursion ban (`spawn` is core-scope only, docs/core-map/02-tools.md section 1).
 
@@ -129,8 +129,8 @@ subagent recursion ban (`spawn` is core-scope only, docs/core-map/02-tools.md se
   for embedding hosts: all four re-reads call `load_config()` with the global path (config/loader.py:45-49), so
   once wired they would read `~/.nanobot/config.json` instead of the host's in-memory config.
 - **S3, "set `denyPatterns=[]`": fixed in f56ec68a.** Config patterns only add to the floor
-  (agent/tools/shell.py:219,244).
-- **E2, allow-pattern exemption of internal patterns: fixed in f56ec68a** (floor first, agent/tools/shell.py:879-892).
+  (agent/tools/shell.py:283-299).
+- **E2, allow-pattern exemption of internal patterns: fixed in f56ec68a** (floor first, agent/tools/shell.py:982-1101).
 - **The loopback exemption is dead code, confirmed.** It requires `scope.source_channel == "websocket"`
   (security/workspace_access.py:383-393), and the slim tree has no websocket channel.
 
@@ -142,28 +142,69 @@ phrase; `tests/utils/test_workspace_violation_throttle.py` must stay green throu
 
 | # | What | Where | Test | Owner |
 |---|---|---|---|---|
-| P0.1a | Resolved-path **fs floor** for read and write, applied even when unrestricted. Deny `/proc/*/environ`, `/proc/*/mem`, `/proc/*/maps` and `/proc/*/root` (after `resolve()`, so symlinks count). Deny the OAuth stores (`<data dir>/auth/`), `plugin-data/` and the session root. For **write only**, also deny `memory/history.jsonl`, `.dream_cursor` and `.nanobot/workspace-id`, so the file tools get the protection exec already has (agent/tools/shell.py:203-209). New error phrase: "protected internal path (not configurable)". Add it to `_WORKSPACE_VIOLATION_MARKERS` (agent/runner.py:1662-1669) so the per-target escalation applies | `_FsTool._resolve_read/_resolve_write` (agent/tools/filesystem.py:151-191), `apply_patch` (agent/tools/apply_patch.py:122), the search tools (inherit `_FsTool`), `image_generation._resolve_reference_image` | read_file `/proc/self/environ` denied with restriction off; a symlink in the workspace to it is also denied; write_file/edit_file/apply_patch to `memory/history.jsonl` denied while read_file of it still works; `auth/mcp.json` read denied; third attempt escalates | no |
-| P0.2 | **Guard `exec_session` input.** Run `input` through `ExecTool`'s floor, deny patterns, sudo and URL checks before `manager.write`. Update the known-gap wording in docs/core-map/02-tools.md. This check is a hint for line-oriented shells only; a REPL can still receive anything, so real containment is H | agent/tools/exec_session.py:162-172,318 | Start `bash` via exec with `yield_time_ms`, send the fork bomb as input: denied with the "dangerous pattern detected" marker; `echo ok\n` still works | no |
-| P0.3 | **Stop floor escalations from telling the model to edit config.** `repeated_exec_guard_error` always says the configured `tools.exec.{allow,deny}_patterns` "must be updated". Give floor denials (those containing "This guard is not configurable.") their own signature `violation:exec-floor` and wording that says no config change allows it | utils/runtime.py:223-265 | Three floor denials escalate without "must be updated"; the existing allow/deny escalation tests (tests/utils/test_workspace_violation_throttle.py:139-175) are unchanged | no |
-| P0.4 | **Make `_WORKSPACE_BOUNDARY_NOTE` truthful.** It is an application-level check, not OS isolation. Keep "Do NOT retry" | agent/tools/shell.py:85-91 | Unit test on the note text; the throttle tests are unchanged | no |
-| P0.5 | **Narrow agent-authored plugin enablement.** Drop the legacy auto-upgrade of a marker equal to `str(plugin.root)` and flip its test. Together with P0.1a's `plugin-data/` write deny, the file tools can then no longer create or upgrade a marker. This is only partial: the `{fingerprint, root}` JSON marker is still computable, and exec can still write it (see the exec caveat below). Host-authenticated markers (an HMAC key or host-held activation state) need a host to supply the key, so they move to P3 | agent/plugins.py:416-445 (legacy branch 436-439); tests/agent/test_agent_plugins.py:402 | A marker whose content equals `str(plugin.root)` is removed, not upgraded, and the plugin's MCP servers are not merged (agent/plugins.py:213-234); write_file to the marker path is denied by P0.1a | no (Q12 governs P3) |
-| P0.6 | **Complete the `NET` blocklist.** Add 192.0.0.0/24, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4, fec0::/10 and ff00::/8. Map NAT64 (64:ff9b::/96) and 6to4 (2002::/16) to their embedded IPv4 in `_normalize_addr`. Make `validate_resolved_url` fail closed on parse errors and `gaierror` | security/network.py:16-30,56-69,291-320 | Parametrized block test per range; the redirect-to-unresolvable case is blocked | no |
-| P0.7 | **Untrusted-content banner** (`_UNTRUSTED_BANNER`) on `web_search` results and on MCP tool/resource/prompt results. Cap and strip control characters from MCP descriptions | agent/tools/web.py:304-315; agent/tools/mcp.py:608,625,795,913 (wrapper `execute` methods) | The banner is present in each result type; the MCP description is capped | no |
-| P0.8 | **Caps.** `web_fetch` `maxChars` at most 200000, and read the body with a byte cap instead of `aread()`. Size caps for write_file/edit_file/apply_patch content (default 10 MiB). Exec one-shot reads its pipes incrementally with a cap instead of `communicate()`. `grep` runs `re` in `to_thread` with a timeout | agent/tools/web.py:1158,1188; agent/tools/filesystem.py:557-565; agent/tools/apply_patch.py:235; agent/tools/shell.py:353; agent/tools/search.py:718 | `yes \| head -c 2G` exec keeps RSS bounded and truncates; oversize write denied; catastrophic regex returns a timeout error | thresholds only |
-| P0.9 | **Log hygiene.** Log the image-gen body at DEBUG through `redact_value`, and redact the subagent tool args | providers/image_generation.py:1338; agent/subagent.py:76-80 | caplog test with a fake `sk-...` key shows `<redacted>` | no |
-| P0.1b | **Deny agent writes to `config.json`** (the path from `get_config_path()`) until P1 moves config out of reach | same as P0.1a | write_file/apply_patch to the config path denied | **[owner]** Q13 |
+| P0.1a **(done in 2e93751 + 6313a20)** | Resolved-path **fs floor** for read and write, applied even when unrestricted. Deny `/proc/*/environ`, `/proc/*/mem`, `/proc/*/maps` and `/proc/*/root` (after `resolve()`, so symlinks count). Deny the OAuth stores (`<data dir>/auth/`), `plugin-data/` and the session root. For **write only**, also deny `memory/history.jsonl`, `.dream_cursor` and `.nanobot/workspace-id`, so the file tools get the protection exec already has (agent/tools/shell.py:283-299). New error phrase: "protected internal path (not configurable)". Add it to `_WORKSPACE_VIOLATION_MARKERS` (agent/runner.py:1662-1669) so the per-target escalation applies *Done: Deviations: write-only files match by path suffix in ANY workspace (so a user repo's `memory/history.jsonl` is also denied); the floor also covers `<data dir>/sessions` and `/proc/<pid>/task/<tid>/...`; the data dir is `get_config_path().parent`, and 6313a20 fixed a symlinked `config.json` making it diverge from `get_data_dir()`.* | `_FsTool._resolve_read/_resolve_write` (agent/tools/filesystem.py:172-257), `apply_patch` (agent/tools/apply_patch.py:122), the search tools (inherit `_FsTool`), `image_generation._resolve_reference_image` | read_file `/proc/self/environ` denied with restriction off; a symlink in the workspace to it is also denied; write_file/edit_file/apply_patch to `memory/history.jsonl` denied while read_file of it still works; `auth/mcp.json` read denied; third attempt escalates | no |
+| P0.2 **(done in f623064)** | **Guard `exec_session` input.** Run `input` through `ExecTool`'s floor, deny patterns, sudo and URL checks before `manager.write`. Update the known-gap wording in docs/core-map/02-tools.md. This check is a hint for line-oriented shells only; a REPL can still receive anything, so real containment is H *Done: Deviation: the guard is stored per session (`manager.start(input_guard=ExecTool.check_session_input)`), each write screened on its own.* | agent/tools/exec_session.py:143-150,337-360 | Start `bash` via exec with `yield_time_ms`, send the fork bomb as input: denied with the "dangerous pattern detected" marker; `echo ok\n` still works | no |
+| P0.3 **(done in 7eb5108)** | **Stop floor escalations from telling the model to edit config.** `repeated_exec_guard_error` always says the configured `tools.exec.{allow,deny}_patterns` "must be updated". Give floor denials (those containing "This guard is not configurable.") their own signature `violation:exec-floor` and wording that says no config change allows it *Done: Also (ruling R1): file-tool floor denials ("protected internal path") got their own escalation wording instead of the workspace text that told the model to disable `restrict_to_workspace`.* | utils/runtime.py:245-300 | Three floor denials escalate without "must be updated"; the existing allow/deny escalation tests (tests/utils/test_workspace_violation_throttle.py:139-175) are unchanged | no |
+| P0.4 **(done in f623064)** | **Make `_WORKSPACE_BOUNDARY_NOTE` truthful.** It is an application-level check, not OS isolation. Keep "Do NOT retry" *Done: Wording now says "application-level path check"; three tests pinning "hard policy boundary" were updated.* | agent/tools/shell.py:164-171 | Unit test on the note text; the throttle tests are unchanged | no |
+| P0.5 **(done in 197b118)** | **Narrow agent-authored plugin enablement.** Drop the legacy auto-upgrade of a marker equal to `str(plugin.root)` and flip its test (done in 197b118: the branch is gone, so a legacy marker now fails the equality check against the JSON marker and is removed). Together with P0.1a's `plugin-data/` write deny, the file tools can then no longer create or upgrade a marker. This is only partial: the `{fingerprint, root}` JSON marker is still computable, and exec can still write it (see the exec caveat below). Host-authenticated markers (an HMAC key or host-held activation state) need a host to supply the key, so they move to P3 *Done: Deviation: the legacy branch was deleted outright in `agent/plugins.py`; a legacy marker now falls through the equality check and is removed.* | agent/plugins.py:416-440,446-455 (the legacy branch that auto-upgraded a `str(plugin.root)` marker was removed in 197b118); tests/agent/test_agent_plugins.py:420 | A marker whose content equals `str(plugin.root)` is removed, not upgraded, and the plugin's MCP servers are not merged (agent/plugins.py:213-234); write_file to the marker path is denied by P0.1a | no (Q12 governs P3) |
+| P0.6 **(done in c5ba1e1)** | **Complete the `NET` blocklist.** Add 192.0.0.0/24, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4, fec0::/10 and ff00::/8. Map NAT64 (64:ff9b::/96) and 6to4 (2002::/16) to their embedded IPv4 in `_normalize_addr`. Make `validate_resolved_url` fail closed on parse errors and `gaierror` *Done: Deviation: `validate_resolved_url` now fails closed, but it has no production caller; the production redirect path (`resolve_url_target`/`validate_url_target`) already failed closed. The new ranges and NAT64/6to4 mapping protect every production path via `_is_private`. TEST-NET-1/2/3 stay unblocked (Docker test hosts).* | security/network.py:16-44,68-97,312-350 | Parametrized block test per range; the redirect-to-unresolvable case is blocked | no |
+| P0.7 **(done in 015e27b)** | **Untrusted-content banner** (`_UNTRUSTED_BANNER`) on `web_search` results and on MCP tool/resource/prompt results. Cap and strip control characters from MCP descriptions *Done: Deviation: the banner also covers MCP `isError` results (still `ToolResult.error`, with changed text); `sanitize_description` also strips C1 controls and DEL; the cap yields 2001 chars (`[:limit]` plus an ellipsis).* | agent/tools/web.py:305-330; agent/tools/mcp.py:630,800,918 (wrapper `execute` methods) | The banner is present in each result type; the MCP description is capped | no |
+| P0.8 **(done in 5b8b173 + 13f12f3 + 5a6cde2 + 45aa568 (web/write caps, grep worker) and b5350c8 (exec output))** | **Caps.** `web_fetch` `maxChars` at most 200000, and read the body with a byte cap instead of `aread()`. Size caps for write_file/edit_file/apply_patch content (default 10 MiB). Exec one-shot reads its pipes incrementally with a cap instead of `communicate()`. `grep` runs `re` in `to_thread` with a timeout *Done: Deviations: `grep` does not use a thread timeout; expensive patterns (nested or stacked unbounded repeats, non-disjoint alternations, atomic/possessive/conditional groups, backreferences with big repeats, lines over ~10 000 chars) run in a regex-only killable worker process (`agent/tools/_grep_worker.py`: JSON only, `-I -S`, minimal env, fails closed). Exec drains and discards excess output (per-stream cap 4 MiB, never below 4x the output limit, head and tail kept) instead of killing. `web_fetch` streams the body (2 MiB cap).* | agent/tools/web.py:1099-1101,1134,1179-1197; agent/tools/filesystem.py:94-100,607-617; agent/tools/apply_patch.py:129,170; agent/tools/shell.py:107-160,437-440,495-520; agent/tools/search.py:532-830,1043 | `yes \| head -c 2G` exec keeps RSS bounded and truncates; oversize write denied; catastrophic regex returns a timeout error | thresholds only |
+| P0.9 **(done in fe9fd63 + c4f0cf3)** | **Log hygiene.** Log the image-gen body at DEBUG through `redact_value`, and redact the subagent tool args *Done: Deviation: OpenAI and Codex request logs also moved to DEBUG and `image_generation.py` error/response-summary logs are redacted; redaction is capped (over 20 KiB keeps first 16 KiB and last 4 KiB) and lazy in the subagent hook (c4f0cf3, after a 46 s quadratic case).* | providers/image_generation.py:1338; agent/subagent.py:76-80 | caplog test with a fake `sk-...` key shows `<redacted>` | no |
+| P0.1b **(done in fde43f1)** | **Deny agent writes to `config.json`** (the path from `get_config_path()`) until P1 moves config out of reach *Done: Exact-path deny of `config.json` and its resolved symlink target for write_file/edit_file/apply_patch; reads unaffected.* | same as P0.1a | write_file/apply_patch to the config path denied | **[owner]** Q13 |
 
 **Exec caveat.** P0.1a, P0.1b and P0.5 govern only the file tools (read_file, write_file, edit_file, list_dir,
 apply_patch, find_files, grep, image-gen references). They do **not** stop `exec`. A command such as
 `echo ... > config.json`, `cat /proc/$PPID/environ`, `cat auth/mcp.json` or a write to the plugin marker still
 works. Exec's only file floor is the internal-state regexes, which cover just `history.jsonl` and `.dream_cursor`
-and can be evaded (agent/tools/shell.py:203-219; finding E2). Exec containment stays with host-layer isolation
+and can be evaded (agent/tools/shell.py:283-299; finding E2). Exec containment stays with host-layer isolation
 (sandbox, separate uid, read-only mounts: layer H) and with the P2 gate. Phase 0 raises the cost of the easy
 path and removes the file-tool leaks; it does not make these paths unreachable.
 
 Suggested shipping order: P0.1a, P0.2, P0.3, P0.4 (the small ones together), P0.5, P0.9, P0.7, P0.6, P0.8, then
 P0.1b after the owner decides. E4 (sudo) gets no regex work: the fix is OS privilege (H), and the regex stays as
 a hint.
+
+### Phase 0 outcome
+
+Phase 0 landed on branch `core-slim` (base 093cc228, suite 4557 passed; at fde43f18 it is 4734 passed, 50 skipped,
+0 failed). All rows of the table above shipped, including P0.1b after the owner said yes (2026-09-26); the commit
+for each row is in its first cell.
+
+**What shipped.** The file-tool floor (reads and writes, symlink-resolved) with its own marker and escalation
+wording; a guarded `exec_session` stdin; truthful boundary note; no auto-upgrade of a legacy plugin marker;
+redacted, lazy log sinks; banners and description sanitising on `web_search` and MCP results; the extra SSRF ranges
+plus NAT64/6to4 normalisation; body, write and exec-output caps; a regex-only worker process for expensive `grep`
+patterns; the `config.json` write deny.
+
+**What did NOT ship (and is not fixed by phase 0).**
+- E4: the `sudo` regex is still only a hint. Real containment is OS privilege (layer H).
+- Host-layer isolation (sandbox, separate uid, read-only mounts, no docker group).
+- `exec` reaching protected paths: the file-tool floor does not stop `cat`, `echo >`, `python -c` and similar.
+- Hard links to protected files (including `config.json`) evade the path-based floor.
+- The TOCTOU symlink swap between resolve and open; FIFOs are not covered either.
+- A custom host `sessions_root`: the floor knows only `<data dir>/sessions`; it needs the P1 `Paths` seam
+  (`ProtectedFloor(data_dir=...)` already accepts one).
+
+**Host fact.** The account this machine's agents run under has passwordless sudo: a reviewer's `sudo id` printed
+`uid=0`. The RSI harness must therefore not run under this account (no sudo, no docker-group access); the sudo
+regex cannot stand in for that.
+
+**Deferred limits** (full list with owners in `.agent/phase0-followups.md`):
+- `exec_session` input guard: NUL bytes are not stripped (`\x00sudo id` runs), each write is screened on its own
+  so a pattern split across two writes passes, and `s''udo`, multi-line splits and a full-width colon evade it
+  (as they do for exec).
+- MCP descriptions: zero-width and bidi format characters (category Cf) are not stripped; the cap yields 2001 chars.
+- Redaction: the name part is capped at 64 chars, so `'a'*100 + 'key=SECRET'` leaks; benign text can be over-masked.
+- SSRF: local-use NAT64 `64:ff9b:1::/48` and IPv4-compatible `::a.b.c.d` are not normalised; `validate_resolved_url`
+  has no production caller.
+- `grep`: stacked bounded repeats (each max <= 100), single-repeat quadratic patterns on lines under 10 000 chars,
+  and memory on newline-heavy explicit files (20 MB of newlines with a routed pattern peaked at 2.7 GB RSS) remain.
+- Exec: a never-ending output flood still keeps a CPU core busy until the timeout (memory is bounded).
+- `web_fetch` Jina path still reads its body unbounded (`agent/tools/web.py` `_fetch_jina`).
+- `edit_file`/`apply_patch` measure only the new payload, so `replace_all` can grow a file past 10 MiB.
+- Unresolved owner decisions: Q5 (workspace == state dir), Q6 (`restrict_to_workspace` default), Q8 (Jina reader
+  default).
 
 ## 4. The host contract (`CoreEnvironment`)
 
@@ -172,9 +213,9 @@ ambient reads listed below.
 
 | Part | Replaces (current tree) |
 |---|---|
-| `ConfigSource` | `load_config()` re-reads (agent/tools/web.py:391, agent/tools/image_generation.py:232, agent/tools/mcp.py:1341, agent/model_presets.py:36, providers/factory.py:408); `Config` `NANOBOT_*` env settings (config/schema.py:688-691); `_apply_ssrf_whitelist` mutating a module global (config/loader.py:213-217) |
-| `CredentialResolver` | `os.environ` key reads: web search (agent/tools/web.py:427-462,540-1044 and the Jina key at 1224), transcription (providers/transcription.py:538-803), Langfuse (providers/openai_compat_provider.py:624); `${VAR}` expansion (config/loader.py:268-437); the Bedrock env write (providers/bedrock_provider.py:75); the OAuth file stores (agent/tools/mcp_oauth.py:101-102, providers/xai_oauth.py:256-258, and `oauth_cli_kit` `FileTokenStorage` for Copilot/Codex, providers/github_copilot_provider.py:50-55, providers/openai_codex_provider.py:18) |
-| `Paths` | `get_state_home` env lookup (config/paths.py:15-48), the module-global config path (config/loader.py:27,39-49), `get_data_dir`/`get_media_dir`/`get_logs_dir` (config/paths.py:61-84; `get_media_dir()` is even called from the exec guard, agent/tools/shell.py:982), `default_sessions_root` (session/sqlite_store.py:113-134), `llm_usage_store_path` (llm_usage/__init__.py:41-42) |
+| `ConfigSource` | `load_config()` re-reads (agent/tools/web.py:391, agent/tools/image_generation.py:232, agent/tools/mcp.py:1344, agent/model_presets.py:36, providers/factory.py:408); `Config` `NANOBOT_*` env settings (config/schema.py:688-691); `_apply_ssrf_whitelist` mutating a module global (config/loader.py:213-217) |
+| `CredentialResolver` | `os.environ` key reads: web search (agent/tools/web.py:427-462,540-1044 and the Jina key at 1272), transcription (providers/transcription.py:538-803), Langfuse (providers/openai_compat_provider.py:624); `${VAR}` expansion (config/loader.py:268-437); the Bedrock env write (providers/bedrock_provider.py:75); the OAuth file stores (agent/tools/mcp_oauth.py:101-102, providers/xai_oauth.py:256-258, and `oauth_cli_kit` `FileTokenStorage` for Copilot/Codex, providers/github_copilot_provider.py:50-55, providers/openai_codex_provider.py:18) |
+| `Paths` | `get_state_home` env lookup (config/paths.py:15-48), the module-global config path (config/loader.py:27,39-49), `get_data_dir`/`get_media_dir`/`get_logs_dir` (config/paths.py:61-84; `get_media_dir()` is even called from the exec guard, agent/tools/shell.py:1069), `default_sessions_root` (session/sqlite_store.py:113-134), `llm_usage_store_path` (llm_usage/__init__.py:41-42) |
 | `PermissionPolicy` | Scattered guards (section 7); `tools_allow`/`tools_deny` (config/schema.py:161-162); the dead loopback gate (security/workspace_access.py:383-393) |
 | `TraceSink` | loguru calls with raw args; no audit stream exists |
 
@@ -187,7 +228,7 @@ client header, a search request. Every egress runs through `redact_value` (the p
 `hive/trace/redact.py`: `sk-` tokens, `Authorization:` headers, `Bearer`, name=value pairs, and long runs near
 key words), and additionally through an exact-match scrub of every value the resolver has handed out this
 process. The egress points are tool results, trace events, log records, session persistence and exported
-transcripts. `allowed_env_keys` (agent/tools/shell.py:103,854-865) becomes a `secret.read:<ref>` grant that the
+transcripts. `allowed_env_keys` (agent/tools/shell.py:346,933-980) becomes a `secret.read:<ref>` grant that the
 policy must allow per principal. The exec child gets the value, and the audit event records the ref, never the
 value.
 
@@ -431,7 +472,7 @@ runner._run_tool(tool_call)
 Floors are checked before policy. No rule, allow pattern, mode flag or config value can remove them. Config and
 policy can only add denials on top.
 
-1. The exec fork bomb and internal-state writes (agent/tools/shell.py:203-219, f56ec68a).
+1. The exec fork bomb and internal-state writes (agent/tools/shell.py:283-299, f56ec68a).
 2. The fs floor of P0.1a, extended by `Paths.protected()`: `/proc/*/environ|mem|maps|root`, the data dir's
    `auth/` and `plugin-data/`, the session root, the audit/trace store, and the policy source.
 3. The audit stream itself. Every decision is emitted. If the sink raises, the decision still stands and a
@@ -440,7 +481,7 @@ policy can only add denials on top.
 
 Floors must never depend on unrelated mode flags. This is the lesson of the reverted upstream change
 `7136de6d`, which skipped the command guard under full access. The code comment at
-agent/tools/shell.py:486-491 already states this rule for the exec guard.
+agent/tools/shell.py:164-171 already states this rule for the exec guard.
 
 ### 7.4 Defaults
 
@@ -448,11 +489,11 @@ agent/tools/shell.py:486-491 already states this rule for the exec guard.
   and private `net.fetch`, sudo, and exec/fs outside the workspace only when restricted. A policy parity test
   proves that the default policy reproduces current guard outcomes on a fixed corpus.
 - An explicit **deny-all or whitelist policy** is logged at startup with the "config-level block, do not retry"
-  wording, as the exec allow-pattern warning does today (agent/tools/shell.py:247-256). Capabilities denied for
+  wording, as the exec allow-pattern warning does today (agent/tools/shell.py:247-257). Capabilities denied for
   every resource are dropped at registration (`registrable`), so the model never sees an unusable tool. This
   removes the June-2026 failure mode at its source.
 - `net.fetch:loopback` replaces the dead websocket gate and the misnamed `webui_allow_local_service_access`
-  (config/schema.py:414; agent/tools/shell.py:186,228-257; security/workspace_access.py:383-393). It is denied
+  (config/schema.py:414; agent/tools/shell.py:186,247-257; security/workspace_access.py:383-393). It is denied
   for `agent` by default and allowed for the `eval` principal in the harness (section 10).
 
 ### 7.5 Denials, markers and the retry loop
@@ -465,7 +506,7 @@ a different command each time (`.agent/gotchas.md:16-18`). The design rules:
 | fs outside workspace (policy or tool) | "outside allowed directory" | `_WORKSPACE_VIOLATION_MARKERS` (agent/runner.py:1662-1669), per-target escalation `repeated_workspace_violation_error` (utils/runtime.py:187-215) |
 | fs floor | "protected internal path" | Added to `_WORKSPACE_VIOLATION_MARKERS` in P0.1a; per-target escalation |
 | net private/loopback | "private/internal address" | `_SSRF_MARKERS` plus the non-bypassable note (agent/runner.py:1647-1660) |
-| exec floor / user deny pattern | "blocked by safety guard (dangerous pattern detected)" | `_EXEC_GUARD_MARKERS` (utils/runtime.py:223-226), class-keyed escalation. P0.3 separates floors |
+| exec floor / user deny pattern | "blocked by safety guard (dangerous pattern detected)" | `_EXEC_GUARD_MARKERS` (utils/runtime.py:245-249), class-keyed escalation. P0.3 separates floors |
 | exec whitelist | "blocked by allowlist filter" | same, class `violation:exec-allowlist` |
 | any other policy deny | "blocked by permission policy" (new) | P2 adds it to `_EXEC_GUARD_MARKERS` with signature `violation:policy:<domain>`, keyed on the capability domain so that distinct resources accumulate. It escalates on the third denial with "host-level policy, not configurable by the agent, Stop retrying" |
 
@@ -477,7 +518,7 @@ Additional rules:
   adds a round-trip test per `DenyMarker`. A mutator (tier 1) may not change them (docs/core-map/README.md,
   "What it must not change").
 - **Denials are `ToolResult.error`, never plain strings.** Today the sudo denial is a plain string
-  (agent/tools/shell.py:510-514), so it is never classified. The gate fixes this for policy denials; the sudo
+  (agent/tools/shell.py:507-520), so it is never classified. The gate fixes this for policy denials; the sudo
   string becomes `ToolResult.error` in P2.
 
 ### 7.6 Sub-agents and other principals
@@ -513,7 +554,7 @@ dict. The keys never go to `os.environ`.
 | `moeka_config` (awork:awork/llm.py:1001-1042) | `from nanobot.config.schema import Config`; `Config.model_validate({"providers": {"openrouter": {"apiKey": k}}, "agents": {"defaults": {"model", "provider": "openrouter"}}, "tools": {"web": {"search": {"provider": "brave", "apiKey": b}}}})` | `nanobot.config.schema.Config` stays importable (re-export from the compat package after P5), and camelCase aliases stay. The adapter maps `providers.openrouter.apiKey` to `SecretRef("openrouter/api_key")` and `tools.web.search.apiKey` to `SecretRef("web_search/brave/api_key")`. The rest becomes plugin sections |
 | `moeka_config_source` (awork:awork/llm.py:1045-1056) | returns `{"config": Config}`, splatted into entry points | The `config=` kwarg stays on every entry point below |
 | `MoekaLLM` completions (awork:awork/llm.py:1247-1265,1318,1390-1447,1530-1594,1676-1692) | `nanobot.api.complete`, `complete_json`, `acomplete`, `acomplete_json`, `complete_stream`, with kwargs `prompt, system, images, schema, model, preset, max_tokens, temperature, usage_sink, retries, config` | The signatures stay (api/complete.py:58-65,117-124,349-356). Internally, `config_from_sources` goes through the adapter. The functions must stay **module-level attributes of `nanobot.api.complete` looked up at call time**, because awork tests monkeypatch `acomplete`, `acomplete_json`, `complete_json` and `nanobot.api.complete` (awork:tests/test_llm_cache.py:141-146, awork:tests/test_llm_reservation.py:260-277, awork:tests/test_phase3_concurrency.py:30-41). `_image_part` stays (awork:tests/test_vision.py:23) |
-| `make_research_agent` (awork:awork/agent.py:316,335-341) | `MoekaCore.scoped(profile=AgentProfileConfig, workspace=, model=, skills=, config=)` | `scoped`/`create` keep their kwargs (core/core.py:70-81,226-232). The adapter builds `CoreEnvironment`. Paths come from the scoped temp workspace, and the data dir must be a sibling temp dir, never `~/.nanobot` (today `get_media_dir()` creates `~/.nanobot/media` even here: config/paths.py:71-74, agent/tools/shell.py:982) |
+| `make_research_agent` (awork:awork/agent.py:316,335-341) | `MoekaCore.scoped(profile=AgentProfileConfig, workspace=, model=, skills=, config=)` | `scoped`/`create` keep their kwargs (core/core.py:70-81,226-232). The adapter builds `CoreEnvironment`. Paths come from the scoped temp workspace, and the data dir must be a sibling temp dir, never `~/.nanobot` (today `get_media_dir()` creates `~/.nanobot/media` even here: config/paths.py:71-74, agent/tools/shell.py:1069) |
 | `_research_profile`/`_discovery_profile` (awork:awork/agent.py:369-396) | `AgentProfileConfig(tools_allow, system_prompt, skills_include, vec_collections)` | The class stays. `tools_allow` compiles to a policy registration rule plus the loader allow list. `vec_collections` stays accepted (it has no consumer today, config/schema.py:231) |
 | `ResearchAgent.research` (awork:awork/agent.py:234-248) | `from nanobot.agent.hook import AgentHook`; `core.run(task, session_key=, hooks=[hook])`; `after_iteration(context.usage)` | `AgentHook` and the `run` signature (core/core.py:622-630) stay. Hooks remain observers |
 | actions and memory (awork:awork/agent.py:205,414,430,443-444) | `register_action(fn, name=, read_only=)`, `ingest_text(text, source=, collection=, tags=)`, `retrieve(query, k=, collection=, mode=, tags=, since=, caller=)` | Signatures stay. An action gets a capability declaration; awork's actions are pure Python and need none |
@@ -669,12 +710,24 @@ Each question comes with a recommended default. None blocks P0 items that are no
 - **Tree and method.** Tree `f56ec68a` (worktree `/home/muk/projects/moeka-core-slim`). Every `path:line` in
   this document was re-located with `grep -n`/`sed -n` in that tree, including all citations kept from the audit
   (whose line numbers came from `80f08dba`). Moved lines were updated: shell.py floor 203-219, guard 867-997,
-  prepare 440-520; plugins.py marker 416-445 and legacy upgrade 436-439; subagent hook 76-80.
+  prepare 440-520; plugins.py marker 416-445 and legacy upgrade 436-439; subagent hook 76-80. Those numbers are the
+  audited tree's: phase 0 later moved them (see the re-verification bullet below).
 - **S2 probe.** Run with the host venv interpreter and `PYTHONPATH` set to this worktree, `env -i` and a planted
   dummy variable, and no real secrets present:
   - `ReadFileTool(workspace=ws, allowed_dir=None).execute(path="/proc/self/environ")` returned the dummy variable.
   - With `allowed_dir=ws`, it returned "outside allowed directory".
 - **awork.** The surface in section 8 was read from `~/projects/awork/backend` (read-only). The awork suite was
-  not run for this documentation-only change.
+  not run for the original documentation-only change. After phase 0 (fde43f18) it was run as a compatibility gate
+  with `PYTHONPATH` pointing at this worktree: 3796 passed, 8 failed, 4 skipped, 1 xfailed; against awork's own
+  vendored moeka: 3808 passed, 1 xfailed, 0 failed. The 8 failures are not phase-0 regressions (the same 8 fail
+  against the base 093cc228 tree): 7 are `Config`/`AgentProfileConfig` `PydanticUserError` (forward reference to
+  `RunnerLimits` not rebuilt when awork imports the schema first) and 1 is a missing `rapidfuzz` module.
+- **Phase 0 re-verification (fde43f18).** After phase 0 every `path:line` for shell.py, filesystem.py, search.py,
+  web.py, mcp.py, network.py, runtime.py, runner.py, plugins.py and exec_session.py was re-extracted by script and
+  compared with the source. The plugins.py cites changed: the legacy `str(plugin.root)` auto-upgrade branch (was
+  436-439) was removed in 197b118, and the marker code is now `_enabled_package_fingerprint` at 416-440 and
+  `_activation_marker` at 446-455 (found with `grep -n "def _enabled_package_fingerprint\|def _activation_marker"`).
+  Section 2.3 rows describe the audited (pre-phase-0) behaviour; their cites now point at the current code that
+  replaced it, so a cite may land on the fix rather than the old flaw.
 - **Not read in full** (claims marked unverified where they depend on these): exec_session manager internals
   beyond the cited lines, the `oauth_cli_kit` storage location, and which log file the CLI configures.

@@ -37,6 +37,14 @@ _PROC_SECRET_RE = re.compile(
 # (``default_sessions_root``) is added per workspace in ``_protected_roots``.
 PROTECTED_READ: tuple[str, ...] = ("auth", "plugin-data", "sessions")
 
+# WRITE only denied: the instance config file itself (``get_config_path()``,
+# plus its resolved symlink target). Reading stays allowed: the model may
+# inspect non-secret config (secrets are ``${VAR}`` references, not values).
+# The loader's atomic write uses a random ``.config.json.<uuid>.tmp`` name that
+# exists only inside ``save_config``; no ``.bak`` is ever created, so there are
+# no sibling names to protect. Code-level writers (``save_config``, the CLI)
+# do not go through the file tools and are unaffected.
+#
 # WRITE only denied: internal-state files, matched by their last two path
 # components in any workspace (so an unrestricted tool cannot overwrite a
 # different workspace's history either). Reading them stays allowed.
@@ -45,15 +53,6 @@ PROTECTED_WRITE: tuple[tuple[str, str], ...] = (
     ("memory", ".dream_cursor"),
     (".nanobot", "workspace-id"),
 )
-
-
-# WRITE only denied: the instance config file itself (``get_config_path()``,
-# plus its resolved symlink target). Reading stays allowed: the model may
-# inspect non-secret config (secrets are ``${VAR}`` references, not values).
-# The loader's atomic write uses a random ``.config.json.<uuid>.tmp`` name that
-# exists only inside ``save_config``; no ``.bak`` is ever created, so there are
-# no sibling names to protect. Code-level writers (``save_config``, the CLI)
-# do not go through the file tools and are unaffected.
 
 
 class ProtectedPathError(WorkspaceBoundaryError):
@@ -224,7 +223,12 @@ def check_protected(
     workspace: Path | None,
     data_dir: DataDirs = None,
 ) -> None:
-    """Raise ``ProtectedPathError`` when *path* is protected."""
+    """Raise ``ProtectedPathError`` when *path* is protected.
+
+    With ``data_dir=None`` the default data dirs and the default config files
+    (``get_config_path()``) are used. When an explicit *data_dir* is passed the
+    config files are skipped: only the given data dirs and *workspace* are checked.
+    """
     reason = ProtectedFloor(
         data_dir=data_dir if data_dir is not None else default_data_dirs(),
         workspace=workspace,
