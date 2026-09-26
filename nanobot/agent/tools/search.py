@@ -551,7 +551,9 @@ def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
     whose branches do not start with distinct literals (``(a+)+$``, ``(a|aa)*``), and
     two or more large repeats (unbounded, or bounded with max > 100) anywhere on one
     path, including inside capturing groups (``a*a*b``, ``(a*)(a*)b``,
-    ``a{0,2000}a{0,2000}b``, ``.*error.*timeout``: polynomial, quadratic or worse).
+    ``a{0,2000}a{0,2000}b``, ``.*error.*timeout``: polynomial, quadratic or worse),
+    looking inside atomic groups, possessive repeats and conditionals too, and any
+    backreference combined with a large repeat (``(a*)\\1b``).
     Over-approximate on purpose: a flagged pattern only costs a worker process,
     never a wrong answer.
     """
@@ -561,53 +563,82 @@ def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
     except Exception:
         return False  # invalid patterns are reported by re.compile as usual
 
-    repeats = (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT)
+    # Opcodes are compared by name so an unknown/renamed opcode never crashes the screen.
+    def kind(op: Any) -> str:
+        return getattr(op, "name", str(op))
+
+    repeat_kinds = {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}
+    groupref_kinds = {"GROUPREF", "GROUPREF_IGNORE", "GROUPREF_LOC_IGNORE", "GROUPREF_UNI_IGNORE"}
+
+    def children(op: Any, av: Any) -> list[Any]:
+        """Sub-sequences of a container opcode that are alternatives of each other or nested."""
+        name = kind(op)
+        if name in repeat_kinds:
+            return [av[2]]
+        if name == "BRANCH":
+            return list(av[1])
+        if name == "SUBPATTERN":
+            return [av[3]]
+        if name in ("ASSERT", "ASSERT_NOT"):
+            return [av[1]]
+        if name == "ATOMIC_GROUP":
+            return [av]
+        if name == "GROUPREF_EXISTS":
+            return [seq for seq in (av[1], av[2]) if seq is not None]
+        return []
 
     def distinct_literal_starts(alternatives: list[Any]) -> bool:
         firsts: list[Any] = []
         for alt in alternatives:
-            if not len(alt) or alt[0][0] is not sre_parse.LITERAL:
+            if not len(alt) or kind(alt[0][0]) != "LITERAL":
                 return False
             firsts.append(alt[0][1])
         return len(set(firsts)) == len(firsts)
 
     def big_repeats(seq: Any) -> int:
-        """Most large repeats met along one path, descending into groups and branches."""
+        """Most large repeats met along one path, descending into every container."""
         total = 0
         for op, av in seq:
-            if op in repeats:
+            subs = children(op, av)
+            if kind(op) in repeat_kinds:
                 total += (1 if av[1] > _GREP_BIG_REPEAT else 0) + big_repeats(av[2])
-            elif op is sre_parse.BRANCH:
-                total += max((big_repeats(alt) for alt in av[1]), default=0)
-            elif op is sre_parse.SUBPATTERN:
-                total += big_repeats(av[3])
-            elif op in (sre_parse.ASSERT, sre_parse.ASSERT_NOT):
-                total += big_repeats(av[1])
+            elif kind(op) in ("BRANCH", "GROUPREF_EXISTS"):
+                total += max((big_repeats(sub) for sub in subs), default=0)
+            else:
+                total += sum(big_repeats(sub) for sub in subs)
         return total
+
+    def has_groupref(seq: Any) -> bool:
+        for op, av in seq:
+            if kind(op) in groupref_kinds:
+                return True
+            if any(has_groupref(sub) for sub in children(op, av)):
+                return True
+        return False
 
     def walk(seq: Any, in_repeat: bool) -> bool:
         for op, av in seq:
-            if op in repeats:
-                _lo, hi, sub = av
-                iterates = hi > 1
+            name = kind(op)
+            if name in repeat_kinds:
+                iterates = av[1] > 1
                 if iterates and in_repeat:
                     return True
-                if walk(sub, in_repeat or iterates):
+                if walk(av[2], in_repeat or iterates):
                     return True
-            elif op is sre_parse.BRANCH:
+            elif name == "BRANCH":
                 if in_repeat and not distinct_literal_starts(av[1]):
                     return True
                 if any(walk(alt, in_repeat) for alt in av[1]):
                     return True
-            elif op is sre_parse.SUBPATTERN:
-                if walk(av[3], in_repeat):
-                    return True
-            elif op in (sre_parse.ASSERT, sre_parse.ASSERT_NOT):
-                if walk(av[1], in_repeat):
-                    return True
+            elif any(walk(sub, in_repeat) for sub in children(op, av)):
+                return True
         return False
 
-    return big_repeats(parsed) >= 2 or walk(parsed, False)
+    repeats_total = big_repeats(parsed)
+    # A backreference makes matching cubic or worse once a repeat feeds it.
+    if repeats_total >= 2 or (repeats_total >= 1 and has_groupref(parsed)):
+        return True
+    return walk(parsed, False)
 
 
 class _Hit:

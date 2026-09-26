@@ -1219,11 +1219,72 @@ async def test_grep_worker_batches_lines_and_matches_the_in_process_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawned
 ) -> None:
     monkeypatch.setattr("nanobot.agent.tools.search._GREP_WORKER_BATCH_CHARS", 200)
-    text = "".join(f"line {i} \u00e9t\u00e9 {'hit' if i % 7 == 0 else 'miss'}\n" for i in range(300))
-    (tmp_path / "b.txt").write_text(text, encoding="utf-8")
+    rows = []
+    for i in range(300):
+        rows.append(f"row {i:03d} \u00e9t\u00e9 {'hit' if i % 7 == 0 else 'miss'}")
+        if i % 11 == 0:
+            rows.append("")
+    (tmp_path / "b.txt").write_text("\n".join(rows) + "\n", encoding="utf-8")
     tool = GrepTool(workspace=tmp_path)
-    isolated = await tool.execute(pattern=r".*hit.*\u00e9", context_before=0, context_after=0)
+    isolated = await tool.execute(pattern=r".*hit.*", context_before=1, context_after=1)
     monkeypatch.setattr("nanobot.agent.tools.search._regex_may_backtrack_badly", lambda *_: False)
-    inline = await tool.execute(pattern=r".*hit.*\u00e9", context_before=0, context_after=0)
+    inline = await tool.execute(pattern=r".*hit.*", context_before=1, context_after=1)
     assert len(spawned) == 1
+    assert "No matches" not in isolated
+    assert isolated.count("hit") > 40  # matches in many different batches
+    assert "row 000" in isolated and "row 294" in isolated
     assert isolated == inline
+
+
+_FROZEN_CASES = [
+    (r"(?>(a+)+c)", "a" * 28),
+    (r"(?:(a+)+c)++", "a" * 28),
+    (r"(a)?(?(1)(a+)+c|x)", "a" * 28),
+    (r"(a*)\1b", "a" * 3000),
+    (r"(a*)\1\1b", "a" * 3000),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pattern", "line"), _FROZEN_CASES, ids=["atomic", "possessive", "conditional", "backref", "backref2"]
+)
+async def test_grep_atomic_possessive_conditional_backref_patterns_use_the_worker(
+    tmp_path: Path, spawned, pattern: str, line: str
+) -> None:
+    (tmp_path / "f.txt").write_text(line + "\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=1)
+    max_gap = 0.0
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal max_gap
+        last = time.monotonic()
+        while not stop:
+            await asyncio.sleep(0)
+            now = time.monotonic()
+            max_gap = max(max_gap, now - last)
+            last = now
+
+    task = asyncio.create_task(ticker())
+    started = time.monotonic()
+    result = await asyncio.wait_for(tool.execute(pattern=pattern), timeout=60)
+    elapsed = time.monotonic() - started
+    stop = True
+    await task
+
+    assert len(spawned) == 1
+    assert result.startswith("Error: grep timed out after 1s")
+    assert elapsed < 5
+    assert max_gap < 0.5
+    assert all(proc.poll() is not None for _a, _k, proc in spawned)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pattern", [r"(?>abc)", r"a*+b", r"(a)\1b", r"(a)?(?(1)b|c)"])
+async def test_grep_harmless_atomic_possessive_backref_patterns_stay_in_process(
+    tmp_path: Path, spawned, pattern: str
+) -> None:
+    (tmp_path / "a.txt").write_text("abc aab aabb\n", encoding="utf-8")
+    await GrepTool(workspace=tmp_path).execute(pattern=pattern)
+    assert spawned == []
