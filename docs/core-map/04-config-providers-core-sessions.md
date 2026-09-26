@@ -99,8 +99,8 @@ Other sections:
 - `ToolsConfig` (config/schema.py:397-424): `maxSessionMessagesPerMinute` 6, `restrictToWorkspace` False,
   `webuiAllowLocalServiceAccess` True (legacy name, still read by exec), `mcpServers` {}, `ssrfWhitelist` [].
   Tool sub-configs: `exec` (agent/tools/shell.py:94-108), `web` (agent/tools/web.py:63-83), `file`
-  (agent/tools/filesystem.py:28-31), `my` (agent/tools/self.py:30-33), `imageGeneration`
-  (agent/tools/image_generation.py:49-57). Doc 02 has the per-tool keys.
+  (agent/tools/filesystem.py:33-36), `my` (agent/tools/self.py:30-33), `imageGeneration`
+  (agent/tools/image_generation.py:50-58). Doc 02 has the per-tool keys.
 - `ProviderConfig` (config/schema.py:242-279): `apiKey`, `apiBase`, `apiType` (only `providers.openai` may set it
   to something other than `auto`, config/schema.py:361-372), `extraHeaders`, `extraBody`, `extraQuery`, `proxy`,
   `thinkingStyle` in {`thinking_type`, `enable_thinking`, `reasoning_split`} (config/schema.py:262-279).
@@ -115,6 +115,12 @@ Gotchas read from code (not runtime-tested):
   exempt it. Pinned by tests/tools/test_exec_security.py (`test_fork_bomb_*`) and
   tests/tools/test_exec_allow_patterns.py::test_extra_deny_patterns_add_to_the_floor.
 - Non-empty `tools.exec.allowPatterns` = whitelist-only exec (agent/tools/shell.py:248-256).
+- `tools.restrictToWorkspace: false` does not open everything to the file tools: a non-configurable floor
+  (security/protected_paths.py, wired in `_FsTool._resolve_read/_resolve_write`, agent/tools/filesystem.py:156-218)
+  always denies `/proc/<pid>/{environ,mem,maps,root,cwd,exe}`, `<data dir>/auth`, `<data dir>/plugin-data`,
+  `<data dir>/sessions` and the default sessions root, and denies WRITES to `memory/history.jsonl`,
+  `memory/.dream_cursor` and `.nanobot/workspace-id`. No config key or `extra_*` list lifts it. It does not
+  apply to `exec` (see the exec caveat in doc 02, "Workspace and network guards tools enforce").
 - sudo is blocked unless `tools.exec.allowSudo` (agent/tools/shell.py:502-514).
 
 ## 3. Provider layer

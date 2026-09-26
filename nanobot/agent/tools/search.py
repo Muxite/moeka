@@ -19,6 +19,7 @@ from typing import Any, Iterable, Iterator, TypeVar
 
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.filesystem import ListDirTool, _FsTool
+from nanobot.security.protected_paths import ProtectedFloor
 from nanobot.utils.document import (
     LocatedDocumentLine,
     PdfPageRangeError,
@@ -197,11 +198,18 @@ class _SearchTool(_FsTool):
             yield root
             return
 
+        floor = self._protected_floor()
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in self._IGNORE_DIRS)
             current = Path(dirpath)
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if d not in self._IGNORE_DIRS and not self._floor_hides(floor, current / d)
+            )
             for filename in sorted(filenames):
-                yield current / filename
+                candidate = current / filename
+                if self._floor_hides(floor, candidate):
+                    continue
+                yield candidate
 
 
 class FindFilesTool(_SearchTool):
@@ -287,8 +295,11 @@ class FindFilesTool(_SearchTool):
         frontier: list[tuple[str, int, _FindFilesEntry]],
         sequence: int,
         budget: _FindFilesBudget,
+        floor: ProtectedFloor | None = None,
     ) -> int:
         budget.checkpoint()
+        if floor is None:
+            floor = self._protected_floor()
         try:
             with os.scandir(directory) as entries:
                 for raw_entry in entries:
@@ -302,6 +313,12 @@ class FindFilesTool(_SearchTool):
                     except OSError:
                         continue
                     if is_dir and raw_entry.name in self._IGNORE_DIRS:
+                        continue
+                    try:
+                        is_link = raw_entry.is_symlink()
+                    except OSError:
+                        is_link = True
+                    if floor.matches(Path(raw_entry.path), write=False, resolve=is_link):
                         continue
 
                     entry = self._entry(Path(raw_entry.path), root, is_dir=is_dir)
@@ -331,8 +348,9 @@ class FindFilesTool(_SearchTool):
         if include_dirs:
             yield self._entry(root, root, is_dir=True)
 
+        floor = self._protected_floor()
         frontier: list[tuple[str, int, _FindFilesEntry]] = []
-        sequence = self._push_directory_entries(root, root, frontier, 0, budget)
+        sequence = self._push_directory_entries(root, root, frontier, 0, budget, floor)
         while frontier:
             budget.checkpoint()
             _, _, entry = heapq.heappop(frontier)
@@ -345,6 +363,7 @@ class FindFilesTool(_SearchTool):
                     frontier,
                     sequence,
                     budget,
+                    floor,
                 )
             else:
                 yield entry

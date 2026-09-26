@@ -32,6 +32,7 @@ from nanobot.providers.image_generation import (
     get_image_gen_provider,
     image_gen_provider_configs,
 )
+from nanobot.security.protected_paths import ProtectedFloor, default_data_dir
 from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.security.workspace_policy import WorkspaceBoundaryError, resolve_allowed_path
 from nanobot.utils.artifacts import (
@@ -164,6 +165,11 @@ class ImageGenerationTool(Tool):
             ) from exc
         except OSError as exc:
             raise ImageGenerationError(f"reference image not found: {value}") from exc
+        floor_reason = ProtectedFloor(
+            data_dir=default_data_dir(), workspace=self.workspace,
+        ).reason(resolved, write=False)
+        if floor_reason is not None:
+            raise ImageGenerationError(floor_reason)
         if not resolved.is_file():
             raise ImageGenerationError(f"reference image is not a file: {value}")
         raw = resolved.read_bytes()

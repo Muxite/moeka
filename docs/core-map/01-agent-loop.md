@@ -159,7 +159,7 @@ Purpose: "Run a tool-capable LLM loop without product-layer concerns" (agent/run
      call (agent/runner.py:901-934).
 - `_execute_tools` (agent/runner.py:1458) partitions calls into batches; with `concurrent_tools` (True for the
   main loop) only tools with `concurrency_safe` run in parallel, everything else runs alone
-  (agent/runner.py:1788-1811).
+  (agent/runner.py:1789-1812).
 - `_run_tool` (agent/runner.py:1530) is the single place where tool errors are shaped, see section 5.
 - Runner never edits the persisted session; `AgentLoop._save_turn` does.
 
@@ -393,9 +393,9 @@ the space left for history, and system messages are never snipped (agent/context
 | Tool raises an exception | `Error: <Type>: <msg>` + hint returned to the model; `on_execute_tool_error` hooks called | agent/runner.py:1595-1615 |
 | Tool returns an error result (`ToolResult.is_error`) | Result text + hint returned as the tool message; event status `error` | agent/runner.py:1617-1633; agent/tools/registry.py:15-16 |
 | Same web_fetch URL / web_search query more than twice in one turn | Blocked: `Error: repeated external lookup blocked...` | agent/runner.py:1543-1554; utils/runtime.py:134-144 |
-| Private/internal URL (SSRF markers) | Non-retryable error with a boundary note; the model is told to stop trying | agent/runner.py:1647-1659,1698-1705 |
-| Workspace boundary violation | Soft error + hint; escalation message after repeated attempts on the same target | agent/runner.py:1662-1669,1728-1745; utils/runtime.py:187-215 |
-| exec deny-pattern or allowlist denial | Returned verbatim (no "try a different approach" hint); after more than 2 denials of the same class the message escalates | agent/runner.py:1707-1726; utils/runtime.py:223-260 |
+| Private/internal URL (SSRF markers) | Non-retryable error with a boundary note; the model is told to stop trying | agent/runner.py:1647-1659,1699-1706 |
+| Workspace boundary violation | Soft error + hint; escalation message after repeated attempts on the same target | agent/runner.py:1662-1670,1729-1746; utils/runtime.py:187-215 |
+| exec deny-pattern or allowlist denial | Returned verbatim (no "try a different approach" hint); after more than 2 denials of the same class the message escalates | agent/runner.py:1708-1727; utils/runtime.py:223-260 |
 | N consecutive iterations where every tool call failed (default 3) | One `[System note] Tool calls have now failed for N iterations in a row. Stop and reassess...` user message injected, only once per run | agent/runner.py:658-680; utils/runtime.py:93-104 |
 | Model returns empty content (no tools) | Retry up to `maxEmptyRetries` (2, so one actual retry since check is `< 2`); then a no-tools "Please provide your response to the user based on the conversation above." call; if still blank, stop_reason `empty_final_response` with the fixed message "I completed the tool steps but couldn't produce a final answer..." | agent/runner.py:699-740,848-865; utils/runtime.py:19-26 |
 | Output cut by max_tokens (`finish_reason == "length"`) | Up to 3 continuation rounds, each asking to continue from the exact endpoint and passing the last 64 chars as an immutable tail | agent/runner.py:742-767; utils/runtime.py:17,36-41,78-90 |
@@ -445,7 +445,7 @@ Cannot (or should not) change from these surfaces:
 - Do not edit `memory/MEMORY.md`, `SOUL.md`, `USER.md` content programmatically as part of self-improvement:
   templates/agent/identity.md:18 says only Dream consolidation may edit profile and long-term memory.
 - Do not set a non-empty `tools.exec.allowPatterns` unless you intend whitelist-only exec (`.agent/gotchas.md`); a
-  leftover value blocks all normal commands and causes long retry loops (agent/runner.py:1707-1726 shows the
+  leftover value blocks all normal commands and causes long retry loops (agent/runner.py:1708-1727 shows the
   throttle).
 - Config `${VAR}` behaviour (verified in config/loader.py:271-287,425-437): a missing variable logs a warning
   naming the dotted config path and leaves the `${VAR}` placeholder in place; it never raises. A placeholder left

@@ -1666,6 +1666,7 @@ class AgentRunner:
         "working_dir could not be resolved",
         "path outside working dir",
         "path traversal detected",
+        "protected internal path",
     )
 
     @classmethod

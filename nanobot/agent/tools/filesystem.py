@@ -20,6 +20,11 @@ from nanobot.agent.tools.schema import (
     tool_parameters_schema,
 )
 from nanobot.config_base import Base
+from nanobot.security.protected_paths import (
+    ProtectedFloor,
+    ProtectedPathError,
+    default_data_dir,
+)
 from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.utils.file_edit_events import FileDiff, FileEditResult, display_file_edit_path
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
@@ -148,6 +153,29 @@ class _FsTool(Tool):
             include_media_dir=include_media_dir,
         )
 
+    def _protected_floor(self) -> ProtectedFloor:
+        """The non-configurable floor (applies whatever the allow settings say)."""
+        return ProtectedFloor(data_dir=default_data_dir(), workspace=self._workspace)
+
+    def _check_floor(self, resolved: Path, *, write: bool) -> Path:
+        reason = self._protected_floor().reason(resolved, write=write)
+        if reason is not None:
+            raise ProtectedPathError(reason)
+        return resolved
+
+    @staticmethod
+    def _floor_hides(floor: ProtectedFloor, entry: Path) -> bool:
+        """True when a traversal must skip *entry* (never list or open it).
+
+        Walks start from a resolved root and do not follow directory symlinks,
+        so an entry's own path is real; only a symlink needs resolving.
+        """
+        try:
+            is_link = entry.is_symlink()
+        except OSError:
+            is_link = True
+        return floor.matches(entry, write=False, resolve=is_link)
+
     def _resolve_read(self, path: str) -> Path:
         plugin_skill_dirs: list[Path] = []
         if self._workspace is not None:
@@ -171,21 +199,23 @@ class _FsTool(Tool):
                     )
             except (OSError, RuntimeError):
                 pass
-        return self._resolve_with_extra(
+        resolved = self._resolve_with_extra(
             path,
             [*self._extra_read_allowed_dirs, *plugin_skill_dirs],
             self._extra_read_allowed_files,
             include_media_dir=True,
             extra_files_require_allowed_root=True,
         )
+        return self._check_floor(resolved, write=False)
 
     def _resolve_write(self, path: str) -> Path:
-        return self._resolve_with_extra(
+        resolved = self._resolve_with_extra(
             path,
             self._extra_write_allowed_dirs,
             self._extra_write_allowed_files,
             include_media_dir=False,
         )
+        return self._check_floor(resolved, write=True)
 
     def _resolve(self, path: str) -> Path:
         return self._resolve_read(path)
@@ -1139,9 +1169,12 @@ class ListDirTool(_FsTool):
             items: list[str] = []
             total = 0
 
+            floor = self._protected_floor()
             if recursive:
                 for item in sorted(dp.rglob("*")):
                     if any(p in self._IGNORE_DIRS for p in item.parts):
+                        continue
+                    if self._floor_hides(floor, item):
                         continue
                     total += 1
                     if len(items) < cap:
@@ -1150,6 +1183,8 @@ class ListDirTool(_FsTool):
             else:
                 for item in sorted(dp.iterdir()):
                     if item.name in self._IGNORE_DIRS:
+                        continue
+                    if self._floor_hides(floor, item):
                         continue
                     total += 1
                     if len(items) < cap:
