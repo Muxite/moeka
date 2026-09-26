@@ -126,6 +126,8 @@ class ApplyPatchTool(_FsTool):
                     if new_text is None:
                         raise _PatchError(f"new_text required for add: {path}")
                     new_text = cast(str, new_text)
+                    if (too_large := self._write_size_error(new_text)) is not None:
+                        return too_large
 
                     pending = writes.get(source)
                     if pending is not None:
@@ -165,6 +167,8 @@ class ApplyPatchTool(_FsTool):
                     if new_text is None:
                         raise _PatchError(f"new_text required for replace: {path}")
                     new_text = cast(str, new_text)
+                    if (too_large := self._write_size_error(new_text)) is not None:
+                        return too_large
 
                     pending = writes.get(source)
                     if pending is not None:

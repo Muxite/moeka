@@ -453,3 +453,53 @@ def test_apply_patch_edits_rolls_back_when_late_operation_fails(tmp_path):
 
     assert "file to update does not exist: missing.txt" in result
     assert first.read_text() == "before\n"
+
+
+def test_apply_patch_rejects_oversize_add_without_writing(tmp_path):
+    tool = ApplyPatchTool(workspace=tmp_path)
+
+    result = asyncio.run(
+        tool.execute(
+            edits=[{"path": "big.txt", "action": "add", "new_text": "a" * (11 * 1024 * 1024)}]
+        )
+    )
+
+    assert "content too large" in result
+    assert not (tmp_path / "big.txt").exists()
+
+
+def test_apply_patch_rejects_oversize_replace_without_modifying(tmp_path):
+    target = tmp_path / "f.txt"
+    target.write_text("hello\n")
+    tool = ApplyPatchTool(workspace=tmp_path)
+
+    result = asyncio.run(
+        tool.execute(
+            edits=[
+                {"path": "ok.txt", "action": "add", "new_text": "fine"},
+                {
+                    "path": "f.txt",
+                    "action": "replace",
+                    "old_text": "hello",
+                    "new_text": "a" * (11 * 1024 * 1024),
+                },
+            ]
+        )
+    )
+
+    assert "content too large" in result
+    assert target.read_text() == "hello\n"
+    assert not (tmp_path / "ok.txt").exists()
+
+
+def test_apply_patch_one_mib_add_works(tmp_path):
+    tool = ApplyPatchTool(workspace=tmp_path)
+
+    result = asyncio.run(
+        tool.execute(
+            edits=[{"path": "one.txt", "action": "add", "new_text": "a" * (1024 * 1024)}]
+        )
+    )
+
+    assert "add one.txt" in result
+    assert (tmp_path / "one.txt").stat().st_size == 1024 * 1024 + 1

@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import fnmatch
 import heapq
 import os
+import pickle
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -519,6 +522,88 @@ class FindFilesTool(_SearchTool):
         return result
 
 
+_GREP_MAX_MATCH_CHARS = 50_000
+_GREP_DEADLINE_CHECK_EVERY = 64
+_GREP_WORKER_STARTUP_S = 60.0
+
+
+class _GrepTimeoutError(Exception):
+    """Raised inside the scan when the cooperative deadline passes."""
+
+
+def _regex_may_backtrack_badly(pattern: str, flags: int) -> bool:
+    """Cheap static screen for patterns prone to catastrophic backtracking.
+
+    Flags a repeat (``*``/``+``/``{n,m>1}``) whose body holds another repeat, or an
+    alternation whose branches do not start with distinct literals (``(a+)+$``,
+    ``(a|aa)*``). Over-approximate on purpose: a flagged pattern only costs a
+    subprocess start, never a wrong answer. Sequential repeats such as ``a*a*a*$``
+    are polynomial rather than exponential and are not flagged.
+    """
+    try:
+        import re._parser as sre_parse  # Python 3.11+
+        parsed = sre_parse.parse(pattern, flags)
+    except Exception:
+        return False  # invalid patterns are reported by re.compile as usual
+
+    repeats = (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT)
+
+    def distinct_literal_starts(alternatives: list[Any]) -> bool:
+        firsts: list[Any] = []
+        for alt in alternatives:
+            if not len(alt) or alt[0][0] is not sre_parse.LITERAL:
+                return False
+            firsts.append(alt[0][1])
+        return len(set(firsts)) == len(firsts)
+
+    def walk(seq: Any, in_repeat: bool) -> bool:
+        for op, av in seq:
+            if op in repeats:
+                _lo, hi, sub = av
+                iterates = hi > 1
+                if iterates and in_repeat:
+                    return True
+                if walk(sub, in_repeat or iterates):
+                    return True
+            elif op is sre_parse.BRANCH:
+                if in_repeat and not distinct_literal_starts(av[1]):
+                    return True
+                if any(walk(alt, in_repeat) for alt in av[1]):
+                    return True
+            elif op is sre_parse.SUBPATTERN:
+                if walk(av[3], in_repeat):
+                    return True
+            elif op in (sre_parse.ASSERT, sre_parse.ASSERT_NOT):
+                if walk(av[1], in_repeat):
+                    return True
+        return False
+
+    return walk(parsed, False)
+
+
+class _BoundedRegex:
+    """Wrap a compiled risky pattern: match at most the first 50 000 chars of a line."""
+
+    def __init__(self, regex: re.Pattern[str]) -> None:
+        self._regex = regex
+
+    def search(self, text: str) -> re.Match[str] | None:
+        return self._regex.search(text[:_GREP_MAX_MATCH_CHARS])
+
+
+def _with_deadline(
+    lines: Iterable[LocatedDocumentLine], deadline: float | None
+) -> Iterator[LocatedDocumentLine]:
+    """Yield ``lines``, raising ``_GrepTimeoutError`` once the deadline has passed."""
+    if deadline is None:
+        yield from lines
+        return
+    for index, line in enumerate(lines):
+        if index % _GREP_DEADLINE_CHECK_EVERY == 0 and time.monotonic() > deadline:
+            raise _GrepTimeoutError
+        yield line
+
+
 class GrepTool(_SearchTool):
     """Search text and document contents using a regex-like pattern."""
     _scopes = {"core", "subagent"}
@@ -527,6 +612,10 @@ class GrepTool(_SearchTool):
     _MAX_RENDERED_LINE_CHARS = 2_000
     _MAX_FILE_BYTES = 2_000_000
     _MAX_EXPLICIT_FILE_BYTES = 100_000_000
+
+    def __init__(self, *args: Any, regex_timeout_s: float = 10.0, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._regex_timeout_s = regex_timeout_s
 
     @property
     def name(self) -> str:
@@ -637,7 +726,7 @@ class GrepTool(_SearchTool):
     @staticmethod
     def _matching_contexts(
         lines: Iterable[LocatedDocumentLine],
-        regex: re.Pattern[str],
+        regex: re.Pattern[str] | _BoundedRegex,
         before: int,
         after: int,
     ) -> Iterable[tuple[list[LocatedDocumentLine], int, int]]:
@@ -706,6 +795,12 @@ class GrepTool(_SearchTool):
             block.append(f"{marker} {coordinate}| {rendered}")
         return "\n".join(block)
 
+    def _timeout_error(self) -> str:
+        return ToolResult.error(
+            f"Error: grep timed out after {self._regex_timeout_s:g}s (pattern too expensive); "
+            "use a simpler pattern or narrow the search path."
+        )
+
     async def execute(
         self,
         pattern: str,
@@ -724,6 +819,86 @@ class GrepTool(_SearchTool):
         offset: int = 0,
         **kwargs: Any,
     ) -> str:
+        scan_kwargs: dict[str, Any] = dict(
+            pattern=pattern, path=path, glob=glob, type=type, pages=pages,
+            case_insensitive=case_insensitive, fixed_strings=fixed_strings,
+            output_mode=output_mode, context_before=context_before,
+            context_after=context_after, max_matches=max_matches, max_results=max_results,
+            head_limit=head_limit, offset=offset,
+        )
+        timeout = self._regex_timeout_s
+        flags = re.IGNORECASE if case_insensitive else 0
+        if not fixed_strings and _regex_may_backtrack_badly(pattern, flags):
+            # ``re`` holds the GIL while matching, so a thread cannot be timed out:
+            # scan such patterns in a child process that can be killed.
+            isolated = await self._execute_isolated(scan_kwargs, timeout)
+            if isolated is not None:
+                return isolated
+        deadline = time.monotonic() + timeout
+        try:
+            return await asyncio.to_thread(self._execute_sync, deadline=deadline, **scan_kwargs)
+        except _GrepTimeoutError:
+            return self._timeout_error()
+
+    async def _execute_isolated(self, scan_kwargs: dict[str, Any], timeout: float) -> str | None:
+        """Run the scan in a killable child process; None means "not possible, use a thread"."""
+        from nanobot.security.workspace_access import current_workspace_scope
+
+        worker_tool = copy.copy(self)
+        worker_tool._explicit_file_states = None
+        try:
+            payload = pickle.dumps((worker_tool, current_workspace_scope(), scan_kwargs))
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "nanobot.agent.tools._grep_worker",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception:
+            return None
+        assert proc.stdin is not None and proc.stdout is not None
+        try:
+            try:
+                proc.stdin.write(payload)
+                await proc.stdin.drain()
+                proc.stdin.close()
+                ready = await asyncio.wait_for(proc.stdout.readline(), _GREP_WORKER_STARTUP_S)
+            except (asyncio.TimeoutError, OSError):
+                ready = b""
+            if ready.strip() != b"READY":
+                return None  # worker could not start: fall back to the thread path
+            try:
+                raw = await asyncio.wait_for(proc.stdout.read(), timeout)
+            except asyncio.TimeoutError:
+                return self._timeout_error()
+            status, text = pickle.loads(raw)
+            if status == "ok":
+                return text
+            return ToolResult.error(f"Error searching files: {text}")
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+
+    def _execute_sync(
+        self,
+        *,
+        pattern: str,
+        path: str = ".",
+        glob: str | None = None,
+        type: str | None = None,
+        pages: str | None = None,
+        case_insensitive: bool = False,
+        fixed_strings: bool = False,
+        output_mode: str = "content",
+        context_before: int = 5,
+        context_after: int = 5,
+        max_matches: int | None = None,
+        max_results: int | None = None,
+        head_limit: int | None = None,
+        offset: int = 0,
+        deadline: float | None = None,
+    ) -> str:
         try:
             target = self._resolve(path or ".")
             if not target.exists():
@@ -734,7 +909,9 @@ class GrepTool(_SearchTool):
             flags = re.IGNORECASE if case_insensitive else 0
             try:
                 needle = re.escape(pattern) if fixed_strings else pattern
-                regex = re.compile(needle, flags)
+                regex: re.Pattern[str] | _BoundedRegex = re.compile(needle, flags)
+                if not fixed_strings and _regex_may_backtrack_badly(pattern, flags):
+                    regex = _BoundedRegex(regex)
             except re.error as e:
                 return ToolResult.error(f"Error: invalid regex pattern: {e}")
 
@@ -764,6 +941,8 @@ class GrepTool(_SearchTool):
             )
 
             for file_path in self._iter_files(target):
+                if deadline is not None and time.monotonic() > deadline:
+                    raise _GrepTimeoutError
                 rel_path = file_path.relative_to(root).as_posix()
                 if glob and not _match_glob(rel_path, file_path.name, glob):
                     continue
@@ -814,6 +993,7 @@ class GrepTool(_SearchTool):
                             for line_no, text in enumerate(content.splitlines(), 1)
                         )
 
+                    source_lines = _with_deadline(source_lines, deadline)
                     file_had_match = False
                     if output_mode == "content":
                         contexts = self._matching_contexts(
@@ -855,7 +1035,7 @@ class GrepTool(_SearchTool):
                                 file_mtimes[display_path] = mtime
                             break
                 except Exception as e:
-                    if not is_document:
+                    if not is_document or isinstance(e, _GrepTimeoutError):
                         raise
                     if target.is_file():
                         if isinstance(e, PdfPageRangeError):
@@ -941,6 +1121,8 @@ class GrepTool(_SearchTool):
             if notes:
                 result += "\n\n" + "\n".join(notes)
             return result
+        except _GrepTimeoutError:
+            raise
         except PermissionError as e:
             return ToolResult.error(f"Error: {e}")
         except Exception as e:

@@ -36,6 +36,9 @@ class FileToolsConfig(Base):
     enable: bool = True  # built-in file tools on by default
 
 
+DEFAULT_MAX_WRITE_BYTES = 10 * 1024 * 1024
+
+
 class _FsTool(Tool):
     """Shared base for filesystem tools — common init and path resolution."""
 
@@ -61,8 +64,10 @@ class _FsTool(Tool):
         restrict_to_workspace: bool | None = None,
         sandbox_restricts_workspace: bool = False,
         extra_read_allowed_files: list[Path] | None = None,
+        max_write_bytes: int = DEFAULT_MAX_WRITE_BYTES,
     ):
         self._workspace = workspace
+        self._max_write_bytes = max_write_bytes
         self._allowed_dir = allowed_dir
         # Legacy alias: extra_allowed_dirs is read-only. Write-capable tools
         # must opt in via extra_write_allowed_dirs.
@@ -84,6 +89,16 @@ class _FsTool(Tool):
         # current async task, which keeps shared tool instances session-safe.
         self._explicit_file_states = file_states
         self._fallback_file_states = FileStates()
+
+    def _write_size_error(self, text: str) -> str | None:
+        """Return a non-retryable error when ``text`` exceeds the write cap (UTF-8 bytes)."""
+        size = len(text.encode("utf-8", errors="surrogatepass"))
+        if size > self._max_write_bytes:
+            return ToolResult.error(
+                f"Error: content too large ({size} bytes, limit {self._max_write_bytes} bytes). "
+                "Split the file or write it in parts."
+            )
+        return None
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
@@ -590,6 +605,8 @@ class WriteFileTool(_FsTool):
                 raise ValueError("Unknown path")
             if content is None:
                 raise ValueError("Unknown content")
+            if (too_large := self._write_size_error(content)) is not None:
+                return too_large
             fp = self._resolve_write(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
@@ -936,6 +953,8 @@ class EditFileTool(_FsTool):
                 raise ValueError("Unknown old_text")
             if new_text is None:
                 raise ValueError("Unknown new_text")
+            if (too_large := self._write_size_error(new_text)) is not None:
+                return too_large
             if occurrence is not None and occurrence < 1:
                 return ToolResult.error("Error: occurrence must be >= 1.")
             if line_hint is not None and line_hint < 1:

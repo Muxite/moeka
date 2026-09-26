@@ -478,3 +478,80 @@ class TestWorkspaceRestriction:
         )
         assert "Patch applied:" in result
         assert target.read_text(encoding="utf-8") == "after\n"
+
+
+# ---------------------------------------------------------------------------
+# Write size cap (max_write_bytes, default 10 MiB)
+# ---------------------------------------------------------------------------
+
+_TEN_MIB = 10 * 1024 * 1024
+
+
+class TestWriteSizeCap:
+
+    @pytest.mark.asyncio
+    async def test_write_file_rejects_over_limit_without_creating(self, tmp_path):
+        tool = WriteFileTool(workspace=tmp_path)
+        target = tmp_path / "big.txt"
+        result = await tool.execute(path=str(target), content="a" * (11 * 1024 * 1024))
+        assert "content too large" in result
+        assert "limit 10485760 bytes" in result
+        assert not target.exists()
+
+    @pytest.mark.asyncio
+    async def test_write_file_over_limit_does_not_modify_existing(self, tmp_path):
+        tool = WriteFileTool(workspace=tmp_path)
+        target = tmp_path / "keep.txt"
+        target.write_text("original", encoding="utf-8")
+        result = await tool.execute(path=str(target), content="a" * (_TEN_MIB + 1))
+        assert "content too large" in result
+        assert target.read_text(encoding="utf-8") == "original"
+
+    @pytest.mark.asyncio
+    async def test_write_file_one_mib_and_exact_limit_work(self, tmp_path):
+        tool = WriteFileTool(workspace=tmp_path)
+        assert "Successfully wrote" in await tool.execute(
+            path=str(tmp_path / "one.txt"), content="a" * (1024 * 1024)
+        )
+        assert "Successfully wrote" in await tool.execute(
+            path=str(tmp_path / "exact.txt"), content="a" * _TEN_MIB
+        )
+        assert (tmp_path / "exact.txt").stat().st_size == _TEN_MIB
+
+    @pytest.mark.asyncio
+    async def test_write_file_measures_utf8_bytes(self, tmp_path):
+        tool = WriteFileTool(workspace=tmp_path, max_write_bytes=10)
+        # 4 characters but 12 UTF-8 bytes
+        result = await tool.execute(path=str(tmp_path / "u.txt"), content="€" * 4)
+        assert "content too large" in result
+        assert not (tmp_path / "u.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_edit_file_rejects_oversize_new_text(self, tmp_path):
+        target = tmp_path / "f.txt"
+        target.write_text("hello world", encoding="utf-8")
+        tool = EditFileTool(workspace=tmp_path)
+        result = await tool.execute(
+            path=str(target), old_text="hello", new_text="a" * (11 * 1024 * 1024)
+        )
+        assert "content too large" in result
+        assert target.read_text(encoding="utf-8") == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_edit_file_rejects_oversize_create(self, tmp_path):
+        tool = EditFileTool(workspace=tmp_path)
+        target = tmp_path / "new.txt"
+        result = await tool.execute(
+            path=str(target), old_text="", new_text="a" * (11 * 1024 * 1024)
+        )
+        assert "content too large" in result
+        assert not target.exists()
+
+    @pytest.mark.asyncio
+    async def test_edit_file_small_edit_still_works(self, tmp_path):
+        target = tmp_path / "f.txt"
+        target.write_text("hello world", encoding="utf-8")
+        tool = EditFileTool(workspace=tmp_path)
+        result = await tool.execute(path=str(target), old_text="hello", new_text="bye")
+        assert "Patch applied" in result
+        assert target.read_text(encoding="utf-8") == "bye world"

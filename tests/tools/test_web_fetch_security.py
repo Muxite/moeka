@@ -307,6 +307,12 @@ async def test_web_fetch_can_skip_jina_and_use_custom_user_agent(monkeypatch):
         async def aread(self):
             raise AssertionError("non-image prefetch body should not be read")
 
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield FakeResponse.text.encode()
+
     class FakeResponse:
         status_code = 200
         url = "https://example.com/page"
@@ -361,8 +367,17 @@ async def test_web_fetch_falls_back_when_readability_dependency_is_missing(monke
         text = "<html><head><title>Test</title></head><body><p>Hello world</p></body></html>"
         headers = {"content-type": "text/html"}
 
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
         def raise_for_status(self):
             return None
+
+        async def aiter_bytes(self):
+            yield self.text.encode()
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
@@ -374,7 +389,7 @@ async def test_web_fetch_falls_back_when_readability_dependency_is_missing(monke
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def get(self, url, headers=None, follow_redirects=False, **kwargs):
+        def stream(self, method, url, headers=None, follow_redirects=False, **kwargs):
             return FakeResponse()
 
     def _missing_readability(*args, **kwargs):
@@ -417,8 +432,11 @@ async def test_web_fetch_blocks_private_redirect_before_readability_request(monk
         headers = {"location": "http://127.0.0.1:8765/metadata"}
         url = "https://attacker.example/start"
 
-        async def aclose(self):
-            return None
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
@@ -431,12 +449,13 @@ async def test_web_fetch_blocks_private_redirect_before_readability_request(monk
             return False
 
         def stream(self, method, url, headers=None, **kwargs):
-            return FakeStreamResponse()
-
-        async def get(self, url, headers=None, **kwargs):
-            requested.append(url)
             if url == "http://127.0.0.1:8765/metadata":
                 raise AssertionError("private redirect target should not be requested")
+            requested.append(url)
+            # First call is the image preflight (plain HTML); the second is the
+            # readability fetch, which is answered with the private redirect.
+            if len(requested) == 1:
+                return FakeStreamResponse()
             return FakeRedirectResponse()
 
     monkeypatch.setattr(web_module.httpx, "AsyncClient", FakeClient)
@@ -453,7 +472,7 @@ async def test_web_fetch_blocks_private_redirect_before_readability_request(monk
     data = json.loads(result)
     assert "error" in data
     assert "redirect blocked" in data["error"].lower()
-    assert requested == ["https://attacker.example/start"]
+    assert requested == ["https://attacker.example/start"] * 2
 
 
 @pytest.mark.asyncio
@@ -541,3 +560,110 @@ async def test_web_fetch_does_not_request_private_redirect_target(monkeypatch):
     assert "error" in data
     assert "redirect blocked" in data["error"].lower()
     assert requested == ["https://attacker.example/start"]
+
+
+# ---------------------------------------------------------------------------
+# Size caps: maxChars clamp and response body byte cap
+# ---------------------------------------------------------------------------
+
+
+def _patch_body_transport(monkeypatch, body: bytes, content_type: str, seen: dict | None = None):
+    """Serve ``body`` from a real httpx MockTransport (streamed reads are real)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": content_type}, content=body)
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    class TransportAsyncClient(real_async_client):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(web_module.httpx, "AsyncClient", TransportAsyncClient)
+    monkeypatch.setattr(web_module, "_pinned_dns_transport", lambda: object())
+
+
+def test_web_fetch_schema_rejects_max_chars_above_limit():
+    tool = WebFetchTool(config=WebFetchConfig(use_jina_reader=False))
+    errors = tool.validate_params({"url": "https://example.com", "maxChars": 10**9})
+    assert errors and any("maxChars" in e for e in errors)
+    assert not tool.validate_params({"url": "https://example.com", "maxChars": 200000})
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_clamps_max_chars_at_runtime(monkeypatch):
+    body = ("word " * 100_000).encode()  # 500 000 chars, under the byte cap
+    _patch_body_transport(monkeypatch, body, "text/plain")
+    tool = WebFetchTool(config=WebFetchConfig(use_jina_reader=False), max_chars=10**9)
+    with patch("nanobot.security.network.socket.getaddrinfo", _fake_resolve_public):
+        via_ctor = json.loads(await tool.execute(url="https://example.com/x"))
+        via_kwarg = json.loads(
+            await WebFetchTool(config=WebFetchConfig(use_jina_reader=False)).execute(
+                url="https://example.com/x", maxChars=10**9
+            )
+        )
+    for data in (via_ctor, via_kwarg):
+        assert data["truncated"] is True
+        assert data["length"] <= 200_000 + 1000  # banner allowance
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_truncates_body_at_byte_cap_and_says_so(monkeypatch):
+    body = b"Z" * (3 * 1024 * 1024)
+    _patch_body_transport(monkeypatch, body, "text/plain")
+    tool = WebFetchTool(
+        config=WebFetchConfig(use_jina_reader=False), max_chars=10**6, max_body_bytes=1024
+    )
+    with patch("nanobot.security.network.socket.getaddrinfo", _fake_resolve_public):
+        data = json.loads(await tool.execute(url="https://example.com/big", maxChars=200000))
+    assert data["truncated"] is True
+    assert "response body truncated" in data["text"]
+    assert data["text"].count("Z") == 1024
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_default_body_cap_is_two_mib(monkeypatch):
+    body = b"y" * (2 * 1024 * 1024 + 500)
+    _patch_body_transport(monkeypatch, body, "text/plain")
+    tool = WebFetchTool(config=WebFetchConfig(use_jina_reader=False))
+    with patch("nanobot.security.network.socket.getaddrinfo", _fake_resolve_public):
+        data = json.loads(await tool.execute(url="https://example.com/big", maxChars=200000))
+    assert data["truncated"] is True
+    assert "response body truncated" in data["text"]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_small_body_unchanged(monkeypatch):
+    _patch_body_transport(monkeypatch, b"hello small body", "text/plain")
+    tool = WebFetchTool(config=WebFetchConfig(use_jina_reader=False))
+    with patch("nanobot.security.network.socket.getaddrinfo", _fake_resolve_public):
+        data = json.loads(await tool.execute(url="https://example.com/s"))
+    assert data["truncated"] is False
+    assert data["extractor"] == "raw"
+    assert data["text"].endswith("hello small body")
+    assert "response body truncated" not in data["text"]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_image_over_text_cap_under_image_cap_still_works(monkeypatch):
+    raw = b"\x89PNG" + b"\x00" * (3 * 1024 * 1024)
+    _patch_body_transport(monkeypatch, raw, "image/png")
+    tool = WebFetchTool(config=WebFetchConfig(use_jina_reader=False))
+    with patch("nanobot.security.network.socket.getaddrinfo", _fake_resolve_public):
+        result = await tool.execute(url="https://example.com/pic.png")
+    assert isinstance(result, list)
+    assert result[0]["type"] == "image_url"
+    assert result[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_image_over_image_cap_is_an_error(monkeypatch):
+    raw = b"\x89PNG" + b"\x00" * 4096
+    _patch_body_transport(monkeypatch, raw, "image/png")
+    tool = WebFetchTool(config=WebFetchConfig(use_jina_reader=False), max_image_bytes=1024)
+    with patch("nanobot.security.network.socket.getaddrinfo", _fake_resolve_public):
+        result = await tool.execute(url="https://example.com/pic.png")
+    assert isinstance(result, str)
+    assert "image too large" in json.loads(result)["error"]

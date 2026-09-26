@@ -1096,6 +1096,33 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: {e}")
 
 
+_MAX_FETCH_CHARS = 200_000
+_MAX_BODY_BYTES = 2 * 1024 * 1024
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+async def _read_capped(response: httpx.Response, cap: int) -> tuple[bytes, bool]:
+    """Stream ``response`` (decoded bytes) and stop once ``cap`` bytes were read.
+
+    Returns ``(body, capped)``; ``capped`` is True when more data was available
+    than the cap allowed (the body is then cut to exactly ``cap`` bytes).
+    """
+    buf = bytearray()
+    async for chunk in response.aiter_bytes():
+        buf += chunk
+        if len(buf) > cap:
+            return bytes(buf[:cap]), True
+    return bytes(buf), False
+
+
+def _decode_body(response: httpx.Response, body: bytes) -> str:
+    encoding = getattr(response, "charset_encoding", None) or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
 @tool_parameters(
     tool_parameters_schema(
         url=StringSchema("URL to fetch"),
@@ -1104,7 +1131,7 @@ class WebSearchTool(Tool):
             "enum": ["markdown", "text"],
             "default": "markdown",
         },
-        maxChars=IntegerSchema(minimum=100),
+        maxChars=IntegerSchema(minimum=100, maximum=_MAX_FETCH_CHARS),
         required=["url"],
     )
 )
@@ -1115,7 +1142,7 @@ class WebFetchTool(Tool):
     name = "web_fetch"  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
     description = (  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
         "Fetch a URL and extract readable content (HTML → markdown/text). "
-        "Output is capped at maxChars (default 50 000). "
+        "Output is capped at maxChars (default 50 000, max 200 000; bodies over 2 MiB are cut). "
         "Works for most web pages and docs; may fail on login-walled or JS-heavy sites."
     )
 
@@ -1137,11 +1164,21 @@ class WebFetchTool(Tool):
             user_agent=ctx.config.web.user_agent,
         )
 
-    def __init__(self, config: WebFetchConfig | None = None, proxy: str | None = None, user_agent: str | None = None, max_chars: int = 50000):
+    def __init__(
+        self,
+        config: WebFetchConfig | None = None,
+        proxy: str | None = None,
+        user_agent: str | None = None,
+        max_chars: int = 50000,
+        max_body_bytes: int = _MAX_BODY_BYTES,
+        max_image_bytes: int = _MAX_IMAGE_BYTES,
+    ):
         self.config = config if config is not None else WebFetchConfig()
         self.proxy = proxy
         self.user_agent = user_agent or _DEFAULT_USER_AGENT
-        self.max_chars = max_chars
+        self.max_chars = min(max_chars, _MAX_FETCH_CHARS)
+        self.max_body_bytes = max_body_bytes
+        self.max_image_bytes = max_image_bytes
 
     @property
     def read_only(self) -> bool:
@@ -1156,7 +1193,9 @@ class WebFetchTool(Tool):
     ) -> Any:  # pyright: ignore[reportIncompatibleMethodOverride]
         url = url.strip(" \t\r\n`\"'")
         extract_mode = kwargs.pop("extractMode", extract_mode)
-        max_chars = cast(int, kwargs.pop("maxChars", max_chars) or self.max_chars)
+        max_chars = min(
+            cast(int, kwargs.pop("maxChars", max_chars) or self.max_chars), _MAX_FETCH_CHARS
+        )
         is_valid, error_msg = _validate_url_safe(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
@@ -1186,7 +1225,9 @@ class WebFetchTool(Tool):
                     ctype = r.headers.get("content-type", "")
                     if ctype.startswith("image/"):
                         r.raise_for_status()
-                        raw = await r.aread()
+                        raw, capped = await _read_capped(r, self.max_image_bytes)
+                        if capped:
+                            return self._image_too_large(url)
                         return build_image_content_blocks(raw, ctype, url, f"(Image fetched from: {url})")
                 finally:
                     if stream is not None:
@@ -1207,6 +1248,12 @@ class WebFetchTool(Tool):
         if result is None:
             result = await self._fetch_readability(url, extract_mode, max_chars)
         return result
+
+    def _image_too_large(self, url: str) -> str:
+        return json.dumps(
+            {"error": f"image too large (over {self.max_image_bytes} bytes)", "url": url},
+            ensure_ascii=False,
+        )
 
     async def _fetch_jina(self, url: str, max_chars: int) -> str | None:
         """Try fetching via Jina Reader API. Returns None on failure."""
@@ -1264,7 +1311,7 @@ class WebFetchTool(Tool):
             async with httpx.AsyncClient(
                 **_fetch_client_kwargs(self.proxy, 30.0),
             ) as client:
-                r, redirect_error = await _get_with_safe_redirects(
+                r, stream, redirect_error, _ = await _stream_with_safe_redirects(
                     client,
                     url,
                     headers={"User-Agent": self.user_agent},
@@ -1273,17 +1320,33 @@ class WebFetchTool(Tool):
                     return json.dumps({"error": redirect_error, "url": url}, ensure_ascii=False)
                 if r is None:
                     return json.dumps({"error": "Fetch failed", "url": url}, ensure_ascii=False)
-                r.raise_for_status()
-
-            ctype = r.headers.get("content-type", "")
-            if ctype.startswith("image/"):
-                return build_image_content_blocks(r.content, ctype, url, f"(Image fetched from: {url})")
-
-            if "application/json" in ctype:
-                text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
-            elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 try:
-                    text = self._extract_readable_html(r.text, extract_mode)
+                    r.raise_for_status()
+                    ctype = r.headers.get("content-type", "")
+                    is_image = ctype.startswith("image/")
+                    body, body_capped = await _read_capped(
+                        r, self.max_image_bytes if is_image else self.max_body_bytes
+                    )
+                finally:
+                    if stream is not None:
+                        await stream.__aexit__(None, None, None)
+
+            if is_image:
+                if body_capped:
+                    return self._image_too_large(url)
+                return build_image_content_blocks(body, ctype, url, f"(Image fetched from: {url})")
+
+            body_text = _decode_body(r, body)
+            if "application/json" in ctype:
+                try:
+                    text, extractor = json.dumps(json.loads(body_text), indent=2, ensure_ascii=False), "json"
+                except ValueError:
+                    if not body_capped:
+                        raise
+                    text, extractor = body_text, "raw"  # JSON cut mid-document
+            elif "text/html" in ctype or body_text[:256].lower().startswith(("<!doctype", "<html")):
+                try:
+                    text = self._extract_readable_html(body_text, extract_mode)
                     extractor = "readability"
                 except Exception as e:
                     logger.warning(
@@ -1291,13 +1354,16 @@ class WebFetchTool(Tool):
                         _redact_url_for_log(url),
                         type(e).__name__,
                     )
-                    text, extractor = _normalize(_strip_tags(r.text)), "html"
+                    text, extractor = _normalize(_strip_tags(body_text)), "html"
             else:
-                text, extractor = r.text, "raw"
+                text, extractor = body_text, "raw"
 
             truncated = len(text) > max_chars
             if truncated:
                 text = text[:max_chars]
+            if body_capped:
+                truncated = True
+                text += f"\n\n[response body truncated at {self.max_body_bytes} bytes]"
             text = f"{_UNTRUSTED_BANNER}\n\n{text}"
 
             return json.dumps({

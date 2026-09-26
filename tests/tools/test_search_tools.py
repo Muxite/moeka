@@ -824,3 +824,70 @@ def test_subagent_prompt_respects_disabled_skills(tmp_path: Path) -> None:
 
     assert "alpha" not in prompt
     assert "beta" in prompt
+
+
+@pytest.mark.asyncio
+async def test_grep_catastrophic_regex_times_out_and_loop_stays_responsive(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "evil.txt").write_text("a" * 40 + "b\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=0.5)
+
+    ticks = 0
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    started = time.monotonic()
+    result = await asyncio.wait_for(tool.execute(pattern=r"(a+)+$"), timeout=30)
+    elapsed = time.monotonic() - started
+    ticks_at_end = ticks
+    stop = True
+    await task
+
+    assert result.startswith("Error: grep timed out after 0.5s (pattern too expensive)")
+    assert "use a simpler pattern or narrow the search path." in result
+    assert elapsed < 15
+    assert ticks_at_end > 10  # the loop kept running while the regex was stuck
+
+
+@pytest.mark.asyncio
+async def test_grep_default_timeout_message_says_10s(tmp_path: Path) -> None:
+    (tmp_path / "evil.txt").write_text("a" * 40 + "b\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=0.3)
+    result = await tool.execute(pattern=r"(a+)+$")
+    assert "timed out after 0.3s" in result
+    assert GrepTool(workspace=tmp_path)._regex_timeout_s == 10.0
+
+
+@pytest.mark.asyncio
+async def test_grep_cooperative_deadline_stops_scan_between_lines(tmp_path: Path) -> None:
+    for index in range(30):
+        (tmp_path / f"many{index}.txt").write_text("nothing here\n" * 5_000, encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, regex_timeout_s=0.001)
+    result = await tool.execute(pattern=r"zzz-not-present", context_before=0, context_after=0)
+    assert result.startswith("Error: grep timed out after 0.001s")
+
+
+@pytest.mark.asyncio
+async def test_grep_risky_looking_patterns_still_return_correct_results(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("foo bar\nbaz\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path)
+    result = await tool.execute(pattern=r"(foo|baz)+", output_mode="files_with_matches")
+    assert result.strip() == "a.txt"
+    result = await tool.execute(pattern=r"(\d+,)*x", output_mode="files_with_matches")
+    assert "No matches" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_plain_patterns_still_match_beyond_50k_chars(tmp_path: Path) -> None:
+    (tmp_path / "min.txt").write_text("a" * 60_000 + "NEEDLE\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path)
+    result = await tool.execute(pattern="NEEDLE", output_mode="files_with_matches")
+    assert result.strip() == "min.txt"
