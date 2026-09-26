@@ -133,3 +133,59 @@ async def test_subagent_hook_arguments_redacted():
     joined = "\n".join(text for _, text in records)
     assert "sk-" not in joined
     assert "Subagent [t1] executing" in joined
+
+
+class TestRedactBounded:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "key" * 30000,
+            "a" + "key" * 30000,
+            "token: " + " " * 100000,
+            "Bearer " + "x" * 100000,
+            "key=" + "a" * 100000,
+        ],
+        ids=["keys", "a-keys", "token-spaces", "bearer-x", "key-eq-a"],
+    )
+    def test_pathological_input_is_fast(self, text):
+        import time
+
+        start = time.perf_counter()
+        redact_text(text)
+        assert time.perf_counter() - start < 1.0
+
+    def test_secret_at_start_of_long_string_still_masked(self):
+        out = redact_text("api_key=sk-abcdefghijklmnop " + "a" * 100000)
+        assert "sk-abcdefghijklmnop" not in out
+        assert len(out) < 30000
+
+
+@pytest.mark.asyncio
+async def test_subagent_hook_redaction_lazy_when_debug_disabled(monkeypatch):
+    from nanobot.agent import subagent as subagent_mod
+    from nanobot.agent.hook import AgentHookContext
+
+    calls = {"n": 0}
+    real = subagent_mod.redact_value
+
+    def counting(value):
+        calls["n"] += 1
+        return real(value)
+
+    monkeypatch.setattr(subagent_mod, "redact_value", counting)
+    hook = subagent_mod._SubagentHook("t2")
+    call = SimpleNamespace(name="exec", arguments={"api_key": FAKE_KEY})
+    ctx = AgentHookContext(iteration=0, messages=[], tool_calls=[call])  # type: ignore[list-item]
+
+    loguru_logger.remove()  # drop all sinks; no handler accepts DEBUG
+    try:
+        await hook.before_execute_tools(ctx)
+        assert calls["n"] == 0
+        records: list[str] = []
+        hid = loguru_logger.add(lambda m: records.append(str(m)), level="DEBUG")
+        await hook.before_execute_tools(ctx)
+        loguru_logger.remove(hid)
+        assert calls["n"] == 1
+        assert FAKE_KEY not in "".join(records)
+    finally:
+        loguru_logger.add(lambda m: None, level="DEBUG")

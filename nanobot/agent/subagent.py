@@ -75,10 +75,12 @@ class _SubagentHook(AgentHook):
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         for tool_call in context.tool_calls:
-            args_str = json.dumps(redact_value(tool_call.arguments), ensure_ascii=False)
-            logger.debug(
+            # Lazy: redaction only runs if a sink will actually emit the record.
+            logger.opt(lazy=True).debug(
                 "Subagent [{}] executing: {} with arguments: {}",
-                self._task_id, tool_call.name, args_str,
+                lambda: self._task_id,
+                lambda: tool_call.name,
+                lambda: json.dumps(redact_value(tool_call.arguments), ensure_ascii=False),
             )
 
     async def after_iteration(self, context: AgentHookContext) -> None:
