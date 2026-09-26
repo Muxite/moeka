@@ -208,14 +208,15 @@ class ExecTool(Tool):
         r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",
     ]
 
-    # User-tunable destructive-system guards. Moeka is a server-management
-    # agent — rm -rf, dd, mkfs, shutdown are legitimate operations on a
-    # homelab. The default is now empty; pass deny_patterns=[...] in config
-    # to opt back in. The fork-bomb pattern stays as a near-universal foot-
-    # gun guard.
-    _DEFAULT_DENY_PATTERNS: list[str] = [
-        r":\(\)\s*\{.*\};\s*:",          # fork bomb
-    ]
+    # Fork bomb: a near-universal foot-gun that is never a legitimate command.
+    _FORK_BOMB_PATTERN = r":\(\)\s*\{.*\};\s*:"
+
+    # The non-removable floor: always applied, never exemptible by
+    # allow_patterns, independent of the deny_patterns passed by config or the
+    # constructor. Moeka is a server-management agent, so rm -rf, dd, mkfs and
+    # shutdown are deliberately NOT here; user deny_patterns can only ADD to
+    # the floor, they can never replace or shrink it.
+    _FLOOR_DENY_PATTERNS: list[str] = _INTERNAL_DENY_PATTERNS + [_FORK_BOMB_PATTERN]
 
     def __init__(
         self,
@@ -239,11 +240,8 @@ class ExecTool(Tool):
         self.working_dir = working_dir
         self.sandbox = sandbox
         self.allow_sudo = allow_sudo
-        # User-tunable layer: caller-supplied or default destructive-system
-        # patterns. The internal-state guards are kept separate and always
-        # applied below.
-        user_layer = deny_patterns if deny_patterns is not None else self._DEFAULT_DENY_PATTERNS
-        self.deny_patterns = list(self._INTERNAL_DENY_PATTERNS) + list(user_layer)
+        # Floor first, then caller-supplied patterns: patterns only add.
+        self.deny_patterns = list(self._FLOOR_DENY_PATTERNS) + list(deny_patterns or [])
         self.allow_patterns = allow_patterns or []
         if self.allow_patterns:
             # Non-empty allow_patterns flips exec into whitelist-only mode —
@@ -298,8 +296,8 @@ class ExecTool(Tool):
             "Destructive operations (rm -rf, dd, mkfs, shutdown) are permitted by default — "
             "this is a server-management agent. "
             "sudo is gated by tools.exec.allow_sudo in config. "
-            "Writes to nanobot internal state files (history.jsonl, .dream_cursor) "
-            "are always blocked. "
+            "A fork bomb and writes to nanobot internal state files "
+            "(history.jsonl, .dream_cursor) are always blocked. "
             "Use this for tests, builds, package commands, git commands, and "
             "other process execution. Prefer read_file/find_files/grep for "
             "inspection and apply_patch/write_file/edit_file for file changes "
@@ -878,6 +876,21 @@ class ExecTool(Tool):
         cmd = command.strip()
         lower = cmd.lower()
 
+        # The floor (fork bomb, internal state files) is checked first and is
+        # never exempted by allow_patterns.
+        for pattern in self._FLOOR_DENY_PATTERNS:
+            if re.search(pattern, lower):
+                logger.warning("exec: command blocked by floor pattern {!r}: {!r}", pattern, cmd[:120])
+                what = (
+                    "is a fork bomb"
+                    if pattern == self._FORK_BOMB_PATTERN
+                    else "would write to a nanobot internal state file"
+                )
+                return ToolResult.error(
+                    "Error: Command blocked by safety guard (dangerous pattern detected) — "
+                    f"{what}. Matched {pattern!r}. This guard is not configurable."
+                )
+
         # allow_patterns take priority over deny_patterns so that users can
         # exempt specific commands (e.g. "rm -rf" inside a build directory)
         # from the hardcoded deny list via configuration. A chained command is
@@ -891,12 +904,6 @@ class ExecTool(Tool):
             for pattern in self.deny_patterns:
                 if re.search(pattern, lower):
                     logger.warning("exec: command blocked by deny pattern {!r}: {!r}", pattern, cmd[:120])
-                    if pattern in self._INTERNAL_DENY_PATTERNS:
-                        return ToolResult.error(
-                            "Error: Command blocked by safety guard (dangerous pattern detected) — "
-                            f"would write to a nanobot internal state file. "
-                            f"Matched {pattern!r}. This guard is not configurable."
-                        )
                     return ToolResult.error(
                         "Error: Command blocked by safety guard (dangerous pattern detected). "
                         f"Matched {pattern!r}. "

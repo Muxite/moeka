@@ -30,13 +30,13 @@ def test_allow_patterns_must_match_to_bypass():
     assert "allowlist" in result.lower()
 
 
-def test_extra_deny_patterns_from_config():
-    """User deny patterns replace the default layer; internal guards persist."""
+def test_extra_deny_patterns_add_to_the_floor():
+    """User deny patterns only ADD; the fork-bomb and internal-state floor persists."""
     tool = ExecTool(deny_patterns=[r"\bping\b"])
     # ping is blocked by the user deny layer
     assert tool._guard_command("ping example.com", "/tmp") is not None
-    # replacing the user layer drops the default fork-bomb guard
-    assert tool._guard_command(":(){ :|:& };:", "/tmp") is None
+    # the fork bomb is part of the floor, so extra patterns do not drop it
+    assert tool._guard_command(":(){ :|:& };:", "/tmp") is not None
     # non-tunable internal guards (session history) still apply
     assert tool._guard_command("echo x > history.jsonl", "/tmp") is not None
 

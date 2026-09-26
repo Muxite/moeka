@@ -101,5 +101,7 @@ def test_exec_description_is_truthful_about_followup_and_guards() -> None:
     assert "exec_session" in description
     assert "write_stdin" not in description
     assert "Hard-blocked" not in description
-    assert "fork-bomb" not in description
-    assert "fork bomb" not in description.lower()
+    # the floor is real again: fork bomb + internal state writes always blocked
+    assert "fork bomb" in description.lower()
+    assert "history.jsonl" in description
+    assert "always blocked" in description

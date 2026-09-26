@@ -108,11 +108,14 @@ Other sections:
   `vec_collections` (config/schema.py:231) has no consumer (grep): **unverified/unused**.
 
 Gotchas read from code (not runtime-tested):
-- `ExecTool.create` passes `cfg.deny_patterns` (default `[]`), which replaces the class default list, so the
-  fork-bomb guard is NOT applied to a config-built exec tool; only the internal history.jsonl/.dream_cursor guards
-  remain (agent/tools/shell.py:194,245-246).
+- `ExecTool.create` passes `cfg.deny_patterns` (default `[]`, agent/tools/shell.py:105,194); `__init__` builds
+  `self.deny_patterns = _FLOOR_DENY_PATTERNS + deny_patterns` (agent/tools/shell.py:244), so config/constructor
+  patterns only ADD to the always-on floor (fork bomb + history.jsonl/.dream_cursor guards, shell.py:203-219),
+  which `_guard_command` checks before the allow-pattern exemption (shell.py:879-892) so `allowPatterns` cannot
+  exempt it. Pinned by tests/tools/test_exec_security.py (`test_fork_bomb_*`) and
+  tests/tools/test_exec_allow_patterns.py::test_extra_deny_patterns_add_to_the_floor.
 - Non-empty `tools.exec.allowPatterns` = whitelist-only exec (agent/tools/shell.py:248-256).
-- sudo is blocked unless `tools.exec.allowSudo` (agent/tools/shell.py:504-516).
+- sudo is blocked unless `tools.exec.allowSudo` (agent/tools/shell.py:502-514).
 
 ## 3. Provider layer
 

@@ -13,10 +13,12 @@ that pins a `core-slim` commit as a submodule), by `MoekaCore`, or by the `nanob
 
 Moeka-specific deviations from upstream nanobot that still exist in the core:
 
-- **Permissive shell sandbox** — `nanobot/agent/tools/shell.py` always applies only `_INTERNAL_DENY_PATTERNS`
-  (writes to `history.jsonl` / `.dream_cursor`). `rm -rf`, `dd`, `mkfs`, `shutdown` are not blocked. The class
-  default `_DEFAULT_DENY_PATTERNS` (a fork-bomb guard) applies only when no deny list is passed; `ExecTool.create`
-  passes `tools.exec.denyPatterns` (default `[]`), so config-built exec tools have no fork-bomb guard.
+- **Permissive shell sandbox** — `nanobot/agent/tools/shell.py` always applies a non-removable floor,
+  `_FLOOR_DENY_PATTERNS` = `_INTERNAL_DENY_PATTERNS` (writes to `history.jsonl` / `.dream_cursor`) plus the fork
+  bomb. The floor is checked before the allow-pattern exemption, so `allowPatterns` cannot exempt it, and
+  `tools.exec.denyPatterns` (config or constructor, `[]`/None included) can only ADD to it. `rm -rf`, `dd`,
+  `mkfs`, `shutdown` are not blocked. Known gap: `exec_session` calls `ExecTool._spawn` directly and never
+  `_guard_command`, so a fork bomb can still be fed to a running shell through `exec_session` stdin.
   `allow_sudo` defaults to False and the denial message explains the opt-in.
 - **SQLite session store outside the workspace** — `nanobot/session/sqlite_store.py`: one `sessions.db` (WAL) at
   `<workspace parent>/<workspace name>-sessions/<workspace-id>/sessions.db` (e.g. `~/.nanobot-sessions/<id>/`),

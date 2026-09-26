@@ -759,3 +759,52 @@ def test_exec_blocks_double_slash_absolute_paths(tmp_path, path):
 
     assert result is not None
     assert "path outside working dir" in result
+
+
+# --- fork-bomb floor: non-removable, non-exemptible, user patterns only add ---
+
+FORK_BOMB = ":(){ :|:& };:"
+
+
+def _floor_ctx(tmp_path, exec_cfg):
+    from nanobot.agent.tools.context import ToolContext
+    from nanobot.config.schema import ToolsConfig
+
+    return ToolContext(config=ToolsConfig(exec=exec_cfg), workspace=str(tmp_path))
+
+
+def test_fork_bomb_blocked_with_empty_deny_patterns():
+    tool = ExecTool(deny_patterns=[])
+    assert "blocked by safety guard" in tool._guard_command(FORK_BOMB, "/tmp")
+
+
+def test_fork_bomb_blocked_with_none_deny_patterns():
+    tool = ExecTool(deny_patterns=None)
+    assert "blocked by safety guard" in tool._guard_command(FORK_BOMB, "/tmp")
+
+
+def test_fork_bomb_blocked_for_config_built_tool(tmp_path):
+    from nanobot.agent.tools.shell import ExecToolConfig
+
+    tool = ExecTool.create(_floor_ctx(tmp_path, ExecToolConfig()))
+    assert "blocked by safety guard" in tool._guard_command(FORK_BOMB, "/tmp")
+
+
+def test_default_config_tool_does_not_over_block(tmp_path):
+    from nanobot.agent.tools.shell import ExecToolConfig
+
+    tool = ExecTool.create(_floor_ctx(tmp_path, ExecToolConfig()))
+    assert tool._guard_command("echo ok", "/tmp") is None
+
+
+def test_fork_bomb_not_exemptible_by_allow_patterns():
+    tool = ExecTool(allow_patterns=[r".*"])
+    assert "blocked by safety guard" in tool._guard_command(FORK_BOMB, "/tmp")
+    # the internal-state floor is likewise never exemptible
+    assert "blocked by safety guard" in tool._guard_command("echo x > history.jsonl", "/tmp")
+
+
+def test_user_deny_patterns_add_to_floor():
+    tool = ExecTool(deny_patterns=[r"\brm\s+-rf\b"])
+    assert "blocked by safety guard" in tool._guard_command(FORK_BOMB, "/tmp")
+    assert "blocked by safety guard" in tool._guard_command("rm -rf /tmp/x", "/tmp")
