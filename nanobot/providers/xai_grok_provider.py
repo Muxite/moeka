@@ -94,6 +94,7 @@ class XAIGrokProvider(LLMProvider):
         catalog = await asyncio.to_thread(
             get_xai_grok_model_catalog,
             self.proxy,
+            data_dir=self._data_dir,
         )
         if catalog.message:
             logger.warning(
@@ -659,19 +660,41 @@ def _should_retry_status(
     return status_code in LLMProvider._RETRYABLE_STATUS_CODES or status_code >= 500  # pyright: ignore[reportPrivateUsage]
 
 
-def get_xai_grok_model_catalog(proxy: str | None = None) -> OAuthModelCatalogSnapshot:
-    token = get_xai_oauth_login_status()
+def get_xai_grok_model_catalog(
+    proxy: str | None = None,
+    *,
+    data_dir: Path | None = None,
+) -> OAuthModelCatalogSnapshot:
+    """Model catalog for the xAI account stored under *data_dir* (``None`` = legacy)."""
+    if data_dir is None:
+        token = get_xai_oauth_login_status()
+        storage_path = get_xai_oauth_storage_path()
+        fetch = None
+    else:
+        token = get_xai_oauth_login_status(data_dir)
+        storage_path = get_xai_oauth_storage_path(data_dir)
+
+        def fetch(p: str | None) -> tuple[ProviderModelSpec, ...]:
+            return _fetch_xai_grok_models(p, data_dir=data_dir)
+
     account_key = _catalog_account_key(getattr(token, "account_id", None))
-    cache_key = f"{get_xai_oauth_storage_path()}\0{account_key}\0{proxy or ''}"
-    return _XAI_GROK_MODEL_CATALOG.get(cache_key=cache_key, proxy=proxy)
+    cache_key = f"{storage_path}\0{account_key}\0{proxy or ''}"
+    return _XAI_GROK_MODEL_CATALOG.get(cache_key=cache_key, proxy=proxy, fetch=fetch)
 
 
 def invalidate_xai_grok_model_catalog() -> None:
     _XAI_GROK_MODEL_CATALOG.invalidate()
 
 
-def _fetch_xai_grok_models(proxy: str | None) -> tuple[ProviderModelSpec, ...]:
-    token = get_xai_oauth_token(proxy=proxy)
+def _fetch_xai_grok_models(
+    proxy: str | None,
+    *,
+    data_dir: Path | None = None,
+) -> tuple[ProviderModelSpec, ...]:
+    if data_dir is None:
+        token = get_xai_oauth_token(proxy=proxy)
+    else:
+        token = get_xai_oauth_token(proxy=proxy, data_dir=data_dir)
     client_kwargs: dict[str, Any] = {"timeout": 10.0, "follow_redirects": False}
     if proxy:
         client_kwargs.update(proxy=proxy, trust_env=False)

@@ -101,3 +101,31 @@ async def test_image_generation_reload_reaches_agent_runtime_control(
     assert result["ok"] is True
     assert result["requires_restart"] is False
     assert registry.has("generate_image")
+
+
+@pytest.mark.asyncio
+async def test_image_generation_reload_keeps_host_paths_and_strict_floor(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hot reload must not drop the host env's media root / strict floor (Task 3 carry-forward)."""
+    from dataclasses import replace
+
+    from tests._kernel_env import credential_env
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    config = load_config()
+    config.tools.image_generation.enabled = True
+    save_config(config)
+
+    env = replace(credential_env(root=tmp_path / "host"), strict=True)
+    state = _runtime_state(tmp_path)
+    state.env = env
+    registry = ToolRegistry()
+    await reload_image_generation_tool(state, registry)
+
+    tool = registry.get("generate_image")
+    assert isinstance(tool, ImageGenerationTool)
+    assert tool._paths is env.paths
+    assert tool._legacy_floor is False

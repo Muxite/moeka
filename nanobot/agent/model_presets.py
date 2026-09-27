@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from nanobot.config.schema import Config, ModelPresetConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot, build_provider_snapshot
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
 
 PresetSnapshotLoader = Callable[[str], ProviderSnapshot]
 PresetCatalogLoader = Callable[[], Mapping[str, ModelPresetConfig]]
@@ -42,10 +46,12 @@ def load_model_preset_catalog(
 def make_preset_snapshot_loader(
     config: Config,
     provider_snapshot_loader: Callable[..., ProviderSnapshot] | None,
+    env: CoreEnvironment | None = None,
 ) -> PresetSnapshotLoader:
+    """Runtime preset switches rebuild providers with the host env (credentials, data_dir)."""
     if provider_snapshot_loader is not None:
         return lambda name: provider_snapshot_loader(preset_name=name)
-    return lambda name: build_provider_snapshot(config, preset_name=name)
+    return lambda name: build_provider_snapshot(config, preset_name=name, env=env)
 
 
 def build_static_preset_snapshot(

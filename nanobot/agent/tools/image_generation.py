@@ -267,11 +267,15 @@ async def reload_image_generation_tool(state: Any, registry: ToolRegistry) -> di
             "error": str(exc),
         }
 
+    # Keep the host env's media root and strict floor across a hot reload.
+    env = getattr(state, "env", None)
     next_tool = (
         ImageGenerationTool(  # pyright: ignore[reportAbstractUsage]
             workspace=state.workspace,
             config=tool_config,
             provider_configs=provider_configs,
+            paths=env.paths if env is not None else None,
+            legacy_floor=env is None or not env.strict,
         )
         if tool_config.enabled
         else None

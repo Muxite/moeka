@@ -5,12 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.config.schema import Config, ModelPresetConfig
 from nanobot.providers.factory import ProviderSnapshot, build_provider_snapshot
 from nanobot.utils.llm_runtime import LLMRuntime, runtime_from_provider_snapshot
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
 
 
 class ModelRuntimeResolver:
@@ -30,8 +33,11 @@ class ModelRuntimeResolver:
         configured_default_preset: str | None = None,
         provider_snapshot_loader: Callable[[], ProviderSnapshot] | None = None,
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
+        env: CoreEnvironment | None = None,
     ) -> None:
         self._runtime = initial_runtime
+        # Host env for per-run model overrides (credentials + data_dir).
+        self._env = env
         self._model_presets = dict(model_presets or {})
         self._preset_catalog_loader = preset_catalog_loader
         self._preset_catalog_refresh_required = False
@@ -242,4 +248,4 @@ class ModelRuntimeResolver:
 
         base = config.resolve_preset(self.model_preset)
         preset = base.model_copy(update={"model": model, "provider": "auto"})
-        return self.resolve_snapshot(build_provider_snapshot(config, preset=preset))
+        return self.resolve_snapshot(build_provider_snapshot(config, preset=preset, env=self._env))

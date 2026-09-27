@@ -71,8 +71,18 @@ class OAuthModelCatalog:
         self._inflight: set[str] = set()
         self._generation = 0
 
-    def get(self, *, cache_key: str, proxy: str | None = None) -> OAuthModelCatalogSnapshot:
-        """Return a fresh catalog, sharing concurrent work and retaining a fallback."""
+    def get(
+        self,
+        *,
+        cache_key: str,
+        proxy: str | None = None,
+        fetch: Callable[[str | None], Sequence[ProviderModelSpec]] | None = None,
+    ) -> OAuthModelCatalogSnapshot:
+        """Return a fresh catalog, sharing concurrent work and retaining a fallback.
+
+        *fetch* overrides the default fetcher for this call (e.g. one bound to a
+        host data dir); *cache_key* must then identify that variant.
+        """
         with self._condition:
             generation = self._generation
             cached = self._cached_result(cache_key)
@@ -88,7 +98,7 @@ class OAuthModelCatalog:
             self._inflight.add(cache_key)
 
         try:
-            models = tuple(self._fetch(proxy))
+            models = tuple((fetch or self._fetch)(proxy))
             if not models:
                 raise ValueError("provider returned an empty model catalog")
         except Exception as exc:

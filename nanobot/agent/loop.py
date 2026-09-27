@@ -355,6 +355,7 @@ class AgentLoop:
             configured_default_preset=model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
+            env=env,
         )
         self.dream_model_preset = dream_model_preset
         self.max_tool_result_chars = (
@@ -542,9 +543,7 @@ class AgentLoop:
                 sessions_root=sessions_root,
                 store=_default_store,
             )
-        provider = extra.pop("provider", None) or make_provider(
-            config, data_dir=env.paths.data_dir,
-        )
+        provider = extra.pop("provider", None) or make_provider(config, env=env)
         resolved = config.resolve_preset()
         model = extra.pop("model", None) or resolved.model
         context_window_tokens = extra.pop("context_window_tokens", None) or resolved.context_window_tokens
@@ -552,6 +551,7 @@ class AgentLoop:
         preset_snapshot_loader = extra.pop("preset_snapshot_loader", None) or preset_helpers.make_preset_snapshot_loader(
             config,
             provider_snapshot_loader,
+            env,
         )
         return cls(
             bus=bus,
