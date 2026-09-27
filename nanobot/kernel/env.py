@@ -128,6 +128,15 @@ class CoreEnvironment:
     exec_base_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     strict: bool = False
 
+    def __post_init__(self) -> None:
+        # I2: ``overlap_ok=True`` is the legacy flat layout only; a strict env must
+        # keep work_dir and state_dir separate whatever its Paths allow.
+        if self.strict and self.paths.overlaps:
+            raise PathsOverlapError(
+                f"strict CoreEnvironment requires separate work_dir {self.paths.work_dir} "
+                f"and state_dir {self.paths.state_dir} (overlap_ok=True is legacy-only)"
+            )
+
 
 def resolve_credential(
     env: CoreEnvironment | None,

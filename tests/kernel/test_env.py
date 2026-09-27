@@ -147,3 +147,33 @@ def test_kernel_reexports():
     for name in ("Paths", "CoreEnvironment", "TraceSink", "StaticCredentialResolver"):
         assert name in k.__all__
         assert hasattr(k, name)
+
+
+def test_strict_env_rejects_overlapping_paths_even_with_overlap_ok(tmp_path):
+    """I2: overlap_ok=True is legacy-only; strict=True refuses it at construction."""
+    from nanobot.kernel.env import (
+        CoreEnvironment,
+        Paths,
+        PathsOverlapError,
+        StaticCredentialResolver,
+    )
+    from nanobot.kernel.trace import NullTraceSink
+
+    flat = Paths(work_dir=tmp_path, state_dir=tmp_path, overlap_ok=True)
+    nested = Paths(work_dir=tmp_path, state_dir=tmp_path / "state", overlap_ok=True)
+    for paths in (flat, nested):
+        with pytest.raises(PathsOverlapError):
+            CoreEnvironment(
+                config=None,  # type: ignore[arg-type]
+                credentials=StaticCredentialResolver({}),
+                paths=paths,
+                trace=NullTraceSink(),
+                strict=True,
+            )
+        # Non-strict (legacy) envs still accept the flat layout.
+        CoreEnvironment(
+            config=None,  # type: ignore[arg-type]
+            credentials=StaticCredentialResolver({}),
+            paths=paths,
+            trace=NullTraceSink(),
+        )
