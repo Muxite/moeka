@@ -447,24 +447,47 @@ has a passing parity test (defence in depth).
 
 ### 7.2 Sequence of one tool call
 
-```
-runner._run_tool(tool_call)
-  |- repeated_external_lookup_error?          (unchanged, agent/runner.py:1543-1554)
-  |- registry.prepare_call(name, args)        -> tool, params | prep_error
-  |    `- prep_error: trace.event("tool.invalid", ...) then _classify_violation (unchanged path)
-  |- reqs = tool.capabilities(params)          (canonical resources)
-  |- for req in reqs:
-  |     d = floors.check(principal, req)       (not configurable; cannot be skipped by policy)
-  |     if d is Allow: d = policy.decide(principal, req, ctx)
-  |     trace.event("policy.decision", actor=principal.id, capability, resource=redact(resource),
-  |                 verdict, marker, rule_id, policy_hash)           <- every decision, allow or deny
-  |     if Deny: result = ToolResult.error("Error: " + d.reason)    (reason embeds d.marker.value)
-  |              -> _classify_violation(raw_text=result, ...)       (existing throttles/escalation)
-  |              -> budget.policy_denials += 1; stop here (hooks never see the call)
-  |- hook.before_execute_tool(...)            (observers only)
-  |- tool.execute(**params)                   (tool-side checks remain as defence in depth)
-  |- trace.event("tool.result", status, error_class, redacted detail)
-  `- hook.after_execute_tool / on_execute_tool_error (unchanged)
+```mermaid
+sequenceDiagram
+    participant R as runner._run_tool
+    participant Reg as registry
+    participant T as tool
+    participant F as floors
+    participant P as policy
+    participant S as trace
+    participant H as hooks
+    R->>R: repeated_external_lookup_error? (unchanged, agent/runner.py:1543-1554)
+    R->>Reg: prepare_call(name, args)
+    alt prep_error
+        Reg-->>R: prep_error
+        R->>S: event("tool.invalid", ...)
+        R->>R: _classify_violation (unchanged path)
+    else prepared
+        Reg-->>R: tool, params
+        R->>T: capabilities(params)
+        T-->>R: reqs (canonical resources)
+        loop for req in reqs
+            R->>F: check(principal, req) (not configurable, policy cannot skip it)
+            F-->>R: d
+            opt d is Allow
+                R->>P: decide(principal, req, ctx)
+                P-->>R: d
+            end
+            R->>S: event("policy.decision", actor, capability, redact(resource), verdict, marker, rule_id, policy_hash)
+            Note over R,S: every decision is emitted, allow or deny
+        end
+        alt any Deny
+            R->>R: ToolResult.error("Error: " + d.reason), reason embeds d.marker.value
+            R->>R: _classify_violation(raw_text=result) (existing throttles and escalation)
+            R->>R: budget.policy_denials += 1, stop here
+            Note over R,H: hooks never see a denied call
+        else all Allow
+            R->>H: before_execute_tool (observers only)
+            R->>T: execute(**params) (tool-side checks remain as defence in depth)
+            R->>S: event("tool.result", status, error_class, redacted detail)
+            R->>H: after_execute_tool / on_execute_tool_error (unchanged)
+        end
+    end
 ```
 
 ### 7.3 Floors (non-removable, non-exemptible)

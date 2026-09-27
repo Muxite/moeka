@@ -105,6 +105,8 @@ nanobot status | sessions | provider
 - Line length: 100.
 - Linting: `ruff` with rules E, F, I, N, W (E501 ignored). Never run `ruff format`.
 - pytest with `asyncio_mode = "auto"`. Tests mirror the `nanobot/` package structure.
+- Diagrams: mermaid only (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`); no ASCII art. Design docs use
+  firm bullet points, with tables only for genuinely tabular data.
 
 ## Common File Locations
 
