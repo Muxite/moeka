@@ -1,0 +1,1 @@
+Update the active sustained goal. Use action='complete' only after the objective is actually achieved and verified. Use action='cancel' when the user cancels, action='block' when progress is genuinely blocked, and action='replace' only when the requested objective changes.

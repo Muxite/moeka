@@ -1,11 +1,15 @@
 """Base class for agent tools."""
 from __future__ import annotations
 
+import functools
+import inspect
 import math
+import re
 import typing
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, TypeVar, cast
 
 if typing.TYPE_CHECKING:
@@ -34,6 +38,117 @@ def capability_request(capability: str, resource: Any = "") -> CapabilityRequest
     elif not isinstance(resource, str):
         resource = str(resource)
     return CapabilityRequest(capability, resource)
+
+# -- descriptions as data (Task 20) ------------------------------------------------
+#
+# - A built-in tool's description lives in ``descriptions/<tool name>.txt`` next to this
+#   module, read through :class:`description_from_file`. The file is UTF-8; its text is
+#   the file minus exactly one trailing newline (POSIX text files end with one).
+# - Descriptions built at runtime stay Python: ``exec`` (platform branch) and ``my``
+#   (``allow_set`` config). ``parameters`` schemas stay Python: they are bound to runtime
+#   constants and platform branches, and their key order is provider-visible.
+# - The golden snapshot ``tests/kernel/test_description_golden.py`` pins every
+#   description and parameters schema byte-for-byte, whatever its source.
+
+DESCRIPTIONS_DIR = Path(__file__).parent / "descriptions"
+_DESCRIPTION_NAME = re.compile(r"[a-z][a-z0-9_]*")
+
+
+class DescriptionFileError(RuntimeError):
+    """A tool description data file is missing, unreadable or not UTF-8."""
+
+
+def read_description_file(path: Path, *, tool: str = "") -> str:
+    """Text of a description file: UTF-8, with exactly one trailing newline removed."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        reason = exc.strerror or type(exc).__name__
+        raise DescriptionFileError(
+            f"description file for tool {tool!r} is unreadable: {path} ({reason})"
+        ) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DescriptionFileError(
+            f"description file for tool {tool!r} is not valid UTF-8: {path}"
+        ) from exc
+    return text[:-1] if text.endswith("\n") else text
+
+
+@functools.cache
+def builtin_description(name: str) -> str:
+    """The built-in description ``descriptions/<name>.txt``, read once per process."""
+    return read_description_file(DESCRIPTIONS_DIR / f"{name}.txt", tool=name)
+
+
+class description_from_file:  # noqa: N801 - used in place of ``@property``
+    """Class attribute that serves a built-in tool's ``description`` from its data file.
+
+    ``description = description_from_file("spawn")`` reads ``descriptions/spawn.txt``
+    on first instance access, not at import: a missing file raises
+    :class:`DescriptionFileError` naming the tool and path when the description is
+    used, and never breaks importing the tool module.
+    """
+
+    def __init__(self, name: str) -> None:
+        if not _DESCRIPTION_NAME.fullmatch(name):
+            raise ValueError(f"description file name must match [a-z][a-z0-9_]*: {name!r}")
+        self.file_name = name
+
+    @property
+    def path(self) -> Path:
+        return DESCRIPTIONS_DIR / f"{self.file_name}.txt"
+
+    @typing.overload
+    def __get__(self, obj: None, owner: type | None = None) -> description_from_file: ...
+
+    @typing.overload
+    def __get__(self, obj: object, owner: type | None = None) -> str: ...
+
+    def __get__(self, obj: object, owner: type | None = None) -> str | description_from_file:
+        # Class access returns the descriptor, as ``property`` does: ABCMeta reads
+        # ``getattr(cls, "description")`` while creating the class, and that must not
+        # touch the file (a missing file would then break importing the module).
+        if obj is None:
+            return self
+        return builtin_description(self.file_name)
+
+
+def description_source(cls: type) -> Path | None:
+    """The data file a tool class reads its description from; ``None`` for Python text."""
+    attr = inspect.getattr_static(cls, "description", None)
+    return attr.path if isinstance(attr, description_from_file) else None
+
+
+def builtin_description_files(root: Path = DESCRIPTIONS_DIR) -> dict[str, str]:
+    """``{tool name: relative path}`` for every built-in description file under ``root``.
+
+    The same shape as ``PluginManifest.descriptions``.
+    """
+    return {p.stem: p.name for p in sorted(root.glob("*.txt"))}
+
+
+def builtin_description_hashes(root: Path = DESCRIPTIONS_DIR) -> dict[str, str]:
+    """Per-tool description hash (``compute_descriptions_hash`` over one file)."""
+    from nanobot.kernel.manifest import compute_descriptions_hash  # lazy: import cycle
+
+    return {
+        name: compute_descriptions_hash(root, {name: rel})
+        for name, rel in builtin_description_files(root).items()
+    }
+
+
+def builtin_descriptions_hash(root: Path = DESCRIPTIONS_DIR) -> str:
+    """One hash over every built-in description file.
+
+    It uses the same fold ``compute_version_hash`` applies to a plugin's
+    ``descriptions``. That makes it the input a future built-in manifest would carry.
+    """
+    from nanobot.kernel.manifest import compute_descriptions_hash  # lazy: import cycle
+
+    return compute_descriptions_hash(root, builtin_description_files(root))
+
 
 # Matches :meth:`Tool._cast_value` / :meth:`Schema.validate_json_schema_value` behavior
 _JSON_TYPE_MAP: dict[str, type | tuple[type, ...]] = {

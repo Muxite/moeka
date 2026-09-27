@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING, Any, cast
 from loguru import logger
 from pydantic import Field
 
-from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    Tool,
+    ToolResult,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.schema import (
     ArraySchema,
@@ -136,13 +142,7 @@ class ImageGenerationTool(Tool):
     def name(self) -> str:
         return "generate_image"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Generate or edit images and store them as persistent artifacts. "
-            "Returns artifact ids and local paths. For edits, pass prior generated image paths "
-            "or user image paths as reference_images."
-        )
+    description = description_from_file("generate_image")  # pyright: ignore[reportAssignmentType]
 
     def _provider_config(self) -> ProviderConfig | None:
         return self.provider_configs.get(self.config.provider)

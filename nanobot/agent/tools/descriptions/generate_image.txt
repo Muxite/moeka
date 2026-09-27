@@ -1,0 +1,1 @@
+Generate or edit images and store them as persistent artifacts. Returns artifact ids and local paths. For edits, pass prior generated image paths or user image paths as reference_images.

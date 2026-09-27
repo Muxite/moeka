@@ -15,7 +15,13 @@ from uuid import uuid4
 
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    Tool,
+    ToolResult,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.context import RequestContext, ToolContext, current_request_context
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -83,9 +89,7 @@ class ListSessionsTool(Tool):
     def name(self) -> str:
         return "list_sessions"
 
-    @property
-    def description(self) -> str:
-        return "List other persisted sessions by @handle."
+    description = description_from_file("list_sessions")  # pyright: ignore[reportAssignmentType]
 
     _capability_names = frozenset({"session.read"})
 
@@ -160,9 +164,7 @@ class SendSessionMessageTool(Tool):
     def name(self) -> str:
         return "send_session_message"
 
-    @property
-    def description(self) -> str:
-        return "Send a message to a persisted session by @handle."
+    description = description_from_file("send_session_message")  # pyright: ignore[reportAssignmentType]
 
     def runtime_context_provider(self):
         return self._provide_runtime_context

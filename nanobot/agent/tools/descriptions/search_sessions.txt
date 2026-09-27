@@ -1,0 +1,1 @@
+Search other persisted conversation sessions by title or recent visible message text. Use this only when the user asks about a past conversation or when prior discussion is needed to answer. Results contain bounded excerpts; use read_session for more context. When citing a result, link its title to the exact session_ref using Markdown. The current session is excluded.

@@ -1,0 +1,1 @@
+Perform a small, exact replacement in one file. Prefer apply_patch for multi-file, structural, or generated edits. occurrence, line_hint, and replace_all=true are mutually exclusive.

@@ -155,6 +155,7 @@ include = [
     "nanobot/templates/**/*.md",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
+    "nanobot/agent/tools/descriptions/*.txt",
 ]
 
 [tool.hatch.build.targets.wheel]

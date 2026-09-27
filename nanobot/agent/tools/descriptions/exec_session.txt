@@ -1,0 +1,1 @@
+Manage a session returned by exec. Input is screened with exec's safety checks as a best-effort hint for line-oriented shells, not a sandbox.

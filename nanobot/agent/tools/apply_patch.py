@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from nanobot.agent.tools.base import ToolResult, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    ToolResult,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.filesystem import _FsTool  # pyright: ignore[reportPrivateUsage]
 from nanobot.agent.tools.schema import (
     ArraySchema,
@@ -86,16 +91,7 @@ class ApplyPatchTool(_FsTool):
     def name(self) -> str:
         return "apply_patch"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Default tool for code edits. Supports multi-file changes in a single call. "
-            "Provide a list of structured edits, each specifying a file path, action "
-            "(replace/add), and the exact text to change. "
-            "Paths are resolved by the current workspace access policy. "
-            "Set dry_run=true to validate and preview without writing files. "
-            "Use edit_file only for small exact replacements on a single file."
-        )
+    description = description_from_file("apply_patch")  # pyright: ignore[reportAssignmentType]
 
     _capability_names = frozenset({"fs.read", "fs.write"})
 

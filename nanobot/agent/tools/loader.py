@@ -21,6 +21,11 @@ Two plugin modes (built-in tools load the same way in both):
   4. its tool name is not already registered (a built-in or another plugin): a hard
      :class:`LoadError`, since the host activated a plugin that cannot load as approved.
 
+  A manifest ``descriptions`` entry for the registered tool's name replaces the tool's
+  own ``description`` (Task 20, descriptions as data). The file is read before plugin
+  code is imported, and its bytes are part of the hash step 2 checked. A file that is
+  not UTF-8 rejects the plugin.
+
   Steps 1-3 failing skip the plugin with a logged error and a ``plugin.load`` deny
   trace event. The registered tool carries ``capability_grant`` = the manifest's
   ``capabilities_requested`` minus what the ToolRegistry's gate policy denies
@@ -227,7 +232,7 @@ class ToolLoader:
             label = str(getattr(ep, "name", ep))
             manifest: PluginManifest | None = None
             try:
-                manifest, tool_cls = self._admit_plugin(ep)
+                manifest, tool_cls, descriptions = self._admit_plugin(ep)
                 if scope not in getattr(tool_cls, "_scopes", {"core"}):
                     continue
                 plugin_ctx = _plugin_context(manifest, tool_cls, ctx)
@@ -251,7 +256,10 @@ class ToolLoader:
                     "built-in or another plugin"
                 )
             grant = _capability_grant(manifest, registry.gate_policy)
-            if registry.register(_KernelPluginTool(tool, plugin=manifest.name, grant=grant)):
+            wrapped = _KernelPluginTool(
+                tool, plugin=manifest.name, grant=grant, description=descriptions.get(name),
+            )
+            if registry.register(wrapped):
                 registered.append(name)
                 _emit(ctx, {
                     "event": "plugin.load", "verdict": "allow", "plugin": manifest.name,
@@ -259,11 +267,15 @@ class ToolLoader:
                 })
         return registered
 
-    def _admit_plugin(self, ep: Any) -> tuple[PluginManifest, type[Tool]]:
+    def _admit_plugin(
+        self, ep: Any,
+    ) -> tuple[PluginManifest, type[Tool], dict[str, str]]:
         """Manifest + registry check on the bytes on disk, THEN import the plugin.
 
-        Raises :class:`_PluginRejectedError` before any plugin code runs when the package
-        has no valid manifest for this entry point or is not active at its current hash.
+        Returns the manifest, the tool class and the manifest's description texts
+        (``{tool name: text}``). Raises :class:`_PluginRejectedError` before any plugin
+        code runs when the package has no valid manifest for this entry point, is not
+        active at its current hash, or has an unreadable description file.
         """
         from nanobot.kernel.manifest import (  # lazy: Ruling C
             MANIFEST_FILENAME,
@@ -306,6 +318,7 @@ class ToolLoader:
             raise _PluginRejectedError(
                 f"plugin {manifest.name!r} is not active at its on-disk hash ({state})"
             )
+        descriptions = _read_descriptions(root, manifest)
         with _no_bytecode():
             cls = ep.load()
         if not (
@@ -315,7 +328,28 @@ class ToolLoader:
             and getattr(cls, "_plugin_discoverable", True)
         ):
             raise _PluginRejectedError(f"entry {entry!r} is not a concrete, discoverable Tool")
-        return manifest, cls
+        return manifest, cls, descriptions
+
+
+def _read_descriptions(root: Path, manifest: PluginManifest) -> dict[str, str]:
+    """``{tool name: text}`` from the manifest's description files (Task 20).
+
+    Read right after the hash check, with the same UTF-8 / one-trailing-newline rule as
+    built-in description files. A file that cannot be read or decoded rejects the plugin.
+    """
+    from nanobot.agent.tools.base import DescriptionFileError, read_description_file
+
+    real_root = root.resolve()
+    texts: dict[str, str] = {}
+    for tool, rel in (manifest.descriptions or {}).items():
+        target = (root / rel).resolve()
+        if not target.is_relative_to(real_root):  # compute_version_hash rejects this too
+            raise _PluginRejectedError(f"description file for {tool!r} escapes the package")
+        try:
+            texts[tool] = read_description_file(target, tool=tool)
+        except DescriptionFileError as exc:
+            raise _PluginRejectedError(f"description file for {tool!r} rejected: {exc}")
+    return texts
 
 
 def _plugin_root(ep: Any) -> Path | None:
@@ -509,10 +543,29 @@ class _KernelPluginTool(_LegacyErrorPrefixTool):
 
     _plugin_discoverable = False
 
-    def __init__(self, wrapped: Tool, *, plugin: str, grant: tuple[str, ...]) -> None:
+    def __init__(
+        self, wrapped: Tool, *, plugin: str, grant: tuple[str, ...],
+        description: str | None = None,
+    ) -> None:
         super().__init__(wrapped)
         self._plugin = plugin
         self._grant = tuple(grant)
+        # The manifest's description file text, when it names this tool (Task 20).
+        self._description = description
+
+    @property
+    def description(self) -> str:
+        if self._description is not None:
+            return self._description
+        return self._wrapped.description
+
+    def to_schema(self) -> dict[str, Any]:
+        schema = self._wrapped.to_schema()
+        if self._description is None:
+            return schema
+        function = dict(schema.get("function") or {})
+        function["description"] = self._description
+        return {**schema, "function": function}
 
     @property
     def plugin_name(self) -> str:

@@ -12,7 +12,7 @@ from nanobot.agent.goal_permission import (
     goal_mutation_allowed,
     revoke_goal_mutation_permission,
 )
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, description_from_file, tool_parameters
 from nanobot.agent.tools.context import RequestContext, ToolContext, current_request_context
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
 from nanobot.bus.queue import MessageBus
@@ -158,14 +158,7 @@ class CreateGoalTool(Tool, _GoalToolsMixin):
     def name(self) -> str:
         return "create_goal"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Create one sustained goal for the current session when Goal Runtime Guidance asks "
-            "you to record it. Consolidate relevant prior discussion into a durable objective "
-            "that is self-contained, bounded, safe under repetition, and explicit about "
-            "completion criteria. Do not retry after a successful creation."
-        )
+    description = description_from_file("create_goal")  # pyright: ignore[reportAssignmentType]
 
     def runtime_context_provider(self):
         return self._provide_runtime_context
@@ -289,14 +282,7 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
     def name(self) -> str:
         return "update_goal"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Update the active sustained goal. Use action='complete' only after the objective "
-            "is actually achieved and verified. Use action='cancel' when the user cancels, "
-            "action='block' when progress is genuinely blocked, and action='replace' only when "
-            "the requested objective changes."
-        )
+    description = description_from_file("update_goal")  # pyright: ignore[reportAssignmentType]
 
     async def execute(
         self,

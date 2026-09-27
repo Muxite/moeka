@@ -6,7 +6,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    Tool,
+    ToolResult,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -63,16 +69,7 @@ class SpawnTool(Tool):
     def name(self) -> str:
         return "spawn"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "Set wait=true for a consultation whose result must inform the current turn. "
-            "The subagent will complete the task and report back when done. "
-            "For deliverables or existing projects, inspect the workspace first "
-            "and use a dedicated subdirectory when helpful."
-        )
+    description = description_from_file("spawn")  # pyright: ignore[reportAssignmentType]
 
     @property
     def concurrency_safe(self) -> bool:

@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from nanobot.agent.tools.base import Tool, tool_parameters
+from nanobot.agent.tools.base import Tool, description_from_file, tool_parameters
 from nanobot.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
 
 STRUCTURED_BUTTON_CHANNELS = frozenset({"telegram", "websocket"})
@@ -37,12 +37,7 @@ class AskUserTool(Tool):
     def name(self) -> str:
         return "ask_user"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Pause and ask the user a question when their answer is required to continue. "
-            "Use options for likely answers; the user's reply, typed or selected, is returned as the tool result."
-        )
+    description = description_from_file("ask_user")  # pyright: ignore[reportAssignmentType]
 
     @property
     def exclusive(self) -> bool:

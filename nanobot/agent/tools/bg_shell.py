@@ -35,7 +35,12 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    Tool,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
@@ -281,17 +286,7 @@ class BackgroundShellTool(Tool):
     def name(self) -> str:
         return "bg_shell"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Start, inspect, and stop background shell commands. "
-            "Use action=start for any task expected to take more than ~10s "
-            "(downloads, builds, dd, long rsync). Returns a task_id immediately; "
-            "the agent is re-woken automatically when the task exits, so you "
-            "can announce completion to the user without being prompted. "
-            "Use action=tail to check progress when the user asks how it's "
-            "going. Use action=list to see your active background work."
-        )
+    description = description_from_file("bg_shell")  # pyright: ignore[reportAssignmentType]
 
     def set_context(
         self,

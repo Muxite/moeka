@@ -1,2 +1,5 @@
 # Ensure shell scripts always use LF line endings (Docker/Linux compat)
 *.sh text eol=lf
+# Built-in tool descriptions are byte-pinned (tests/kernel/test_description_golden.py)
+# and hashed: never convert their line endings.
+nanobot/agent/tools/descriptions/*.txt text eol=lf

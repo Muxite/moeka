@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, description_from_file, tool_parameters
 from nanobot.agent.tools.schema import ObjectSchema, StringSchema, tool_parameters_schema
 
 if TYPE_CHECKING:
@@ -59,13 +59,7 @@ class DeferActionTool(Tool):
     def name(self) -> str:
         return "defer_action"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Record a tool call you need but cannot run (blocked, missing capability, "
-            "sandbox or credential) in the deferred-action log for a human to review. "
-            "It never runs the tool. Denied calls are logged automatically."
-        )
+    description = description_from_file("defer_action")  # pyright: ignore[reportAssignmentType]
 
     async def execute(
         self,

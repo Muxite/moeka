@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, TypeVar
 
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult, capability_request
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, description_from_file
 from nanobot.agent.tools.filesystem import ListDirTool, _FsTool
 from nanobot.security.protected_paths import ProtectedFloor
 from nanobot.utils.document import (
@@ -233,12 +233,7 @@ class FindFilesTool(_SearchTool):
     def name(self) -> str:
         return "find_files"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Find workspace paths by name, glob, or file type. "
-            "Returns relative paths and skips dependency/build directories."
-        )
+    description = description_from_file("find_files")  # pyright: ignore[reportAssignmentType]
 
     @property
     def read_only(self) -> bool:
@@ -872,12 +867,7 @@ class GrepTool(_SearchTool):
     def name(self) -> str:
         return "grep"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Search text, PDF, DOCX, XLSX, and PPTX content. "
-            "Returns matches with five context lines and source locators by default."
-        )
+    description = description_from_file("grep")  # pyright: ignore[reportAssignmentType]
 
     @property
     def read_only(self) -> bool:

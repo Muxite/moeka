@@ -1,0 +1,1 @@
+Search text, PDF, DOCX, XLSX, and PPTX content. Returns matches with five context lines and source locators by default.

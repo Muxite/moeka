@@ -1,0 +1,1 @@
+List other persisted sessions by @handle.

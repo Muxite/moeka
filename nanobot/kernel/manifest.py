@@ -78,6 +78,7 @@ _ENTRY = re.compile(rf"{_DOTTED}:{_DOTTED}")
 
 _JSON_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})
 _HASH_DOMAIN = b"moeka.kernel.plugin-manifest.v1\0"
+_DESCRIPTIONS_HASH_DOMAIN = b"moeka.kernel.tool-descriptions.v1\0"
 
 
 def _check_schema(schema: Any, path: str = "$") -> None:
@@ -318,7 +319,19 @@ def compute_version_hash(root: Path, manifest: PluginManifest | Mapping[str, Any
     digest.update(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     )
-    descriptions = payload.get("descriptions") or {}
+    _fold_descriptions(digest, root, real_root, payload.get("descriptions") or {})
+    return digest.hexdigest()
+
+
+def _fold_descriptions(
+    digest: Any, root: Path, real_root: Path, descriptions: Mapping[str, str],
+) -> None:
+    """Fold each description file into ``digest``: sorted by tool, name + path + bytes.
+
+    Shared by :func:`compute_version_hash` (a plugin's ``descriptions``) and
+    :func:`compute_descriptions_hash` (description files alone, e.g. the built-in
+    ``nanobot/agent/tools/descriptions``), so both hash a description file alike.
+    """
     for tool in sorted(descriptions):
         rel = descriptions[tool]
         target = (root / rel).resolve()
@@ -334,6 +347,23 @@ def compute_version_hash(root: Path, manifest: PluginManifest | Mapping[str, Any
         digest.update(rel.encode())
         digest.update(b"\0")
         digest.update(data)
+
+
+def compute_descriptions_hash(root: Path, descriptions: Mapping[str, str]) -> str:
+    """sha256 over description files only (Task 20): tool name, relative path, bytes.
+
+    - Same per-file fold as :func:`compute_version_hash`, under its own domain tag, so
+      a description hash is never mistaken for a package version hash.
+    - Built-in tools use it for ``nanobot/agent/tools/descriptions`` (see
+      ``nanobot.agent.tools.base.builtin_descriptions_hash``). Built-ins carry no
+      manifest today. A future built-in manifest would list the same files in its
+      ``descriptions`` map, and ``compute_version_hash`` would fold the same bytes.
+    - It is also the separate tier-1 hash Task 17 suggested: a description edit shows
+      up here without being read as a change to tier-2 plugin code.
+    - Raises ``ValueError`` when a file resolves outside ``root`` or cannot be read.
+    """
+    digest = hashlib.sha256(_DESCRIPTIONS_HASH_DOMAIN)
+    _fold_descriptions(digest, root, root.resolve(), descriptions)
     return digest.hexdigest()
 
 
@@ -346,5 +376,6 @@ __all__ = [
     "PluginKind",
     "PluginManifest",
     "PluginTier",
+    "compute_descriptions_hash",
     "compute_version_hash",
 ]

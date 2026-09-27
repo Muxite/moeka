@@ -1,0 +1,1 @@
+Find workspace paths by name, glob, or file type. Returns relative paths and skips dependency/build directories.

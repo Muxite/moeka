@@ -12,7 +12,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    Tool,
+    ToolResult,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.context import ToolContext, current_request_session_key
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -590,12 +596,7 @@ class ExecSessionTool(Tool):
     def name(self) -> str:
         return "exec_session"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Manage a session returned by exec. Input is screened with exec's safety "
-            "checks as a best-effort hint for line-oriented shells, not a sandbox."
-        )
+    description = description_from_file("exec_session")  # pyright: ignore[reportAssignmentType]
 
     _capability_names = frozenset({"exec.session_input"})
 
@@ -767,9 +768,7 @@ class ListExecSessionsTool(Tool):
     def name(self) -> str:
         return "list_exec_sessions"
 
-    @property
-    def description(self) -> str:
-        return "List active exec sessions."
+    description = description_from_file("list_exec_sessions")  # pyright: ignore[reportAssignmentType]
 
     @property
     def read_only(self) -> bool:

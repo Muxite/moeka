@@ -16,7 +16,13 @@ import httpx
 from loguru import logger
 from pydantic import Field
 
-from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    Tool,
+    ToolResult,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -372,12 +378,7 @@ class WebSearchTool(Tool):
     _scopes = {"core", "subagent"}
 
     name = "web_search"  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
-    description = (  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
-        "Search the web. Returns titles, URLs, and snippets. "
-        "count defaults to 5 (max 10). "
-        "Some providers support timeRange, authLevel, and queryRewrite. "
-        "Use web_fetch to read a specific page in full."
-    )
+    description = description_from_file("web_search")  # pyright: ignore[reportAssignmentType]
 
     config_key = "web"
 
@@ -1183,11 +1184,7 @@ class WebFetchTool(Tool):
     _scopes = {"core", "subagent"}
 
     name = "web_fetch"  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
-    description = (  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
-        "Fetch a URL and extract readable content (HTML → markdown/text). "
-        "Output is capped at maxChars (default 50 000, max 200 000; bodies over 2 MiB are cut). "
-        "Works for most web pages and docs; may fail on login-walled or JS-heavy sites."
-    )
+    description = description_from_file("web_fetch")  # pyright: ignore[reportAssignmentType]
 
     config_key = "web"
 

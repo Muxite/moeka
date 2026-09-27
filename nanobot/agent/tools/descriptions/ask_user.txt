@@ -1,0 +1,1 @@
+Pause and ask the user a question when their answer is required to continue. Use options for likely answers; the user's reply, typed or selected, is returned as the tool result.

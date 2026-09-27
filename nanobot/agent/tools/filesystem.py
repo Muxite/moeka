@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
+from nanobot.agent.tools.base import (
+    Tool,
+    ToolResult,
+    capability_request,
+    description_from_file,
+    tool_parameters,
+)
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.file_state import FileStates, current_file_states
 from nanobot.agent.tools.path_utils import resolve_workspace_path
@@ -358,12 +364,7 @@ class ReadFileTool(_FsTool):
     def name(self) -> str:
         return "read_file"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Read text, images, PDFs, and Office documents by path. "
-            "Text is line-numbered; use offset/limit or pages for targeted ranges."
-        )
+    description = description_from_file("read_file")  # pyright: ignore[reportAssignmentType]
 
     @property
     def read_only(self) -> bool:
@@ -638,14 +639,7 @@ class WriteFileTool(_FsTool):
     def name(self) -> str:
         return "write_file"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Create a new file or intentionally replace an entire file with "
-            "the provided content. Overwrites existing files and creates parent "
-            "directories as needed. For code changes or partial edits, prefer "
-            "apply_patch; use edit_file only for small exact replacements."
-        )
+    description = description_from_file("write_file")  # pyright: ignore[reportAssignmentType]
 
     _capability_names = frozenset({"fs.write"})
 
@@ -968,13 +962,7 @@ class EditFileTool(_FsTool):
     def name(self) -> str:
         return "edit_file"
 
-    @property
-    def description(self) -> str:
-        return (
-            "Perform a small, exact replacement in one file. "
-            "Prefer apply_patch for multi-file, structural, or generated edits. "
-            "occurrence, line_hint, and replace_all=true are mutually exclusive."
-        )
+    description = description_from_file("edit_file")  # pyright: ignore[reportAssignmentType]
 
     @staticmethod
     def _strip_trailing_ws(text: str) -> str:
@@ -1217,13 +1205,7 @@ class ListDirTool(_FsTool):
     def name(self) -> str:
         return "list_dir"
 
-    @property
-    def description(self) -> str:
-        return (
-            "List the contents of a directory. "
-            "Set recursive=true to explore nested structure. "
-            "Common noise directories (.git, node_modules, __pycache__, etc.) are auto-ignored."
-        )
+    description = description_from_file("list_dir")  # pyright: ignore[reportAssignmentType]
 
     @property
     def read_only(self) -> bool:

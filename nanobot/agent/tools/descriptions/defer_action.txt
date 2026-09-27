@@ -1,0 +1,1 @@
+Record a tool call you need but cannot run (blocked, missing capability, sandbox or credential) in the deferred-action log for a human to review. It never runs the tool. Denied calls are logged automatically.
