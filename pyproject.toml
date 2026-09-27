@@ -156,17 +156,20 @@ include = [
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
     "nanobot/agent/tools/descriptions/*.txt",
+    "moeka/**/*.py",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot"]
+packages = ["nanobot", "moeka"]
 
 [tool.hatch.build.targets.wheel.sources]
 "nanobot" = "nanobot"
+"moeka" = "moeka"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "nanobot/",
+    "moeka/",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",

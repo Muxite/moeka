@@ -51,6 +51,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY conftest.py ./
 COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY nanobot/ nanobot/
+COPY moeka/ moeka/
 COPY scripts/ scripts/
 COPY tests/ tests/
 RUN --mount=type=cache,target=/root/.cache/uv \

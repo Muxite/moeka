@@ -1,6 +1,6 @@
 """Invariant I1 proof: no ambient reads outside the host-adapter allow-list.
 
-Every ``nanobot/**/*.py`` is parsed with :mod:`ast` (so docstrings and comments
+Every ``nanobot/**/*.py`` and ``moeka/**/*.py`` is parsed with :mod:`ast` (so docstrings and comments
 never match) and scanned for reads of process-global state: the process
 environment, the user's home directory, and the ambient config/state locations.
 Kernel code must receive all of these through ``CoreEnvironment``; only the host
@@ -20,6 +20,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPO_ROOT / "nanobot"
+# The public facade: re-exports only, so it gets no allow-list entries at all.
+PACKAGE_ROOTS = (PACKAGE_ROOT, REPO_ROOT / "moeka")
 
 # Host adapters where ambient reads are allowed (plan ruling R2, amended by Ruling G).
 AMBIENT_ALLOWLIST: dict[str, str] = {
@@ -236,7 +238,8 @@ def _allowed(rel: str) -> bool:
 
 def scan_package() -> list[Violation]:
     found: list[Violation] = []
-    for file in sorted(PACKAGE_ROOT.rglob("*.py")):
+    files = sorted(f for root in PACKAGE_ROOTS for f in root.rglob("*.py"))
+    for file in files:
         rel = file.relative_to(REPO_ROOT).as_posix()
         if _allowed(rel) or rel in KNOWN_EXEMPTIONS:
             continue
@@ -253,6 +256,11 @@ def test_no_ambient_reads_outside_allowlist() -> None:
         "ambient reads outside the R2 allow-list (route them through CoreEnvironment "
         "or a nanobot/kernel/legacy.py helper):\n" + "\n".join(map(str, violations))
     )
+
+
+def test_scan_covers_the_moeka_facade() -> None:
+    assert (REPO_ROOT / "moeka" / "__init__.py").exists()
+    assert not any(entry.startswith("moeka/") for entry in [*AMBIENT_ALLOWLIST, *KNOWN_EXEMPTIONS])
 
 
 def test_allowlist_and_exemptions_exist() -> None:

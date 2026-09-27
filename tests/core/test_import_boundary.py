@@ -33,6 +33,9 @@ import nanobot.kernel          # noqa: F401
 import nanobot.core.vec        # noqa: F401
 import nanobot.core.vec_store  # noqa: F401
 import nanobot.api.complete    # noqa: F401
+import moeka                   # noqa: F401
+import moeka.tools             # noqa: F401
+import moeka.trace             # noqa: F401
 forbidden = {forbidden!r}
 leaked = sorted(
     m for m in sys.modules
@@ -43,7 +46,7 @@ print(",".join(leaked))
 
 
 def test_core_import_has_no_runtime_deps():
-    """A fresh interpreter importing nanobot.core pulls in no runtime packages."""
+    """A fresh interpreter importing nanobot.core or moeka pulls in no runtime packages."""
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE.format(forbidden=_FORBIDDEN)],
         capture_output=True,
