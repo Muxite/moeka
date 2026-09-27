@@ -456,6 +456,18 @@ Purpose: facts enter the artifact only with provenance, and the user is asked on
 - Built mechanics (Tasks 22-23, library only): the "Record ... with user provenance" step is
   `FactStore.record("user", <turn ref>, answer)`; the "Commit" step is `ArtifactStore.propose` with that trace
   ID as the leaf's cite. The epistemic audit and the question loop are not built (Tasks 24-25).
+- Built mechanics (Task 24, library only, `nanobot/kernel/clarify.py`):
+  - `resolve_divergence(Divergence, classify=)` is a pure decision: `CommitReady` (minor) or one
+    `Question` (semantic); it writes no store and asks no user;
+  - the default classifier is deterministic and LLM-free (I6): equal after whitespace collapse and
+    `casefold()` (recursing into lists and dict values, exact types) is minor; anything else is semantic;
+  - no known source (`known_trace_id` unset) is always a question; the classifier is not consulted;
+  - a minor result commits the KNOWN value with its fact's cite, never the reformatted draft;
+  - the classifier is pluggable (`ClassifierFn`); a label other than `minor`/`semantic` raises;
+  - one divergence in, at most one question out; there is no batch or merge function, so two
+    ambiguities are two questions; asking them one at a time is the (unbuilt) turn loop's job;
+  - `record_answer` records `FactStore.record("user", turn_ref, answer)`, then `propose`s it citing
+    that trace ID.
 - `propose` semantics:
   - merges leaf by leaf into the artifact; never replaces it wholesale;
   - a commit replaces the committed value and cite at that leaf and clears its provisional value;
