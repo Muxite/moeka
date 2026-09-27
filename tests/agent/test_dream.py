@@ -337,9 +337,11 @@ class TestDreamTools:
             },
         )
 
-        assert "outside allowed directory" in history_result
-        assert "outside allowed directory" in cursor_result
-        assert "outside allowed directory" in history_write_result
+        # The kernel gate checks the protected-path floor before the tool's own
+        # allowed-dir check, so either refusal is correct; the files must not change.
+        refusals = ("outside allowed directory", "protected internal path")
+        for result in (history_result, cursor_result, history_write_result):
+            assert any(marker in result for marker in refusals), result
         assert store.history_file.read_text(encoding="utf-8") == "before\n"
         assert store._dream_cursor_file.read_text(encoding="utf-8") == "1"
 

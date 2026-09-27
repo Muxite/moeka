@@ -146,6 +146,8 @@ async def _execute_tool_call(
             if len(prepared_tuple) == 3:
                 tool, params, prep_error = cast(tuple[Any, Any, str | None], prepared_tuple)
     if prep_error:
+        if isinstance(tools, ToolRegistry):
+            tools.emit_invalid(tool_call.name, prep_error)
         payload = _with_retry_hint(prep_error)
         event = {
             "name": tool_call.name,
@@ -162,6 +164,38 @@ async def _execute_tool_call(
         if handled is not None:
             return handled
         return payload, event
+
+    if tool is not None:
+        # Same capability gate as AgentRunner._run_tool: a denied call never reaches
+        # a hook. This module is not the production path (the runner keeps its own
+        # _run_tool) but must not become a silent gate bypass if someone uses it.
+        if isinstance(tools, ToolRegistry):
+            gate = tools.gate(tool, params)
+        else:
+            from nanobot.kernel.gate import gate_call
+
+            gate = gate_call(tool, params, None, None, None)
+        if not gate.allowed:
+            denial = gate.error_text()
+            payload = _with_retry_hint(denial)
+            event = {
+                "name": tool_call.name,
+                "status": "error",
+                "detail": denial.split(": ", 1)[-1][:120],
+            }
+            if gate.policy_capability is not None:
+                event["detail"] = _event_detail("policy_denial: ", denial)
+                return denial, event
+            handled = _classify_violation(
+                raw_text=denial,
+                soft_payload=payload,
+                event=event,
+                tool_call=tool_call,
+                workspace_violation_counts=workspace_violation_counts,
+            )
+            if handled is not None:
+                return handled
+            return payload, event
 
     await hook.before_execute_tool(context, tool_call, tool, params)
     try:

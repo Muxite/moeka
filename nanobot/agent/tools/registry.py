@@ -9,6 +9,11 @@ from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.context import ContextAware, current_request_context
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.gate import GateResult
+    from nanobot.kernel.policy import PermissionPolicy, Principal
     from nanobot.runtime_context import RuntimeContextProvider
 
 
@@ -26,6 +31,45 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
         self._cached_definitions: list[dict[str, Any]] | None = None
+        # Capability gate settings for ``execute`` (kernel P2). Unset means
+        # ``DefaultPolicy()``, the top-level agent and the legacy floor roots.
+        self.gate_policy: PermissionPolicy | None = None
+        self.gate_principal: Principal | None = None
+        self.gate_env: CoreEnvironment | None = None
+        self.gate_workspace: Path | None = None
+
+    def configure_gate(
+        self,
+        *,
+        policy: PermissionPolicy | None = None,
+        principal: Principal | None = None,
+        env: CoreEnvironment | None = None,
+        workspace: Path | None = None,
+    ) -> None:
+        """Set the policy/principal/env that ``execute`` gates every call with."""
+        self.gate_policy = policy
+        self.gate_principal = principal
+        self.gate_env = env
+        self.gate_workspace = workspace
+
+    def gate(self, tool: Tool, params: Any) -> GateResult:
+        """Run the kernel capability gate for one prepared call."""
+        from nanobot.kernel.gate import gate_call
+
+        return gate_call(
+            tool,
+            params,
+            self.gate_principal,
+            self.gate_policy,
+            self.gate_env,
+            workspace=self.gate_workspace,
+        )
+
+    def emit_invalid(self, name: str, error: str) -> None:
+        """Record a call that failed preparation as a ``tool.invalid`` trace event."""
+        from nanobot.kernel.gate import emit_tool_invalid
+
+        emit_tool_invalid(self.gate_env, name, self.gate_principal, error)
 
     def register(self, tool: Tool) -> None:
         """Register a tool."""
@@ -189,10 +233,14 @@ class ToolRegistry:
         hint = "\n\n[Analyze the error above and try a different approach.]"
         tool, params, error = self.prepare_call(name, params)
         if error:
+            self.emit_invalid(name, str(error))
             return ToolResult.error(str(error) + hint)
+        assert tool is not None  # guarded by prepare_call()
+        gate = self.gate(tool, params)
+        if not gate.allowed:
+            return ToolResult.error(gate.error_text() + hint)
 
         try:
-            assert tool is not None  # guarded by prepare_call()
             result = await tool.execute(**params)
             if is_tool_error_result(result):
                 return ToolResult.error(str(result) + hint)
