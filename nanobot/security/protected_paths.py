@@ -101,15 +101,25 @@ def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
         roots.append(default_sessions_root(resolved_ws))
     if resolved_ws is not None:
         # Legacy hosts without Paths: the workspace is the state home, which holds the
-        # host-owned kernel plugin registry.
-        roots.append(resolved_ws / _plugin_registry_filename())
+        # host-owned kernel state files (plugin registry, fact store).
+        roots.extend(resolved_ws / name for name in _kernel_state_filenames())
     return roots
 
 
-def _plugin_registry_filename() -> str:
+def _kernel_state_filenames() -> tuple[str, ...]:
+    """Host-owned kernel state files kept directly in ``state_dir``.
+
+    The kernel plugin registry, and the fact store database with its SQLite
+    sidecars (``-wal``/``-shm``/``-journal``).
+    """
+    from nanobot.kernel.facts import FACTS_DB_FILENAME
     from nanobot.kernel.registry import REGISTRY_FILENAME
 
-    return REGISTRY_FILENAME
+    return (
+        REGISTRY_FILENAME,
+        FACTS_DB_FILENAME,
+        *(FACTS_DB_FILENAME + suffix for suffix in ("-wal", "-shm", "-journal")),
+    )
 
 
 def _match(
@@ -159,13 +169,15 @@ class ProtectedFloor:
         ``sessions_root``, and the workspace-internal write-only files. When
         ``work_dir`` and ``state_dir`` are separated, all of ``state_dir`` is
         denied. In the legacy flat layout ``state_dir`` is the workspace, so only
-        the named subtrees are protected there, plus the host-owned kernel plugin
-        registry file (``nanobot.kernel.registry.REGISTRY_FILENAME``) in either layout. *extra_data_dirs*/*config_files*
+        the named subtrees are protected there, plus the host-owned kernel state
+        files (plugin registry ``nanobot.kernel.registry.REGISTRY_FILENAME``, fact store
+        ``nanobot.kernel.facts.FACTS_DB_FILENAME`` and its sidecars) in either layout. *extra_data_dirs*/*config_files*
         carry the legacy ambient roots (``default_data_dirs()``/``default_config_files()``).
         """
         bases: list[Path] = [paths.data_dir, *extra_data_dirs]
         floor = cls(data_dir=bases, workspace=paths.work_dir, config_files=config_files)
-        extra = [paths.sessions_root, paths.state_dir / _plugin_registry_filename()]
+        extra = [paths.sessions_root]
+        extra.extend(paths.state_dir / name for name in _kernel_state_filenames())
         if not paths.overlaps:
             extra.append(paths.state_dir)
         for root in extra:
