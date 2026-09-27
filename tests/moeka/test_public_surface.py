@@ -17,6 +17,9 @@ SURFACE: dict[str, list[str]] = {
         "Sampling",
         "StaticCredentialResolver",
     ],
+    "moeka.agents": [
+        "Agent", "AgentSpec", "AskUser", "RunLimits", "RunResult", "StopReason", "ToolInfo",
+    ],
     "moeka.budget": ["Budget", "CallEstimate", "CapBudget", "ResponseCache"],
     "moeka.errors": [
         "AuthError",

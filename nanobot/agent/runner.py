@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Awaitable, Callable, Iterable
-from contextlib import nullcontext
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -43,7 +44,9 @@ from nanobot.providers.base import (
     LLMProvider,
     LLMResponse,
     LLMUsage,
+    ProviderCallContext,
     ProviderConversationState,
+    RequestExtras,
     ToolCallRequest,
 )
 from nanobot.providers.conversation_state import ProviderConversationStateController
@@ -98,6 +101,32 @@ _MAX_INJECTION_CYCLES = 5
 # is threaded with spec.limits. Flagged for follow-up.
 _MICROCOMPACT_KEEP_RECENT = 10
 _MICROCOMPACT_MIN_CHARS = 500
+
+
+# Per-turn request extras (kernel ``Agent.run`` sampling): attached to every model
+# request the runner makes while bound, so a host can set sampling for one run
+# without mutating the shared provider. Tasks spawned inside the turn (sub-agents)
+# inherit the binding with the context.
+_TURN_REQUEST_EXTRAS: ContextVar[RequestExtras | None] = ContextVar(
+    "nanobot_turn_request_extras", default=None,
+)
+
+
+@contextmanager
+def turn_request_extras(extras: RequestExtras | None) -> Iterator[None]:
+    """Bind *extras* (e.g. ``sampling`` / ``default_sampling``) for the runner's requests."""
+    token = _TURN_REQUEST_EXTRAS.set(extras)
+    try:
+        yield
+    finally:
+        _TURN_REQUEST_EXTRAS.reset(token)
+
+
+def _with_turn_extras(context: ProviderCallContext | None) -> ProviderCallContext | None:
+    extras = _TURN_REQUEST_EXTRAS.get()
+    if extras is None:
+        return context
+    return replace(context or ProviderCallContext(), request=extras)
 
 
 def _restore_outer_whitespace(content: str, original: str | None) -> str:
@@ -664,6 +693,7 @@ class AgentRunner:
                         stop_reason = "ask_user"
                         context.final_content = final_content
                         context.stop_reason = stop_reason
+                        context.ask_user_options = list(fatal_error.options)
                         if hook.wants_streaming():
                             await hook.on_stream_end(context, resuming=False)
                         await hook.after_iteration(context)
@@ -1050,6 +1080,7 @@ class AgentRunner:
             tool_definitions=tool_definitions,
             transcript=transcript,
         )
+        provider_context = _with_turn_extras(provider_context)
 
         kwargs = self._build_request_kwargs(
             spec,
@@ -1458,6 +1489,7 @@ class AgentRunner:
             tool_definitions=None,
             transcript=transcript,
         )
+        provider_context = _with_turn_extras(provider_context)
         kwargs = self._build_request_kwargs(
             spec,
             messages,
@@ -1767,7 +1799,9 @@ class AgentRunner:
                 result = validate_result(tool, result, env=spec.env, principal=spec.principal)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except (Exception, AskUserInterrupt) as exc:
+            # AskUserInterrupt is a BaseException (so generic handlers let it through);
+            # it must be caught here to become the "ask_user" stop.
             await hook.on_execute_tool_error(context, tool_call, tool, params, exc)
             event = {
                 "name": tool_call.name,

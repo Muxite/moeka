@@ -137,12 +137,18 @@ class MoekaCore:
             config=config, config_dict=config_dict, config_path=config_path,
         )
 
+        from nanobot.config.profile import (
+            apply_profile,
+            build_bootstrap_overrides,
+            build_inline_skills,
+        )
+
         prof = None
         if profile is not None:
-            cfg, prof = cls._apply_profile(cfg, profile)
+            cfg, prof = apply_profile(cfg, profile)
 
-        overrides = cls._build_bootstrap_overrides(prof, bootstrap)
-        inline_skills = cls._build_inline_skills(prof, skills)
+        overrides = build_bootstrap_overrides(prof, bootstrap)
+        inline_skills = build_inline_skills(prof, skills)
 
         # Resolve the workspace. An explicit arg always wins. Otherwise the
         # file/default route trusts the config's own workspace, while an
@@ -166,75 +172,6 @@ class MoekaCore:
             core.profile = prof
             core.profile_name = profile if isinstance(profile, str) else "inline"
         return core
-
-    @staticmethod
-    def _apply_profile(cfg: Any, profile: Any) -> tuple[Any, Any]:
-        """Compile a profile into a deep-copied config's agents.defaults.
-
-        *profile* may be a name from ``config.profiles``, an
-        :class:`~nanobot.config.schema.AgentProfileConfig` instance, or a plain
-        dict — the latter two let embedding hosts define their scope in code
-        without touching the user's config file.
-        """
-        from nanobot.config.schema import AgentProfileConfig
-
-        if isinstance(profile, str):
-            prof = cfg.resolve_profile(profile)
-        elif isinstance(profile, AgentProfileConfig):
-            prof = profile
-        else:
-            prof = AgentProfileConfig.model_validate(profile)
-        cfg = cfg.model_copy(deep=True)
-        d = cfg.agents.defaults
-        if prof.model_preset:
-            d.model_preset = prof.model_preset
-        if prof.tools_allow is not None:
-            d.tools_allow = list(prof.tools_allow)
-        if prof.tools_deny:
-            d.tools_deny = sorted({*d.tools_deny, *prof.tools_deny})
-        if prof.skills_include is not None:
-            d.allowed_skills = list(prof.skills_include)
-        if prof.skills_exclude:
-            d.disabled_skills = sorted({*d.disabled_skills, *prof.skills_exclude})
-        if not prof.memory_enabled:
-            d.vec.enable = False
-        if prof.planning:
-            d.planning = True
-        if prof.limits is not None:
-            d.limits = prof.limits
-        return cfg, prof
-
-    @staticmethod
-    def _build_bootstrap_overrides(
-        prof: Any, bootstrap: Mapping[str, str] | None
-    ) -> dict[str, str] | None:
-        """Merge the profile persona and explicit bootstrap sections — in memory.
-
-        Explicit ``bootstrap`` entries win; the persona fills ``"AGENTS.md"``
-        only when the caller didn't supply that key. ``system_prompt_file`` is
-        read here, once — the path is the host's choice, the core sees content.
-        """
-        overrides = dict(bootstrap or {})
-        if prof is not None and "AGENTS.md" not in overrides:
-            text = prof.system_prompt
-            if not text and prof.system_prompt_file:
-                text = Path(prof.system_prompt_file).expanduser().read_text(encoding="utf-8")
-            if text:
-                overrides["AGENTS.md"] = text
-        return overrides or None
-
-    @staticmethod
-    def _build_inline_skills(prof: Any, skills: Sequence[Any] | None) -> list[Any] | None:
-        """Combine profile ``skills_inline`` with create-time ``skills`` (validated)."""
-        from nanobot.config.schema import InlineSkillConfig
-
-        combined = list(getattr(prof, "skills_inline", None) or [])
-        for skill in skills or []:
-            if isinstance(skill, InlineSkillConfig):
-                combined.append(skill)
-            else:
-                combined.append(InlineSkillConfig.model_validate(skill))
-        return combined or None
 
     @classmethod
     @contextmanager

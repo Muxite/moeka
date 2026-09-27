@@ -31,6 +31,8 @@ class AgentHookContext:
     stop_reason: str | None = None
     error: str | None = None
     session_key: str | None = None
+    # Set with stop_reason "ask_user": the choices the model offered (may be empty).
+    ask_user_options: list[str] | None = None
 
 
 @dataclass(slots=True)

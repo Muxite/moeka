@@ -15,6 +15,12 @@ Per kernel (Task 8): ``variant`` (a :class:`~nanobot.kernel.variants.Variant`, s
 behaviour); a kernel given its own registry never sees solvers registered elsewhere.
 ``kernel.llm.complete_json``'s deterministic fast path consults ``kernel.solvers``.
 
+Agents (Task 9): ``kernel.agent(spec)`` returns the :class:`~nanobot.kernel.agent.Agent`
+for an ``AgentSpec`` (cached per equal spec). All agents share one ``SessionManager``
+under ``env.paths.state_dir``; ``policy`` (optional) is intersected with each spec's.
+``close``/``aclose`` closes the agents, then the session store, then the LLM
+providers, then the loop thread.
+
 Trace routing: ``kernel.trace`` is a :class:`~nanobot.kernel.trace.Tracer` wrapping
 ``env.trace`` (the host's sink). Everything the kernel builds (pool providers, their
 ledgers, budget metering, cache events) is handed ``kernel.core_env``, a copy of
@@ -37,12 +43,15 @@ from nanobot.kernel.hostenv import Environment
 from nanobot.kernel.trace import Tracer
 
 if TYPE_CHECKING:
+    from nanobot.kernel.agent import Agent, AgentSpec
     from nanobot.kernel.baselines import BaselineRegistry
     from nanobot.kernel.budget import Budget, ResponseCache
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.llm import LLM
+    from nanobot.kernel.policy import PermissionPolicy
     from nanobot.kernel.solvers import SolverRegistry
     from nanobot.kernel.variants import Variant
+    from nanobot.session.manager import SessionManager
 
 
 class Kernel:
@@ -56,6 +65,7 @@ class Kernel:
         budget: Budget | None = None,
         cache: ResponseCache | None = None,
         variant: Variant | None = None,
+        policy: PermissionPolicy | None = None,
         max_concurrency: int = 16,
         solvers: SolverRegistry | None = None,
         baselines: BaselineRegistry | None = None,
@@ -78,6 +88,10 @@ class Kernel:
             raise TypeError(f"cache must implement get/put, got {type(cache).__name__}")
         if variant is not None and not isinstance(variant, Variant):
             raise TypeError(f"variant must be a Variant, got {type(variant).__name__}")
+        if policy is not None and not callable(getattr(policy, "decide", None)):
+            raise TypeError(
+                f"policy must implement decide(principal, request, ctx), got {type(policy).__name__}"
+            )
         if solvers is not None and not isinstance(solvers, _solvers.SolverRegistry):
             raise TypeError(f"solvers must be a SolverRegistry, got {type(solvers).__name__}")
         if baselines is not None and not isinstance(baselines, _baselines.BaselineRegistry):
@@ -94,14 +108,22 @@ class Kernel:
         self._cache = cache
         self._max_concurrency = max_concurrency
         self._variant = variant
+        self._policy = policy
         # ``None`` = the process-wide default, looked up on each access.
         self._solvers = solvers
         self._baselines = baselines
         self._closed = False
+        self._closing = False  # set once close() starts: no new agents or session stores
         self._close_lock = threading.Lock()
         # Internal: the loop that ``*_sync`` twins run on. Starts lazily on first use.
         self._bridge = LoopThread(name="moeka-kernel-loop")
         self._llm: LLM | None = None
+        # Agents (Task 9): one per spec, sharing one SessionManager (both built lazily).
+        self._agents: dict[AgentSpec, Agent] = {}
+        self._sessions: SessionManager | None = None
+        # Not _close_lock: a run building its loop on the loop thread must never wait
+        # on a close() that is itself waiting for the loop thread.
+        self._agents_lock = threading.Lock()
 
     @property
     def env(self) -> Environment:
@@ -133,6 +155,11 @@ class Kernel:
     def variant(self) -> Variant | None:
         """The kernel's :class:`Variant` (``None`` = built-ins); agents it builds use it."""
         return self._variant
+
+    @property
+    def policy(self) -> PermissionPolicy | None:
+        """The kernel's permission policy; each agent's is this ∩ ``AgentSpec.policy``."""
+        return self._policy
 
     @property
     def solvers(self) -> SolverRegistry:
@@ -171,6 +198,39 @@ class Kernel:
     def closed(self) -> bool:
         return self._closed
 
+    # -- agents ------------------------------------------------------------
+
+    def agent(self, spec: AgentSpec) -> Agent:
+        """The agent for *spec* (one per equal spec; its loop is built on first use)."""
+        from nanobot.kernel.agent import Agent, AgentSpec
+
+        if not isinstance(spec, AgentSpec):
+            raise TypeError(f"agent() needs an AgentSpec, got {type(spec).__name__}")
+        with self._agents_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("kernel is closed")
+            agent = self._agents.get(spec)
+            if agent is None or agent.closed:
+                agent = Agent(self, spec)
+                self._agents[spec] = agent
+            return agent
+
+    def _session_manager(self) -> SessionManager:
+        """The one ``SessionManager`` all of this kernel's agents share (state dir)."""
+        with self._agents_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("kernel is closed")
+            if self._sessions is None:
+                from nanobot.session.manager import SessionManager
+                from nanobot.session.sqlite_store import SqliteSessionStore
+
+                paths = self._env.paths
+                store = SqliteSessionStore(paths.work_dir, sessions_root=paths.sessions_root)
+                self._sessions = SessionManager(
+                    paths.work_dir, sessions_root=paths.sessions_root, store=store,
+                )
+            return self._sessions
+
     # -- lifecycle -------------------------------------------------------
 
     def _reject_loop_thread(self, method: str) -> None:
@@ -192,11 +252,41 @@ class Kernel:
         with self._close_lock:
             if self._closed:
                 return
+            with self._agents_lock:
+                self._closing = True
+            self._close_agents()
             self._close_llm()
             self._bridge.stop()
             # Only after stop() returned: a failed stop leaves the kernel open
             # so a later close() can retry.
             self._closed = True
+
+    def _close_agents(self) -> None:
+        # Agents' loops (and their in-flight runs) live on the loop thread; then the
+        # shared session store, once no agent can write to it.
+        with self._agents_lock:
+            agents = list(self._agents.values())
+            self._agents.clear()
+        if agents and self._bridge._state == "running":
+            try:
+                self._bridge.run(self._aclose_agents(agents), timeout=30.0)
+            except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
+                logger.warning("kernel: closing agents failed: {!r}", exc)
+        with self._agents_lock:
+            sessions, self._sessions = self._sessions, None
+        if sessions is not None:
+            try:
+                sessions.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("kernel: closing the session store failed: {!r}", exc)
+
+    @staticmethod
+    async def _aclose_agents(agents: list[Agent]) -> None:
+        for agent in agents:
+            try:
+                await agent._aclose()
+            except BaseException as exc:  # noqa: BLE001 - close the others regardless
+                logger.warning("kernel: closing agent {!r} failed: {!r}", agent.spec.name, exc)
 
     def _close_llm(self) -> None:
         # Pool providers' HTTP clients live on the loop thread: close them there,

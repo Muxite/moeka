@@ -805,6 +805,8 @@ class LLM:
                 prompt_tokens=prompt_tokens_of(messages, tools if isinstance(tools, list) else None),
                 max_output_tokens=max_tokens,
                 pricing=self._pricing_for(spec, provider, model),
+                # The active span's tags (an agent run's): per_tag caps apply to it.
+                tags=current_tags(),
             )
 
         return estimate

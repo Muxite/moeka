@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.goal_permission import (
@@ -137,8 +138,12 @@ class CreateGoalTool(Tool, _GoalToolsMixin):
         self,
         sessions: SessionManager,
         bus: MessageBus | None = None,
+        *,
+        template_roots: tuple[Path, ...] = (),
     ) -> None:
         _GoalToolsMixin.__init__(self, sessions, bus)
+        # The loop's variant template roots (Task 8): agent/goal_runtime.md is variant-able.
+        self._template_roots = tuple(template_roots)
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
@@ -148,6 +153,7 @@ class CreateGoalTool(Tool, _GoalToolsMixin):
         return cls(
             sessions=sess,
             bus=ctx.bus,
+            template_roots=ctx.variant.template_roots if ctx.variant is not None else (),
         )
 
     @classmethod
@@ -178,6 +184,7 @@ class CreateGoalTool(Tool, _GoalToolsMixin):
         guidance = render_template(
             "agent/goal_runtime.md",
             strip=True,
+            roots=self._template_roots,
             goal_start_requested=goal_start_requested,
             goal_active=goal_active,
         )

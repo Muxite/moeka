@@ -1846,6 +1846,16 @@ class SessionManager:
                 logger.warning("Failed to flush session {}", key, exc_info=True)
         return flushed
 
+    def close(self) -> None:
+        """Release the store's resources (the SQLite connection, after a WAL checkpoint).
+
+        Idempotent. A store without ``close`` (JSONL) holds nothing open. The
+        SQLite store reconnects lazily if the manager is used again.
+        """
+        close = getattr(self._store, "close", None)
+        if callable(close):
+            close()
+
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)

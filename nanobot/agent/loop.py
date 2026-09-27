@@ -340,6 +340,7 @@ class AgentLoop:
         max_concurrent_requests: int | None = None,
         policy: PermissionPolicy | None = None,
         variant: Variant | None = None,
+        max_policy_denials: int | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
         from nanobot.kernel.gate import AGENT_PRINCIPAL
@@ -356,6 +357,8 @@ class AgentLoop:
         # against the floors and this policy. DefaultPolicy() is today's
         # permissive behaviour (floors only).
         self.policy: PermissionPolicy = policy if policy is not None else DefaultPolicy()
+        # I5 ceiling per turn (``None`` = the runner default, DEFAULT_MAX_POLICY_DENIALS).
+        self.max_policy_denials = max_policy_denials
         self.principal = AGENT_PRINCIPAL
         self._recovery_admission = recovery_admission
         if turn_delivery_factory is not None:
@@ -1349,6 +1352,10 @@ class AgentLoop:
                 policy=self.policy,
                 principal=self.principal,
                 env=self.env,
+                **(
+                    {"max_policy_denials": self.max_policy_denials}
+                    if self.max_policy_denials is not None else {}
+                ),
             ))
         finally:
             turn_scope_stack.close()
