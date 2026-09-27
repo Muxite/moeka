@@ -247,6 +247,41 @@ def _json_system_suffix(schema: dict[str, Any] | None) -> str:
     return base
 
 
+_UNSOLVED = object()
+
+
+def _coerce_json(parsed: Any, model_cls: type | None) -> Any:
+    """The one validation path for a JSON value, from an LLM reply or a solver."""
+    if model_cls is not None:
+        return model_cls.model_validate(parsed)
+    return parsed
+
+
+def _try_deterministic(
+    task_type: str,
+    task_payload: dict[str, Any] | None,
+    prompt: str,
+    model_cls: type | None,
+) -> Any:
+    """Solver fast path: the coerced value, or ``_UNSOLVED`` to fall through to the LLM."""
+    from loguru import logger
+
+    from nanobot.kernel import solvers
+
+    payload = task_payload if task_payload is not None else {"prompt": prompt}
+    solved = solvers.try_solve(task_type, payload)
+    if solved is None:
+        return _UNSOLVED
+    try:
+        return _coerce_json(solved.value, model_cls)
+    except Exception as exc:
+        logger.warning(
+            "solver {} ({}) value failed validation: {}; falling through to the LLM",
+            solved.solver_name, task_type, exc,
+        )
+        return _UNSOLVED
+
+
 async def acomplete_json(
     prompt: str,
     *,
@@ -254,6 +289,8 @@ async def acomplete_json(
     model_cls: type | None = None,
     retries: int = 2,
     system: str | None = None,
+    task_type: str | None = None,
+    task_payload: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Any:
     """One-shot completion constrained to JSON, with parse-retry.
@@ -272,6 +309,14 @@ async def acomplete_json(
             validated — the validated instance is returned.
         retries: Extra attempts after a failed parse/validation.
         system: Optional system prompt; the JSON instruction is appended.
+        task_type: Optional deterministic-solver task type (I6). When a solver
+            registered for it (:mod:`nanobot.kernel.solvers`) solves the
+            payload, its value is returned after the same ``model_cls``
+            validation an LLM reply gets, and no provider is built or called.
+            An invalid solver value falls through to the LLM, as an invalid
+            LLM reply leads to a retry. ``None`` (default) skips the lookup.
+        task_payload: The dict handed to the solvers; defaults to
+            ``{"prompt": prompt}``. Ignored without ``task_type``.
         **kwargs: Forwarded to :func:`acomplete` (``model``, ``preset``,
             ``images``, ``max_tokens``, ``temperature``, config sources, ...).
 
@@ -282,6 +327,11 @@ async def acomplete_json(
     Raises:
         ValueError: When every attempt fails to produce valid JSON.
     """
+    if task_type is not None:
+        solved = _try_deterministic(task_type, task_payload, prompt, model_cls)
+        if solved is not _UNSOLVED:
+            return solved
+
     if model_cls is not None:
         schema = model_cls.model_json_schema()
 
@@ -294,10 +344,7 @@ async def acomplete_json(
         reply = await acomplete(attempt_prompt, system=full_system, **kwargs)
         payload = _extract_json_text(reply)
         try:
-            parsed = json.loads(payload)
-            if model_cls is not None:
-                return model_cls.model_validate(parsed)
-            return parsed
+            return _coerce_json(json.loads(payload), model_cls)
         except Exception as exc:  # json decode or pydantic validation
             last_error = str(exc)
             attempt_prompt = (

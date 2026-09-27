@@ -712,6 +712,7 @@ class MoekaCore:
         schema: dict[str, Any] | None = None,
         model_cls: type | None = None,
         retries: int = 2,
+        task_type: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """One-shot structured thinking: a completion constrained to JSON.
@@ -721,9 +722,13 @@ class MoekaCore:
         Pass ``schema`` (JSON Schema dict) or ``model_cls`` (pydantic model;
         validated instance is returned). Per-call ``model`` / ``temperature``
         / ``max_tokens`` / ``system`` / ``images`` forward to the provider.
+        ``task_type`` (and ``task_payload``) select a registered deterministic
+        solver first; a solved task makes no LLM call (I6).
         """
         from nanobot.api.complete import acomplete_json
 
+        if task_type is not None:
+            kwargs["task_type"] = task_type
         return await acomplete_json(
             prompt, schema=schema, model_cls=model_cls, retries=retries, **kwargs
         )
