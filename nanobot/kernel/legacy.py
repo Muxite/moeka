@@ -44,7 +44,7 @@ def _collect_credentials(config: Any) -> dict[str, str]:
         if key:
             values[f"providers/{slot}/api_key"] = key
     search = config.tools.web.search
-    if search.api_key:
+    if search.api_key and search.provider:
         values[f"web/{search.provider}"] = search.api_key
     return values
 

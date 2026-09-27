@@ -93,5 +93,5 @@ class CoreEnvironment:
     credentials: CredentialResolver
     paths: Paths
     trace: TraceSink
-    exec_base_env: Mapping[str, str] = field(default_factory=dict)
+    exec_base_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     strict: bool = False

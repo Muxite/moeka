@@ -126,3 +126,29 @@ def test_explicit_env_stored_and_reaches_tool_context(tmp_path, monkeypatch):
     assert seen and all(c.env is env for c in seen)
     sub_ctx_env = [c.env for c in seen]
     assert sub_ctx_env[0] is env
+
+
+def test_process_env_secret_not_in_repr(tmp_path, monkeypatch):
+    monkeypatch.setenv("KERNEL_T2_FAKE_SECRET", "s3cr3t-env-value")
+    env = LegacyEnvironment.from_config(_config(tmp_path))
+    assert env.exec_base_env["KERNEL_T2_FAKE_SECRET"] == "s3cr3t-env-value"
+    assert "s3cr3t-env-value" not in repr(env)
+    assert "s3cr3t-env-value" not in str(env)
+
+
+def test_direct_env_repr_hides_exec_base_env(tmp_path):
+    env = CoreEnvironment(
+        config=LegacyEnvironment.from_config(_config(tmp_path)).config,
+        credentials=StaticCredentialResolver({}),
+        paths=Paths(work_dir=tmp_path / "w", state_dir=tmp_path / "s"),
+        trace=NullTraceSink(),
+        exec_base_env={"TOKEN": "hidden-value"},
+    )
+    assert "hidden-value" not in repr(env)
+
+
+def test_empty_search_provider_makes_no_web_ref(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.tools.web.search.provider = ""
+    env = LegacyEnvironment.from_config(cfg)
+    assert env.credentials.resolve("web/", "x") is None
