@@ -368,6 +368,8 @@ class ReadFileTool(_FsTool):
     def read_only(self) -> bool:
         return True
 
+    _capability_names = frozenset({"fs.read"})
+
     def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
         return [capability_request("fs.read", params.get("path"))]
 
@@ -633,6 +635,8 @@ class WriteFileTool(_FsTool):
             "directories as needed. For code changes or partial edits, prefer "
             "apply_patch; use edit_file only for small exact replacements."
         )
+
+    _capability_names = frozenset({"fs.write"})
 
     def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
         return [capability_request("fs.write", params.get("path"))]
@@ -978,6 +982,8 @@ class EditFileTool(_FsTool):
         text = f"Patch applied:\n- {action} {path}{stats}"
         return FileEditResult(text, {resolved_path: diff})
 
+    _capability_names = frozenset({"fs.write"})
+
     def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
         return [capability_request("fs.write", params.get("path"))]
 
@@ -1211,6 +1217,8 @@ class ListDirTool(_FsTool):
     @property
     def read_only(self) -> bool:
         return True
+
+    _capability_names = frozenset({"fs.read"})
 
     def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
         return [capability_request("fs.read", params.get("path"))]

@@ -97,6 +97,8 @@ class ApplyPatchTool(_FsTool):
             "Use edit_file only for small exact replacements on a single file."
         )
 
+    _capability_names = frozenset({"fs.read", "fs.write"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         # One request per distinct path, in order. ``dry_run`` validates against the
         # current files without writing, so it needs only ``fs.read``.

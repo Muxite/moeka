@@ -396,6 +396,8 @@ class FindFilesTool(_SearchTool):
             return False
         return _matches_query(entry.display_path, query)
 
+    _capability_names = frozenset({"fs.read"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         return [capability_request("fs.read", params.get("path") or ".")]
 
@@ -1049,6 +1051,8 @@ class GrepTool(_SearchTool):
             f"Error: grep timed out after {self._regex_timeout_s:g}s (pattern too expensive); "
             "use a simpler pattern or narrow the search path."
         )
+
+    _capability_names = frozenset({"fs.read"})
 
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         return [capability_request("fs.read", params.get("path") or ".")]

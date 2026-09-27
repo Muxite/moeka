@@ -79,6 +79,8 @@ class SpawnTool(Tool):
         """Each call owns its task state; the manager serializes capacity admission."""
         return True
 
+    _capability_names = frozenset({"budget.subagents"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         return [capability_request("budget.subagents")]
 

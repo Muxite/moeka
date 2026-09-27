@@ -208,6 +208,8 @@ class ImageGenerationTool(Tool):
             return []
         return [self._resolve_reference_image(value) for value in values if value]
 
+    _capability_names = frozenset({"fs.read", "net.fetch"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         # Reference images are read from disk; generation calls the provider API.
         refs = params.get("reference_images")

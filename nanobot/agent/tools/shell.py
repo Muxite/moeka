@@ -421,6 +421,8 @@ class ExecTool(Tool):
     def exclusive(self) -> bool:
         return True
 
+    _capability_names = frozenset({"exec.run"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         command = params.get("command") or params.get("cmd") or ""
         return [capability_request("exec.run", command)]

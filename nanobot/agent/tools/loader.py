@@ -196,6 +196,9 @@ class _LegacyErrorPrefixTool(Tool):
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         return self._wrapped.capabilities(params)
 
+    def capability_surface(self) -> frozenset[str] | None:
+        return self._wrapped.capability_surface()
+
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         return self._wrapped.validate_params(params)
 

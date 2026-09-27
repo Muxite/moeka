@@ -509,6 +509,8 @@ class WebSearchTool(Tool):
         """DuckDuckGo searches are serialized because ddgs is not concurrency-safe."""
         return self._effective_provider() == "duckduckgo"
 
+    _capability_names = frozenset({"net.fetch"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         # The contacted host depends on the configured provider, so the resource is
         # ``search:<query>`` (distinguishable from fetched URLs in deny rules).
@@ -1228,6 +1230,8 @@ class WebFetchTool(Tool):
     @property
     def read_only(self) -> bool:
         return True
+
+    _capability_names = frozenset({"net.fetch"})
 
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         url = params.get("url")

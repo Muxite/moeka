@@ -87,6 +87,8 @@ class ListSessionsTool(Tool):
     def description(self) -> str:
         return "List other persisted sessions by @handle."
 
+    _capability_names = frozenset({"session.read"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         return [capability_request("session.read", "*")]
 
@@ -180,6 +182,8 @@ class SendSessionMessageTool(Tool):
         if envelope["expect_reply"]:
             content += " Reply with send_session_message."
         return RuntimeContextBlock(source="session_message", content=content)
+
+    _capability_names = frozenset({"session.send"})
 
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         return [capability_request("session.send", params.get("to"))]

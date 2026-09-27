@@ -225,6 +225,10 @@ class Tool(ABC):
     config_key: str = ""
     _plugin_discoverable: bool = True
     _scopes: set[str] = {"core"}
+    # Every capability name ``capabilities`` can return, for any params: the static
+    # surface a sub-agent requests when its policy is attenuated (I4). Declared on the
+    # same class that overrides ``capabilities``; ``None`` means undeclared.
+    _capability_names: frozenset[str] | None = None
 
     @classmethod
     def config_cls(cls) -> type[BaseModel] | None:
@@ -260,8 +264,31 @@ class Tool(ABC):
           own ``_workspace``/``workspace``, else the host's work dir, before any floor or
           policy sees them. Declare the path the tool resolves, not a pre-resolved one.
         - Existing inline guards inside ``execute`` stay; the gate is additive.
+        - Declare every name this can return in ``_capability_names`` on the same class
+          (see ``capability_surface``).
         """
         return []
+
+    def capability_surface(self) -> frozenset[str] | None:
+        """Every capability name ``capabilities`` can return, or ``None`` if unknown.
+
+        - A tool that does not override ``capabilities`` declares nothing: empty set.
+        - Otherwise ``_capability_names`` counts only when it is set on the class that
+          overrides ``capabilities`` or a subclass of it; a subclass that overrides
+          ``capabilities`` again without redeclaring is ``None`` (a stale inherited
+          declaration is never trusted).
+        """
+        mro = type(self).__mro__
+        caps_owner = next(i for i, c in enumerate(mro) if "capabilities" in c.__dict__)
+        if mro[caps_owner] is Tool:
+            return frozenset()
+        names_owner = next(
+            (i for i, c in enumerate(mro) if "_capability_names" in c.__dict__), len(mro),
+        )
+        if names_owner > caps_owner:
+            return None
+        names = self._capability_names
+        return None if names is None else frozenset(names)
 
     @staticmethod
     def error(content: str) -> ToolResult:

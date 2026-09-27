@@ -597,6 +597,8 @@ class ExecSessionTool(Tool):
             "checks as a best-effort hint for line-oriented shells, not a sandbox."
         )
 
+    _capability_names = frozenset({"exec.session_input"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         # Sessions are started by ``exec`` (gated as ``exec.run``). Writing stdin,
         # closing it or terminating is ``exec.session_input``; the resource is the input

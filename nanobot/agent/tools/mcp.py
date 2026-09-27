@@ -541,6 +541,8 @@ class _MCPWrapperBase(Tool):
         self._url = url
         self._reconnect: _ReconnectCallback | None = None
 
+    _capability_names = frozenset({"mcp.call", "net.fetch"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         """``mcp.call`` on ``<server>.<name>``; HTTP transports also need ``net.fetch``.
 

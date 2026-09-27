@@ -305,6 +305,8 @@ class BackgroundShellTool(Tool):
         self._origin_chat_id.set(chat_id)
         self._origin_session_key.set(session_key or f"{channel}:{chat_id}")
 
+    _capability_names = frozenset({"exec.run", "exec.session_input"})
+
     def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
         action = str(params.get("action") or "").strip().lower()
         if action == "start":
