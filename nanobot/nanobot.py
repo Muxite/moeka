@@ -97,6 +97,7 @@ class Nanobot:
         workspace: str | Path | None = None,
         model: str | None = None,
         model_preset: str | None = None,
+        env: Any | None = None,
     ) -> Nanobot:
         """Create a Nanobot instance from a config file.
 
@@ -106,6 +107,7 @@ class Nanobot:
             workspace: Override the workspace directory from config.
             model: Override the instance default model.
             model_preset: Override the instance default model preset.
+            env: Optional ``CoreEnvironment``; default is built from the config.
         """
         from nanobot.config.loader import load_config, resolve_config_env_vars
 
@@ -140,6 +142,7 @@ class Nanobot:
             vec_config=defaults.vec,  # moeka: wire VecStore semantic memory config
             hook_factories=[create_file_edit_activity_hook],
             tool_registry=tools,
+            env=env,
         )
         return cls(loop, config=config, mcp_provider=mcp_provider)
 

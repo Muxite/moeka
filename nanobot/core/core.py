@@ -79,6 +79,7 @@ class MoekaCore:
         profile: Any | None = None,
         bootstrap: Mapping[str, str] | None = None,
         skills: Sequence[Any] | None = None,
+        env: Any | None = None,
     ) -> MoekaCore:
         """Build a core from moeka config — files optional.
 
@@ -115,6 +116,9 @@ class MoekaCore:
                 instances or equivalent dicts. Combined with the profile's
                 ``skills_inline``. Inline skills shadow workspace/builtin skills
                 of the same name and bypass ``skills_include`` filtering.
+            env: Optional :class:`~nanobot.kernel.env.CoreEnvironment`. When given
+                it wins for paths/credentials; ``config`` still drives model and
+                provider choice. Default: built from the config by ``LegacyEnvironment``.
         """
         from nanobot.config.loader import config_from_sources
 
@@ -144,7 +148,7 @@ class MoekaCore:
 
         core = cls.from_config(
             cfg, workspace=ws, model=model, provider=provider,
-            bootstrap_overrides=overrides, inline_skills=inline_skills,
+            bootstrap_overrides=overrides, inline_skills=inline_skills, env=env,
         )
         core._ephemeral_workspace = ephemeral
         if prof is not None:
@@ -281,6 +285,7 @@ class MoekaCore:
         provider: Any | None = None,
         bootstrap_overrides: Mapping[str, str] | None = None,
         inline_skills: Sequence[Any] | None = None,
+        env: Any | None = None,
     ) -> MoekaCore:
         """Build a core directly from an in-memory :class:`Config` (the data seam).
 
@@ -310,6 +315,8 @@ class MoekaCore:
             extra["provider"] = provider
         if model is not None:
             extra["model"] = model
+        if env is not None:
+            extra["env"] = env
 
         loop = AgentLoop.from_config(config, tool_registry=ToolRegistry(), **extra)
         return cls(loop)

@@ -116,6 +116,7 @@ if TYPE_CHECKING:
         ProviderConfig,
         ToolsConfig,
     )
+    from nanobot.kernel.env import CoreEnvironment
 
 _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
@@ -313,12 +314,14 @@ class AgentLoop:
         bootstrap_overrides: dict[str, str] | None = None,
         inline_skills: list | None = None,
         recovery_admission: RecoveryAdmission | None = None,
+        env: CoreEnvironment | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
         _tc = tools_config or ToolsConfig()
         defaults = AgentDefaults()
         self.bus = bus
+        self.env = env
         self._recovery_admission = recovery_admission
         if turn_delivery_factory is not None:
             if turn_delivery_factory.bus is not bus:
@@ -448,6 +451,7 @@ class AgentLoop:
             tools_allow=self.tools_allow,
             tools_deny=self.tools_deny,
             inline_skills=inline_skills,
+            env=env,
         )
         self._unified_session = unified_session
         self._running = False
@@ -504,6 +508,7 @@ class AgentLoop:
         bus: MessageBus | None = None,
         *,
         tool_registry: ToolRegistry,
+        env: CoreEnvironment | None = None,
         **extra: Any,
     ) -> AgentLoop:
         """Create an AgentLoop from config with the common parameter set.
@@ -515,8 +520,10 @@ class AgentLoop:
         allowing callers to override or extend the standard config-derived
         parameters (e.g. ``session_manager``).
         """
+        from nanobot.kernel.legacy import LegacyEnvironment
         from nanobot.providers.factory import make_provider
 
+        env = env or LegacyEnvironment.from_config(config)
         if bus is None:
             bus = MessageBus()
         defaults = config.agents.defaults
@@ -569,6 +576,7 @@ class AgentLoop:
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
             tool_registry=tool_registry,
+            env=env,
             **extra,
         )
 
@@ -684,6 +692,7 @@ class AgentLoop:
             timezone=self.context.timezone or "UTC",
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_control=AgentRuntimeControl(self),
+            env=self.env,
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools, allow=self.tools_allow, deny=self.tools_deny)

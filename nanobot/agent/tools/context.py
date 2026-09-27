@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.runtime_control import RuntimeControl
     from nanobot.bus.queue import MessageBus
     from nanobot.config.schema import ProviderConfig, ToolsConfig
+    from nanobot.kernel.env import CoreEnvironment
     from nanobot.providers.factory import ProviderSnapshot
     from nanobot.security.workspace_access import WorkspaceSandboxStatus
     from nanobot.session.manager import SessionManager
@@ -88,3 +89,4 @@ class ToolContext:
     timezone: str = "UTC"
     workspace_sandbox: WorkspaceSandboxStatus | None = None
     runtime_control: RuntimeControl | None = None
+    env: CoreEnvironment | None = None

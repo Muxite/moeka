@@ -8,7 +8,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 from loguru import logger
 
@@ -39,6 +39,9 @@ from nanobot.security.workspace_access import (
 )
 from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.prompt_templates import render_template
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
 
 
 class _SubagentOrigin(TypedDict):
@@ -111,7 +114,9 @@ class SubagentManager:
         tools_allow: list[str] | None = None,
         tools_deny: list[str] | None = None,
         inline_skills: list | None = None,
+        env: "CoreEnvironment | None" = None,
     ):
+        self.env = env
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
         if bus is None:
@@ -229,6 +234,7 @@ class SubagentManager:
                 restrict_to_workspace=cfg.restrict_to_workspace,
                 workspace=root,
             ),
+            env=self.env,
         )
         ToolLoader().load(
             ctx, registry, scope="subagent",
