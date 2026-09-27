@@ -832,3 +832,63 @@ def test_union_types_apply_to_arguments_too():
     from nanobot.agent.tools.base import Schema
 
     assert Schema.validate_json_schema_value("abc", {"type": ["integer", "string"]}) == []
+
+
+# -- review fix round 3: valid instances pass (re-validated by field values) -------------
+
+
+async def _typed_out(fn, model) -> Any:
+    tool = FunctionTool(fn, name="m", output_model=model)
+    tools = ToolRegistry()
+    tools.register(tool)
+    return await tools.execute("m", {})
+
+
+async def test_valid_instance_with_alias_passes():
+    from pydantic import Field
+
+    class Aliased(BaseModel):
+        n: int = Field(alias="N")
+
+    out = await _typed_out(lambda: Aliased(N=3), Aliased)
+    assert not is_tool_error_result(out), out
+
+
+async def test_valid_instance_with_excluded_required_field_passes():
+    from pydantic import Field
+
+    class Excl(BaseModel):
+        n: int
+        secret: str = Field(exclude=True)
+
+    out = await _typed_out(lambda: Excl(n=1, secret="x"), Excl)
+    assert not is_tool_error_result(out), out
+    assert "secret" not in out
+
+
+async def test_valid_instance_with_value_changing_serializer_passes():
+    from pydantic import field_serializer
+
+    class Items(BaseModel):
+        n: int
+
+        @field_serializer("n")
+        def _items(self, v: int) -> str:
+            return f"{v} items"
+
+    out = await _typed_out(lambda: Items(n=3), Items)
+    assert not is_tool_error_result(out), out
+    assert json.loads(out) == {"n": "3 items"}
+
+
+async def test_nested_constructed_instance_is_rejected():
+    class Outer(BaseModel):
+        inner: _Count
+
+    out = await _typed_out(
+        lambda: Outer(inner=_Count(n=1)).model_copy(
+            update={"inner": _Count.model_construct(n="bad")},
+        ),
+        Outer,
+    )
+    assert is_tool_error_result(out) and RESULT_SCHEMA_MARKER in out and "inner.n" in out

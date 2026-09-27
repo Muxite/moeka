@@ -107,6 +107,34 @@ def _schema_from_signature(fn: Callable[..., Any]) -> dict[str, Any]:
     return schema
 
 
+def _is_model_instance(value: Any) -> bool:
+    """True for a pydantic model instance (not the class)."""
+    return (
+        not isinstance(value, type)
+        and callable(getattr(value, "model_dump", None))
+        and isinstance(getattr(value, "__dict__", None), dict)
+    )
+
+
+def _field_values(value: Any) -> Any:
+    """Raw field values of a model instance, recursively, for re-validation by name.
+
+    Nested model instances become dicts too, so they are re-validated rather than
+    returned as is. Extra fields (``extra="allow"``) are included.
+    """
+    if _is_model_instance(value):
+        data = {k: _field_values(v) for k, v in value.__dict__.items()}
+        extra = getattr(value, "__pydantic_extra__", None)
+        if isinstance(extra, dict):
+            data.update({k: _field_values(v) for k, v in extra.items()})
+        return data
+    if isinstance(value, (list, tuple)):
+        return [_field_values(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _field_values(v) for k, v in value.items()}
+    return value
+
+
 class FunctionTool(Tool):
     """Adapts a plain (sync or async) Python callable into a moeka Tool.
 
@@ -121,10 +149,12 @@ class FunctionTool(Tool):
     uses) and returned as ``ToolResult(<model JSON>, structured=<model instance>)``;
     a mismatch returns ``ToolResult.error`` with ``RESULT_SCHEMA_MARKER`` and the field
     paths, never raises. ``output_schema`` is then the model's JSON Schema (it declares
-    the tool as typed). A returned model instance is re-validated from its dumped fields
-    (pydantic would otherwise return it unchecked), so the instance attached is always
-    freshly validated; the kernel's ``validate_result`` trusts it (for this exact class
-    only) rather than re-checking its dumped form, which a ``field_serializer`` may change.
+    the tool as typed). A returned model instance is re-validated from its raw field
+    values, by field name and recursively through nested models, lists and dicts
+    (pydantic would otherwise return it unchecked; its serialized dump is not used, since
+    aliases, ``exclude=True`` and serializers change it). So the instance attached is
+    always freshly validated, and the kernel's ``validate_result`` trusts it (for this
+    exact class only) rather than re-checking its dumped form.
     Without it the return value passes exactly as before.
     """
 
@@ -196,17 +226,17 @@ class FunctionTool(Tool):
                     "(value): not valid JSON, expected a value matching the declared "
                     "output schema",
                 ])
-        # pydantic returns an existing instance as is (revalidate_instances="never"), so
-        # a model_construct()-ed or mutated instance would pass unchecked: validate its
-        # dumped fields instead.
-        dump = getattr(result, "model_dump", None)
-        if callable(dump) and not isinstance(result, type):
-            try:
-                result = dump(warnings=False)
-            except Exception as exc:  # noqa: BLE001 - an undumpable instance is a bad result
-                return result_schema_error(self._name, [f"(value): {type(exc).__name__}"])
         try:
-            model = _coerce_json(result, self._output_model)
+            if _is_model_instance(result):
+                # pydantic returns an existing instance as is (revalidate_instances=
+                # "never"), so a model_construct()-ed or mutated instance would pass
+                # unchecked. Validate its raw field VALUES (by field name), not its
+                # serialized dump, which aliases, exclude=True and serializers change.
+                model = self._output_model.model_validate(
+                    _field_values(result), by_name=True,
+                )
+            else:
+                model = _coerce_json(result, self._output_model)
         except Exception as exc:  # noqa: BLE001 - a bad return value is a tool error
             return result_schema_error(self._name, pydantic_problems(exc))
         return ToolResult(model.model_dump_json(), structured=model)

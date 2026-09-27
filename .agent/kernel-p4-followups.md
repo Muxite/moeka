@@ -102,8 +102,10 @@ flowchart LR
   - `FunctionTool` results are trusted as the pydantic `output_model` instance instead of being re-checked in
     their dumped form, which a `field_serializer` can change.
 - Fixed in review round 2:
-  - `FunctionTool` re-validates a returned model instance from its dumped fields. pydantic returns an existing
-    instance as is, so a `model_construct()`-ed or mutated instance used to pass.
+  - `FunctionTool` re-validates a returned model instance. pydantic returns an existing instance as is, so a
+    `model_construct()`-ed or mutated instance used to pass. Round 3 corrected the method: it validates the
+    instance's raw field values by name (recursively), not its serialized dump, because aliases,
+    `exclude=True` and serializers change the dump.
   - The kernel's trust skip applies only to exactly `FunctionTool`, so no other tool can opt out.
   - A nullable union (`"type": [...]` with `nullable: true`) accepts `None` again.
 - A `type` list is a union for arguments as well as results. This is deliberate: the old first-type-only
