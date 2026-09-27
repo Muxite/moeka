@@ -179,12 +179,19 @@ def _invalidate_skill_cache(workspace: Path, data_root: Path | None = None) -> N
     _SKILL_CACHE.pop(_skill_cache_key(workspace, data_root), None)
 
 
-def _package_fingerprint(root: Path) -> str | None:
-    """Hash package paths, link targets, and file contents."""
+def _package_fingerprint(root: Path, *, exclude: frozenset[str] = frozenset()) -> str | None:
+    """Hash package paths, link targets, and file contents.
+
+    ``exclude`` holds root-relative POSIX paths to skip. It is empty for Agent Plugins;
+    the kernel manifest hash (:func:`nanobot.kernel.manifest.compute_version_hash`)
+    excludes the manifest file itself so the stamped ``version_hash`` never feeds itself.
+    """
     digest = sha256()
     try:
         for candidate in sorted(root.rglob("*")):
             relative = candidate.relative_to(root).as_posix()
+            if relative in exclude:
+                continue
             digest.update(relative.encode())
             if candidate.is_symlink():
                 digest.update(b"\0link\0")
