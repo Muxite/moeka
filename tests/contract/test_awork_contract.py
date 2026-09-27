@@ -16,6 +16,7 @@ future rename/removal fails loudly here instead of silently in awork.
 from __future__ import annotations
 
 import inspect
+import re
 
 import pytest
 
@@ -37,10 +38,12 @@ class _FakeProvider:
     exercise usage_sink and the response_format-carrying ``provider_context``.
     """
 
-    def __init__(self, replies: list[str], *, reject_native: bool = False):
+    def __init__(self, replies: list[str], *, reject_native: bool = False,
+                 cache_read_tokens: int | None = None):
         self._replies = list(replies)
         self.calls: list[dict] = []
         self._reject_native = reject_native
+        self._cache_read_tokens = cache_read_tokens
 
     async def chat_with_retry(self, *, messages, max_tokens=None, temperature=None,
                                provider_context=None):
@@ -60,7 +63,9 @@ class _FakeProvider:
             # an error LLMResponse, never a raised exception.
             return LLMResponse(content="Error: response_format not supported", finish_reason="error")
         content = self._replies.pop(0)
-        usage = LLMUsage.reported(input_tokens=11, output_tokens=7)
+        usage = LLMUsage.reported(
+            input_tokens=11, output_tokens=7, cache_read_tokens=self._cache_read_tokens,
+        )
         return LLMResponse(content=content, finish_reason="stop", usage=usage)
 
 
@@ -83,6 +88,10 @@ def _install(monkeypatch, provider: _FakeProvider) -> list[dict]:
 
 
 async def test_acomplete_reports_usage_to_sink(monkeypatch):
+    """awork's UsageLedger reads legacy OpenAI-shaped keys (prompt_tokens/
+    completion_tokens/total_tokens, cached_tokens for cache reads) — see
+    backend/awork/llm.py:165-166 (``_cache_tokens``) and :328-329, :599-601
+    (event ingestion) — not LLMUsage's canonical field names."""
     provider = _FakeProvider(["hello"])
     _install(monkeypatch, provider)
     seen: list[dict] = []
@@ -93,9 +102,11 @@ async def test_acomplete_reports_usage_to_sink(monkeypatch):
     assert len(seen) == 1
     payload = seen[0]
     assert payload["model"] == "some/model"
-    assert payload["input_tokens"] == 11
-    assert payload["output_tokens"] == 7
+    assert payload["prompt_tokens"] == 11
+    assert payload["completion_tokens"] == 7
     assert payload["total_tokens"] == 18
+    assert "input_tokens" not in payload  # canonical LLMUsage key must not leak
+    assert "output_tokens" not in payload
 
 
 def test_complete_sync_with_usage_sink_and_config_object(monkeypatch):
@@ -105,7 +116,20 @@ def test_complete_sync_with_usage_sink_and_config_object(monkeypatch):
     seen: list[dict] = []
     out = complete("hi", config=config, usage_sink=seen.append)
     assert out == "sync hello"
-    assert len(seen) == 1 and seen[0]["model"] is None
+    assert len(seen) == 1
+    assert seen[0]["model"] is None
+    assert seen[0]["prompt_tokens"] == 11
+    assert seen[0]["completion_tokens"] == 7
+
+
+async def test_acomplete_usage_sink_reports_cache_read_key_awork_recognises(monkeypatch):
+    """awork's ``_cache_tokens`` reads ``cached_tokens`` or
+    ``cache_read_input_tokens`` for the cache-read count (llm.py:165-166)."""
+    provider = _FakeProvider(["hi"], cache_read_tokens=4)
+    _install(monkeypatch, provider)
+    seen: list[dict] = []
+    await acomplete("hi", config_dict=dict(_CONFIG_DICT), usage_sink=seen.append)
+    assert seen[0].get("cached_tokens") == 4
 
 
 async def test_acomplete_images_and_system_awork_shape(monkeypatch):
@@ -135,6 +159,39 @@ async def test_acomplete_usage_sink_error_never_breaks_completion(monkeypatch):
 
     out = await acomplete("hi", config_dict=dict(_CONFIG_DICT), usage_sink=_boom)
     assert out == "ok"
+
+
+# awork's own sentinel regex (backend/awork/llm.py:1012) for sniffing a
+# provider error out of moeka's completion text — copied verbatim so this
+# test fails the moment `complete()`'s error-as-content contract breaks,
+# instead of only failing inside awork after a submodule bump.
+_AWORK_PROVIDER_SENTINEL_RE = re.compile(r"(?:^|['\"])error(?: calling [^:'\"]{0,60})?:")
+
+
+class _ErrorProvider:
+    """A provider whose chat_with_retry returns a provider-error LLMResponse —
+    moeka never raises on this, it returns the error as content text so hosts
+    can sniff it (see nanobot.api.complete.acomplete's docstring)."""
+
+    async def chat_with_retry(self, *, messages, max_tokens=None, temperature=None):
+        return LLMResponse(
+            content='Error: {"message": "insufficient credits"}', finish_reason="error",
+        )
+
+
+def test_complete_returns_provider_error_text_matching_awork_sentinel(monkeypatch):
+    """acomplete()/complete() must not raise on a provider error — awork
+    detects it itself via `_PROVIDER_SENTINEL_RE`."""
+    def _make(config, *, preset_name=None, preset=None, model=None, **kw):
+        return _ErrorProvider()
+
+    import nanobot.providers.factory as factory
+
+    monkeypatch.setattr(factory, "make_provider", _make)
+
+    out = complete("hi", config_dict=dict(_CONFIG_DICT))
+    # awork lowercases before matching (llm.py:1022) — replicate that here.
+    assert _AWORK_PROVIDER_SENTINEL_RE.search(out.lower())
 
 
 # ---------------------------------------------------------------------------

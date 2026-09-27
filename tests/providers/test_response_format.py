@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest  # noqa: F401
@@ -71,16 +72,26 @@ def test_build_kwargs_sets_response_format_from_provider_context():
 
 # --- acomplete_json native-first with fallback ----------------------------- #
 
+def _resp(content, finish_reason="stop"):
+    return SimpleNamespace(content=content, finish_reason=finish_reason, error_type=None)
+
+
 async def test_acomplete_json_native_success(monkeypatch):
-    """When the native call returns valid JSON, one call, response_format passed."""
+    """When the native call returns valid JSON, one call, response_format passed.
+
+    acomplete_json calls the response-returning ``_acomplete_response`` helper
+    (not ``acomplete``) so it can see ``finish_reason`` — a provider rejection
+    of response_format comes back as an error LLMResponse, not a raised
+    exception (moeka's `chat()` never lets a provider error propagate).
+    """
     seen = {}
 
-    async def fake_acomplete(prompt, *, system=None, response_format=None, **kw):
+    async def fake_response(prompt, *, system=None, response_format=None, **kw):
         seen["response_format"] = response_format
         seen["calls"] = seen.get("calls", 0) + 1
-        return '{"ok": true}'
+        return _resp('{"ok": true}')
 
-    monkeypatch.setattr(capi, "acomplete", fake_acomplete)
+    monkeypatch.setattr(capi, "_acomplete_response", fake_response)
     out = await acomplete_json("q", schema={"type": "object"})
     assert out == {"ok": True}
     assert seen["calls"] == 1
@@ -91,13 +102,13 @@ async def test_acomplete_json_falls_back_when_provider_rejects(monkeypatch):
     """Provider rejects response_format on the first call → drop it and retry."""
     calls = []
 
-    async def fake_acomplete(prompt, *, system=None, response_format=None, **kw):
+    async def fake_response(prompt, *, system=None, response_format=None, **kw):
         calls.append(response_format)
         if response_format is not None:
-            raise RuntimeError("400 response_format not supported")
-        return '{"ok": 1}'
+            return _resp("Error: response_format not supported", finish_reason="error")
+        return _resp('{"ok": 1}')
 
-    monkeypatch.setattr(capi, "acomplete", fake_acomplete)
+    monkeypatch.setattr(capi, "_acomplete_response", fake_response)
     out = await acomplete_json("q", schema={"type": "object"}, retries=2)
     assert out == {"ok": 1}
     assert calls[0] is not None and calls[1] is None   # native then plain fallback
@@ -107,11 +118,11 @@ async def test_acomplete_json_no_schema_uses_plain_path(monkeypatch):
     """No schema → no native response_format, existing reprompt path unchanged."""
     seen = {}
 
-    async def fake_acomplete(prompt, *, system=None, response_format=None, **kw):
+    async def fake_response(prompt, *, system=None, response_format=None, **kw):
         seen["response_format"] = response_format
-        return "[]"
+        return _resp("[]")
 
-    monkeypatch.setattr(capi, "acomplete", fake_acomplete)
+    monkeypatch.setattr(capi, "_acomplete_response", fake_response)
     out = await acomplete_json("q")
     assert out == []
     assert seen["response_format"] is None
@@ -120,8 +131,6 @@ async def test_acomplete_json_no_schema_uses_plain_path(monkeypatch):
 # --- acomplete threads response_format into a ProviderCallContext ---------- #
 
 async def test_acomplete_builds_provider_context_from_response_format(monkeypatch):
-    from types import SimpleNamespace
-
     seen = {}
 
     class _StubProvider:
@@ -148,8 +157,6 @@ async def test_acomplete_builds_provider_context_from_response_format(monkeypatc
 
 
 async def test_acomplete_omits_provider_context_without_response_format(monkeypatch):
-    from types import SimpleNamespace
-
     seen = {}
 
     class _StubProvider:

@@ -59,8 +59,20 @@ async def _aclose_provider(provider: Any) -> None:
 
 
 def _usage_payload(model: str | None, usage: Any) -> dict[str, Any]:
-    """Flatten provider ``LLMUsage`` into the plain dict a usage_sink expects."""
-    fields = dataclasses.asdict(usage) if dataclasses.is_dataclass(usage) else dict(usage)
+    """Flatten provider ``LLMUsage`` into the legacy OpenAI-shaped dict hosts expect.
+
+    ``usage_sink`` consumers (e.g. awork's UsageLedger) read the compact
+    per-turn shape (``prompt_tokens``/``completion_tokens``/``total_tokens``,
+    and ``cached_tokens``/``cache_write_tokens`` for cache accounting) rather
+    than ``LLMUsage``'s canonical field names — see
+    :meth:`LLMUsage.to_turn_dict`.
+    """
+    to_turn_dict = getattr(usage, "to_turn_dict", None)
+    fields = (
+        to_turn_dict()
+        if callable(to_turn_dict)
+        else dataclasses.asdict(usage) if dataclasses.is_dataclass(usage) else dict(usage)
+    )
     return {"model": model, **fields}
 
 
@@ -99,6 +111,65 @@ def _user_content(prompt: str, images: list[str | bytes | Path] | None) -> Any:
     if not images:
         return prompt
     return [{"type": "text", "text": prompt}] + [_image_part(i) for i in images]
+
+
+async def _acomplete_response(
+    prompt: str,
+    *,
+    system: str | None = None,
+    images: list[str | bytes | Path] | None = None,
+    config: Any | None = None,
+    config_dict: dict[str, Any] | None = None,
+    config_path: str | Path | None = None,
+    model: str | None = None,
+    preset: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    usage_sink: Any | None = None,
+    response_format: dict[str, Any] | None = None,
+    env: Any | None = None,
+) -> Any:
+    """Do the actual provider call for one completion; return the raw ``LLMResponse``.
+
+    :func:`acomplete` wraps this and returns just the text (its long-standing
+    public contract: a provider error comes back as *content* — moeka never
+    raises on ``finish_reason == "error"`` — so hosts like awork can sniff the
+    "Error: ..." sentinel text themselves). :func:`acomplete_json` calls this
+    directly instead, because it needs to see ``finish_reason`` to decide
+    whether a native ``response_format`` attempt was rejected and should fall
+    back to the plain parse-retry path.
+    """
+    from nanobot.config.loader import config_from_sources
+    from nanobot.providers.base import ProviderCallContext, RequestExtras
+    from nanobot.providers.factory import make_provider
+
+    resolved_config, _ = config_from_sources(
+        config=config, config_dict=config_dict, config_path=config_path,
+    )
+    extra: dict[str, Any] = {"env": env} if env is not None else {}
+    provider = make_provider(resolved_config, preset_name=preset, model=model, **extra)
+
+    messages: list[dict[str, Any]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": _user_content(prompt, images)})
+
+    call_kwargs: dict[str, Any] = dict(
+        messages=messages, max_tokens=max_tokens, temperature=temperature,
+    )
+    if response_format is not None:
+        call_kwargs["provider_context"] = ProviderCallContext(
+            request=RequestExtras(response_format=response_format)
+        )
+    try:
+        response = await provider.chat_with_retry(**call_kwargs)
+    finally:
+        # Release the provider's async HTTP client inside this loop so the sync
+        # ``asyncio.run`` wrapper doesn't leave it to be GC'd against a closed
+        # loop (noisy "Event loop is closed" tracebacks).
+        await _aclose_provider(provider)
+    _report_usage(usage_sink, model, response)
+    return response
 
 
 async def acomplete(
@@ -146,46 +217,22 @@ async def acomplete(
             keeps the pre-kernel call exactly.
 
     Returns:
-        The assistant's text content.
+        The assistant's text content. A provider error comes back as content
+        text (e.g. ``"Error: ..."``) rather than a raised exception — this is
+        the long-standing contract hosts (e.g. awork) sniff for.
     """
-    from nanobot.config.loader import config_from_sources
-    from nanobot.providers.base import ProviderCallContext, RequestExtras
-    from nanobot.providers.factory import make_provider
-
-    resolved_config, _ = config_from_sources(
-        config=config, config_dict=config_dict, config_path=config_path,
+    response = await _acomplete_response(
+        prompt, system=system, images=images, config=config, config_dict=config_dict,
+        config_path=config_path, model=model, preset=preset, max_tokens=max_tokens,
+        temperature=temperature, usage_sink=usage_sink, response_format=response_format,
+        env=env,
     )
-    extra: dict[str, Any] = {"env": env} if env is not None else {}
-    provider = make_provider(resolved_config, preset_name=preset, model=model, **extra)
-
-    messages: list[dict[str, Any]] = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": _user_content(prompt, images)})
-
-    call_kwargs: dict[str, Any] = dict(
-        messages=messages, max_tokens=max_tokens, temperature=temperature,
-    )
-    if response_format is not None:
-        call_kwargs["provider_context"] = ProviderCallContext(
-            request=RequestExtras(response_format=response_format)
-        )
-    try:
-        response = await provider.chat_with_retry(**call_kwargs)
-    finally:
-        # Release the provider's async HTTP client inside this loop so the sync
-        # ``asyncio.run`` wrapper doesn't leave it to be GC'd against a closed
-        # loop (noisy "Event loop is closed" tracebacks).
-        await _aclose_provider(provider)
-    if response.finish_reason == "error":
-        raise RuntimeError(f"moeka completion failed: {response.content}")
     if response.content is None:
         raise RuntimeError(
             "moeka completion returned no content "
             f"(finish_reason={response.finish_reason!r}, "
             f"error_type={response.error_type!r})"
         )
-    _report_usage(usage_sink, model, response)
     return response.content
 
 
@@ -452,17 +499,34 @@ async def acomplete_json(
     attempt_prompt = prompt
     last_error = ""
     for _ in range(max(retries, 0) + 1):
+        # Call the response-returning helper directly (not acomplete()) so a
+        # provider's rejection of response_format is visible via
+        # finish_reason — acomplete() itself never raises on a provider error,
+        # it returns the error text as content (hosts sniff that sentinel), so
+        # that signal would otherwise be invisible here.
         try:
-            reply = await acomplete(
+            response = await _acomplete_response(
                 attempt_prompt, system=full_system,
                 response_format=native_rf if use_native else None, **kwargs,
             )
-        except Exception as exc:  # provider likely rejected response_format
+        except Exception as exc:  # unexpected failure while native was in flight
             if use_native:
                 use_native = False
                 last_error = str(exc)
                 continue
             raise
+        if use_native and response.finish_reason == "error":
+            # Provider rejected response_format — drop it and retry without.
+            use_native = False
+            last_error = str(response.content)
+            continue
+        reply = response.content
+        if reply is None:
+            raise RuntimeError(
+                "moeka completion returned no content "
+                f"(finish_reason={response.finish_reason!r}, "
+                f"error_type={response.error_type!r})"
+            )
         payload = _extract_json_text(reply)
         try:
             return _coerce_json(json.loads(payload), model_cls)

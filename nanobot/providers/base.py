@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1841,14 +1841,10 @@ class LLMProvider(ABC):
                         or self._contains_image_content(state.payload)
                     ):
                         # Provider-owned payloads may retain earlier input_image items.
-                        # Rebuild from the stripped public transcript for this retry.
-                        stripped_context = ProviderCallContext(
-                            context_window_tokens=(
-                                provider_context.context_window_tokens
-                            ),
-                            session_id=provider_context.session_id,
-                            events=provider_context.events,
-                        )
+                        # Rebuild from the stripped public transcript for this retry —
+                        # drop conversation_state only; every other field (including
+                        # ``request``) must survive the retry unchanged.
+                        stripped_context = replace(provider_context, conversation_state=None)
                 if stripped is not None or stripped_context is not None:
                     logger.warning(
                         "Non-transient LLM error with image content, retrying without images"
