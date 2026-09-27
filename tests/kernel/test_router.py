@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, get_args
@@ -24,11 +25,13 @@ import pytest
 
 from nanobot.config.schema import Config, ModelTier
 from nanobot.core import MoekaCore
+from nanobot.kernel import baselines as baselines_mod
 from nanobot.kernel import router as router_mod
 from nanobot.kernel import solvers as solvers_mod
+from nanobot.kernel.baselines import Baseline, BaselineRegistry, compare_cost, cost_ratio
 from nanobot.kernel.deferred import deferred_log_path
 from nanobot.kernel.env import CoreEnvironment, Paths, StaticCredentialResolver
-from nanobot.kernel.ledger import LedgerObserver, ModelPricing, PricingTable
+from nanobot.kernel.ledger import LedgerEvent, LedgerObserver, ModelPricing, PricingTable
 from nanobot.kernel.policy import POLICY_MARKER, Allow, DefaultPolicy
 from nanobot.kernel.router import (
     MODEL_DISPATCH,
@@ -745,3 +748,96 @@ async def test_acomplete_without_env_keeps_the_old_make_provider_call(monkeypatc
     made = _install(monkeypatch, ["hi"])
     await complete_mod.acomplete("x", config=_ladder_config())
     assert made == [{"preset_name": None}]
+
+
+# ================================================================================
+# Baseline comparators (the RSI harness's I6 score)
+# ================================================================================
+
+
+def _event(cost: float | None, usage_source: str = "reported", tier: str | None = "fast") -> Any:
+    return LedgerEvent(
+        trace_id=None, slot="s", tier=tier, model="m", provider="p",
+        tokens_in=1, tokens_out=1, tokens_cache_read=0, latency_ms=1.0,
+        cost_usd=cost, source="system", usage_source=usage_source,
+    )
+
+
+_ZERO_SHOT = Baseline("extract.title", "one zero-shot fast-tier call", reference_cost_usd=0.002)
+
+
+def test_cost_ratio_of_known_events_against_a_known_baseline() -> None:
+    assert cost_ratio([_event(0.001), _event(0.002)], _ZERO_SHOT) == pytest.approx(1.5)
+
+
+def test_cost_ratio_accepts_trace_dicts_from_a_fake_ledger() -> None:
+    events = [_event(0.001).to_trace(), _event(0.003).to_trace()]
+    assert cost_ratio(events, _ZERO_SHOT) == pytest.approx(2.0)
+
+
+def test_cost_ratio_with_no_calls_is_zero() -> None:
+    assert cost_ratio([], _ZERO_SHOT) == 0.0
+
+
+def test_cost_ratio_unknown_cost_is_none() -> None:
+    comparison = compare_cost([_event(0.001), _event(None)], _ZERO_SHOT)
+    assert comparison.ratio is None
+    assert comparison.reason == "unknown_cost"
+    assert cost_ratio([_event(None)], _ZERO_SHOT) is None
+
+
+def test_cost_ratio_refuses_estimated_usage_by_default() -> None:
+    events = [_event(0.001), _event(0.001, usage_source="estimated")]
+    comparison = compare_cost(events, _ZERO_SHOT)
+    assert comparison.ratio is None
+    assert comparison.reason == "estimated_usage"
+    assert comparison.unbilled == 1
+    assert cost_ratio(events, _ZERO_SHOT) is None
+    # Opt-in: the harness may accept estimates, and the result says so.
+    flagged = compare_cost(events, _ZERO_SHOT, allow_estimated=True)
+    assert flagged.ratio == pytest.approx(1.0)
+    assert flagged.estimated is True
+
+
+def test_old_trace_dicts_without_usage_source_are_not_billed() -> None:
+    old = {k: v for k, v in _event(0.001).to_trace().items() if k != "usage_source"}
+    assert cost_ratio([old], _ZERO_SHOT) is None
+
+
+def test_local_zero_cost_counts_whatever_the_usage_source() -> None:
+    assert cost_ratio([_event(0.0, usage_source="estimated", tier="local")], _ZERO_SHOT) == 0.0
+
+
+def test_deterministic_baseline_is_free() -> None:
+    parser = Baseline.deterministic("parse.version", "a regex over the version string")
+    assert parser.reference_cost_usd == 0.0
+    assert cost_ratio([], parser) == 1.0  # parity: the solver path made no call
+    assert cost_ratio([_event(0.0001)], parser) == math.inf  # any spend is an I6 violation
+
+
+def test_unknown_baseline_cost_is_none() -> None:
+    assert cost_ratio([_event(0.001)], Baseline("f", "a static heuristic")) is None
+
+
+def test_baseline_registry_declares_one_alternative_per_family(monkeypatch) -> None:
+    registry = BaselineRegistry()
+    registry.register(_ZERO_SHOT)
+    assert registry.get("extract.title") is _ZERO_SHOT
+    assert registry.get("missing") is None
+    with pytest.raises(ValueError, match="already declared"):
+        registry.register(Baseline("extract.title", "other"))
+    registry.register(Baseline("extract.title", "other"), replace=True)
+    assert registry.get("extract.title").alternative == "other"
+    assert registry.families() == ("extract.title",)
+
+    fresh = BaselineRegistry()
+    monkeypatch.setattr(baselines_mod, "_DEFAULT_REGISTRY", fresh)
+    baselines_mod.declare_baseline(_ZERO_SHOT)
+    assert baselines_mod.get_baseline("extract.title") is _ZERO_SHOT
+
+
+def test_baseline_rejects_bad_declarations() -> None:
+    with pytest.raises(ValueError):
+        Baseline("", "x")
+    with pytest.raises(ValueError):
+        Baseline("f", "x", reference_cost_usd=-1.0)
