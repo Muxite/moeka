@@ -85,8 +85,18 @@ def _runtime_settings(env: CoreEnvironment | None) -> dict[str, object]:
     return dict(legacy_runtime_settings())
 
 
+def _stream_idle_timeout_setting(env: CoreEnvironment | None) -> float:
+    return resolve_stream_idle_timeout_s(
+        env_value=_runtime_settings(env).get("stream_idle_timeout_s")
+    )
+
+
 def _apply_runtime_settings(provider: LLMProvider, env: CoreEnvironment | None) -> None:
-    """Set provider tunables from the host env (defaults when the host sets none)."""
+    """Set provider tunables from the host env (defaults when the host sets none).
+
+    Providers that bake a timeout into a client at construction (Bedrock) also
+    receive it as a constructor argument; this keeps the attribute consistent.
+    """
     runtime = _runtime_settings(env)
     provider.stream_idle_timeout_s = resolve_stream_idle_timeout_s(
         env_value=runtime.get("stream_idle_timeout_s")
@@ -301,6 +311,7 @@ def _make_provider_core(
             extra_body=p.extra_body if p else None,
             provider_name=provider_name,
             env=env,
+            stream_idle_timeout_s=_stream_idle_timeout_setting(env),
         )
     else:
         from nanobot.providers.openai_compat_provider import OpenAICompatProvider

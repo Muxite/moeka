@@ -85,8 +85,13 @@ class BedrockProvider(LLMProvider):
         client: Any | None = None,
         provider_name: str = "bedrock",
         env: CoreEnvironment | None = None,
+        stream_idle_timeout_s: float | None = None,
     ):
         super().__init__(api_key, api_base, provider_name=provider_name)
+        # Set before the boto client is built: it becomes the botocore socket
+        # connect/read timeout (the factory passes the host runtime setting).
+        if stream_idle_timeout_s is not None:
+            self.stream_idle_timeout_s = stream_idle_timeout_s
         self.default_model = default_model
         # Region: explicit, else the host env's providers/bedrock/region (legacy:
         # AWS_REGION / AWS_DEFAULT_REGION via LEGACY_ENV_REFS).
