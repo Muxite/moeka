@@ -31,14 +31,17 @@ from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, tool_parameters
+from nanobot.agent.tools.base import Tool, capability_request, tool_parameters
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+
+if TYPE_CHECKING:
+    from nanobot.kernel.policy import CapabilityRequest
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -301,6 +304,14 @@ class BackgroundShellTool(Tool):
         self._origin_channel.set(channel)
         self._origin_chat_id.set(chat_id)
         self._origin_session_key.set(session_key or f"{channel}:{chat_id}")
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        action = str(params.get("action") or "").strip().lower()
+        if action == "start":
+            return [capability_request("exec.run", params.get("command"))]
+        if action == "kill":
+            return [capability_request("exec.session_input", params.get("task_id"))]
+        return []
 
     async def execute(
         self,

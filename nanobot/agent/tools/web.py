@@ -16,7 +16,7 @@ import httpx
 from loguru import logger
 from pydantic import Field
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -31,6 +31,7 @@ from nanobot.utils.helpers import build_image_content_blocks
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.policy import CapabilityRequest
 
 # Shared constants
 _DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
@@ -507,6 +508,11 @@ class WebSearchTool(Tool):
     def exclusive(self) -> bool:
         """DuckDuckGo searches are serialized because ddgs is not concurrency-safe."""
         return self._effective_provider() == "duckduckgo"
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        # The contacted host depends on the configured provider, so the resource is
+        # ``search:<query>`` (distinguishable from fetched URLs in deny rules).
+        return [capability_request("net.fetch", f"search:{params.get('query') or ''}")]
 
     async def execute(
         self,
@@ -1222,6 +1228,12 @@ class WebFetchTool(Tool):
     @property
     def read_only(self) -> bool:
         return True
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        url = params.get("url")
+        if isinstance(url, str):
+            url = url.strip(" \t\r\n`\"'")
+        return [capability_request("net.fetch", url)]
 
     async def execute(
         self,

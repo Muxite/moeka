@@ -10,9 +10,9 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_session_key
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -20,6 +20,9 @@ from nanobot.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
+
+if TYPE_CHECKING:
+    from nanobot.kernel.policy import CapabilityRequest
 
 DEFAULT_YIELD_MS = 1000
 MAX_YIELD_MS = 30_000
@@ -593,6 +596,19 @@ class ExecSessionTool(Tool):
             "Manage a session returned by exec. Input is screened with exec's safety "
             "checks as a best-effort hint for line-oriented shells, not a sandbox."
         )
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        # Sessions are started by ``exec`` (gated as ``exec.run``). Writing stdin,
+        # closing it or terminating is ``exec.session_input``; the resource is the input
+        # text when present (so the exec floor screens it), else the session id. A pure
+        # poll/wait only reads output of a process already gated at start: no capability.
+        session_id = params.get("session_id")
+        text = params.get("input")
+        if text is not None:
+            return [capability_request("exec.session_input", text)]
+        if params.get("close_stdin") or params.get("terminate"):
+            return [capability_request("exec.session_input", session_id)]
+        return []
 
     async def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,

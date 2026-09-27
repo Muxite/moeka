@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from loguru import logger
 from pydantic import Field
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.schema import (
     ArraySchema,
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.context import ToolContext
     from nanobot.config.schema import ProviderConfig
     from nanobot.kernel.env import Paths
+    from nanobot.kernel.policy import CapabilityRequest
 
 
 def _legacy_media_dir() -> Path:
@@ -206,6 +207,16 @@ class ImageGenerationTool(Tool):
         if not values:
             return []
         return [self._resolve_reference_image(value) for value in values if value]
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        # Reference images are read from disk; generation calls the provider API.
+        refs = params.get("reference_images")
+        reqs = [
+            capability_request("fs.read", ref)
+            for ref in (refs if isinstance(refs, list) else [])
+        ]
+        reqs.append(capability_request("net.fetch", "image_generation"))
+        return reqs
 
     async def execute(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 import httpx
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.security.network import (
     PinnedDNSAsyncTransport,
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.mcp_oauth import MCPOAuthHandlers
     from nanobot.config.schema import Config, MCPServerConfig
     from nanobot.kernel.env import ConfigSource, CoreEnvironment
+    from nanobot.kernel.policy import CapabilityRequest
 
 # Transient connection errors that warrant a single retry.
 # These typically happen when an MCP server restarts or a network
@@ -525,10 +526,31 @@ class _MCPWrapperBase(Tool):
     _server_name: str
     _name: str
 
-    def _set_mcp_connection(self, session: ClientSession, server_name: str) -> None:
+    def _set_mcp_connection(
+        self,
+        session: ClientSession,
+        server_name: str,
+        target: str,
+        transport: str | None = None,
+        url: str | None = None,
+    ) -> None:
         self._session = session
         self._server_name = server_name
+        self._mcp_target = f"{server_name}.{target}"
+        self._transport = transport
+        self._url = url
         self._reconnect: _ReconnectCallback | None = None
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        """``mcp.call`` on ``<server>.<name>``; HTTP transports also need ``net.fetch``.
+
+        The ``net.fetch`` resource is the redacted server URL (credentials, query and
+        path are stripped) because deny reasons are shown to the model.
+        """
+        reqs = [capability_request("mcp.call", self._mcp_target)]
+        if self._transport in {"sse", "streamableHttp"} and self._url:
+            reqs.append(capability_request("net.fetch", _redact_url(self._url)))
+        return reqs
 
     def set_reconnect_handler(self, reconnect: _ReconnectCallback) -> None:
         self._reconnect = reconnect
@@ -618,8 +640,11 @@ class MCPToolWrapper(_MCPWrapperBase):
         tool_def: MCPToolDefinition,
         tool_timeout: int = 30,
         media_dir: Path | None = None,
+        *,
+        transport: str | None = None,
+        url: str | None = None,
     ):
-        self._set_mcp_connection(session, server_name)
+        self._set_mcp_connection(session, server_name, tool_def.name, transport, url)
         self._media_dir = media_dir
         self._original_name = tool_def.name
         self._name = _sanitize_mcp_tool_name(f"mcp_{server_name}_{tool_def.name}")
@@ -782,8 +807,11 @@ class MCPResourceWrapper(_MCPWrapperBase):
         server_name: str,
         resource_def: Resource,
         resource_timeout: int = 30,
+        *,
+        transport: str | None = None,
+        url: str | None = None,
     ):
-        self._set_mcp_connection(session, server_name)
+        self._set_mcp_connection(session, server_name, resource_def.name, transport, url)
         self._uri = resource_def.uri
         self._name = _sanitize_mcp_tool_name(f"mcp_{server_name}_resource_{resource_def.name}")
         desc = resource_def.description or resource_def.name
@@ -886,8 +914,11 @@ class MCPPromptWrapper(_MCPWrapperBase):
         server_name: str,
         prompt_def: Prompt,
         prompt_timeout: int = 30,
+        *,
+        transport: str | None = None,
+        url: str | None = None,
     ):
-        self._set_mcp_connection(session, server_name)
+        self._set_mcp_connection(session, server_name, prompt_def.name, transport, url)
         self._prompt_name = prompt_def.name
         self._name = _sanitize_mcp_tool_name(f"mcp_{server_name}_prompt_{prompt_def.name}")
         desc = prompt_def.description or prompt_def.name
@@ -1185,6 +1216,7 @@ async def connect_mcp_servers(
                     continue
                 wrapper = MCPToolWrapper(
                     session, name, tool_def, tool_timeout=cfg.tool_timeout, media_dir=media_dir,
+                    transport=transport_type, url=cfg.url,
                 )
                 registry.register(wrapper)
                 logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)
@@ -1221,7 +1253,8 @@ async def connect_mcp_servers(
                     resources_result = await session.list_resources()
                     for resource in resources_result.resources:
                         wrapper = MCPResourceWrapper(
-                            session, name, resource, resource_timeout=cfg.tool_timeout
+                            session, name, resource, resource_timeout=cfg.tool_timeout,
+                            transport=transport_type, url=cfg.url,
                         )
                         registry.register(wrapper)
                         registered_count += 1
@@ -1239,7 +1272,8 @@ async def connect_mcp_servers(
                     prompts_result = await session.list_prompts()
                     for prompt in prompts_result.prompts:
                         wrapper = MCPPromptWrapper(
-                            session, name, prompt, prompt_timeout=cfg.tool_timeout
+                            session, name, prompt, prompt_timeout=cfg.tool_timeout,
+                            transport=transport_type, url=cfg.url,
                         )
                         registry.register(wrapper)
                         registered_count += 1

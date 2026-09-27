@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.file_state import FileStates, current_file_states
 from nanobot.agent.tools.path_utils import resolve_workspace_path
@@ -32,6 +32,7 @@ from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import Paths
+    from nanobot.kernel.policy import CapabilityRequest
 
 
 class FileToolsConfig(Base):
@@ -367,6 +368,9 @@ class ReadFileTool(_FsTool):
     def read_only(self) -> bool:
         return True
 
+    def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
+        return [capability_request("fs.read", params.get("path"))]
+
     async def execute(
         self,
         path: str | None = None,
@@ -629,6 +633,9 @@ class WriteFileTool(_FsTool):
             "directories as needed. For code changes or partial edits, prefer "
             "apply_patch; use edit_file only for small exact replacements."
         )
+
+    def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
+        return [capability_request("fs.write", params.get("path"))]
 
     async def execute(self, path: str | None = None, content: str | None = None, **kwargs: Any) -> str:
         try:
@@ -971,6 +978,9 @@ class EditFileTool(_FsTool):
         text = f"Patch applied:\n- {action} {path}{stats}"
         return FileEditResult(text, {resolved_path: diff})
 
+    def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
+        return [capability_request("fs.write", params.get("path"))]
+
     async def execute(
         self, path: str | None = None, old_text: str | None = None,
         new_text: str | None = None,
@@ -1201,6 +1211,9 @@ class ListDirTool(_FsTool):
     @property
     def read_only(self) -> bool:
         return True
+
+    def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
+        return [capability_request("fs.read", params.get("path"))]
 
     async def execute(
         self, path: str | None = None, recursive: bool = False,

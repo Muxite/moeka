@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, TypeVar
 
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request
 from nanobot.agent.tools.filesystem import ListDirTool, _FsTool
 from nanobot.security.protected_paths import ProtectedFloor
 from nanobot.utils.document import (
@@ -35,6 +35,7 @@ from nanobot.utils.document import (
 
 if TYPE_CHECKING:
     from nanobot.agent.tools.context import ToolContext
+    from nanobot.kernel.policy import CapabilityRequest
 
 _DEFAULT_HEAD_LIMIT = 250
 _DEFAULT_FILE_HEAD_LIMIT = 200
@@ -394,6 +395,9 @@ class FindFilesTool(_SearchTool):
         elif not _matches_type(entry.name, file_type):
             return False
         return _matches_query(entry.display_path, query)
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        return [capability_request("fs.read", params.get("path") or ".")]
 
     async def execute(
         self,
@@ -1045,6 +1049,9 @@ class GrepTool(_SearchTool):
             f"Error: grep timed out after {self._regex_timeout_s:g}s (pattern too expensive); "
             "use a simpler pattern or narrow the search path."
         )
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        return [capability_request("fs.read", params.get("path") or ".")]
 
     async def execute(
         self,

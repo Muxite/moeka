@@ -12,9 +12,28 @@ if typing.TYPE_CHECKING:
     from pydantic import BaseModel
 
     from nanobot.agent.tools.context import ToolContext
+    from nanobot.kernel.policy import CapabilityRequest
     from nanobot.runtime_context import RuntimeContextProvider
 
 _ToolT = TypeVar("_ToolT", bound="Tool")
+
+
+def capability_request(capability: str, resource: Any = "") -> CapabilityRequest:
+    """Build a ``CapabilityRequest`` for ``Tool.capabilities`` declarations.
+
+    ``nanobot.kernel.policy`` is imported lazily: importing any ``nanobot.kernel``
+    submodule runs ``nanobot/kernel/__init__.py``, which re-exports ``nanobot.core`` and
+    so imports this module back (a module-level import here is a cycle).
+    Non-string resources (a malformed tool call) are coerced with ``str``; ``None``
+    becomes ``""``.
+    """
+    from nanobot.kernel.policy import CapabilityRequest
+
+    if resource is None:
+        resource = ""
+    elif not isinstance(resource, str):
+        resource = str(resource)
+    return CapabilityRequest(capability, resource)
 
 # Matches :meth:`Tool._cast_value` / :meth:`Schema.validate_json_schema_value` behavior
 _JSON_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
@@ -227,6 +246,16 @@ class Tool(ABC):
     async def execute(self, **kwargs: Any) -> Any:
         """Run the tool; return content, or ``ToolResult.error(...)`` for failures."""
         ...
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        """Capabilities a call with *params* needs (checked by the kernel gate).
+
+        - Default: none. Built-in tools that touch the filesystem, network, processes,
+          sessions or budgets override this.
+        - Must not raise on malformed *params* (the gate runs before validation).
+        - Existing inline guards inside ``execute`` stay; the gate is additive.
+        """
+        return []
 
     @staticmethod
     def error(content: str) -> ToolResult:

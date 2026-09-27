@@ -16,6 +16,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from nanobot.agent.tools.context import RequestContext, ToolContext
+    from nanobot.kernel.policy import CapabilityRequest
 
 _SKIP_MODULES = frozenset({
     "base", "schema", "registry", "context", "loader", "config",
@@ -191,6 +192,9 @@ class _LegacyErrorPrefixTool(Tool):
 
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._wrapped.cast_params(params)
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        return self._wrapped.capabilities(params)
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         return self._wrapped.validate_params(params)

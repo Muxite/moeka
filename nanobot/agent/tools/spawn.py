@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -19,6 +19,7 @@ from nanobot.security.workspace_access import current_workspace_scope
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
     from nanobot.agent.tools.context import ToolContext
+    from nanobot.kernel.policy import CapabilityRequest
 
 
 @tool_parameters(
@@ -77,6 +78,9 @@ class SpawnTool(Tool):
     def concurrency_safe(self) -> bool:
         """Each call owns its task state; the manager serializes capacity admission."""
         return True
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        return [capability_request("budget.subagents")]
 
     async def execute(
         self,

@@ -10,12 +10,12 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.context import RequestContext, ToolContext, current_request_context
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -37,6 +37,9 @@ from nanobot.session.session_messages import (
     SessionMessageEnvelope,
     session_message_envelope,
 )
+
+if TYPE_CHECKING:
+    from nanobot.kernel.policy import CapabilityRequest
 
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
 MIN_REPLY_TIMEOUT_SECONDS = 5
@@ -83,6 +86,9 @@ class ListSessionsTool(Tool):
     @property
     def description(self) -> str:
         return "List other persisted sessions by @handle."
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        return [capability_request("session.read", "*")]
 
     async def execute(self, **kwargs: Any) -> str:
         request = current_request_context()
@@ -174,6 +180,9 @@ class SendSessionMessageTool(Tool):
         if envelope["expect_reply"]:
             content += " Reply with send_session_message."
         return RuntimeContextBlock(source="session_message", content=content)
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        return [capability_request("session.send", params.get("to"))]
 
     async def execute(
         self,

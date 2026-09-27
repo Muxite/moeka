@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from nanobot.agent.tools.base import ToolResult, tool_parameters
+from nanobot.agent.tools.base import ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.filesystem import _FsTool  # pyright: ignore[reportPrivateUsage]
 from nanobot.agent.tools.schema import (
     ArraySchema,
@@ -15,6 +15,9 @@ from nanobot.agent.tools.schema import (
     tool_parameters_schema,
 )
 from nanobot.utils.file_edit_events import FileDiff, FileEditResult, display_file_edit_path
+
+if TYPE_CHECKING:
+    from nanobot.kernel.policy import CapabilityRequest
 
 
 class _PatchError(ValueError):
@@ -93,6 +96,18 @@ class ApplyPatchTool(_FsTool):
             "Set dry_run=true to validate and preview without writing files. "
             "Use edit_file only for small exact replacements on a single file."
         )
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        # One request per distinct path, in order. ``dry_run`` validates against the
+        # current files without writing, so it needs only ``fs.read``.
+        cap = "fs.read" if params.get("dry_run") is True else "fs.write"
+        edits = params.get("edits")
+        paths: list[str] = []
+        for edit in edits if isinstance(edits, list) else []:
+            path = edit.get("path") if isinstance(edit, dict) else None
+            if path is not None and str(path) not in paths:
+                paths.append(str(path))
+        return [capability_request(cap, p) for p in paths]
 
     async def execute(
         self,

@@ -21,7 +21,7 @@ from urllib.parse import unquote
 from loguru import logger
 from pydantic import Field
 
-from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_session_key
 from nanobot.agent.tools.exec_session import (
     DEFAULT_EXEC_SESSION_MANAGER,
@@ -46,6 +46,7 @@ from nanobot.security.workspace_policy import is_path_within
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.policy import CapabilityRequest
 
 _IS_WINDOWS = sys.platform == "win32"
 _PROCESS_TREE_OWNER_ATTR = "_nanobot_process_tree_owner"
@@ -419,6 +420,10 @@ class ExecTool(Tool):
     @property
     def exclusive(self) -> bool:
         return True
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        command = params.get("command") or params.get("cmd") or ""
+        return [capability_request("exec.run", command)]
 
     async def execute(
         self, command: str | None = None, cmd: str | None = None,
