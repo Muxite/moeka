@@ -91,3 +91,60 @@ def test_exception_in_with_block_still_closes(tmp_path) -> None:
             raise ValueError("boom")
     assert kernel.closed
     assert not kernel._bridge._thread.is_alive()
+
+
+def test_close_from_loop_thread_raises_and_host_close_still_stops(tmp_path) -> None:
+    kernel = Kernel(_env(tmp_path))
+
+    async def close_inside() -> None:
+        kernel.close()
+
+    with pytest.raises(RuntimeError, match="own loop thread"):
+        kernel._bridge.run(close_inside(), timeout=5)
+    assert not kernel.closed
+    thread = kernel._bridge._thread
+    assert thread.is_alive()
+
+    kernel.close()
+    assert kernel.closed
+    assert not thread.is_alive()
+
+
+def test_aclose_from_loop_thread_raises_and_host_aclose_still_stops(tmp_path) -> None:
+    kernel = Kernel(_env(tmp_path))
+
+    with pytest.raises(RuntimeError, match="own loop thread"):
+        kernel._bridge.run(kernel.aclose(), timeout=5)
+    assert not kernel.closed
+    thread = kernel._bridge._thread
+    assert thread.is_alive()
+
+    asyncio.run(kernel.aclose())
+    assert kernel.closed
+    assert not thread.is_alive()
+
+
+async def test_aclose_waits_for_a_concurrent_close_in_progress(tmp_path) -> None:
+    import threading
+
+    kernel = Kernel(_env(tmp_path))
+    kernel._bridge.start()
+    thread = kernel._bridge._thread
+    entered = threading.Event()
+    real_stop = kernel._bridge.stop
+
+    def slow_stop(timeout: float = 5.0) -> None:
+        entered.set()
+        import time
+
+        time.sleep(0.2)
+        real_stop(timeout)
+
+    kernel._bridge.stop = slow_stop  # type: ignore[method-assign]
+    closer = threading.Thread(target=kernel.close)
+    closer.start()
+    assert entered.wait(timeout=2)
+    await kernel.aclose()
+    assert kernel.closed
+    assert not thread.is_alive()
+    closer.join(timeout=5)

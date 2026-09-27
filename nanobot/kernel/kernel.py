@@ -46,27 +46,37 @@ class Kernel:
 
     # -- lifecycle -------------------------------------------------------
 
+    def _reject_loop_thread(self, method: str) -> None:
+        if threading.current_thread() is self._bridge._thread:
+            raise RuntimeError(
+                f"Kernel.{method}() called from the kernel's own loop thread would join "
+                "itself; close the kernel from host code instead"
+            )
+
     def close(self) -> None:
         """Release kernel resources and stop the loop thread. Idempotent.
 
         Raises ``RuntimeError`` when called from the kernel's own loop thread
-        (it would join itself); await :meth:`aclose` from host code instead.
+        (it would join itself), leaving the kernel open. Concurrent callers
+        block until the first close has finished, so a return always means
+        the loop thread is gone.
         """
+        self._reject_loop_thread("close")
         with self._close_lock:
             if self._closed:
                 return
+            self._bridge.stop()
+            # Only after stop() returned: a failed stop leaves the kernel open
+            # so a later close() can retry.
             self._closed = True
-        self._bridge.stop()
 
     async def aclose(self) -> None:
         """Async :meth:`close`: stops the loop thread off the caller's event loop."""
+        self._reject_loop_thread("aclose")
+        # ``_closed`` is set only once the thread is stopped, so this fast path
+        # never returns while another thread's close is still in progress.
         if self._closed:
             return
-        if threading.current_thread() is self._bridge._thread:
-            raise RuntimeError(
-                "Kernel.aclose() called from the kernel's own loop thread; "
-                "close the kernel from host code instead"
-            )
         await asyncio.to_thread(self.close)
 
     def __enter__(self) -> Kernel:
