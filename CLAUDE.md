@@ -5,13 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 This repo is **moeka**, a fork of [nanobot](https://github.com/HKUDS/nanobot) (HKUDS). This branch,
-`core-slim`, is the **slim agent core**: the agent loop, LLM providers, tools, skills, prompt templates, memory
-(Dream), the SQLite session store, config, and the embeddable `MoekaCore` library. The chat channels, gateway,
+`core-slim`, is the **slim agent kernel**: the agent loop, LLM providers, tools, skills, prompt templates, memory
+(Dream), the SQLite session store, config, and the embeddable `MoekaKernel` library (`nanobot.kernel`; `MoekaCore` is the real class and stays as an alias). The chat channels, gateway,
 WebUI, HTTP API server, pairing, audio, cron, triggers, heartbeat, CLI apps and the `message` tool are removed
-here; they live on in the full chat-bot distribution on `main`. The core is driven by a harness (a separate repo
-that pins a `core-slim` commit as a submodule), by `MoekaCore`, or by the `nanobot agent` CLI.
+here; they live on in the full chat-bot distribution on `main`. The kernel is driven by a harness (a separate repo
+that pins a `core-slim` commit as a submodule), by `MoekaKernel`, or by the `nanobot agent` CLI.
 
-Moeka-specific deviations from upstream nanobot that still exist in the core:
+Moeka-specific deviations from upstream nanobot that still exist in the kernel:
 
 - **Permissive shell sandbox** — `nanobot/agent/tools/shell.py` always applies a non-removable floor,
   `_FLOOR_DENY_PATTERNS` = `_INTERNAL_DENY_PATTERNS` (writes to `history.jsonl` / `.dream_cursor`) plus the fork
@@ -44,7 +44,7 @@ Moeka-specific deviations from upstream nanobot that still exist in the core:
 
 ## Documentation for agents
 
-`docs/core-map/README.md` is the authoritative, line-cited map of this core (agent loop, tools, prompts/skills/
+`docs/core-map/README.md` is the authoritative, line-cited map of this kernel (agent loop, tools, prompts/skills/
 memory, config/providers/sessions) and states what a self-improvement agent may and may not change. On this
 branch the rest of `docs/` describes the full distribution on `main` and is legacy (see the banner in
 `docs/README.md`).
@@ -81,7 +81,7 @@ nanobot status | sessions | provider
   `nanobot/agent/dream.py`).
 - **Sessions** (`nanobot/session/`), **config** (`nanobot/config/schema.py`, `loader.py`), **commands**
   (`nanobot/command/builtin.py`), **security** guards (`nanobot/security/`).
-- **Embedding**: `MoekaCore` (`nanobot/core/`; import boundary enforced by `tests/core/test_import_boundary.py`)
+- **Embedding**: `MoekaKernel` = `MoekaCore` (`nanobot/core/`, re-exported by `nanobot/kernel/`; import boundary enforced by `tests/core/test_import_boundary.py`)
   and the `Nanobot` SDK facade (`nanobot/nanobot.py`).
 
 ## Project-Specific Notes
@@ -92,7 +92,7 @@ nanobot status | sessions | provider
 
 ## Branching Strategy
 
-- `core-slim` (this branch) — the slim core. The harness repo pins a `core-slim` commit as its core submodule.
+- `core-slim` (this branch) — the slim kernel. The harness repo pins a `core-slim` commit as its kernel submodule.
   Do not merge it into `main`.
 - `main` — the full chat-bot distribution; the live systemd service follows it.
 - `nightly` — integrates upstream `HKUDS/nanobot` plus moeka work for `main`. The `upstream` remote points at

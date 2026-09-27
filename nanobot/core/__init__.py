@@ -1,4 +1,6 @@
-"""moeka-core — a reusable RAG/agentic "thinking core".
+"""moeka kernel — a reusable RAG/agentic "thinking kernel".
+
+``MoekaKernel`` is the public name; ``MoekaCore`` is the real class and stays as an alias.
 
 Embed moeka's agent engine in your own Python code: register plain functions as
 actions, ingest documents for retrieval, and run a multi-step tool-calling loop
@@ -15,7 +17,7 @@ with memory and RAG — without the chat-bot runtime (channels, gateway, WebUI).
 
     result = await core.run("what is 2 + 3?")
 
-Files are optional. The core consumes only the pydantic :class:`Config` data
+Files are optional. The kernel consumes only the pydantic :class:`Config` data
 object; reading a ``config.json`` is just one way to produce one::
 
     from nanobot.core import MoekaCore, Config
@@ -31,12 +33,13 @@ All heavy imports are lazy; importing this package has no channel/gateway deps.
 
 from nanobot.api.complete import acomplete, acomplete_json, complete, complete_json
 from nanobot.config.schema import Config
-from nanobot.core.core import MoekaCore
+from nanobot.core.core import MoekaCore, MoekaKernel
 from nanobot.core.function_tool import FunctionTool
 from nanobot.core.vec import RetrievedChunk, open_vec_store
 from nanobot.nanobot import RunResult
 
 __all__ = [
+    "MoekaKernel",
     "MoekaCore",
     "Config",
     "FunctionTool",

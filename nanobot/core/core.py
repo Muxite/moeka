@@ -717,3 +717,6 @@ class MoekaCore:
         return await acomplete_json(
             prompt, schema=schema, model_cls=model_cls, retries=retries, **kwargs
         )
+
+
+MoekaKernel = MoekaCore

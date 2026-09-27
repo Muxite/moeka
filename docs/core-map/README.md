@@ -1,6 +1,6 @@
 # Core map
 
-The authoritative description of the moeka slim core (`core-slim` branch), written for a self-improvement
+The authoritative description of the moeka slim kernel (`core-slim` branch), written for a self-improvement
 agent that edits skills, prompts, tool descriptions and config, and for the harness that supervises it. Every
 behavioural claim cites `path:line` in the current tree; citations are relative to `nanobot/` unless they start
 with `tests/`, `docs/` or `.agent/`. Anything not confirmed by reading code is marked **unverified**.
@@ -52,7 +52,7 @@ with `tests/`, `docs/` or `.agent/`. Anything not confirmed by reading code is m
 
 ## What it must not change
 
-- The evaluator / harness that scores and gates its changes, and anything outside this core repo.
+- The evaluator / harness that scores and gates its changes, and anything outside this kernel repo.
 - Python code in general, and specifically the session store (`nanobot/session/`), the agent loop and runner, and
   the security guards: `nanobot/security/`, exec deny/allow patterns and sudo gating in
   `nanobot/agent/tools/shell.py`, the SSRF/workspace marker phrases in `nanobot/agent/runner.py`, the `my` tool's

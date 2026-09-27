@@ -1,4 +1,6 @@
-# moeka-core as a kernel: design
+# moeka kernel: design
+
+Naming: `MoekaKernel` is the public name; `MoekaCore` remains the real class and an alias (`nanobot.kernel` re-exports both).
 
 Status: design plan, 2026-09-26, branch `core-slim` at `4d2a2d8a`. Nothing new here is implemented; phase 0
 shipped earlier. The detailed findings, threat model and phase-0 log live in the appendix spec,
@@ -6,7 +8,7 @@ shipped earlier. The detailed findings, threat model and phase-0 log live in the
 
 ## 1. Mission
 
-`moeka-core` must function strictly as an embeddable, secure execution kernel that guarantees isolation, auditability, and deterministic state transitions, leaving domain logic and environment access to the host and plugins.
+The moeka kernel must function strictly as an embeddable, secure execution kernel that guarantees isolation, auditability, and deterministic state transitions, leaving domain logic and environment access to the host and plugins.
 
 ## 2. Architecture and boundaries
 
@@ -31,7 +33,7 @@ flowchart TD
         Sink["TraceSink (append-only audit stream)"]
         Config["ConfigSource"]
     end
-    subgraph Core["moeka-core Kernel (closed engine)"]
+    subgraph Core["moeka Kernel (closed engine)"]
         Runner["Agent Loop and Runner"]
         DAG["Dynamic Task DAG Engine"]
         Gate{"Capability Policy Gate"}
@@ -417,7 +419,7 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Resolve Q5: `Paths.state_dir` and `Paths.work_dir` are separate explicit attributes everywhere; test and
   production defaults point to separate paths.
 - Add `CoreEnvironment(ConfigSource, CredentialResolver, Paths, TraceSink)`; remove `keys.env`, `os.environ` and
-  `load_config()` from core modules; providers request keys on demand through the resolver.
+  `load_config()` from kernel modules; providers request keys on demand through the resolver.
 - Add the AST guard test for ambient reads outside authorised compat modules.
 - Wrap legacy config in `LegacyConfigAdapter` with an in-memory resolver; the floor takes its roots from `Paths`.
 - Proof: AST guard green, fake-HOME test creates nothing under `$HOME`, awork suite green.
@@ -453,9 +455,9 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 **P7 backends as plugins.** Goal: providers, search, sandbox, stores and token stores are plugins.
 - Provider router plugin with a golden parity table for `_match_provider`.
 - OAuth stores reachable only through the resolver.
-- Proof: provider, session and core test suites green with the parity table.
+- Proof: provider, session and kernel test suites green with the parity table.
 
-**P8 legacy Config out of the core.** Goal: `Config` lives in compat only.
+**P8 legacy Config out of the kernel.** Goal: `Config` lives in compat only.
 - Move `nanobot/config/schema.py` to compat with re-exports at old paths.
 - Proof: `import nanobot.core` imports no `nanobot.config.schema` unless `config=` is passed; awork green.
 
