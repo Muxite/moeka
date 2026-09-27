@@ -7,7 +7,7 @@ import json
 import re
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -254,6 +254,18 @@ class ProviderConversationState:
 
 
 @dataclass(frozen=True)
+class RequestExtras:
+    """Per-request extras that ride on :class:`ProviderCallContext`.
+
+    Kept separate from the continuation/telemetry fields above so a single
+    request-shaped knob (native structured output today; sampling fields are
+    a later addition) doesn't grow the base context's surface.
+    """
+
+    response_format: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class ProviderCallContext:
     """Optional provider-owned continuation data for one model request.
 
@@ -268,6 +280,7 @@ class ProviderCallContext:
     context_window_tokens: int | None = None
     session_id: str | None = field(default=None, repr=False)
     events: EventSink = field(default=NO_EVENTS, repr=False, compare=False)
+    request: RequestExtras | None = None
 
 
 @dataclass(frozen=True, slots=True)

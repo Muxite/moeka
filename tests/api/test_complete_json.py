@@ -21,10 +21,12 @@ class _StubProvider:
         self._replies = list(replies)
         self.calls: list[list[dict]] = []
 
-    async def chat_with_retry(self, *, messages, max_tokens=None, temperature=None):
+    async def chat_with_retry(
+        self, *, messages, max_tokens=None, temperature=None, provider_context=None,
+    ):
         self.calls.append(messages)
         return SimpleNamespace(
-            content=self._replies.pop(0), finish_reason="stop", error_type=None
+            content=self._replies.pop(0), finish_reason="stop", error_type=None,
         )
 
 

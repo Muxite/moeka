@@ -949,6 +949,7 @@ class OpenAICompatProvider(LLMProvider):
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
         extra_headers: dict[str, str] | None = None,
+        provider_context: ProviderCallContext | None = None,
     ) -> dict[str, Any]:
         model_name = model or self.default_model
         spec = self._spec
@@ -1114,6 +1115,16 @@ class OpenAICompatProvider(LLMProvider):
             kwargs = _merge_chat_extra_body(kwargs, self._extra_body)
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
+
+        # Native structured output (OpenAI/OpenRouter `response_format`), carried
+        # on the call context so the provider-agnostic chat()/chat_with_retry()
+        # signatures don't grow a dedicated kwarg. Only set when the caller asked
+        # for it (acomplete_json); providers that reject it surface an error the
+        # caller falls back from, so this is additive.
+        if provider_context is not None and provider_context.request is not None:
+            response_format = provider_context.request.response_format
+            if response_format is not None:
+                kwargs["response_format"] = response_format
 
         return kwargs
 
@@ -2017,6 +2028,7 @@ class OpenAICompatProvider(LLMProvider):
                 messages, tools, model, max_tokens, temperature,
                 reasoning_effort, tool_choice,
                 extra_headers=affinity,
+                provider_context=provider_context,
             )
             chat_raw = cast(
                 Any,
