@@ -1132,21 +1132,34 @@ class ExecTool(Tool):
 
         return None
 
-    def _floor_violation(self, cmd: str, lower: str) -> str | None:
-        """Non-configurable floor: fork bomb and internal state file writes."""
-        for pattern in self._FLOOR_DENY_PATTERNS:
+    @classmethod
+    def floor_denial(cls, lower: str) -> tuple[str, str] | None:
+        """Return ``(pattern, message)`` for the first floor pattern in *lower*.
+
+        Pure (no logging); shared with ``nanobot.kernel.floors.check_floors`` so
+        the kernel floor and this tool emit the identical denial text.
+        """
+        for pattern in cls._FLOOR_DENY_PATTERNS:
             if re.search(pattern, lower):
-                logger.warning("exec: command blocked by floor pattern {!r}: {!r}", pattern, cmd[:120])
                 what = (
                     "is a fork bomb"
-                    if pattern == self._FORK_BOMB_PATTERN
+                    if pattern == cls._FORK_BOMB_PATTERN
                     else "would write to a nanobot internal state file"
                 )
-                return ToolResult.error(
+                return pattern, (
                     "Error: Command blocked by safety guard (dangerous pattern detected) — "
                     f"{what}. Matched {pattern!r}. This guard is not configurable."
                 )
         return None
+
+    def _floor_violation(self, cmd: str, lower: str) -> str | None:
+        """Non-configurable floor: fork bomb and internal state file writes."""
+        hit = self.floor_denial(lower)
+        if hit is None:
+            return None
+        pattern, message = hit
+        logger.warning("exec: command blocked by floor pattern {!r}: {!r}", pattern, cmd[:120])
+        return ToolResult.error(message)
 
     def _explicitly_allowed(self, lower: str) -> bool:
         """True when every top-level shell segment matches an allow pattern.
