@@ -99,7 +99,17 @@ def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
     resolved_ws = _safe_resolve(workspace) if workspace is not None else None
     if resolved_ws is not None and resolved_ws not in resolved_bases:
         roots.append(default_sessions_root(resolved_ws))
+    if resolved_ws is not None:
+        # Legacy hosts without Paths: the workspace is the state home, which holds the
+        # host-owned kernel plugin registry.
+        roots.append(resolved_ws / _plugin_registry_filename())
     return roots
+
+
+def _plugin_registry_filename() -> str:
+    from nanobot.kernel.registry import REGISTRY_FILENAME
+
+    return REGISTRY_FILENAME
 
 
 def _match(
@@ -149,12 +159,13 @@ class ProtectedFloor:
         ``sessions_root``, and the workspace-internal write-only files. When
         ``work_dir`` and ``state_dir`` are separated, all of ``state_dir`` is
         denied. In the legacy flat layout ``state_dir`` is the workspace, so only
-        the named subtrees are protected there. *extra_data_dirs*/*config_files*
+        the named subtrees are protected there, plus the host-owned kernel plugin
+        registry file (``nanobot.kernel.registry.REGISTRY_FILENAME``) in either layout. *extra_data_dirs*/*config_files*
         carry the legacy ambient roots (``default_data_dirs()``/``default_config_files()``).
         """
         bases: list[Path] = [paths.data_dir, *extra_data_dirs]
         floor = cls(data_dir=bases, workspace=paths.work_dir, config_files=config_files)
-        extra = [paths.sessions_root]
+        extra = [paths.sessions_root, paths.state_dir / _plugin_registry_filename()]
         if not paths.overlaps:
             extra.append(paths.state_dir)
         for root in extra:
