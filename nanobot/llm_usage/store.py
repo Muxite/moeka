@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sqlite3
 import threading
@@ -15,7 +16,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nanobot.llm_usage.models import LLMCallRecord
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Columns added after v1, as (name, declaration). v2 (Task 14): the kernel ledger's
+# model tier and USD cost. Migrations only ever ADD nullable columns, so an old row
+# reads back with NULL for them and no data is rewritten.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("tier", "TEXT"),  # v2
+    ("cost_usd", "REAL"),  # v2
+)
 MAX_DAYS_RETAINED = 400
 MAX_CALLS_RETAINED = 100_000
 
@@ -137,6 +145,16 @@ def _clean_status_code(value: int | None) -> int | None:
     return status if 100 <= status <= 599 else None
 
 
+def _clean_cost(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    return cost if math.isfinite(cost) and cost >= 0 else None
+
+
 def _as_int_row(row: sqlite3.Row) -> dict[str, int]:
     return {
         key: max(0, int(row[key] or 0))
@@ -214,7 +232,9 @@ class LLMUsageStore:
                 ttft_ms INTEGER,
                 timed_requests INTEGER,
                 error_status_code INTEGER,
-                error_kind TEXT
+                error_kind TEXT,
+                tier TEXT,
+                cost_usd REAL
             );
             CREATE INDEX IF NOT EXISTS llm_calls_started_at_idx
                 ON llm_calls(started_at_ms);
@@ -222,10 +242,31 @@ class LLMUsageStore:
                 ON llm_calls(provider, model, started_at_ms);
             """
         )
-        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._migrate(connection)
         self._connection = connection
         self._connection_pid = pid
         return connection
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        """Bring an older ``llm_calls`` table up to ``SCHEMA_VERSION`` in place.
+
+        Keyed on the actual columns (not only ``user_version``) so a half-applied
+        or concurrent migration from another process converges instead of failing.
+        """
+        row = connection.execute("PRAGMA user_version").fetchone()
+        version = int(row[0]) if row is not None else 0
+        existing = {str(info[1]) for info in connection.execute("PRAGMA table_info(llm_calls)")}
+        for name, declaration in _ADDED_COLUMNS:
+            if name in existing:
+                continue
+            try:
+                connection.execute(f"ALTER TABLE llm_calls ADD COLUMN {name} {declaration}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        if version < SCHEMA_VERSION:
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _read_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -285,6 +326,8 @@ class LLMUsageStore:
             ),
             _clean_status_code(call.error_status_code),
             _clean_error_kind(call.error_kind),
+            call.tier[:32] if call.tier else None,
+            _clean_cost(call.cost_usd),
         )
         with self._lock:
             connection = self._connect()
@@ -295,9 +338,10 @@ class LLMUsageStore:
                     finish_reason, input_tokens, output_tokens, total_tokens,
                     cache_read_tokens, cache_write_tokens, reported_tokens,
                     estimated_tokens, generation_ms, measured_output_tokens,
-                    ttft_ms, timed_requests, error_status_code, error_kind
+                    ttft_ms, timed_requests, error_status_code, error_kind,
+                    tier, cost_usd
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 values,

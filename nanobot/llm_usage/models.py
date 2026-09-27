@@ -26,6 +26,9 @@ class LLMCallRecord:
     usage: LLMUsage | None = None
     error_status_code: int | None = None
     error_kind: str | None = None
+    # Ledger enrichment (Task 14): set by the kernel ledger, never by providers.
+    tier: str | None = None
+    cost_usd: float | None = None
 
     def __post_init__(self) -> None:
         if self.started_at_ms < 0 or self.duration_ms < 0:
@@ -36,3 +39,5 @@ class LLMCallRecord:
             raise ValueError("invalid LLM usage source")
         if not self.finish_reason.strip():
             raise ValueError("LLM usage finish_reason must be non-empty")
+        if self.cost_usd is not None and self.cost_usd < 0:
+            raise ValueError("LLM usage cost_usd must be non-negative")

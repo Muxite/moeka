@@ -68,3 +68,56 @@ def llm_usage_source(source: LLMUsageSource) -> Generator[None]:
         yield
     finally:
         reset_llm_usage_source(token)
+
+
+# -- ledger attribution (Task 14): which schema slot / trace a call serves ----
+
+_CURRENT_SLOT: ContextVar[str | None] = ContextVar("nanobot_llm_usage_slot", default=None)
+_CURRENT_TRACE_ID: ContextVar[str | None] = ContextVar(
+    "nanobot_llm_usage_trace_id",
+    default=None,
+)
+
+
+def current_llm_usage_slot() -> str | None:
+    return _CURRENT_SLOT.get()
+
+
+def bind_llm_usage_slot(slot: str | None) -> Token[str | None]:
+    return _CURRENT_SLOT.set(slot)
+
+
+def reset_llm_usage_slot(token: Token[str | None]) -> None:
+    _CURRENT_SLOT.reset(token)
+
+
+@contextmanager
+def llm_usage_slot(slot: str | None) -> Generator[None]:
+    """Bind the schema slot nested provider calls are attributed to in the ledger."""
+    token = bind_llm_usage_slot(slot)
+    try:
+        yield
+    finally:
+        reset_llm_usage_slot(token)
+
+
+def current_llm_usage_trace_id() -> str | None:
+    return _CURRENT_TRACE_ID.get()
+
+
+def bind_llm_usage_trace_id(trace_id: str | None) -> Token[str | None]:
+    return _CURRENT_TRACE_ID.set(trace_id)
+
+
+def reset_llm_usage_trace_id(token: Token[str | None]) -> None:
+    _CURRENT_TRACE_ID.reset(token)
+
+
+@contextmanager
+def llm_usage_trace_id(trace_id: str | None) -> Generator[None]:
+    """Bind the trace id nested provider calls are attributed to in the ledger."""
+    token = bind_llm_usage_trace_id(trace_id)
+    try:
+        yield
+    finally:
+        reset_llm_usage_trace_id(token)
