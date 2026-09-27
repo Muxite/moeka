@@ -91,5 +91,10 @@ and `scripts/`; files outside the repo, such as workspace skills, are not in the
    the only format check.
 6. Config: `python -c "from pathlib import Path; from nanobot.config.loader import load_config; load_config(Path('<config.json>'))"`
    must not raise `ConfigLoadError` (doc 04 section 1).
-7. Before handing a change back: `scripts/test-docker.sh` (full suite, expect 0 failed) and
+7. Kernel invariants: `scripts/test-docker.sh pytest tests/kernel -q`. The AST guard
+   (tests/kernel/test_no_ambient_reads.py) fails on any `os.environ`/`getenv`, `Path.home()`, `expanduser("~")`,
+   `expandvars` or `load_config`/`get_*_dir` call outside `nanobot/cli/`, `nanobot/config/`,
+   `nanobot/kernel/legacy.py` and `nanobot/utils/restart.py`, and names the file and line. Route a new fallback
+   through a `nanobot/kernel/legacy.py` helper instead of widening the allow-list.
+8. Before handing a change back: `scripts/test-docker.sh` (full suite, expect 0 failed) and
    `scripts/test-docker.sh ruff check nanobot/ tests/`. Never run `ruff format`.

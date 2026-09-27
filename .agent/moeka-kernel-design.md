@@ -73,15 +73,39 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   credential and runtime flag enters through `CoreEnvironment`.
 - Enforced by: the host builds `CoreEnvironment`; `LegacyConfigAdapter` does ambient reads outside the kernel.
 - Proven by: an AST test over `nanobot/` that fails on a forbidden read outside the compat and CLI modules.
-- Status: not met. 95 lines in 20 files under `nanobot/` (outside `cli/`) match `os.environ|os.getenv`.
+- Status: met for kernel modules (P1, 2026-09-27). Proof is `tests/kernel/test_no_ambient_reads.py`, an AST
+  guard (docstrings and comments never match) over every `nanobot/**/*.py`, with a self-test per pattern.
+- Forbidden outside the allow-list: `os.environ`/`environb`/`getenv`/`putenv`/`unsetenv` (including `import os
+  as x`, `from os import environ as e`, `getattr(os, "environ")`), bare `environ.get`, `os.path.expandvars`,
+  `Path.home()`, `os.path.expanduser("~...")`, `Path("~...").expanduser()`, and every ambient locator in
+  `nanobot/config/{paths,loader}.py` (`load_config`, `get_config_path`, `get_state_home`, `get_data_dir`,
+  `get_media_dir`, `get_runtime_subdir`, `get_legacy_sessions_dir` and the other `get_*_dir` helpers).
+- Allowed: `Path(x).expanduser()` and `os.path.expanduser(x)` on a caller-supplied path.
+- Allow-list (`AMBIENT_ALLOWLIST`): `nanobot/cli/` (host CLI), `nanobot/config/` (config layer: paths, loader,
+  schema `workspace_path` fallback and the pydantic `NANOBOT_` env prefix), `nanobot/kernel/legacy.py` (the
+  ambient adapter) and `nanobot/utils/restart.py` (host re-exec).
+- One exemption (`KNOWN_EXEMPTIONS`): `nanobot/utils/path.py`, which reads the home dir only to shorten a path
+  string in tool-call hints ("/home/u/x" -> "~/x").
+- Env-less legacy fallbacks (`data_dir=None`, `media_dir=None`, `workspace=None`) reach ambient state only
+  through named helpers in `nanobot/kernel/legacy.py` (`legacy_data_dir`, `legacy_media_dir`,
+  `legacy_state_home`, `legacy_config_path`, `legacy_runtime_subdir`, `legacy_sessions_dir`,
+  `process_env_snapshot`, `ambient_credential`).
+- Runtime proof: `tests/kernel/test_fake_home.py` runs one strict kernel turn with a tool call under a temp
+  `HOME` with every legacy env var set to a poison sentinel. It asserts no poisoned variable is looked up and
+  that `os.environ` is not mutated. It also asserts the sentinel reaches no trace, log, provider payload, tool
+  output or file, and that nothing is created under `$HOME` or the cwd.
 
 **I2 Physical path separation**
 - `Paths.work_dir` and `Paths.state_dir` must never overlap. Agent file and shell operations stay in
   `work_dir`; sessions, traces and policy stay in `state_dir`.
 - Enforced by: a construction check, the file-tool floor, and the sandbox for shell (section 4).
 - Proven by: a test that constructing the kernel with overlapping dirs raises; a test that fs tools deny `state_dir`.
-- Status: partial. The file-tool floor shipped in phase 0 (`nanobot/security/protected_paths.py`); the default
-  layout is still flat (workspace == state home, Q5).
+- Status: partial. Strict `Paths` exist: a strict `CoreEnvironment` rejects overlapping dirs, and sessions,
+  auth stores, `llm_usage`, plugin state and logs live under `state_dir`, while media lives under `work_dir`.
+  The file-tool floor denies `state_dir` (`tests/kernel/test_paths_wiring.py`).
+- Not met: shell isolation. `exec` can still reach `state_dir` by absolute path unless the workspace guard is on
+  or a sandbox backend runs; strict mode refusing shell without a sandbox is P2.
+- The legacy adapter keeps the flat layout (workspace == state home, R1 `overlap_ok=True`).
 
 **I3 Unearned knowledge is forbidden**
 - An output schema must bind only values backed by grounded source context or explicit user confirmation.
@@ -423,6 +447,9 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Add the AST guard test for ambient reads outside authorised compat modules.
 - Wrap legacy config in `LegacyConfigAdapter` with an in-memory resolver; the floor takes its roots from `Paths`.
 - Proof: AST guard green, fake-HOME test creates nothing under `$HOME`, awork suite green.
+- Proof status (Checkpoint 1, 2026-09-27): AST guard and fake-HOME test green, and the full suite passes.
+  The awork suite has the same 8 failures as before P1 (awork's venv lacks `rapidfuzz`), with no new failure.
+  Deferred minors: `.agent/kernel-p1-followups.md`.
 
 **P2 gate and budgets.** Goal: one audited choke point with hard limits.
 - `PermissionPolicy` with default parity, floors, the gate at both call paths, audit events.

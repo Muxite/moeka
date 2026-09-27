@@ -241,6 +241,37 @@ prefixes its spec declares, `_request_model_name`, providers/openai_compat_provi
   connection is NOT closed by `cleanup()` despite the docstring; only the vec store is. Committed data is safe
   (section 5); the WAL is simply not checkpointed.
 
+### 4.1 Host environment (`env=`, kernel P1)
+
+```mermaid
+flowchart LR
+    Host["host (awork, CLI, tests)"] -->|"env="| Env["CoreEnvironment"]
+    Cfg["legacy Config + process env"] --> Legacy["LegacyEnvironment.from_config<br/>(nanobot/kernel/legacy.py)"]
+    Legacy -->|"env=None default"| Env
+    Env --> Kernel["MoekaCore / AgentLoop / tools / providers"]
+```
+
+- `CoreEnvironment` (kernel/env.py) carries `config` (a `ConfigSource`: `section(name)`), `credentials`
+  (a `CredentialResolver`: `resolve(ref, scope)`), `paths` (`Paths`), `trace` (a `TraceSink`), `exec_base_env`
+  (the exec child's base env) and `strict`.
+- `create(env=...)`/`from_config(env=...)`: the env wins for paths and credentials; the config still picks model
+  and provider. The loop's workspace is `env.paths.work_dir`.
+- Without `env`, `LegacyEnvironment.from_config(config)` builds one from the config and the process env. It keeps
+  every legacy location (flat layout, `overlap_ok=True`; data, media and logs next to `config.json` for a
+  file-loaded config) and pre-loads credentials from `LEGACY_ENV_REFS` (`BRAVE_API_KEY` etc.).
+- A strict env (`strict=True`, separate `work_dir`/`state_dir`) keeps sessions (`state_dir/sessions`), auth
+  stores and `llm_usage` (`state_dir/data`), plugin state (`state_dir/data/plugin-data`) and logs under
+  `state_dir`; media lives under `work_dir/media`. Nothing is read from `os.environ`, `~` or `config.json`.
+- Ambient reads are allowed only in `nanobot/cli/`, `nanobot/config/`, `nanobot/kernel/legacy.py` and
+  `nanobot/utils/restart.py`. Other modules reach the legacy locations through named helpers in
+  `kernel/legacy.py` (`legacy_data_dir`, `legacy_media_dir`, `legacy_state_home`, `legacy_config_path`,
+  `legacy_runtime_subdir`, `legacy_sessions_dir`, `process_env_snapshot`, `ambient_credential`), and only
+  when a caller passed no host path. The AST guard `tests/kernel/test_no_ambient_reads.py` enforces this, and
+  `tests/kernel/test_fake_home.py` proves it at runtime (poisoned env, fake `HOME`).
+- Exec: the child env is built from `env.exec_base_env` (`HOME`/`LANG`/`TERM` plus `allowedEnvKeys` resolved
+  with scope `exec`). `$VAR` in guarded command paths and sandbox bind paths expands against that same base env
+  (`agent/tools/sandbox.py` `expand_vars`), not the process env.
+
 ## 5. Sessions and crash behaviour
 
 - Location: NOT `<workspace>/sessions.db`. The default `sessions_root` is `<workspace parent>/<workspace
@@ -248,7 +279,8 @@ prefixes its spec declares, `_request_model_name`, providers/openai_compat_provi
   (session/sqlite_store.py:176-181), where `<workspace-id>` comes from the marker `<workspace>/.nanobot/workspace-id`
   (docstring session/sqlite_store.py:13-16). The store refuses a `sessions_root` inside the workspace
   (session/sqlite_store.py:158-162). For the default flat workspace `~/.nanobot` that is
-  `~/.nanobot-sessions/<id>/sessions.db`.
+  `~/.nanobot-sessions/<id>/sessions.db`. With a host env the root is `env.paths.sessions_root`
+  (`state_dir/sessions` for a strict env).
 - A pre-ADR-0001 `<workspace>/sessions.db` is only warned about, never moved (session/sqlite_store.py:258-287);
   moving it is the explicit `nanobot sessions migrate` command. Legacy per-session `.jsonl` files are imported once
   at startup and renamed `*.jsonl.imported` (session/sqlite_store.py:289-339). `dump_jsonl(key)` exports one session
