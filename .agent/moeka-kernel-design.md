@@ -317,8 +317,8 @@ Purpose: the kernel must work as a chatbot and make effective, typed calls to ou
   inside the same loop. Transport (Telegram, web, CLI) belongs to the host, not the kernel.
 - Every outward call must be typed: a declared argument schema, validated before the gate, and a declared
   result schema, validated before the result reaches the model or the artifact store.
-- Today (verified): tools cast and validate arguments (`Tool.cast_params`, `Tool.validate_params`,
-  `nanobot/agent/tools/base.py:251,297`; `ToolRegistry.prepare_call`, `registry.py:110`). No result schema exists.
+- Before P4 (verified): tools cast and validate arguments (`Tool.cast_params`, `Tool.validate_params`,
+  `nanobot/agent/tools/base.py`; `ToolRegistry.prepare_call`, `registry.py`). No result schema existed.
 - An argument that fails validation must return a structured error naming each bad field and the expected type,
   so the model repairs the call in one step instead of thrashing.
 - Outside services are reached only through `net.fetch`, `mcp.call` or a service plugin, always behind the gate.
@@ -326,6 +326,37 @@ Purpose: the kernel must work as a chatbot and make effective, typed calls to ou
   operation). The gate checks the capability; the kernel checks the types.
 - A typed result that fails its schema is a tool error with a marker, never passed on as fact (I3).
 - Typed results are the only values that may bind into the artifact store.
+- Status: built, opt-in per tool (P4, Task 21, Checkpoint 4). What is enforced:
+  - `Tool.output_schema` (default `None`). `nanobot.kernel.typed.validate_result` (re-exported from
+    `nanobot.kernel.gate`) runs after `execute` on all three live call paths: `AgentRunner._run_tool`,
+    `ToolRegistry.execute` and `nanobot.agent.tools.execution`. It is live for every real tool call, but it
+    checks only tools that declare a schema. No built-in declares one, so built-in results are unchanged.
+  - The value checked: a `ToolResult`'s `structured` payload when present, else a string parsed as JSON,
+    else the Python value. Text that is not JSON fails.
+  - A failing result becomes `ToolResult.error` with marker `result failed schema` and each field path
+    (`temp.c: expected integer, got string`). The payload is never echoed. A `tool.result_invalid` trace
+    event is emitted. It reaches `on_execute_tool_error`, never `after_execute_tool`.
+  - Classification: a tool error, not a gate denial. There is no deferred entry, no `violation:*` signature
+    and no I5 count, because the call was allowed and the service broke its own contract; a retry may succeed.
+  - Arguments: invalid-parameter errors keep the legacy text and add `Fields to fix: <path>: expected <type>`
+    (`Schema.schema_violations`, the same validator results use).
+  - MCP: a server `outputSchema` becomes the wrapper's `output_schema`, and `structuredContent` is checked,
+    not the bannered text. `outputSchema` without `structuredContent` fails (the MCP spec says MUST; the SDK
+    raises too, and its result-schema `RuntimeError`s carry the marker). `structuredContent` without
+    `outputSchema`, or neither, is legacy text, unchanged.
+  - `FunctionTool(output_model=)` validates through `nanobot.api.complete._coerce_json`, the same path as
+    `acomplete_json` and the solvers. It returns `ToolResult(<model JSON>, structured=<model>)`.
+  - Kernel-mode plugins: the manifest `Operation` named like the registered tool binds its `output_schema`
+    (result) and its `input_schema` (on top of the tool's own `parameters`). Legacy-mode plugins ignore
+    manifest operations.
+- Still aspirational:
+  - The validator is the `Schema` subset (`type`, `enum`, bounds, lengths, `properties`, `required`,
+    `additionalProperties`, `items`). `$ref`, `anyOf`/`oneOf`/`allOf` and `pattern` are accepted unchecked.
+  - Kernel mode itself is opt-in (`ToolLoader(plugin_registry=...)`); no production caller passes a
+    registry, so manifest operations are enforced only where a host enables kernel mode.
+  - The artifact store (P5) does not exist. The contract it can rely on: a non-error result of a tool with
+    an `output_schema` has passed this check.
+  - Outside services are not yet forced through a typed tool: an untyped tool may still return free text.
 
 ## 6. Cost-aware routing
 
@@ -557,6 +588,19 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Host-authenticated activation; the unsigned marker is rejected; tool descriptions become data files.
 - Manifests declare typed operations (`input_schema`, `output_schema`); results are validated before use (section 5b).
 - Proof: a changed description hash quarantines the plugin; an exec-written marker does not activate it; a service result that violates its schema is a tool error and never reaches the artifact store.
+- Proof status (Checkpoint 4, 2026-09-27): all green.
+  - `tests/kernel/test_plugin_registry.py` and `test_loader_integration.py` show that a changed package or
+    description hash quarantines the plugin and never imports it. They also show that an exec-written or
+    legacy "enabled" marker does not activate it: only a host-principal `activate` at the on-disk hash does.
+  - `tests/kernel/test_descriptions_data.py` and `test_description_golden.py` show that built-in and plugin
+    descriptions are hashed data files, byte-identical to the old strings.
+  - `tests/kernel/test_typed_results.py` shows that a result violating its `output_schema` (direct, MCP,
+    `FunctionTool`, or a kernel plugin's manifest operation) becomes a `result failed schema` tool error on
+    every call path before any success hook sees it. A tool without a schema is unchanged. There is no
+    artifact store yet (P5), so "never reaches the artifact store" holds because nothing downstream receives
+    a failed result as a success.
+  - The full suite passes (5647), and the awork suite keeps the same 8 pre-existing failures.
+  - Deferred minors: `.agent/kernel-p4-followups.md`.
 
 **P5 epistemic and artifact stores.** Goal: I3 holds by construction.
 - Generic fact records with provenance (trace ID, source kind, span).
