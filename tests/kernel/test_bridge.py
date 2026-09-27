@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import threading
 import time
+from typing import Any
 
 import pytest
 
@@ -220,3 +221,177 @@ def test_fifty_threads_submit_concurrently(bridge):
 
     assert not errors
     assert results == [i * i for i in range(50)]
+
+
+def test_fifty_threads_submit_with_barrier():
+    """All 50 threads submit at the exact same instant (via a Barrier),
+    not just started close together — a tighter version of the race the
+    plan calls for.
+    """
+    lt = LoopThread(name="barrier-fifty")
+    n = 50
+    barrier = threading.Barrier(n)
+    results: list[Any] = [None] * n
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        async def coro():
+            await asyncio.sleep(0)
+            return i * i
+
+        barrier.wait(timeout=5.0)
+        try:
+            results[i] = lt.run(coro())
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+    lt.stop(timeout=2.0)
+
+    assert not errors
+    assert results == [i * i for i in range(n)]
+
+
+def test_timeout_before_task_starts_on_loop(bridge):
+    """The timeout can fire while the loop is still busy with something
+    queued ahead of the scheduling callback, i.e. before the task even
+    exists. The cancellation must still land the moment the task is
+    created, and the coroutine body must never run.
+    """
+    bridge.start()
+    ran = threading.Event()
+
+    def block() -> None:
+        time.sleep(0.3)  # hog the loop so run()'s scheduling queues behind this
+
+    bridge._loop.call_soon_threadsafe(block)
+
+    async def victim():
+        await asyncio.sleep(0.1)
+        ran.set()
+
+    with pytest.raises(TimeoutError):
+        bridge.run(victim(), timeout=0.05)
+
+    assert not ran.wait(timeout=1.0), "victim body ran despite the timeout"
+
+
+def test_run_racing_stop_never_hangs_and_raises_bridge_stopped():
+    """A run() call that starts mid-drain (state already "stopping" once it
+    reaches the loop, or later once fully "stopped") must return promptly
+    with RuntimeError("bridge stopped") instead of blocking forever.
+    """
+    lt = LoopThread(name="race-stop")
+    lt.start()
+
+    async def slow():
+        await asyncio.sleep(0.2)
+
+    lt.submit(slow())
+
+    result: dict[str, Any] = {}
+
+    def late_caller() -> None:
+        time.sleep(0.05)  # land while stop() is draining
+
+        async def c():
+            await asyncio.sleep(0.5)
+            return 1
+
+        try:
+            result["value"] = lt.run(c())
+        except BaseException as exc:  # noqa: BLE001
+            result["value"] = exc
+
+    t = threading.Thread(target=late_caller, daemon=True)
+    t.start()
+    lt.stop(timeout=0.3)
+    t.join(timeout=2.0)
+
+    assert not t.is_alive(), "run() racing stop() hung instead of returning"
+    assert isinstance(result.get("value"), RuntimeError)
+    assert "bridge stopped" in str(result["value"])
+
+
+def test_concurrent_stop_from_several_threads_does_not_raise():
+    lt = LoopThread(name="concurrent-stop")
+    lt.start()
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def stopper() -> None:
+        try:
+            lt.stop(timeout=1.0)
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=stopper) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert not errors
+    with pytest.raises(RuntimeError, match="bridge stopped"):
+        lt.run(_noop_coro())
+
+
+def test_stop_racing_start_leaves_no_unjoined_thread():
+    lt = LoopThread(name="start-stop-race")
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def starter() -> None:
+        try:
+            lt.start()
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    def stopper() -> None:
+        try:
+            lt.stop(timeout=1.0)
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    t1 = threading.Thread(target=starter)
+    t2 = threading.Thread(target=stopper)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    assert not errors
+    if lt._thread is not None:
+        assert not lt._thread.is_alive()
+
+
+def test_submit_future_cancel_cancels_task(bridge, caplog):
+    started = threading.Event()
+    done = threading.Event()
+
+    async def task():
+        started.set()
+        await asyncio.sleep(0.2)
+        done.set()
+
+    fut = bridge.submit(task())
+    fut.cancel()
+
+    with pytest.raises(BaseException):  # noqa: PT011 - CancelledError, not a plain Exception
+        fut.result(timeout=2.0)
+
+    assert not done.wait(timeout=0.5), "task still ran to completion after fut.cancel()"
+    assert "Event loop is closed" not in caplog.text
+
+
+async def _noop_coro() -> None:
+    return None

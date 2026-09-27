@@ -24,53 +24,57 @@ class LoopThread:
     (:meth:`run`), fire-and-forget (:meth:`submit`), or pull an async
     iterator through it item by item (:meth:`iterate`). Calling from the
     loop thread's own running loop raises ``RuntimeError`` instead of
-    deadlocking.
+    deadlocking. All state transitions (idle -> running -> stopping ->
+    stopped) happen under one lock, so ``start``/``run``/``submit`` and
+    ``stop`` are safe to call concurrently from any number of threads; the
+    loop never restarts once stopped.
     """
 
     def __init__(self, name: str = "moeka-kernel-loop") -> None:
         self._name = name
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
-        self._start_lock = threading.Lock()
-        self._started = threading.Event()
-        self._stopped = False
+        self._lock = threading.Lock()
+        self._state = "idle"  # idle -> running -> stopping -> stopped
+        self._stopped_event = threading.Event()
+        self._pending: set[Future[Any]] = set()
 
     # -- lifecycle ---------------------------------------------------
 
     def start(self) -> None:
-        """Start the loop thread if it isn't already running. Idempotent."""
-        if self._started.is_set():
+        """Start the loop thread if it isn't already running. Idempotent.
+
+        Raises ``RuntimeError`` if the bridge has already been stopped
+        (or is in the process of stopping) — it never restarts.
+        """
+        with self._lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
+        # Caller holds self._lock.
+        if self._state == "running":
             return
-        with self._start_lock:
-            if self._started.is_set():
-                return
-            if self._stopped:
-                raise RuntimeError("bridge stopped")
-            ready = threading.Event()
-
-            def _run() -> None:
-                loop = asyncio.new_event_loop()
-                self._loop = loop
-                asyncio.set_event_loop(loop)
-                ready.set()
-                try:
-                    loop.run_forever()
-                finally:
-                    loop.close()
-
-            thread = threading.Thread(target=_run, name=self._name, daemon=True)
-            self._thread = thread
-            thread.start()
-            ready.wait()
-            self._started.set()
-
-    def _ensure_started(self) -> asyncio.AbstractEventLoop:
-        if self._stopped:
+        if self._state in ("stopping", "stopped"):
             raise RuntimeError("bridge stopped")
-        if not self._started.is_set():
-            self.start()
-        assert self._loop is not None
-        return self._loop
+
+        ready = threading.Event()
+
+        def _run() -> None:
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
+            ready.set()
+            try:
+                loop.run_forever()
+            finally:
+                loop.close()
+                self._fail_pending_futures()
+
+        thread = threading.Thread(target=_run, name=self._name, daemon=True)
+        self._thread = thread
+        thread.start()
+        ready.wait()
+        self._state = "running"
 
     def _check_not_on_loop_thread(self, method: str) -> None:
         if threading.current_thread() is self._thread:
@@ -79,87 +83,160 @@ class LoopThread:
                 "await the async method directly instead"
             )
 
+    def _fail_pending_futures(self) -> None:
+        with self._lock:
+            pending = list(self._pending)
+            self._pending.clear()
+        for fut in pending:
+            if not fut.done():
+                try:
+                    fut.set_exception(RuntimeError("bridge stopped"))
+                except Exception:  # noqa: BLE001 - fut may settle concurrently
+                    pass
+
+    def _settle(
+        self,
+        fut: Future[Any],
+        *,
+        exc: BaseException | None = None,
+        result: Any = None,
+        cancelled: bool = False,
+    ) -> None:
+        with self._lock:
+            self._pending.discard(fut)
+        if fut.done():
+            return
+        try:
+            if cancelled:
+                fut.cancel()
+            elif exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
+        except Exception:  # noqa: BLE001 - fut may have settled concurrently
+            pass
+
     # -- submission ----------------------------------------------------
 
-    def submit(self, coro: Any) -> Future[Any]:
-        """Schedule ``coro`` on the loop; return a ``concurrent.futures.Future``."""
-        loop = self._ensure_started()
-        self._check_not_on_loop_thread("submit")
-        ctx = contextvars.copy_context()
-        fut: Future[Any] = Future()
+    def _schedule(self, coro: Any, method_name: str) -> tuple[Future[Any], dict[str, Any]]:
+        """Schedule ``coro`` on the loop; return its future and a task handle.
 
-        def _start() -> None:
+        The handle is a plain ``dict`` with a ``"task"`` key, filled in once
+        the task is actually created on the loop (or left ``None`` if the
+        bridge rejected the call before that point). Both ``run`` and
+        ``submit`` build on this so the accept/reject/cancel logic lives in
+        one place.
+        """
+        with self._lock:
+            if self._state in ("stopping", "stopped"):
+                coro.close()
+                fut: Future[Any] = Future()
+                fut.set_exception(RuntimeError("bridge stopped"))
+                return fut, {}
+            if self._state == "idle":
+                self._start_locked()
+            loop = self._loop
+        assert loop is not None
+        self._check_not_on_loop_thread(method_name)
+
+        ctx = contextvars.copy_context()
+        fut = Future()
+        handle: dict[str, Any] = {"task": None}
+        with self._lock:
+            self._pending.add(fut)
+
+        def _on_fut_settled(f: Future[Any]) -> None:
+            # Lets fut.cancel() (submit's caller cancelling, or run()'s own
+            # timeout handling) reach the underlying task, matching
+            # asyncio.run_coroutine_threadsafe's cancel semantics.
+            if not f.cancelled():
+                return
+            task = handle.get("task")
+            if task is not None and not task.done():
+                try:
+                    loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    pass  # loop already closed
+
+        fut.add_done_callback(_on_fut_settled)
+
+        def _on_loop() -> None:
+            with self._lock:
+                accept = self._state == "running"
+            if not accept:
+                coro.close()
+                self._settle(fut, exc=RuntimeError("bridge stopped"))
+                return
+            if fut.done():
+                # Cancelled (or otherwise settled) before we got to start it.
+                coro.close()
+                return
             try:
                 task = loop.create_task(coro, context=ctx)
-            except Exception as exc:  # noqa: BLE001 - surface failure to the caller's future
-                fut.set_exception(exc)
+            except Exception as exc:  # noqa: BLE001 - surface to the caller's future
+                self._settle(fut, exc=exc)
                 return
+            handle["task"] = task
 
-            def _done(t: asyncio.Task[Any]) -> None:
+            def _on_task_done(t: asyncio.Task[Any]) -> None:
+                if fut.done():
+                    return
                 if t.cancelled():
-                    fut.cancel()
+                    self._settle(fut, cancelled=True)
                     return
                 exc = t.exception()
                 if exc is not None:
-                    fut.set_exception(exc)
+                    self._settle(fut, exc=exc)
                 else:
-                    fut.set_result(t.result())
+                    self._settle(fut, result=t.result())
 
-            task.add_done_callback(_done)
+            task.add_done_callback(_on_task_done)
 
-        loop.call_soon_threadsafe(_start)
+        loop.call_soon_threadsafe(_on_loop)
+        return fut, handle
+
+    def submit(self, coro: Any) -> Future[Any]:
+        """Schedule ``coro`` on the loop; return a ``concurrent.futures.Future``.
+
+        Cancelling the returned future (``fut.cancel()``) cancels the
+        underlying task too, if it has been created by then.
+        """
+        fut, _handle = self._schedule(coro, "submit")
         return fut
 
     def run(self, coro: Any, timeout: float | None = None) -> Any:
         """Run ``coro`` on the loop and block until it finishes.
 
-        Re-raises the coroutine's own exception unchanged. On timeout,
-        cancels the underlying task, waits (bounded) for the cancellation
-        to actually land, then raises ``TimeoutError``.
+        Re-raises the coroutine's own exception unchanged. Rejected calls
+        (bridge stopping/stopped) always raise ``RuntimeError("bridge
+        stopped")``. On timeout, cancels the underlying task (or, if it
+        hasn't been created on the loop yet, cancels it the moment it is —
+        the cancel request is itself delivered on the loop, after any
+        already-queued task creation), waits (bounded) for the cancellation
+        to actually land, then raises builtin ``TimeoutError``.
         """
-        loop = self._ensure_started()
-        self._check_not_on_loop_thread("run")
-        ctx = contextvars.copy_context()
-        task_holder: dict[str, asyncio.Task[Any]] = {}
-        fut: Future[Any] = Future()
-
-        def _start() -> None:
-            try:
-                task = loop.create_task(coro, context=ctx)
-            except Exception as exc:  # noqa: BLE001
-                fut.set_exception(exc)
-                return
-            task_holder["task"] = task
-
-            def _done(t: asyncio.Task[Any]) -> None:
-                if t.cancelled():
-                    fut.cancel()
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    fut.set_exception(exc)
-                else:
-                    fut.set_result(t.result())
-
-            task.add_done_callback(_done)
-
-        loop.call_soon_threadsafe(_start)
+        fut, handle = self._schedule(coro, "run")
         try:
             return fut.result(timeout=timeout)
         except TimeoutError:
-            task = task_holder.get("task")
-            if task is not None:
+            loop = self._loop
+            if loop is not None:
 
-                def _cancel() -> None:
-                    task.cancel()
+                def _cancel_on_loop() -> None:
+                    task = handle.get("task")
+                    if task is not None and not task.done():
+                        task.cancel()
 
-                loop.call_soon_threadsafe(_cancel)
-                # Bound the wait for cancellation to actually land; don't hang
-                # forever if the coroutine swallows CancelledError.
                 try:
-                    fut.result(timeout=5.0)
-                except Exception:  # noqa: BLE001 - we only care that it settled
-                    pass
+                    loop.call_soon_threadsafe(_cancel_on_loop)
+                except RuntimeError:
+                    pass  # loop already closed
+            # Bound the wait for cancellation to actually land; don't hang
+            # forever if the coroutine swallows CancelledError.
+            try:
+                fut.result(timeout=5.0)
+            except Exception:  # noqa: BLE001 - we only care that it settled
+                pass
             raise TimeoutError(f"LoopThread.run timed out after {timeout}s") from None
 
     def iterate(
@@ -171,8 +248,6 @@ class LoopThread:
         exception raised into this generator), ``aclose()`` is called on
         the async iterator on the loop.
         """
-        self._ensure_started()
-        self._check_not_on_loop_thread("iterate")
         closed = False
 
         def _aclose() -> None:
@@ -203,42 +278,68 @@ class LoopThread:
     # -- shutdown --------------------------------------------------------
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Stop the loop thread. Idempotent.
+        """Stop the loop thread. Idempotent and safe to call concurrently.
 
-        Lets pending tasks finish for up to ``timeout`` seconds (drain),
-        then cancels whatever is left, runs ``shutdown_asyncgens``, and
-        joins the thread. After this, ``run``/``submit`` raise
-        ``RuntimeError``.
+        Lets pending tasks finish for up to ``timeout`` seconds (drain,
+        re-checked in a loop so tasks created mid-drain are also waited
+        on), then cancels whatever is left, runs ``shutdown_asyncgens``,
+        and joins the thread. After this, ``run``/``submit`` always raise
+        ``RuntimeError("bridge stopped")``. Concurrent callers all block
+        until the one doing the actual work finishes; none of them raise.
         """
-        if self._stopped:
-            return
-        if not self._started.is_set():
-            # Never started: nothing to drain or join.
-            self._stopped = True
+        with self._lock:
+            if self._state == "stopped":
+                return
+            if self._state == "idle":
+                # Never started: nothing to drain or join.
+                self._state = "stopped"
+                self._stopped_event.set()
+                return
+            if self._state == "stopping":
+                owner = False
+            else:  # "running"
+                self._state = "stopping"
+                owner = True
+
+        if not owner:
+            self._stopped_event.wait()
             return
 
         loop = self._loop
-        assert loop is not None
-
-        drain_done: Future[None] = Future()
+        thread = self._thread
+        assert loop is not None and thread is not None
 
         async def _drain_and_shutdown() -> None:
+            running_loop = asyncio.get_running_loop()
+            deadline = running_loop.time() + timeout
+            while True:
+                current = asyncio.current_task()
+                pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+                if not pending:
+                    break
+                remaining = deadline - running_loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.wait(pending, timeout=remaining)
+                # Loop again: draining may itself have let new tasks start.
             current = asyncio.current_task()
-            pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
-            if pending:
-                await asyncio.wait(pending, timeout=timeout)
-            still_pending = [t for t in pending if not t.done()]
-            for t in still_pending:
+            stragglers = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+            for t in stragglers:
                 t.cancel()
-            if still_pending:
-                await asyncio.gather(*still_pending, return_exceptions=True)
-            await loop.shutdown_asyncgens()
+            if stragglers:
+                await asyncio.gather(*stragglers, return_exceptions=True)
+            await running_loop.shutdown_asyncgens()
+
+        drain_done: Future[None] = Future()
 
         def _start_drain() -> None:
             task = loop.create_task(_drain_and_shutdown())
 
             def _done(t: asyncio.Task[None]) -> None:
-                exc = t.exception() if not t.cancelled() else None
+                if t.cancelled():
+                    drain_done.set_result(None)
+                    return
+                exc = t.exception()
                 if exc is not None:
                     drain_done.set_exception(exc)
                 else:
@@ -253,6 +354,10 @@ class LoopThread:
             logger.warning("LoopThread.stop: drain/shutdown failed: {!r}", exc)
 
         loop.call_soon_threadsafe(loop.stop)
-        if self._thread is not None:
-            self._thread.join(timeout=timeout + 5.0)
-        self._stopped = True
+        thread.join(timeout=timeout + 5.0)
+        # _run's finally already closed the loop and failed any leftover
+        # pending futures once run_forever() returned above.
+
+        with self._lock:
+            self._state = "stopped"
+        self._stopped_event.set()
