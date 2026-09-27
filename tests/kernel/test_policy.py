@@ -15,6 +15,7 @@ from nanobot.kernel.policy import (
     CapabilityRequest,
     DefaultPolicy,
     Deny,
+    IntersectionPolicy,
     PermissionPolicy,
     Principal,
 )
@@ -234,30 +235,117 @@ def test_attenuate_with_foreign_narrower() -> None:
     assert _allowed(child) == frozenset({"fs.read"})
 
 
+RESOURCES = ("r", "/etc/passwd", "/tmp/x", "https://example.com", "")
+
+
+def _allowed_pairs(policy: PermissionPolicy, principal: Principal) -> frozenset[tuple[str, str]]:
+    return frozenset(
+        (c, r) for c in UNIVERSE for r in RESOURCES
+        if isinstance(policy.decide(principal, CapabilityRequest(c, r), None), Allow)
+    )
+
+
+class _NoCap(DefaultPolicy):
+    """A DefaultPolicy subclass whose overridden decide denies one extra capability."""
+
+    def __init__(self, banned: str, **kw) -> None:
+        super().__init__(**kw)
+        self.banned = banned
+
+    def decide(self, principal, req, ctx):
+        if req.capability == self.banned:
+            return Deny(reason=f"banned {POLICY_MARKER}", marker=POLICY_MARKER,
+                        capability=req.capability)
+        return super().decide(principal, req, ctx)
+
+
+class _Leaky:
+    """A misbehaving foreign policy: denies one capability, attenuates to allow-all."""
+
+    def __init__(self, banned: str) -> None:
+        self.banned = banned
+
+    def decide(self, principal, req, ctx):
+        if req.capability == self.banned:
+            return Deny(reason=f"leaky {POLICY_MARKER}", marker=POLICY_MARKER,
+                        capability=req.capability)
+        return Allow()
+
+    def attenuate(self, requested, narrower=None):
+        return DefaultPolicy()
+
+
+def test_subclass_narrower_rules_survive_attenuate() -> None:
+    child = DefaultPolicy().attenuate(frozenset({"exec.run", "fs.read"}), _NoCap("exec.run"))
+    assert _allowed(child) == frozenset({"fs.read"})
+
+
+def test_subclass_self_rules_survive_attenuate() -> None:
+    parent = _NoCap("exec.run")
+    child = parent.attenuate(frozenset({"exec.run", "fs.read"}))
+    assert _allowed(child) == frozenset({"fs.read"})
+    assert _allowed(child.attenuate(frozenset(UNIVERSE))) <= frozenset({"fs.read"})
+
+
+def test_intersection_keeps_misbehaving_member_as_floor() -> None:
+    parent = DefaultPolicy().attenuate(frozenset(UNIVERSE), _Leaky("net.fetch"))
+    assert "net.fetch" not in _allowed(parent)
+    grand = parent.attenuate(frozenset({"net.fetch", "fs.read"}))
+    assert _allowed(grand) == frozenset({"fs.read"})
+    great = grand.attenuate(frozenset(UNIVERSE))
+    assert _allowed(great) <= frozenset({"fs.read"})
+
+
+def _random_policy(rng: random.Random, depth: int = 0) -> PermissionPolicy:
+    denied = frozenset(rng.sample(UNIVERSE, rng.randint(0, 3)))
+    rules = tuple(
+        (rng.choice(UNIVERSE), rng.choice(("/etc/*", "https://*", "*", "/tmp/?")))
+        for _ in range(rng.randint(0, 3))
+    )
+    roll = rng.random()
+    if roll < 0.4:
+        policy: PermissionPolicy = DefaultPolicy(deny_capabilities=denied, deny_rules=rules)
+    elif roll < 0.6:
+        policy = _NoCap(rng.choice(UNIVERSE), deny_capabilities=denied, deny_rules=rules)
+    elif roll < 0.75:
+        policy = _Leaky(rng.choice(UNIVERSE))
+    elif roll < 0.9 and depth < 2:
+        policy = IntersectionPolicy(_random_policy(rng, depth + 1), _random_policy(rng, depth + 1))
+    else:
+        policy = _DenyExec()
+    if rng.random() < 0.5:
+        policy = policy.attenuate(frozenset(rng.sample(UNIVERSE, rng.randint(0, len(UNIVERSE)))))
+    return policy
+
+
 def test_attenuate_subset_property() -> None:
-    """Every child's allowed set is a subset of its parent's and of its request."""
+    """Every child is a subset of its parent, its request and its narrower (I4).
+
+    Parents and narrowers are DefaultPolicy (with deny rules), DefaultPolicy subclasses
+    overriding decide, IntersectionPolicy, and foreign policies (including one whose
+    attenuate misbehaves); decisions are compared over several resources.
+    """
     rng = random.Random(7)
-    for _ in range(200):
-        denied = frozenset(rng.sample(UNIVERSE, rng.randint(0, 4)))
-        parent: PermissionPolicy = DefaultPolicy(deny_capabilities=denied)
-        if rng.random() < 0.5:
-            parent = parent.attenuate(frozenset(rng.sample(UNIVERSE, rng.randint(0, 13))))
+    for _ in range(300):
+        parent = _random_policy(rng)
+        if not isinstance(parent, (DefaultPolicy, IntersectionPolicy)):
+            # A bare foreign root's own attenuate is outside the kernel's control;
+            # the kernel only ever holds one as an IntersectionPolicy member.
+            parent = IntersectionPolicy(parent)
         requested = frozenset(rng.sample(UNIVERSE, rng.randint(0, len(UNIVERSE))))
-        narrower = None
-        if rng.random() < 0.5:
-            narrower = DefaultPolicy().attenuate(
-                frozenset(rng.sample(UNIVERSE, rng.randint(0, len(UNIVERSE))))
-            )
+        narrower = _random_policy(rng) if rng.random() < 0.5 else None
         child = parent.attenuate(requested, narrower)
+        grand_req = frozenset(rng.sample(UNIVERSE, rng.randint(0, len(UNIVERSE))))
+        grand = child.attenuate(grand_req)
         for principal in (HOST, AGENT, SUB):
-            got = _allowed(child, principal)
-            assert got <= _allowed(parent, principal)
-            assert got <= requested
+            got = _allowed_pairs(child, principal)
+            assert got <= _allowed_pairs(parent, principal)
+            assert {c for c, _ in got} <= requested
             if narrower is not None:
-                assert got <= _allowed(narrower, principal)
-        # Grandchild never broadens either.
-        grand = child.attenuate(frozenset(UNIVERSE))
-        assert _allowed(grand) <= _allowed(child)
+                assert got <= _allowed_pairs(narrower, principal)
+            g = _allowed_pairs(grand, principal)
+            assert g <= got
+            assert {c for c, _ in g} <= grand_req
 
 
 def test_attenuated_deny_carries_policy_marker() -> None:

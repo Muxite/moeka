@@ -112,7 +112,9 @@ class DefaultPolicy:
 
     def decide(self, principal: Principal, req: CapabilityRequest, ctx: Any) -> Allow | Deny:
         cap = req.capability
-        # Defense in depth: the floor already denies this before decide runs.
+        # Defense in depth: check_floors already denies this (marker PLUGIN_LOAD_MARKER in
+        # nanobot.kernel.floors) before decide runs; reaching here means the gate was
+        # bypassed, so the generic POLICY_MARKER is used on purpose.
         if cap == "plugin.load" and principal.kind != "host":
             return policy_deny(principal, req, "plugin.load is host-only")
         if self.allowed is not None and cap not in self.allowed:
@@ -129,31 +131,42 @@ class DefaultPolicy:
     ) -> PermissionPolicy:
         """A child that allows only ``requested`` ∩ this policy (∩ ``narrower``).
 
-        Deny rules are inherited. With a foreign ``narrower`` the child also requires
-        ``narrower.decide`` to allow, so it is never broader than either parent.
+        Fields are merged only for exact ``DefaultPolicy`` instances. A subclass (of
+        ``self`` or ``narrower``) may add rules by overriding ``decide``, so it is kept
+        as a member of an ``IntersectionPolicy`` and its own ``decide`` is still
+        consulted: the child is never broader than either.
         """
         allowed = frozenset(requested)
         if self.allowed is not None:
             allowed &= self.allowed
         deny_caps = self.deny_capabilities
         rules = self.deny_rules
-        if isinstance(narrower, DefaultPolicy):
+        if narrower is not None and type(narrower) is DefaultPolicy:
             if narrower.allowed is not None:
                 allowed &= narrower.allowed
             deny_caps |= narrower.deny_capabilities
             rules = rules + narrower.deny_rules
             narrower = None
-        child = DefaultPolicy(deny_capabilities=deny_caps, deny_rules=rules, allowed=allowed)
-        if narrower is None:
-            return child
-        return IntersectionPolicy(child, narrower)
+        child: PermissionPolicy = DefaultPolicy(
+            deny_capabilities=deny_caps, deny_rules=rules, allowed=allowed,
+        )
+        extra: list[PermissionPolicy] = []
+        if type(self) is not DefaultPolicy:
+            extra.append(self)
+        if narrower is not None:
+            extra.append(narrower)
+        return IntersectionPolicy(child, *extra) if extra else child
 
 
 class IntersectionPolicy:
     """Allows a request only when every member policy allows it (first Deny wins)."""
 
     def __init__(self, *members: PermissionPolicy) -> None:
-        self.members = members
+        flat: list[PermissionPolicy] = []
+        for member in members:
+            parts = member.members if type(member) is IntersectionPolicy else (member,)
+            flat.extend(p for p in parts if not any(p is q for q in flat))
+        self.members = tuple(flat)
 
     def decide(self, principal: Principal, req: CapabilityRequest, ctx: Any) -> Allow | Deny:
         for member in self.members:
@@ -165,7 +178,18 @@ class IntersectionPolicy:
     def attenuate(
         self, requested: frozenset[str], narrower: PermissionPolicy | None = None,
     ) -> PermissionPolicy:
-        children = [m.attenuate(requested) for m in self.members]
+        """Attenuate every member; members we do not control stay in as a floor.
+
+        An exact ``DefaultPolicy`` member's ``attenuate`` is trusted. Any other member
+        is kept alongside its attenuated version, and a ``DefaultPolicy(allowed=
+        requested)`` bounds the result, so a misbehaving ``attenuate`` cannot let a
+        grandchild escape its parent's rules or the requested set.
+        """
+        children: list[PermissionPolicy] = [DefaultPolicy(allowed=frozenset(requested))]
+        for member in self.members:
+            children.append(member.attenuate(requested))
+            if type(member) is not DefaultPolicy:
+                children.append(member)
         if narrower is not None:
             children.append(narrower)
         return IntersectionPolicy(*children)
