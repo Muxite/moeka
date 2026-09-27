@@ -32,7 +32,6 @@ from nanobot.kernel.policy import (
     CapabilityRequest,
     DefaultPolicy,
     Deny,
-    IntersectionPolicy,
     PermissionPolicy,
     Principal,
 )
@@ -255,35 +254,136 @@ async def test_child_exec_manager_with_live_sessions_is_kept_and_closed(tmp_path
     assert sm._child_exec_managers == {}
 
 
+# --- foreign parents: their own attenuate is never trusted ---------------------------
+
+
+class _DecideOnly:
+    """A valid policy shape AgentLoop can hold: ``decide`` only, no ``attenuate``."""
+
+    def __init__(self, banned: str = "exec.run") -> None:
+        self.banned = banned
+
+    def decide(self, principal, req, ctx):
+        if req.capability == self.banned:
+            return Deny(reason="banned", marker="banned", capability=req.capability)
+        return Allow()
+
+
+class _LeakyRoot(_DecideOnly):
+    """Its attenuate returns an allow-all policy (untrustworthy)."""
+
+    def attenuate(self, requested, narrower=None):
+        return DefaultPolicy()
+
+
+class _RaisingRoot(_DecideOnly):
+    def attenuate(self, requested, narrower=None):
+        raise RuntimeError("broken attenuate")
+
+
+@pytest.mark.parametrize("root_cls", [_DecideOnly, _LeakyRoot, _RaisingRoot])
+async def test_foreign_parent_is_not_trusted_to_attenuate(tmp_path, root_cls):
+    parent = root_cls()
+    sm = _manager(tmp_path, policy=parent)
+    spec = await _spawned_spec(sm)  # must not raise
+    caps = _allowed_caps(spec.policy)
+    surface = frozenset().union(*(EXPECTED_SURFACE[n] for n in SUBAGENT_TOOLS))
+    assert "exec.run" not in caps
+    assert _allowed_pairs(spec.policy) <= _allowed_pairs(parent)
+    assert caps <= surface
+    for denied in ("session.send", "secret.read", "session.read", "mcp.call"):
+        assert denied not in caps
+    # A grandchild built on this child is still bounded.
+    grand_sm = _manager(tmp_path, policy=spec.policy)
+    grand = grand_sm._child_policy(grand_sm._build_tools())
+    assert _allowed_pairs(grand) <= _allowed_pairs(spec.policy)
+
+
+async def test_decide_only_parent_run_inline_does_not_raise(tmp_path):
+    sm = _manager(tmp_path, policy=_DecideOnly(), tools_allow=["read_file", "exec"])
+    _ok_runner(sm)
+    assert await sm.run_inline("do task", runtime=_runtime()) == "ok"
+    spec = sm.runner.run.await_args.args[0]
+    assert _allowed_caps(spec.policy) == frozenset({"fs.read"})
+
+
+def test_decide_only_narrower_is_kept(tmp_path):
+    sm = _manager(tmp_path, child_policy=_LeakyRoot("fs.read"))
+    child = sm._child_policy(sm._build_tools())
+    assert "fs.read" not in _allowed_caps(child)
+    assert "exec.run" in _allowed_caps(child)
+
+
 # --- property test: through the SubagentManager construction path ------------------
 
 
-def _root(rng: random.Random) -> PermissionPolicy:
-    parent = _random_policy(rng)
-    if not isinstance(parent, (DefaultPolicy, IntersectionPolicy)):
-        # The kernel only ever holds a foreign root as an IntersectionPolicy member.
-        parent = IntersectionPolicy(parent)
-    return parent
+class _RandomUndeclared(Tool):
+    """A plugin-like tool with no static surface: the probe path must run."""
+
+    description = "undeclared"  # pyright: ignore[reportAssignmentType]
+    parameters = {"type": "object", "properties": {}}  # pyright: ignore[reportAssignmentType]
+
+    def __init__(self, name: str, caps: frozenset[str]) -> None:
+        self._name = name
+        self._caps = caps
+
+    @property
+    def name(self) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
+        return self._name
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        return [CapabilityRequest(c, "x") for c in sorted(self._caps)]
+
+    async def execute(self, **kwargs: Any) -> str:
+        return "ok"
+
+
+def _random_root(rng: random.Random) -> PermissionPolicy:
+    """Any parent shape AgentLoop may hold, unwrapped: DefaultPolicy (and subclasses),
+    IntersectionPolicy, foreign policies with an untrusted attenuate, decide-only."""
+    roll = rng.random()
+    if roll < 0.15:
+        return _DecideOnly(rng.choice(UNIVERSE))
+    if roll < 0.25:
+        return _LeakyRoot(rng.choice(UNIVERSE))
+    return _random_policy(rng)
 
 
 def test_child_and_grandchild_never_broaden_property(tmp_path):
-    """For random parents, tool selections and narrowers, the child's effective
-    ``decide`` never allows a (capability, resource) pair the parent denies, and a
-    grandchild manager built on the child's policy never exceeds the child."""
+    """For random parents (including bare foreign and decide-only roots), tool
+    selections (including undeclared-surface and session.send tools) and narrowers,
+    the child's effective ``decide`` never allows a (capability, resource) pair the
+    parent denies, and a grandchild built on the child never exceeds the child."""
+    from nanobot.agent.tools.session_messages import SendSessionMessageTool
+
     rng = random.Random(11)
-    for i in range(60):
-        parent = _root(rng)
+    probed = sent = 0
+    for i in range(80):
+        parent = _random_root(rng)
         allow = (
             None if rng.random() < 0.3
             else rng.sample(SUBAGENT_TOOLS, rng.randint(0, len(SUBAGENT_TOOLS)))
         )
         deny = rng.sample(SUBAGENT_TOOLS, rng.randint(0, 3))
-        narrower = _random_policy(rng) if rng.random() < 0.5 else None
+        narrower = _random_root(rng) if rng.random() < 0.5 else None
         sm = _manager(tmp_path, policy=parent, tools_allow=allow, tools_deny=deny,
                       child_policy=narrower)
         tools = sm._build_tools()
-        child = sm._child_policy(tools)
+        expected = frozenset().union(
+            *(EXPECTED_SURFACE[n] for n in tools.tool_names), frozenset(),
+        )
+        if rng.random() < 0.5:
+            caps = frozenset(rng.sample(UNIVERSE, rng.randint(1, 4)))
+            tools.register(_RandomUndeclared(f"plugin_{i}", caps))
+            expected |= caps
+            probed += 1
+        if rng.random() < 0.5:
+            tools.register(SendSessionMessageTool.__new__(SendSessionMessageTool))
+            expected |= {"session.send"}
+            sent += 1
         surface = sm._requested_capabilities(tools)
+        assert surface == expected, i
+        child = sm._child_policy(tools)
 
         grand_sm = _manager(tmp_path, policy=child,
                             tools_allow=rng.sample(SUBAGENT_TOOLS, rng.randint(0, 12)))
@@ -293,6 +393,8 @@ def test_child_and_grandchild_never_broaden_property(tmp_path):
             got = _allowed_pairs(child, principal)
             assert got <= _allowed_pairs(parent, principal), i
             assert {c for c, _ in got} <= surface - SUBAGENT_DENIED_BY_DEFAULT, i
+            assert "session.send" not in {c for c, _ in got}, i
             if narrower is not None:
                 assert got <= _allowed_pairs(narrower, principal), i
             assert _allowed_pairs(grand, principal) <= got, i
+    assert probed >= 10 and sent >= 10

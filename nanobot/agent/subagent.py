@@ -307,13 +307,22 @@ class SubagentManager:
     def _child_policy(self, tools: ToolRegistry) -> "PermissionPolicy":
         """The attenuated policy for one child run over *tools* (I4).
 
-        ``parent.attenuate(surface - SUBAGENT_DENIED_BY_DEFAULT, narrower=child_policy)``:
-        never broader than the parent, the child's own tool surface or the narrower set.
+        Attenuates the parent to ``surface - SUBAGENT_DENIED_BY_DEFAULT`` intersected with
+        ``child_policy``: never broader than the parent, the child's own tool surface or
+        the narrower set.
+
+        - Only an exact ``DefaultPolicy`` parent's own ``attenuate`` is trusted.
+        - Any other parent (a subclass, a foreign policy whose ``attenuate`` may
+          over-grant or raise, or a decide-only policy with no ``attenuate`` at all) is
+          wrapped in ``IntersectionPolicy`` first. Its ``attenuate`` keeps the parent as
+          a floor and bounds the result with ``DefaultPolicy(allowed=requested)``.
         """
-        from nanobot.kernel.policy import DefaultPolicy
+        from nanobot.kernel.policy import DefaultPolicy, IntersectionPolicy
 
         parent = self.policy if self.policy is not None else DefaultPolicy()
         requested = self._requested_capabilities(tools) - SUBAGENT_DENIED_BY_DEFAULT
+        if type(parent) is not DefaultPolicy:
+            parent = IntersectionPolicy(parent)
         return parent.attenuate(requested, narrower=self.child_policy)
 
     async def _release_exec_manager(self, task_id: str) -> None:

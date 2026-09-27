@@ -183,13 +183,22 @@ class IntersectionPolicy:
         An exact ``DefaultPolicy`` member's ``attenuate`` is trusted. Any other member
         is kept alongside its attenuated version, and a ``DefaultPolicy(allowed=
         requested)`` bounds the result, so a misbehaving ``attenuate`` cannot let a
-        grandchild escape its parent's rules or the requested set.
+        grandchild escape its parent's rules or the requested set. A member with no
+        ``attenuate`` (a decide-only policy) or whose ``attenuate`` raises is kept as
+        that floor alone.
         """
         children: list[PermissionPolicy] = [DefaultPolicy(allowed=frozenset(requested))]
         for member in self.members:
-            children.append(member.attenuate(requested))
-            if type(member) is not DefaultPolicy:
-                children.append(member)
+            if type(member) is DefaultPolicy:
+                children.append(member.attenuate(requested))
+                continue
+            attenuate = getattr(member, "attenuate", None)
+            if callable(attenuate):
+                try:
+                    children.append(attenuate(requested))
+                except Exception:  # noqa: BLE001 - the member itself stays as the floor
+                    pass
+            children.append(member)
         if narrower is not None:
             children.append(narrower)
         return IntersectionPolicy(*children)
