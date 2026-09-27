@@ -5,6 +5,7 @@ import pytest
 
 from nanobot.agent.tools.registry import is_tool_error_result
 from nanobot.agent.tools.web import WebSearchConfig, WebSearchTool
+from tests._kernel_env import credential_env
 
 
 def _tool(
@@ -12,10 +13,13 @@ def _tool(
     api_key: str = "",
     base_url: str = "",
     user_agent: str | None = None,
+    creds: dict[str, str] | None = None,
 ) -> WebSearchTool:
+    """A search tool whose host env resolver holds exactly ``creds`` (nothing ambient)."""
     return WebSearchTool(
         config=WebSearchConfig(provider=provider, api_key=api_key, base_url=base_url),
         user_agent=user_agent,
+        env=credential_env(creds),
     )
 
 
@@ -42,7 +46,7 @@ def test_brave_with_api_key_remains_concurrency_safe():
 
 
 def test_brave_without_api_key_is_treated_as_duckduckgo_for_concurrency(monkeypatch):
-    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.setenv("BRAVE_API_KEY", "ambient-must-be-ignored")
     tool = _tool(provider="brave", api_key="")
     assert tool.exclusive is True
     assert tool.concurrency_safe is False
@@ -132,7 +136,7 @@ async def test_tavily_search(monkeypatch):
 
 
 def test_keenable_without_api_key_is_concurrency_safe(monkeypatch):
-    monkeypatch.delenv("KEENABLE_API_KEY", raising=False)
+    monkeypatch.setenv("KEENABLE_API_KEY", "ambient-must-be-ignored")
     tool = _tool(provider="keenable", api_key="")
     assert tool.exclusive is False
     assert tool.concurrency_safe is True
@@ -168,7 +172,7 @@ async def test_keenable_without_api_key_uses_public_endpoint(monkeypatch):
         })
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    monkeypatch.delenv("KEENABLE_API_KEY", raising=False)
+    monkeypatch.setenv("KEENABLE_API_KEY", "ambient-must-be-ignored")
     tool = _tool(provider="keenable", api_key="")
     result = await tool.execute(query="keenable", count=1)
     assert "Public" in result
@@ -184,8 +188,7 @@ async def test_keenable_search_uses_env_api_key(monkeypatch):
         })
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    monkeypatch.setenv("KEENABLE_API_KEY", "env-keen-key")
-    tool = _tool(provider="keenable", api_key="")
+    tool = _tool(provider="keenable", api_key="", creds={"web/keenable": "env-keen-key"})
     result = await tool.execute(query="keenable", count=1)
     assert "Env" in result
 
@@ -203,7 +206,7 @@ async def test_keenable_search_http_error(monkeypatch):
 
 def test_serper_without_api_key_is_treated_as_duckduckgo(monkeypatch):
     # Serper requires a key; without one we fall back to DuckDuckGo for concurrency.
-    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    monkeypatch.setenv("SERPER_API_KEY", "ambient-must-be-ignored")
     tool = _tool(provider="serper", api_key="")
     assert tool.exclusive is True
     assert tool.concurrency_safe is False
@@ -239,8 +242,7 @@ async def test_serper_search_uses_env_api_key(monkeypatch):
         })
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    monkeypatch.setenv("SERPER_API_KEY", "env-serper-key")
-    tool = _tool(provider="serper", api_key="")
+    tool = _tool(provider="serper", api_key="", creds={"web/serper": "env-serper-key"})
     result = await tool.execute(query="serper", count=1)
     assert "Env" in result
 
@@ -255,7 +257,7 @@ async def test_serper_fallback_to_duckduckgo_when_no_key(monkeypatch):
             return [{"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}]
 
     monkeypatch.setattr("ddgs.DDGS", MockDDGS)
-    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    monkeypatch.setenv("SERPER_API_KEY", "ambient-must-be-ignored")
 
     tool = _tool(provider="serper", api_key="")
     result = await tool.execute(query="serper", count=1)
@@ -289,7 +291,7 @@ async def test_serper_search_rate_limited(monkeypatch):
 def test_anysearch_remains_concurrency_safe_without_api_key(monkeypatch):
     # Unlike keyed providers, AnySearch works without a key (anonymous quota),
     # so it must never be treated as exclusive/serialized.
-    monkeypatch.delenv("ANYSEARCH_API_KEY", raising=False)
+    monkeypatch.setenv("ANYSEARCH_API_KEY", "ambient-must-be-ignored")
     tool = _tool(provider="anysearch", api_key="")
     assert tool.exclusive is False
     assert tool.concurrency_safe is True
@@ -335,7 +337,7 @@ async def test_anysearch_without_api_key_uses_anonymous_quota(monkeypatch):
         })
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    monkeypatch.delenv("ANYSEARCH_API_KEY", raising=False)
+    monkeypatch.setenv("ANYSEARCH_API_KEY", "ambient-must-be-ignored")
     tool = _tool(provider="anysearch", api_key="", user_agent="nanobot-search-test")
     result = await tool.execute(query="anysearch", count=1)
     assert "Anon" in result
@@ -354,8 +356,7 @@ async def test_anysearch_search_uses_env_api_key(monkeypatch):
         })
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    monkeypatch.setenv("ANYSEARCH_API_KEY", "env-anysearch-key")
-    tool = _tool(provider="anysearch", api_key="")
+    tool = _tool(provider="anysearch", api_key="", creds={"web/anysearch": "env-anysearch-key"})
     result = await tool.execute(query="anysearch", count=1)
     assert "Env" in result
 
@@ -428,7 +429,7 @@ async def test_bocha_missing_key_falls_back_to_duckduckgo(monkeypatch):
             return [{"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}]
 
     monkeypatch.setattr("ddgs.DDGS", MockDDGS)
-    monkeypatch.delenv("BOCHA_API_KEY", raising=False)
+    monkeypatch.setenv("BOCHA_API_KEY", "ambient-must-be-ignored")
 
     tool = _tool(provider="bocha")
     result = await tool.execute(query="test")
@@ -496,8 +497,8 @@ async def test_volcengine_missing_key_falls_back_to_duckduckgo(monkeypatch):
             return [{"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}]
 
     monkeypatch.setattr("ddgs.DDGS", MockDDGS)
-    monkeypatch.delenv("VOLCENGINE_SEARCH_API_KEY", raising=False)
-    monkeypatch.delenv("WEB_SEARCH_API_KEY", raising=False)
+    monkeypatch.setenv("VOLCENGINE_SEARCH_API_KEY", "ambient-must-be-ignored")
+    monkeypatch.setenv("WEB_SEARCH_API_KEY", "ambient-must-be-ignored")
 
     tool = _tool(provider="volcengine")
     result = await tool.execute(query="test")
@@ -583,7 +584,7 @@ async def test_brave_fallback_to_duckduckgo_when_no_key(monkeypatch):
             return [{"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}]
 
     monkeypatch.setattr("ddgs.DDGS", MockDDGS)
-    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.setenv("BRAVE_API_KEY", "ambient-must-be-ignored")
 
     tool = _tool(provider="brave", api_key="")
     result = await tool.execute(query="test")
@@ -678,8 +679,7 @@ async def test_exa_search_uses_env_api_key(monkeypatch):
         })
 
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    monkeypatch.setenv("EXA_API_KEY", "env-exa-key")
-    tool = _tool(provider="exa", api_key="")
+    tool = _tool(provider="exa", api_key="", creds={"web/exa": "env-exa-key"})
     result = await tool.execute(query="test", count=1)
 
     assert "Env Exa Result" in result
@@ -728,7 +728,7 @@ async def test_searxng_no_base_url_falls_back(monkeypatch):
             return [{"title": "Fallback", "href": "https://ddg.example", "body": "fallback"}]
 
     monkeypatch.setattr("ddgs.DDGS", MockDDGS)
-    monkeypatch.delenv("SEARXNG_BASE_URL", raising=False)
+    monkeypatch.setenv("SEARXNG_BASE_URL", "ambient-must-be-ignored")
 
     tool = _tool(provider="searxng", base_url="")
     result = await tool.execute(query="test")
@@ -777,7 +777,7 @@ async def test_kagi_fallback_to_duckduckgo_when_no_key(monkeypatch):
             return [{"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}]
 
     monkeypatch.setattr("ddgs.DDGS", MockDDGS)
-    monkeypatch.delenv("KAGI_API_KEY", raising=False)
+    monkeypatch.setenv("KAGI_API_KEY", "ambient-must-be-ignored")
 
     tool = _tool(provider="kagi", api_key="")
     result = await tool.execute(query="test")
@@ -794,7 +794,7 @@ async def test_exa_fallback_to_duckduckgo_when_no_key(monkeypatch):
             return [{"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}]
 
     monkeypatch.setattr("ddgs.DDGS", MockDDGS)
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("EXA_API_KEY", "ambient-must-be-ignored")
 
     tool = _tool(provider="exa", api_key="")
     result = await tool.execute(query="test")
@@ -901,7 +901,7 @@ async def test_olostep_missing_key_falls_back_to_duckduckgo(monkeypatch):
     fake_mod.Olostep_BaseError = Exception
     monkeypatch.setitem(sys.modules, "olostep", fake_mod)
 
-    monkeypatch.delenv("OLOSTEP_API_KEY", raising=False)
+    monkeypatch.setenv("OLOSTEP_API_KEY", "ambient-must-be-ignored")
     with patch("ddgs.DDGS", MockDDGS):
         tool = _tool(provider="olostep", api_key="")
         result = await tool.execute(query="test query")
@@ -946,3 +946,105 @@ async def test_search_without_results_has_no_banner(monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
     result = await _tool(provider="brave", api_key="k").execute(query="q", count=1)
     assert result == "No results for: q"
+
+
+# --- Credentials through the host env (Task 4, I1) ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_brave_key_comes_from_resolver_under_tool_web_scope(monkeypatch):
+    async def mock_get(self, url, **kw):
+        assert kw["headers"]["X-Subscription-Token"] == "resolver-brave"
+        return _response(json={"web": {"results": [{"title": "R", "url": "https://r", "description": "d"}]}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    tool = WebSearchTool(
+        config=WebSearchConfig(provider="brave"),
+        env=credential_env({"web/brave": "resolver-brave"}, scopes={"web/brave": ["tool:web"]}),
+    )
+    assert tool._effective_provider() == "brave"
+    assert "R" in await tool.execute(query="q", count=1)
+
+
+def test_resolver_scope_mismatch_means_no_key():
+    tool = WebSearchTool(
+        config=WebSearchConfig(provider="brave"),
+        env=credential_env({"web/brave": "k"}, scopes={"web/brave": ["provider:openai"]}),
+    )
+    assert tool._effective_provider() == "duckduckgo"
+
+
+def test_searxng_base_url_and_volcengine_key_come_from_resolver():
+    searx = _tool(provider="searxng", creds={"web/searxng/base_url": "https://searx.example"})
+    assert searx._effective_provider() == "searxng"
+    volc = _tool(provider="volcengine", creds={"web/volcengine": "volc-key"})
+    assert volc._effective_provider() == "volcengine"
+
+
+def test_legacy_env_var_still_selects_backend_through_legacy_environment(tmp_path, monkeypatch):
+    """Legacy hosts: BRAVE_API_KEY in the process env keeps working (no behaviour change)."""
+    from nanobot.agent.tools.context import ToolContext
+    from nanobot.config.schema import Config
+    from nanobot.kernel.legacy import LegacyEnvironment
+
+    monkeypatch.setenv("BRAVE_API_KEY", "legacy-env-brave")
+    config = Config.model_validate({
+        "tools": {"web": {"search": {"provider": "brave"}}},
+        "agents": {"defaults": {"workspace": str(tmp_path)}},
+    })
+    env = LegacyEnvironment.from_config(config)
+    tool = WebSearchTool.create(ToolContext(config=config.tools, workspace=str(tmp_path), env=env))
+    assert tool._effective_provider() == "brave"
+    assert tool._credential("brave") == "legacy-env-brave"
+
+
+def test_direct_construction_without_env_keeps_env_var_fallback(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "direct-env-tavily")
+    tool = WebSearchTool(config=WebSearchConfig(provider="tavily"))
+    assert tool._effective_provider() == "tavily"
+
+
+class _HeaderRecordingClient:
+    seen: list[dict] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def get(self, url, **kwargs):
+        _HeaderRecordingClient.seen.append(dict(kwargs.get("headers") or {}))
+
+        class _Response:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"data": {"title": "T", "content": "body"}}
+
+        return _Response()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("creds", "expected"),
+    [({"web/jina": "jina-fetch-key"}, "Bearer jina-fetch-key"), ({}, None)],
+)
+async def test_web_fetch_jina_key_comes_from_resolver(monkeypatch, creds, expected):
+    from unittest.mock import patch
+
+    from nanobot.agent.tools.web import WebFetchTool
+
+    monkeypatch.setenv("JINA_API_KEY", "ambient-must-be-ignored")
+    _HeaderRecordingClient.seen = []
+    with patch("nanobot.agent.tools.web.httpx.AsyncClient", _HeaderRecordingClient):
+        tool = WebFetchTool(env=credential_env(creds))
+        result = await tool._fetch_jina("https://example.com/page", max_chars=1000)
+    assert result is not None
+    assert _HeaderRecordingClient.seen[0].get("Authorization") == expected

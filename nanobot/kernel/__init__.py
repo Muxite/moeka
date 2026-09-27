@@ -24,6 +24,8 @@ from nanobot.kernel.env import (
     Paths,
     PathsOverlapError,
     StaticCredentialResolver,
+    missing_credential,
+    resolve_credential,
 )
 from nanobot.kernel.trace import LoguruTraceSink, NullTraceSink, TraceSink, safe_emit
 
@@ -43,6 +45,8 @@ __all__ = [
     "PathsOverlapError",
     "CredentialResolver",
     "StaticCredentialResolver",
+    "resolve_credential",
+    "missing_credential",
     "ConfigSource",
     "CoreEnvironment",
     "TraceSink",

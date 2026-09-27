@@ -7,10 +7,9 @@ from __future__ import annotations
 import asyncio
 import html
 import json
-import os
 import re
 from collections.abc import Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, quote, urljoin, urlparse
 
 import httpx
@@ -26,8 +25,12 @@ from nanobot.agent.tools.schema import (
     tool_parameters_schema,
 )
 from nanobot.config_base import Base
+from nanobot.kernel.env import missing_credential, resolve_credential
 from nanobot.security.untrusted import UNTRUSTED_BANNER, mark_untrusted
 from nanobot.utils.helpers import build_image_content_blocks
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
 
 # Shared constants
 _DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
@@ -40,6 +43,8 @@ _VOLCENGINE_SEARCH_API_URL = "https://open.feedcoopapi.com/search_api/web_search
 _VOLCENGINE_TRAFFIC_TAG = "nanobot"
 _VOLCENGINE_TIME_RANGES = {"OneDay", "OneWeek", "OneMonth", "OneYear"}
 _VOLCENGINE_DATE_RANGE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2}$")
+# Credential scope for the web tools: refs ``web/<backend>`` (I1, via env.credentials).
+_WEB_SCOPE = "tool:web"
 
 
 # Single source of truth for selectable search providers (CLI wizard + WebUI).
@@ -396,6 +401,7 @@ class WebSearchTool(Tool):
             proxy=ctx.config.web.proxy,
             user_agent=ctx.config.web.user_agent,
             config_loader=config_loader,
+            env=ctx.env,
         )
 
     def __init__(
@@ -404,11 +410,27 @@ class WebSearchTool(Tool):
         proxy: str | None = None,
         user_agent: str | None = None,
         config_loader: Callable[[], WebSearchConfig] | None = None,
+        env: CoreEnvironment | None = None,
     ):
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
         self.user_agent = user_agent if user_agent is not None else _DEFAULT_USER_AGENT
         self._config_loader = config_loader
+        # Host env: backend keys resolve through env.credentials (None = legacy env vars).
+        self._env = env
+
+    def _credential(self, backend: str) -> str:
+        """Configured key, else ``web/<backend>`` from the host resolver ("" if absent)."""
+        return self.config.api_key or resolve_credential(
+            self._env, f"web/{backend}", _WEB_SCOPE
+        ) or ""
+
+    def _searxng_base_url(self) -> str:
+        return (
+            self.config.base_url
+            or resolve_credential(self._env, "web/searxng/base_url", _WEB_SCOPE)
+            or ""
+        ).strip()
 
     def _refresh_config(self) -> None:
         if self._config_loader is None:
@@ -425,42 +447,38 @@ class WebSearchTool(Tool):
         if provider == "duckduckgo":
             return "duckduckgo"
         if provider == "brave":
-            api_key = self.config.api_key or os.environ.get("BRAVE_API_KEY", "")
+            api_key = self._credential("brave")
             return "brave" if api_key else "duckduckgo"
         if provider == "tavily":
-            api_key = self.config.api_key or os.environ.get("TAVILY_API_KEY", "")
+            api_key = self._credential("tavily")
             return "tavily" if api_key else "duckduckgo"
         if provider == "searxng":
-            base_url = (self.config.base_url or os.environ.get("SEARXNG_BASE_URL", "")).strip()
+            base_url = self._searxng_base_url()
             return "searxng" if base_url else "duckduckgo"
         if provider == "jina":
-            api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "")
+            api_key = self._credential("jina")
             return "jina" if api_key else "duckduckgo"
         if provider == "kagi":
-            api_key = self.config.api_key or os.environ.get("KAGI_API_KEY", "")
+            api_key = self._credential("kagi")
             return "kagi" if api_key else "duckduckgo"
         if provider == "exa":
-            api_key = self.config.api_key or os.environ.get("EXA_API_KEY", "")
+            api_key = self._credential("exa")
             return "exa" if api_key else "duckduckgo"
         if provider == "olostep":
-            api_key = self.config.api_key or os.environ.get("OLOSTEP_API_KEY", "")
+            api_key = self._credential("olostep")
             return "olostep" if api_key else "duckduckgo"
         if provider == "bocha":
-            api_key = self.config.api_key or os.environ.get("BOCHA_API_KEY", "")
+            api_key = self._credential("bocha")
             return "bocha" if api_key else "duckduckgo"
         if provider == "volcengine":
-            api_key = (
-                self.config.api_key
-                or os.environ.get("VOLCENGINE_SEARCH_API_KEY", "")
-                or os.environ.get("WEB_SEARCH_API_KEY", "")
-            )
+            api_key = self._credential("volcengine")
             return "volcengine" if api_key else "duckduckgo"
         if provider == "keenable":
             return "keenable"
         if provider == "anysearch":
             return "anysearch"
         if provider == "serper":
-            api_key = self.config.api_key or os.environ.get("SERPER_API_KEY", "")
+            api_key = self._credential("serper")
             return "serper" if api_key else "duckduckgo"
         return provider
 
@@ -538,9 +556,9 @@ class WebSearchTool(Tool):
             )
         async_olostep = cast(Any, AsyncOlostep)
         olostep_base_error = cast(type[Exception], Olostep_BaseError)
-        api_key = self.config.api_key or os.environ.get("OLOSTEP_API_KEY", "")
+        api_key = self._credential("olostep")
         if not api_key:
-            logger.warning("OLOSTEP_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/olostep"))
             return await self._search_duckduckgo(query, n)
         try:
             async with async_olostep(api_key=api_key) as client:
@@ -588,9 +606,9 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: Olostep search error: {type(e).__name__}: {e}")
 
     async def _search_brave(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("BRAVE_API_KEY", "")
+        api_key = self._credential("brave")
         if not api_key:
-            logger.warning("BRAVE_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/brave"))
             return await self._search_duckduckgo(query, n)
         try:
             headers = {
@@ -630,9 +648,9 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: {e}")
 
     async def _search_tavily(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("TAVILY_API_KEY", "")
+        api_key = self._credential("tavily")
         if not api_key:
-            logger.warning("TAVILY_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/tavily"))
             return await self._search_duckduckgo(query, n)
         try:
             async with httpx.AsyncClient(proxy=self.proxy) as client:
@@ -648,7 +666,7 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: {e}")
 
     async def _search_keenable(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("KEENABLE_API_KEY", "")
+        api_key = self._credential("keenable")
         headers = {
             "Content-Type": "application/json",
             "User-Agent": self.user_agent,
@@ -686,9 +704,11 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: Keenable search failed: {e}")
 
     async def _search_searxng(self, query: str, n: int) -> str:
-        base_url = (self.config.base_url or os.environ.get("SEARXNG_BASE_URL", "")).strip()
+        base_url = self._searxng_base_url()
         if not base_url:
-            logger.warning("SEARXNG_BASE_URL not set, falling back to DuckDuckGo")
+            logger.warning(
+                "{}; falling back to DuckDuckGo", missing_credential("web/searxng/base_url")
+            )
             return await self._search_duckduckgo(query, n)
         endpoint = f"{base_url.rstrip('/')}/search"
         is_valid, error_msg = _validate_url(endpoint)
@@ -708,9 +728,9 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: {e}")
 
     async def _search_jina(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "")
+        api_key = self._credential("jina")
         if not api_key:
-            logger.warning("JINA_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/jina"))
             return await self._search_duckduckgo(query, n)
         try:
             headers = {
@@ -737,9 +757,9 @@ class WebSearchTool(Tool):
             return await self._search_duckduckgo(query, n)
 
     async def _search_kagi(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("KAGI_API_KEY", "")
+        api_key = self._credential("kagi")
         if not api_key:
-            logger.warning("KAGI_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/kagi"))
             return await self._search_duckduckgo(query, n)
         try:
             async with httpx.AsyncClient(proxy=self.proxy) as client:
@@ -759,9 +779,9 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: {e}")
 
     async def _search_exa(self, query: str, n: int) -> str:
-        api_key = self.config.api_key or os.environ.get("EXA_API_KEY", "")
+        api_key = self._credential("exa")
         if not api_key:
-            logger.warning("EXA_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/exa"))
             return await self._search_duckduckgo(query, n)
         try:
             headers = {
@@ -816,9 +836,9 @@ class WebSearchTool(Tool):
 
     async def _search_serper(self, query: str, n: int) -> str:
         """Search via Serper.dev (Google Search API)."""
-        api_key = self.config.api_key or os.environ.get("SERPER_API_KEY", "")
+        api_key = self._credential("serper")
         if not api_key:
-            logger.warning("SERPER_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/serper"))
             return await self._search_duckduckgo(query, n)
         try:
             headers = {
@@ -861,7 +881,7 @@ class WebSearchTool(Tool):
         anonymous quota with lower rate limits, so the provider works out of
         the box.
         """
-        api_key = self.config.api_key or os.environ.get("ANYSEARCH_API_KEY", "")
+        api_key = self._credential("anysearch")
         headers = {
             "Content-Type": "application/json",
             "User-Agent": self.user_agent,
@@ -907,13 +927,11 @@ class WebSearchTool(Tool):
         auth_level: int | None = None,
         query_rewrite: bool | None = None,
     ) -> str:
-        api_key = (
-            self.config.api_key
-            or os.environ.get("VOLCENGINE_SEARCH_API_KEY", "")
-            or os.environ.get("WEB_SEARCH_API_KEY", "")
-        )
+        api_key = self._credential("volcengine")
         if not api_key:
-            logger.warning("VOLCENGINE_SEARCH_API_KEY/WEB_SEARCH_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning(
+                "{}; falling back to DuckDuckGo", missing_credential("web/volcengine")
+            )
             return await self._search_duckduckgo(query, n)
 
         try:
@@ -1042,9 +1060,9 @@ class WebSearchTool(Tool):
             return ToolResult.error(f"Error: DuckDuckGo search failed ({e})")
 
     async def _search_bocha(self, query: str, n: int, freshness: str = "noLimit") -> str:
-        api_key = self.config.api_key or os.environ.get("BOCHA_API_KEY", "")
+        api_key = self._credential("bocha")
         if not api_key:
-            logger.warning("BOCHA_API_KEY not set, falling back to DuckDuckGo")
+            logger.warning("{}; falling back to DuckDuckGo", missing_credential("web/bocha"))
             return await self._search_duckduckgo(query, n)
         try:
             headers = {
@@ -1162,6 +1180,7 @@ class WebFetchTool(Tool):
             config=ctx.config.web.fetch,
             proxy=ctx.config.web.proxy,
             user_agent=ctx.config.web.user_agent,
+            env=ctx.env,
         )
 
     def __init__(
@@ -1172,7 +1191,10 @@ class WebFetchTool(Tool):
         max_chars: int = 50000,
         max_body_bytes: int = _MAX_BODY_BYTES,
         max_image_bytes: int = _MAX_IMAGE_BYTES,
+        env: CoreEnvironment | None = None,
     ):
+        # Host env: the Jina reader key is ``web/jina`` (None = legacy JINA_API_KEY).
+        self._env = env
         self.config = config if config is not None else WebFetchConfig()
         self.proxy = proxy
         self.user_agent = user_agent or _DEFAULT_USER_AGENT
@@ -1269,7 +1291,7 @@ class WebFetchTool(Tool):
         forwarded_url = url.split("#", 1)[0]
         try:
             headers = {"Accept": "application/json", "User-Agent": self.user_agent}
-            jina_key = os.environ.get("JINA_API_KEY", "")
+            jina_key = resolve_credential(self._env, "web/jina", _WEB_SCOPE)
             if jina_key:
                 headers["Authorization"] = f"Bearer {jina_key}"
             async with httpx.AsyncClient(proxy=self.proxy, timeout=20.0) as client:

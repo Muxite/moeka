@@ -35,8 +35,84 @@ class _ConfigSectionSource:
         return "ConfigSectionSource()"
 
 
+# The single table of credential refs the pre-kernel code read from ``os.environ``
+# (ref -> env var names, first set name wins). LegacyEnvironment pre-populates its
+# resolver from these, so ``BRAVE_API_KEY`` etc. keep working for legacy hosts;
+# kernel-native hosts get nothing from the process environment (I1).
+LEGACY_ENV_REFS: dict[str, tuple[str, ...]] = {
+    # agent/tools/web.py (search backends; web/jina also serves the Jina fetch reader)
+    "web/brave": ("BRAVE_API_KEY",),
+    "web/tavily": ("TAVILY_API_KEY",),
+    "web/searxng/base_url": ("SEARXNG_BASE_URL",),
+    "web/jina": ("JINA_API_KEY",),
+    "web/kagi": ("KAGI_API_KEY",),
+    "web/exa": ("EXA_API_KEY",),
+    "web/olostep": ("OLOSTEP_API_KEY",),
+    "web/bocha": ("BOCHA_API_KEY",),
+    "web/volcengine": ("VOLCENGINE_SEARCH_API_KEY", "WEB_SEARCH_API_KEY"),
+    "web/serper": ("SERPER_API_KEY",),
+    "web/keenable": ("KEENABLE_API_KEY",),
+    "web/anysearch": ("ANYSEARCH_API_KEY",),
+    # providers/transcription.py
+    "transcription/assemblyai": ("ASSEMBLYAI_API_KEY",),
+    "transcription/assemblyai/base_url": ("ASSEMBLYAI_BASE_URL",),
+    "transcription/openai": ("OPENAI_API_KEY",),
+    "transcription/openai/base_url": ("OPENAI_TRANSCRIPTION_BASE_URL",),
+    "transcription/groq": ("GROQ_API_KEY",),
+    "transcription/groq/base_url": ("GROQ_BASE_URL",),
+    "transcription/openrouter": ("OPENROUTER_API_KEY",),
+    "transcription/openrouter/base_url": ("OPENROUTER_BASE_URL",),
+    "transcription/mimo": ("MIMO_API_KEY",),
+    "transcription/mimo/base_url": ("MIMO_API_BASE",),
+    "transcription/stepfun": ("STEPFUN_API_KEY",),
+    # utils/searchusage.py
+    "searchusage/tavily": ("TAVILY_API_KEY",),
+    # providers/openai_compat_provider.py (enables the langfuse client wrapper)
+    "observability/langfuse_secret": ("LANGFUSE_SECRET_KEY",),
+    # providers/bedrock_provider.py
+    "providers/bedrock/region": ("AWS_REGION", "AWS_DEFAULT_REGION"),
+    # providers/github_copilot_provider.py (GitHub Enterprise endpoint overrides)
+    "providers/github_copilot/api_base": ("NANOBOT_COPILOT_BASE_URL",),
+    "providers/github_copilot/token_url": ("NANOBOT_COPILOT_TOKEN_URL",),
+    "providers/github_copilot/client_id": ("NANOBOT_GITHUB_COPILOT_CLIENT_ID",),
+    "providers/github_copilot/device_code_url": ("NANOBOT_GITHUB_DEVICE_CODE_URL",),
+    "providers/github_copilot/access_token_url": ("NANOBOT_GITHUB_ACCESS_TOKEN_URL",),
+    "providers/github_copilot/user_url": ("NANOBOT_GITHUB_USER_URL",),
+}
+
+# Scope that each ref family may be read from (StaticCredentialResolver allow-list).
+_SCOPE_BY_FAMILY = {
+    "web": "tool:web",
+    "transcription": "transcription",
+    "searchusage": "searchusage",
+    "observability": "observability",
+}
+
+
+def legacy_scope_for_ref(ref: str) -> str:
+    """The only scope allowed to read ``ref`` (``providers/<slot>/...`` -> ``provider:<slot>``)."""
+    family, _, rest = ref.partition("/")
+    if family == "providers":
+        return f"provider:{rest.partition('/')[0]}"
+    return _SCOPE_BY_FAMILY.get(family, family)
+
+
+def ambient_credential(ref: str) -> str | None:
+    """Read ``ref`` from the process env via LEGACY_ENV_REFS (legacy fallback only)."""
+    for name in LEGACY_ENV_REFS.get(ref, ()):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
 def _collect_credentials(config: Any) -> dict[str, str]:
     values: dict[str, str] = {}
+    for ref in LEGACY_ENV_REFS:
+        value = ambient_credential(ref)
+        if value:
+            values[ref] = value
+    # Refs provided by Config win over the process environment.
     providers = config.providers
     slots: dict[str, Any] = {n: getattr(providers, n) for n in type(providers).model_fields}
     slots.update(providers.model_extra or {})
@@ -48,6 +124,24 @@ def _collect_credentials(config: Any) -> dict[str, str]:
     if search.api_key and search.provider:
         values[f"web/{search.provider}"] = search.api_key
     return values
+
+
+class _LegacyCredentialResolver(StaticCredentialResolver):
+    """Named refs, each scoped to its owner, plus the ``exec`` scope over a env snapshot.
+
+    ``exec`` lookups (``allowed_env_keys`` for the exec child env, R3) read only the
+    process-env snapshot taken at construction and never a named ref; no other scope
+    can read that snapshot.
+    """
+
+    def __init__(self, values: dict[str, str], exec_env: dict[str, str]) -> None:
+        super().__init__(values, scopes={ref: (legacy_scope_for_ref(ref),) for ref in values})
+        self._exec_env = exec_env
+
+    def resolve(self, ref: str, scope: str) -> str | None:
+        if scope == "exec":
+            return self._exec_env.get(ref)
+        return super().resolve(ref, scope)
 
 
 def _legacy_data_dir() -> Path:
@@ -98,12 +192,15 @@ class LegacyEnvironment:
         # kernel-private state dir is the workspace itself (overlap allowed).
         paths = _legacy_paths(config)
         trace = LoguruTraceSink()
+        exec_base_env = dict(os.environ)
         env = CoreEnvironment(
             config=_ConfigSectionSource(config),
-            credentials=StaticCredentialResolver(_collect_credentials(config)),
+            credentials=_LegacyCredentialResolver(
+                _collect_credentials(config), dict(exec_base_env)
+            ),
             paths=paths,
             trace=trace,
-            exec_base_env=dict(os.environ),
+            exec_base_env=exec_base_env,
             strict=False,
         )
         if paths.overlaps and not _OVERLAP_WARNED:
@@ -124,4 +221,10 @@ class LegacyEnvironment:
         return env
 
 
-__all__ = ["ConfigSource", "LegacyEnvironment"]
+__all__ = [
+    "ConfigSource",
+    "LEGACY_ENV_REFS",
+    "LegacyEnvironment",
+    "ambient_credential",
+    "legacy_scope_for_ref",
+]

@@ -43,9 +43,9 @@ def _reset_flag():
 def test_keys_land_under_refs(tmp_path):
     env = LegacyEnvironment.from_config(_config(tmp_path))
     assert isinstance(env, CoreEnvironment)
-    assert env.credentials.resolve("providers/openrouter/api_key", "any") == SECRET
-    assert env.credentials.resolve("web/brave", "any") == SEARCH_SECRET
-    assert env.credentials.resolve("providers/openai/api_key", "any") is None
+    assert env.credentials.resolve("providers/openrouter/api_key", "provider:openrouter") == SECRET
+    assert env.credentials.resolve("web/brave", "tool:web") == SEARCH_SECRET
+    assert env.credentials.resolve("providers/openai/api_key", "provider:openai") is None
     assert env.strict is False
 
 
@@ -100,7 +100,9 @@ def test_from_config_builds_default_env(tmp_path):
     loop = AgentLoop.from_config(_config(tmp_path), tool_registry=ToolRegistry(),
                                  provider=_provider())
     assert isinstance(loop.env, CoreEnvironment)
-    assert loop.env.credentials.resolve("providers/openrouter/api_key", "x") == SECRET
+    assert loop.env.credentials.resolve(
+        "providers/openrouter/api_key", "provider:openrouter"
+    ) == SECRET
 
 
 def test_explicit_env_stored_and_reaches_tool_context(tmp_path, monkeypatch):
@@ -151,4 +153,4 @@ def test_empty_search_provider_makes_no_web_ref(tmp_path):
     cfg = _config(tmp_path)
     cfg.tools.web.search.provider = ""
     env = LegacyEnvironment.from_config(cfg)
-    assert env.credentials.resolve("web/", "x") is None
+    assert env.credentials.resolve("web/", "tool:web") is None

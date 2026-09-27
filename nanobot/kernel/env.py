@@ -127,3 +127,26 @@ class CoreEnvironment:
     trace: TraceSink
     exec_base_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     strict: bool = False
+
+
+def resolve_credential(env: CoreEnvironment | None, ref: str, scope: str) -> str | None:
+    """Resolve ``ref`` for ``scope`` through the host env (I1); empty values become ``None``.
+
+    With an env, only ``env.credentials`` is consulted: a kernel-native host whose
+    resolver lacks ``ref`` gets ``None`` even when a matching variable is set in the
+    process. ``env=None`` is the legacy direct-construction path (a tool or provider
+    built without a host env): it falls back to the pre-kernel environment variables
+    via ``nanobot.kernel.legacy.LEGACY_ENV_REFS``, so behaviour is unchanged there.
+    """
+    if env is not None:
+        value = env.credentials.resolve(ref, scope)
+    else:
+        from nanobot.kernel.legacy import ambient_credential
+
+        value = ambient_credential(ref)
+    return value or None
+
+
+def missing_credential(ref: str) -> str:
+    """Redaction-safe message for an absent credential: names the ref, never a value."""
+    return f"missing credential {ref}"
