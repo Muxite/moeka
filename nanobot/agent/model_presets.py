@@ -31,16 +31,25 @@ def configured_model_presets(config: Config) -> dict[str, ModelPresetConfig]:
 
 def load_model_preset_catalog(
     config_path: Path | None = None,
+    *,
+    env: CoreEnvironment | None = None,
 ) -> dict[str, ModelPresetConfig]:
-    """Load the current preset catalog from the configured file."""
-    from nanobot.config.loader import load_config, resolve_config_env_vars
+    """Load the current preset catalog (a host ``preset_catalog_loader``).
 
-    return configured_model_presets(
-        resolve_config_env_vars(
-            load_config(config_path),
-            config_path=config_path,
-        ),
-    )
+    With *env* (and no *config_path*) the catalog comes from ``env.config``; the
+    legacy adapter re-reads ``config.json`` when it changed. Otherwise the config
+    file at *config_path* (``None`` = the current config path) is read through
+    the legacy adapter.
+    """
+    from nanobot.config.loader import snapshot_config
+
+    if env is not None and config_path is None:
+        source = env.config
+    else:
+        from nanobot.kernel.legacy import file_config_source
+
+        source = file_config_source(config_path)
+    return configured_model_presets(snapshot_config(source))
 
 
 def make_preset_snapshot_loader(

@@ -19,7 +19,6 @@ from nanobot.providers.base import (
     LLMResponse,
     LLMUsage,
     ToolCallRequest,
-    resolve_stream_idle_timeout_s,
     tool_arguments_object_for_replay,
 )
 
@@ -783,7 +782,7 @@ class AnthropicProvider(LLMProvider):
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
         )
-        idle_timeout_s = resolve_stream_idle_timeout_s()
+        idle_timeout_s = self.stream_idle_timeout_s
         kwargs["timeout"] = idle_timeout_s
         try:
             async with self._client.messages.stream(**kwargs) as stream:

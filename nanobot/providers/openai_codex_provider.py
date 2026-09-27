@@ -19,11 +19,11 @@ from oauth_cli_kit.storage import FileTokenStorage
 
 from nanobot import __version__
 from nanobot.providers.base import (
+    DEFAULT_STREAM_IDLE_TIMEOUT_S,
     LLMProvider,
     LLMResponse,
     ProviderCallContext,
     ProviderConversationState,
-    resolve_stream_idle_timeout_s,
 )
 from nanobot.providers.oauth_model_catalog import (
     OAuthModelCatalog,
@@ -169,6 +169,7 @@ class OpenAICodexProvider(LLMProvider):
                         on_content_delta=on_content_delta if emit_deltas else None,
                         on_thinking_delta=on_thinking_delta if emit_deltas else None,
                         on_tool_call_delta=on_tool_call_delta if emit_deltas else None,
+                        idle_timeout_s=self.stream_idle_timeout_s,
                     )
                 except Exception as exc:
                     if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
@@ -185,6 +186,7 @@ class OpenAICodexProvider(LLMProvider):
                         on_content_delta=on_content_delta if emit_deltas else None,
                         on_thinking_delta=on_thinking_delta if emit_deltas else None,
                         on_tool_call_delta=on_tool_call_delta if emit_deltas else None,
+                        idle_timeout_s=self.stream_idle_timeout_s,
                     )
 
             compact_threshold = resolve_compact_threshold(
@@ -475,8 +477,8 @@ async def _request_codex(
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
     on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    idle_timeout_s: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
 ) -> LLMResponse:
-    idle_timeout_s = resolve_stream_idle_timeout_s()
     client_kwargs: dict[str, Any] = {"timeout": idle_timeout_s, "verify": verify}
     if proxy:
         client_kwargs["proxy"] = proxy

@@ -210,6 +210,32 @@ def config_from_sources(
     return resolve_config_env_vars(load_config(resolved)), True
 
 
+def snapshot_config(source: Any) -> Config:
+    """The current :class:`Config` behind a host ``ConfigSource`` (no file I/O here).
+
+    The legacy adapter's source hands back its own snapshot (a file-backed legacy
+    config re-reads ``config.json`` when it changed, which is what hot reload
+    relies on). Any other source is validated from its sections; empty sections
+    keep the schema defaults and ``${VAR}`` placeholders are not expanded (a
+    kernel-native host gives literal values).
+    """
+    snapshot = getattr(source, "snapshot", None)
+    if callable(snapshot):
+        return cast(Config, snapshot())
+    from nanobot.config.schema import _resolve_tool_config_refs
+
+    try:
+        _resolve_tool_config_refs()
+    except Exception:
+        pass
+    data: dict[str, Any] = {}
+    for name in Config.model_fields:
+        section = source.section(name)
+        if section:
+            data[name] = section
+    return Config.model_validate(data)
+
+
 def _apply_ssrf_whitelist(config: Config) -> None:
     """Apply SSRF whitelist from config to the network security module."""
     from nanobot.security.network import configure_ssrf_whitelist

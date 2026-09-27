@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from abc import ABC, abstractmethod
@@ -38,12 +37,18 @@ RetryStatusCallback = Callable[[RetryStatusEvent], Awaitable[None]]
 
 def resolve_stream_idle_timeout_s(
     *,
-    env_value: str | None = None,
+    env_value: object = None,
     default: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
     maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
 ) -> float:
-    """Return a safe streaming idle timeout from env/config text."""
-    raw = os.environ.get(STREAM_IDLE_TIMEOUT_ENV) if env_value is None else env_value
+    """Return a safe streaming idle timeout from a host setting (text or number).
+
+    The value comes from the host's ``runtime`` config section
+    (``stream_idle_timeout_s``; the legacy adapter fills it from
+    ``NANOBOT_STREAM_IDLE_TIMEOUT_S``). ``None`` means unset: the default. This
+    function never reads the process environment.
+    """
+    raw = None if env_value is None else str(env_value)
     if raw is None or not raw.strip():
         return default
     try:
@@ -622,6 +627,10 @@ _SYNTHETIC_USER_CONTENT = "(conversation continued)"
 
 class LLMProvider(ABC):
     """Base class for LLM providers."""
+
+    # Streaming idle timeout (seconds); the provider factory sets it from the
+    # host env's ``runtime`` section, direct constructions keep the default.
+    stream_idle_timeout_s: float = DEFAULT_STREAM_IDLE_TIMEOUT_S
 
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _PERSISTENT_MAX_DELAY = 60
@@ -1331,7 +1340,7 @@ class LLMProvider(ABC):
                 reasoning_effort=reasoning_effort,
                 tool_choice=tool_choice,
             ),
-            timeout=resolve_stream_idle_timeout_s(),
+            timeout=self.stream_idle_timeout_s,
         )
         if on_content_delta and response.content:
             await on_content_delta(response.content)

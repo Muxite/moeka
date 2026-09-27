@@ -35,6 +35,7 @@ from nanobot.security.workspace_access import (
     WorkspaceScope,
     bind_workspace_scope,
     reset_workspace_scope,
+    sandbox_environ,
     workspace_sandbox_status,
 )
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -233,6 +234,9 @@ class SubagentManager:
             workspace_sandbox=workspace_sandbox_status(
                 restrict_to_workspace=cfg.restrict_to_workspace,
                 workspace=root,
+                environ=sandbox_environ(
+                    self.env.config.section("runtime") if self.env is not None else None
+                ),
             ),
             env=self.env,
         )
@@ -558,6 +562,7 @@ class SubagentManager:
             self.workspace,
             disabled_skills=self.disabled_skills,
             inline_skills=self.inline_skills,
+            env=self.env,
         ).build_skills_summary(workspace=project_workspace)
         history_log = (
             str(agent_workspace / "memory" / "history.jsonl")

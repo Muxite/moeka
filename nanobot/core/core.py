@@ -305,7 +305,7 @@ class MoekaCore:
                 "aihubmix": config.providers.aihubmix,
             },
             "vec_config": defaults.vec,
-            "vec_store": cls._build_vec_store(config),
+            "vec_store": cls._build_vec_store(config, env),
         }
         if bootstrap_overrides:
             extra["bootstrap_overrides"] = dict(bootstrap_overrides)
@@ -322,20 +322,23 @@ class MoekaCore:
         return cls(loop)
 
     @staticmethod
-    def _build_vec_store(config: Any) -> Any | None:
+    def _build_vec_store(config: Any, env: Any | None = None) -> Any | None:
         """Construct the semantic store when enabled (degrades gracefully).
 
         The product runtime never instantiates a VecStore, so the core wires it
         up here — at ``<workspace>/memory/vec.db`` — to make RAG over memory,
         history, and host documents actually work. Returns ``None`` when disabled;
         an unavailable store (``moeka[vec]`` missing) is harmless and inert.
+        With an explicit host *env* the workspace is ``env.paths.work_dir`` (the
+        loop's workspace; memory files stay in the work dir, R4).
         """
         vec_config = config.agents.defaults.vec
         if not getattr(vec_config, "enable", False):
             return None
         from nanobot.core.vec_store import VecStore
 
-        db_path = config.workspace_path / "memory" / "vec.db"
+        workspace = env.paths.work_dir if env is not None else config.workspace_path
+        db_path = workspace / "memory" / "vec.db"
         return VecStore(
             db_path,
             model_name=vec_config.embedding_model,

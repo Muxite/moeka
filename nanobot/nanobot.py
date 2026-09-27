@@ -109,19 +109,13 @@ class Nanobot:
             model_preset: Override the instance default model preset.
             env: Optional ``CoreEnvironment``; default is built from the config.
         """
-        from nanobot.config.loader import load_config, resolve_config_env_vars
+        from nanobot.config.loader import config_from_sources
 
         ensure_single_model_selector(model=model, model_preset=model_preset)
-        resolved: Path | None = None
-        if config_path is not None:
-            resolved = Path(config_path).expanduser().resolve()
-            if not resolved.exists():
-                raise FileNotFoundError(f"Config not found: {resolved}")
-
-        config: Config = resolve_config_env_vars(
-            load_config(resolved),
-            config_path=resolved,
-        )
+        # Host adapter: the file -> Config step lives in the config loader (R2),
+        # shared with MoekaCore/acomplete; ``None`` discovers the default path.
+        config: Config
+        config, _ = config_from_sources(config_path=config_path)
         if workspace is not None:
             config.agents.defaults.workspace = str(
                 Path(workspace).expanduser().resolve()

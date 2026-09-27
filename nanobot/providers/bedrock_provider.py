@@ -17,7 +17,6 @@ from nanobot.providers.base import (
     LLMUsage,
     ToolCallRequest,
     parse_tool_arguments,
-    resolve_stream_idle_timeout_s,
     tool_arguments_object_for_replay,
 )
 
@@ -118,7 +117,7 @@ class BedrockProvider(LLMProvider):
         boto3_module = cast(Any, boto3)
         session = boto3_module.Session(botocore_session=botocore_session)
 
-        idle_timeout_s = resolve_stream_idle_timeout_s()
+        idle_timeout_s = self.stream_idle_timeout_s
         client_kwargs: dict[str, Any] = {
             "config": Config(
                 connect_timeout=idle_timeout_s, read_timeout=idle_timeout_s, **config_kwargs
@@ -799,7 +798,7 @@ class BedrockProvider(LLMProvider):
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         _ = on_thinking_delta, on_tool_call_delta
-        idle_timeout_s = resolve_stream_idle_timeout_s()
+        idle_timeout_s = self.stream_idle_timeout_s
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         thinking_blocks: list[dict[str, Any]] = []

@@ -32,7 +32,6 @@ from nanobot.providers.base import (
     LLMResponse,
     ProviderCallContext,
     ProviderConversationState,
-    resolve_stream_idle_timeout_s,
 )
 from nanobot.providers.openai_responses import (
     ResponsesStreamCapture,
@@ -253,7 +252,7 @@ class AzureOpenAIProvider(LLMProvider):
     ) -> Any:
         """Retry once without server compaction when Azure rejects the option."""
         request_options: dict[str, Any] = (
-            {"timeout": resolve_stream_idle_timeout_s()} if body.get("stream") else {}
+            {"timeout": self.stream_idle_timeout_s} if body.get("stream") else {}
         )
         try:
             return cast(Any, await self._client.responses.create(**body, **request_options))
@@ -388,7 +387,7 @@ class AzureOpenAIProvider(LLMProvider):
             provider_context,
         )
         body["stream"] = True
-        idle_timeout_s = resolve_stream_idle_timeout_s()
+        idle_timeout_s = self.stream_idle_timeout_s
 
         try:
             stream = await self._create_response_with_compaction_fallback(body)

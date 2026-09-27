@@ -73,7 +73,6 @@ def _events(api: str, kind: str) -> list[dict]:
 
 @pytest.fixture
 async def make_provider(monkeypatch):
-    monkeypatch.setenv("NANOBOT_STREAM_IDLE_TIMEOUT_S", "0.3")
     clients = []
 
     async def make(api: str, kind: str, *, stall_at: int | None = None):
@@ -100,6 +99,7 @@ async def make_provider(monkeypatch):
             )
         provider._client = client
         provider._CHAT_RETRY_DELAYS = ()
+        provider.stream_idle_timeout_s = 0.3
         return provider, stream
 
     yield make
@@ -204,8 +204,6 @@ async def test_runner_streams_past_old_wall_limit_with_optional_ui(
 
 @pytest.mark.parametrize("finalize", [False, True], ids=["model-request", "finalization"])
 async def test_chat_only_provider_still_has_a_timeout(monkeypatch, finalize):
-    monkeypatch.setenv("NANOBOT_STREAM_IDLE_TIMEOUT_S", "0.05")
-
     class ChatOnlyProvider(LLMProvider):
         _CHAT_RETRY_DELAYS = ()
 
@@ -226,6 +224,7 @@ async def test_chat_only_provider_still_has_a_timeout(monkeypatch, finalize):
             await asyncio.Event().wait()
 
     provider = ChatOnlyProvider()
+    provider.stream_idle_timeout_s = 0.05
     result = await asyncio.wait_for(AgentRunner().run(AgentRunSpec(
         initial_messages=[{"role": "user", "content": "work"}],
         tools=ToolRegistry(),

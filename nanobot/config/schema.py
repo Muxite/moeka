@@ -450,6 +450,11 @@ class Config(BaseSettings):
         self._source_path = path.expanduser().resolve(strict=False)
 
     @property
+    def source_path(self) -> Path | None:
+        """The ``config.json`` this config was loaded from (``None`` = in-memory)."""
+        return self._source_path
+
+    @property
     def runtime_data_dir(self) -> Path | None:
         """Return the active instance data directory when loaded from a config path."""
         return self._source_path.parent if self._source_path is not None else None

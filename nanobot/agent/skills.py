@@ -1,15 +1,19 @@
 """Skills loader for agent capabilities."""
 
+from __future__ import annotations
+
 import json
-import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
 from nanobot.runtime_context import RuntimeContextBlock
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -63,8 +67,12 @@ class SkillsLoader:
         disabled_skills: set[str] | None = None,
         allowed_skills: set[str] | None = None,
         inline_skills: list | None = None,
+        env: CoreEnvironment | None = None,
     ):
         self.workspace = workspace
+        # Host env: ``requires.env`` presence is ``env.credentials.resolve(name,
+        # scope="skills")``; ``None`` keeps the legacy process-env check.
+        self._env = env
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
         self.disabled_skills = disabled_skills or set()
@@ -320,7 +328,7 @@ class SkillsLoader:
         required_bins, required_env_vars = self._requirement_lists(skill_meta)
         return ", ".join(
             [f"CLI: {command_name}" for command_name in required_bins if not shutil.which(command_name)]
-            + [f"ENV: {env_name}" for env_name in required_env_vars if not os.environ.get(env_name)]
+            + [f"ENV: {env_name}" for env_name in required_env_vars if not self._env_present(env_name)]
         )
 
     def get_skill_availability(self, name: str) -> tuple[bool, str]:
@@ -336,7 +344,7 @@ class SkillsLoader:
             "bins": bins,
             "env": env,
             "missing_bins": [value for value in bins if not shutil.which(value)],
-            "missing_env": [value for value in env if not os.environ.get(value)],
+            "missing_env": [value for value in env if not self._env_present(value)],
         }
 
     def get_skill_description(self, name: str) -> str:
@@ -380,8 +388,16 @@ class SkillsLoader:
         """Check if skill requirements are met (bins, env vars)."""
         required_bins, required_env_vars = self._requirement_lists(skill_meta)
         return all(shutil.which(cmd) for cmd in required_bins) and all(
-            os.environ.get(var) for var in required_env_vars
+            self._env_present(var) for var in required_env_vars
         )
+
+    def _env_present(self, name: str) -> bool:
+        """Whether a skill's required env name is available (a non-empty value)."""
+        if self._env is not None:
+            return bool(self._env.credentials.resolve(name, scope="skills"))
+        from nanobot.kernel.legacy import ambient_env_var
+
+        return bool(ambient_env_var(name))
 
     def _get_skill_meta(self, name: str) -> dict[str, Any]:
         """Get nanobot metadata for a skill (cached in frontmatter)."""

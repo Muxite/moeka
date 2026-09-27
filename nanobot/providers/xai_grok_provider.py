@@ -17,11 +17,11 @@ from loguru import logger
 
 from nanobot import __version__
 from nanobot.providers.base import (
+    DEFAULT_STREAM_IDLE_TIMEOUT_S,
     LLMProvider,
     LLMResponse,
     LLMUsage,
     ToolCallRequest,
-    resolve_stream_idle_timeout_s,
 )
 from nanobot.providers.oauth_model_catalog import OAuthModelCatalog, OAuthModelCatalogSnapshot
 from nanobot.providers.openai_responses import (
@@ -189,6 +189,7 @@ class XAIGrokProvider(LLMProvider):
                         on_content_delta=on_content_delta,
                         on_thinking_delta=on_thinking_delta,
                         on_tool_call_delta=on_tool_call_delta,
+                        idle_timeout_s=self.stream_idle_timeout_s,
                     )
                     break
                 except _XAIHTTPError as exc:
@@ -382,6 +383,7 @@ async def _request_xai(
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
     on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    idle_timeout_s: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
 ) -> tuple[str, list[ToolCallRequest], str, LLMUsage | None, str | None]:
     active_hosted_tools: dict[str, dict[str, Any]] = {}
     stream_output_emitted = False
@@ -417,7 +419,7 @@ async def _request_xai(
         if hosted_event is not None:
             await _track_and_forward_tool_event(hosted_event)
 
-    client_kwargs: dict[str, Any] = {"timeout": resolve_stream_idle_timeout_s()}
+    client_kwargs: dict[str, Any] = {"timeout": idle_timeout_s}
     if proxy:
         client_kwargs.update(proxy=proxy, trust_env=False)
     async with httpx.AsyncClient(**client_kwargs) as client:

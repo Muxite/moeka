@@ -8,7 +8,6 @@ import asyncio
 import hashlib
 import importlib.util
 import json
-import os
 import re
 import secrets
 import string
@@ -32,7 +31,6 @@ from nanobot.providers.base import (
     ProviderConversationState,
     ToolCallRequest,
     parse_tool_arguments,
-    resolve_stream_idle_timeout_s,
     tool_arguments_json_for_replay,
 )
 from nanobot.providers.openai_responses import (
@@ -210,22 +208,26 @@ def _gateway_reasoning_extra_body(style: str, effort: str | None) -> dict[str, A
 
 
 
-def _openai_compat_timeout_s() -> float:
-    """Return the bounded request timeout used for OpenAI-compatible providers."""
-    return _float_env("NANOBOT_OPENAI_COMPAT_TIMEOUT_S", _OPENAI_COMPAT_REQUEST_TIMEOUT_S)
+def resolve_openai_compat_timeout_s(raw: object = None) -> float:
+    """Bounded request timeout from a host setting (``runtime.openai_compat_timeout_s``).
 
-
-def _float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
+    The legacy adapter fills the setting from ``NANOBOT_OPENAI_COMPAT_TIMEOUT_S``;
+    ``None`` (unset) or an invalid/non-positive value gives the default. Never
+    reads the process environment.
+    """
+    default = _OPENAI_COMPAT_REQUEST_TIMEOUT_S
+    text = None if raw is None else str(raw)
+    if text is None or not text.strip():
         return default
     try:
-        value = float(raw)
+        value = float(text)
     except (TypeError, ValueError):
-        logger.warning("Ignoring invalid {}={!r}; using {}", name, raw, default)
+        logger.warning("Ignoring invalid openai_compat_timeout_s={!r}; using {}", text, default)
         return default
     if value <= 0:
-        logger.warning("Ignoring non-positive {}={!r}; using {}", name, raw, default)
+        logger.warning(
+            "Ignoring non-positive openai_compat_timeout_s={!r}; using {}", text, default
+        )
         return default
     return value
 
@@ -517,6 +519,9 @@ class OpenAICompatProvider(LLMProvider):
     """
 
     _native_compaction_available = True
+    # Request timeout (seconds); the provider factory sets it from the host env's
+    # ``runtime`` section, direct constructions keep the default.
+    request_timeout_s: float = _OPENAI_COMPAT_REQUEST_TIMEOUT_S
 
     def __init__(
         self,
@@ -574,7 +579,7 @@ class OpenAICompatProvider(LLMProvider):
         """Create the OpenAI client using the current module-level AsyncOpenAI."""
         import httpx
 
-        timeout_s = _openai_compat_timeout_s()
+        timeout_s = self.request_timeout_s
         http_client: httpx.AsyncClient | None = None
         if self._proxy:
             http_client = httpx.AsyncClient(
@@ -1382,7 +1387,7 @@ class OpenAICompatProvider(LLMProvider):
     ) -> Any:
         """Retry Responses once without server compaction on compatibility errors."""
         request_options = (
-            {"timeout": resolve_stream_idle_timeout_s()} if body.get("stream") else {}
+            {"timeout": self.stream_idle_timeout_s} if body.get("stream") else {}
         )
         try:
             return await client.responses.create(**body, extra_headers=extra_headers, **request_options)
@@ -2036,7 +2041,7 @@ class OpenAICompatProvider(LLMProvider):
         provider_context: ProviderCallContext | None = None,
     ) -> LLMResponse:
         client = await self._ensure_client()
-        idle_timeout_s = resolve_stream_idle_timeout_s()
+        idle_timeout_s = self.stream_idle_timeout_s
         affinity = self._opencode_affinity_headers(provider_context)
         try:
             if self._should_use_responses_api(model, reasoning_effort):

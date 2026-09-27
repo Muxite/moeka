@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from nanobot.agent.tools.mcp_oauth import MCPOAuthHandlers
     from nanobot.config.schema import Config, MCPServerConfig
-    from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.env import ConfigSource, CoreEnvironment
 
 # Transient connection errors that warrant a single retry.
 # These typically happen when an MCP server restarts or a network
@@ -322,8 +322,13 @@ def _normalize_windows_stdio_command(
     command: str,
     args: list[str] | None,
     env: dict[str, str] | None,
+    base_env: Mapping[str, str] | None = None,
 ) -> tuple[str, list[str], dict[str, str] | None]:
-    """Wrap Windows shell launchers so MCP stdio servers start reliably."""
+    """Wrap Windows shell launchers so MCP stdio servers start reliably.
+
+    ``COMSPEC`` comes from the server's own env, then *base_env* (the host's
+    ``env.exec_base_env``); ``None`` is the legacy path (process env snapshot).
+    """
     normalized_args = list(args or [])
     if os.name != "nt":
         return command, normalized_args, env
@@ -345,7 +350,11 @@ def _normalize_windows_stdio_command(
     if not should_wrap:
         return command, normalized_args, env
 
-    comspec = (env or {}).get("COMSPEC") or os.environ.get("COMSPEC") or "cmd.exe"
+    if base_env is None:
+        from nanobot.kernel.legacy import process_env_snapshot
+
+        base_env = process_env_snapshot()
+    comspec = (env or {}).get("COMSPEC") or base_env.get("COMSPEC") or "cmd.exe"
     return comspec, ["/d", "/c", command, *normalized_args], env
 
 
@@ -1012,11 +1021,13 @@ async def connect_mcp_servers(
     oauth_handlers: Mapping[str, MCPOAuthHandlers] | None = None,
     data_dir: Path | None = None,
     media_dir: Path | None = None,
+    base_env: Mapping[str, str] | None = None,
 ) -> dict[str, MCPConnection]:
     """Connect to configured MCP servers and register their tools, resources, prompts.
 
     *data_dir* (OAuth store) and *media_dir* (image artifacts) are the host's
     ``env.paths`` values; ``None`` keeps the legacy ambient directories.
+    *base_env* is the host's ``env.exec_base_env`` (Windows ``COMSPEC`` lookup).
 
     Returns one connection handle per server.  Each handle keeps the task that
     entered the MCP SDK contexts alive so reconnect and shutdown can close
@@ -1083,6 +1094,7 @@ async def connect_mcp_servers(
                     cfg.command,
                     cfg.args,
                     cfg.env or None,
+                    base_env,
                 )
                 params = StdioServerParameters(
                     command=command,
@@ -1344,19 +1356,37 @@ def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     return {"mcp_presets": mcp_presets} if isinstance(mcp_presets, list) and mcp_presets else {}
 
 
-def _configured_servers(config: Config) -> dict[str, MCPServerConfig]:
+def _configured_servers(
+    config: Config, workspace: Path | None = None,
+) -> dict[str, MCPServerConfig]:
     from nanobot.agent.plugins import agent_plugin_mcp_servers
 
     return agent_plugin_mcp_servers(
-        config.workspace_path,
+        workspace if workspace is not None else config.workspace_path,
         config.tools.mcp_servers,
     )
 
 
-def _load_current_servers() -> dict[str, MCPServerConfig]:
-    from nanobot.config.loader import load_config, resolve_config_env_vars
+def _source_server_loader(
+    source: ConfigSource | None, workspace: Path | None = None,
+) -> MCPServerLoader:
+    """Hot-reload loader over a host ConfigSource (``None`` = current config file).
 
-    return _configured_servers(resolve_config_env_vars(load_config()))
+    The legacy adapter's source re-reads ``config.json`` when it changed; the
+    env-less default reads the current config file through the legacy adapter.
+    """
+
+    def _load() -> dict[str, MCPServerConfig]:
+        from nanobot.config.loader import snapshot_config
+
+        current = source
+        if current is None:
+            from nanobot.kernel.legacy import file_config_source
+
+            current = file_config_source()
+        return _configured_servers(snapshot_config(current), workspace)
+
+    return _load
 
 
 class MCPProvider:
@@ -1370,13 +1400,16 @@ class MCPProvider:
         server_loader: MCPServerLoader | None = None,
         data_dir: Path | None = None,
         media_dir: Path | None = None,
+        base_env: Mapping[str, str] | None = None,
     ) -> None:
         self._servers = dict(servers)
         # Host paths (env.paths); ``None`` keeps the legacy ambient dirs.
         self._data_dir = data_dir
         self._media_dir = media_dir
+        # Host exec base env (env.exec_base_env); ``None`` = legacy process env.
+        self._base_env = base_env
         self._registry = registry
-        self._server_loader = server_loader or _load_current_servers
+        self._server_loader = server_loader or _source_server_loader(None)
         self._connections: dict[str, MCPConnection] = {}
         self._runtime_statuses: dict[str, MCPRuntimeStatus] = {}
         self._lock = asyncio.Lock()
@@ -1391,20 +1424,28 @@ class MCPProvider:
         server_loader: MCPServerLoader | None = None,
         env: CoreEnvironment | None = None,
     ) -> MCPProvider:
+        if env is None:
+            return cls(_configured_servers(config), registry, server_loader=server_loader)
+        # An explicit host env owns the work dir (plugin MCP servers live there)
+        # and the hot-reload source (env.config).
+        workspace = env.paths.work_dir
         return cls(
-            _configured_servers(config),
+            _configured_servers(config, workspace),
             registry,
-            server_loader=server_loader,
-            data_dir=env.paths.data_dir if env is not None else None,
-            media_dir=env.paths.media_dir if env is not None else None,
+            server_loader=server_loader or _source_server_loader(env.config, workspace),
+            data_dir=env.paths.data_dir,
+            media_dir=env.paths.media_dir,
+            base_env=env.exec_base_env,
         )
 
-    def _path_kwargs(self) -> dict[str, Path]:
-        kwargs: dict[str, Path] = {}
+    def _path_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
         if self._data_dir is not None:
             kwargs["data_dir"] = self._data_dir
         if self._media_dir is not None:
             kwargs["media_dir"] = self._media_dir
+        if self._base_env is not None:
+            kwargs["base_env"] = self._base_env
         return kwargs
 
     def _has_oauth_credentials(self, name: str, url: str | None) -> bool:

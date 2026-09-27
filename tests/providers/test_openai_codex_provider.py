@@ -204,9 +204,8 @@ async def test_codex_request_marks_rejected_compaction_without_retaining_raw_bod
 
 
 @pytest.mark.asyncio
-async def test_codex_request_honors_stream_idle_timeout_env(monkeypatch) -> None:
-    """NANOBOT_STREAM_IDLE_TIMEOUT_S overrides the default Codex stream timeout."""
-    monkeypatch.setenv("NANOBOT_STREAM_IDLE_TIMEOUT_S", "5")
+async def test_codex_request_honors_stream_idle_timeout(monkeypatch) -> None:
+    """The provider's stream idle timeout (host runtime setting) reaches the Codex client."""
     original_client = httpx.AsyncClient
     seen: dict[str, int] = {}
 
@@ -227,7 +226,9 @@ async def test_codex_request_honors_stream_idle_timeout_env(monkeypatch) -> None
 
     monkeypatch.setattr("nanobot.providers.openai_codex_provider.httpx.AsyncClient", fake_client)
 
-    await _request_codex("https://codex.example/responses", {}, {"input": []}, verify=True)
+    await _request_codex(
+        "https://codex.example/responses", {}, {"input": []}, verify=True, idle_timeout_s=5
+    )
 
     assert seen["timeout"] == 5
 
@@ -284,6 +285,7 @@ async def test_codex_omits_prompt_cache_key_without_session_id(monkeypatch) -> N
         on_content_delta=None,
         on_thinking_delta=None,
         on_tool_call_delta=None,
+        idle_timeout_s=None,
     ):
         _ = proxy, on_thinking_delta, on_tool_call_delta
         bodies.append(body)
@@ -439,6 +441,7 @@ async def test_codex_provider_passes_proxy_to_oauth_and_response_request(monkeyp
         on_content_delta=None,
         on_thinking_delta=None,
         on_tool_call_delta=None,
+        idle_timeout_s=None,
     ):
         _ = url, headers, body, verify, on_content_delta, on_thinking_delta, on_tool_call_delta
         seen["request_proxy"] = proxy
@@ -720,6 +723,7 @@ async def test_codex_replayed_tool_turn_omits_server_item_ids(monkeypatch) -> No
         on_content_delta=None,
         on_thinking_delta=None,
         on_tool_call_delta=None,
+        idle_timeout_s=None,
     ):
         bodies.append(body)
         return provider_base.LLMResponse(content="done")
@@ -787,6 +791,7 @@ async def test_codex_compacts_state_at_ninety_percent_before_next_request(
         on_content_delta=None,
         on_thinking_delta=None,
         on_tool_call_delta=None,
+        idle_timeout_s=None,
     ):
         _ = (
             url,
@@ -901,6 +906,7 @@ async def test_codex_disables_unsupported_native_compaction_and_continues(
         on_content_delta=None,
         on_thinking_delta=None,
         on_tool_call_delta=None,
+        idle_timeout_s=None,
     ):
         _ = (
             url,
@@ -962,6 +968,7 @@ async def test_codex_stream_surfaces_reasoning_summary(monkeypatch) -> None:
         on_content_delta=None,
         on_thinking_delta=None,
         on_tool_call_delta=None,
+        idle_timeout_s=None,
     ):
         _ = url, headers, verify, proxy, on_tool_call_delta
         assert body["reasoning"] == {"summary": "auto", "effort": "medium"}

@@ -16,14 +16,15 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Iterator, TypeVar
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, TypeVar
 
 from loguru import logger
 
-from nanobot.agent.tools.base import ToolResult
+from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.filesystem import ListDirTool, _FsTool
 from nanobot.security.protected_paths import ProtectedFloor
 from nanobot.utils.document import (
@@ -31,6 +32,9 @@ from nanobot.utils.document import (
     PdfPageRangeError,
     open_document_line_source,
 )
+
+if TYPE_CHECKING:
+    from nanobot.agent.tools.context import ToolContext
 
 _DEFAULT_HEAD_LIMIT = 250
 _DEFAULT_FILE_HEAD_LIMIT = 200
@@ -671,7 +675,15 @@ class _RegexWorker:
     and ``close()``, and every kill is followed by ``wait()``.
     """
 
-    def __init__(self, pattern: str, flags: int, deadline: float | None) -> None:
+    def __init__(
+        self,
+        pattern: str,
+        flags: int,
+        deadline: float | None,
+        base_env: Mapping[str, str] | None = None,
+    ) -> None:
+        # Host exec base env (env.exec_base_env); ``None`` = legacy process env.
+        self._base_env = base_env
         self._pattern = pattern
         self._flags = flags
         self._deadline = deadline
@@ -680,10 +692,14 @@ class _RegexWorker:
         self._closed = False
         self.timed_out = False
 
-    @staticmethod
-    def _minimal_env() -> dict[str, str]:
+    def _minimal_env(self) -> dict[str, str]:
         if sys.platform == "win32":
-            return {k: v for k, v in os.environ.items() if k.upper() in {"SYSTEMROOT", "PATH"}}
+            base = self._base_env
+            if base is None:
+                from nanobot.kernel.legacy import process_env_snapshot
+
+                base = process_env_snapshot()
+            return {k: v for k, v in base.items() if k.upper() in {"SYSTEMROOT", "PATH"}}
         return {}
 
     def _start(self) -> subprocess.Popen[bytes]:
@@ -827,9 +843,24 @@ class GrepTool(_SearchTool):
     _MAX_FILE_BYTES = 2_000_000
     _MAX_EXPLICIT_FILE_BYTES = 100_000_000
 
-    def __init__(self, *args: Any, regex_timeout_s: float = 10.0, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        regex_timeout_s: float = 10.0,
+        base_env: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._regex_timeout_s = regex_timeout_s
+        # Host exec base env for the regex worker (Windows SYSTEMROOT/PATH).
+        self._base_env = base_env
+
+    @classmethod
+    def create(cls, ctx: ToolContext) -> Tool:
+        tool = super().create(ctx)
+        if ctx.env is not None and isinstance(tool, GrepTool):
+            tool._base_env = ctx.env.exec_base_env
+        return tool
 
     @property
     def name(self) -> str:
@@ -1044,7 +1075,7 @@ class GrepTool(_SearchTool):
         worker: _RegexWorker | None = None
         if not fixed_strings:
             flags = re.IGNORECASE if case_insensitive else 0
-            worker = _RegexWorker(pattern, flags, deadline)
+            worker = _RegexWorker(pattern, flags, deadline, self._base_env)
         try:
             return await asyncio.to_thread(
                 self._execute_sync, deadline=deadline, worker=worker, **scan_kwargs

@@ -392,9 +392,21 @@ class WebSearchTool(Tool):
     def create(cls, ctx: ToolContext) -> Tool:
         config_loader: Callable[[], WebSearchConfig] | None = None
         if ctx.provider_snapshot_loader is not None:
+            # Hot reload: the host ConfigSource is re-read per search (the legacy
+            # adapter re-reads config.json when it changed); env-less contexts
+            # read the current config file through the legacy adapter.
+            if ctx.env is not None:
+                source = ctx.env.config
+            else:
+                from nanobot.kernel.legacy import file_config_source
+
+                source = file_config_source()
+
             def _load_search_config() -> WebSearchConfig:
-                from nanobot.config.loader import load_config, resolve_config_env_vars
-                return resolve_config_env_vars(load_config()).tools.web.search
+                from nanobot.config.loader import snapshot_config
+
+                return snapshot_config(source).tools.web.search
+
             config_loader = _load_search_config
         return cls(
             config=ctx.config.web.search,
@@ -420,9 +432,14 @@ class WebSearchTool(Tool):
         self._env = env
 
     def _credential(self, backend: str) -> str:
-        """Configured key, else ``web/<backend>`` from the host resolver ("" if absent)."""
+        """Configured key, else ``web/<backend>`` from the host resolver ("" if absent).
+
+        ``self.config`` is the current config (refreshed on hot reload), so the
+        resolver is asked only for refs it did not mirror from config: a key the
+        user cleared in config is not resurrected from the startup copy.
+        """
         return self.config.api_key or resolve_credential(
-            self._env, f"web/{backend}", _WEB_SCOPE
+            self._env, f"web/{backend}", _WEB_SCOPE, exclude_config=True
         ) or ""
 
     def _searxng_base_url(self) -> str:

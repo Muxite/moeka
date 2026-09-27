@@ -146,3 +146,34 @@ async def test_codex_stream_ignores_invalid_idle_timeout_env(monkeypatch) -> Non
     )
 
     assert seen["timeout"] == DEFAULT_STREAM_IDLE_TIMEOUT_S
+
+
+def test_stream_idle_timeout_parser_accepts_numbers_and_unset() -> None:
+    assert resolve_stream_idle_timeout_s(env_value=None) == DEFAULT_STREAM_IDLE_TIMEOUT_S
+    assert resolve_stream_idle_timeout_s(env_value=2.5) == 2.5
+
+
+def test_stream_idle_timeout_parser_never_reads_process_env(monkeypatch) -> None:
+    monkeypatch.setenv("NANOBOT_STREAM_IDLE_TIMEOUT_S", "5")
+    assert resolve_stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
+
+
+def test_legacy_env_invalid_idle_timeout_falls_back_to_default(tmp_path, monkeypatch) -> None:
+    from nanobot.config.schema import Config
+    from nanobot.kernel.legacy import LegacyEnvironment
+    from nanobot.providers.factory import make_provider
+    from tests._kernel_env import credential_env
+
+    config = Config.model_validate({
+        "providers": {"openai": {"apiKey": "sk-test"}},
+        "agents": {"defaults": {"workspace": str(tmp_path), "model": "openai/gpt-4o"}},
+    })
+    monkeypatch.setenv("NANOBOT_STREAM_IDLE_TIMEOUT_S", "abc")
+    legacy = make_provider(config, env=LegacyEnvironment.from_config(config))
+    assert legacy.stream_idle_timeout_s == DEFAULT_STREAM_IDLE_TIMEOUT_S
+
+    monkeypatch.setenv("NANOBOT_STREAM_IDLE_TIMEOUT_S", "7200")
+    legacy = make_provider(config, env=LegacyEnvironment.from_config(config))
+    assert legacy.stream_idle_timeout_s == MAX_STREAM_IDLE_TIMEOUT_S
+    kernel = make_provider(config, env=credential_env(root=tmp_path / "host"))
+    assert kernel.stream_idle_timeout_s == DEFAULT_STREAM_IDLE_TIMEOUT_S

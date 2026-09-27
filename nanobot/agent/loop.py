@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import os
 import time
 import weakref
 from collections.abc import Coroutine, Iterable, Mapping
@@ -74,6 +73,7 @@ from nanobot.security.workspace_access import (
     WorkspaceScopeResolver,
     bind_workspace_scope,
     reset_workspace_scope,
+    sandbox_environ,
 )
 from nanobot.session import turn_continuation
 from nanobot.session.automation_turns import automation_history_overrides
@@ -190,6 +190,25 @@ class TurnContext:
         if self.session is None:
             raise RuntimeError("turn session is not initialized; RESTORE must run before this stage")
         return self.session
+
+
+def _runtime_section(env: CoreEnvironment | None) -> dict[str, Any]:
+    """The host env's ``runtime`` section (``{}`` without an env: defaults)."""
+    return dict(env.config.section("runtime")) if env is not None else {}
+
+
+def _resolve_max_concurrent_requests(explicit: int | None, env: CoreEnvironment | None) -> int:
+    """Explicit value, else ``runtime.max_concurrent_requests``; invalid/unset -> 0."""
+    if explicit is not None:
+        return explicit
+    raw = _runtime_section(env).get("max_concurrent_requests")
+    if raw is None or not str(raw).strip():
+        return 0
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        logger.warning("Ignoring invalid max_concurrent_requests={!r}; unlimited", raw)
+        return 0
 
 
 class AgentLoop:
@@ -315,6 +334,7 @@ class AgentLoop:
         inline_skills: list | None = None,
         recovery_admission: RecoveryAdmission | None = None,
         env: CoreEnvironment | None = None,
+        max_concurrent_requests: int | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -381,6 +401,7 @@ class AgentLoop:
         self.workspace_scopes = WorkspaceScopeResolver(
             default_workspace=workspace,
             default_restrict_to_workspace=restrict_to_workspace,
+            sandbox_env=sandbox_environ(_runtime_section(env)),
         )
         self._start_time = time.time()
         self._extra_hooks: list[AgentHook] = hooks or []
@@ -403,6 +424,7 @@ class AgentLoop:
             vec_config=vec_config,
             bootstrap_overrides=bootstrap_overrides,
             inline_skills=inline_skills,
+            env=env,
         )
         if session_manager is not None:
             self.sessions = session_manager
@@ -475,8 +497,9 @@ class AgentLoop:
         # No automation sources currently register turn coordinators; the
         # defer/complete hooks in the run loop iterate this (empty) tuple.
         self._automation_turn_coordinators: tuple[tuple[str, Any], ...] = ()
-        # NANOBOT_MAX_CONCURRENT_REQUESTS: unset or <=0 means unlimited.
-        _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "0"))
+        # Explicit arg, else the host env's runtime.max_concurrent_requests (the
+        # legacy adapter maps NANOBOT_MAX_CONCURRENT_REQUESTS); <=0 = unlimited.
+        _max = _resolve_max_concurrent_requests(max_concurrent_requests, env)
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )

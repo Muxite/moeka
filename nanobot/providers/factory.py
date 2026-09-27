@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nanobot.config.schema import Config, InlineFallbackConfig, ModelPresetConfig, ProviderConfig
-from nanobot.providers.base import GenerationSettings, LLMProvider
+from nanobot.providers.base import GenerationSettings, LLMProvider, resolve_stream_idle_timeout_s
 from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.providers.registry import ProviderSpec, create_dynamic_spec, find_by_name
 
@@ -49,6 +49,29 @@ def _provider_api_key(
     return env.credentials.resolve(
         f"providers/{provider_name}/api_key", scope=f"provider:{provider_name}"
     ) or None
+
+
+def _runtime_settings(env: CoreEnvironment | None) -> dict[str, object]:
+    """The host ``runtime`` section; ``env=None`` = legacy process-env settings."""
+    if env is not None:
+        return dict(env.config.section("runtime"))
+    from nanobot.kernel.legacy import legacy_runtime_settings
+
+    return dict(legacy_runtime_settings())
+
+
+def _apply_runtime_settings(provider: LLMProvider, env: CoreEnvironment | None) -> None:
+    """Set provider tunables from the host env (defaults when the host sets none)."""
+    runtime = _runtime_settings(env)
+    provider.stream_idle_timeout_s = resolve_stream_idle_timeout_s(
+        env_value=runtime.get("stream_idle_timeout_s")
+    )
+    if hasattr(provider, "request_timeout_s"):
+        from nanobot.providers.openai_compat_provider import resolve_openai_compat_timeout_s
+
+        provider.request_timeout_s = resolve_openai_compat_timeout_s(
+            runtime.get("openai_compat_timeout_s")
+        )
 
 
 def _resolve_model_preset(
@@ -270,6 +293,7 @@ def _make_provider_core(
         )
 
     provider.generation = preset.to_generation_settings()
+    _apply_runtime_settings(provider, env)
     return provider
 
 
@@ -450,13 +474,19 @@ def load_provider_snapshot(
     preset_name: str | None = None,
     env: CoreEnvironment | None = None,
 ) -> ProviderSnapshot:
-    from nanobot.config.loader import load_config, resolve_config_env_vars
+    """Build a snapshot from the current config (a host ``provider_snapshot_loader``).
 
-    return build_provider_snapshot(
-        resolve_config_env_vars(
-            load_config(config_path),
-            config_path=config_path,
-        ),
-        preset_name=preset_name,
-        env=env,
-    )
+    With *env* (and no *config_path*) the config comes from ``env.config``; the
+    legacy adapter re-reads ``config.json`` when it changed. Otherwise the config
+    file at *config_path* (``None`` = the current config path) is read through the
+    legacy adapter. *env* always supplies credentials and ``data_dir``.
+    """
+    from nanobot.config.loader import snapshot_config
+
+    if env is not None and config_path is None:
+        source = env.config
+    else:
+        from nanobot.kernel.legacy import file_config_source
+
+        source = file_config_source(config_path)
+    return build_provider_snapshot(snapshot_config(source), preset_name=preset_name, env=env)

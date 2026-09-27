@@ -670,7 +670,7 @@ class ExecTool(Tool):
             else:
                 command = self._wrap_path_export(command, env)
 
-        shell_program, shell_error = self._resolve_shell(shell)
+        shell_program, shell_error = self._resolve_shell(shell, env)
         if shell_error:
             return shell_error
 
@@ -817,7 +817,10 @@ class ExecTool(Tool):
         return f"{leading}& {stripped}"
 
     @staticmethod
-    def _resolve_shell(shell: str | None) -> tuple[str | None, str | None]:
+    def _resolve_shell(
+        shell: str | None, child_env: Mapping[str, str] | None = None,
+    ) -> tuple[str | None, str | None]:
+        """Resolve the requested shell; ``cmd`` uses the child env's ``COMSPEC``."""
         if not shell:
             return None, None
         if "\0" in shell or "\n" in shell or "\r" in shell:
@@ -843,7 +846,7 @@ class ExecTool(Tool):
                     "Allowed: powershell, pwsh, cmd"
                 )
             if shell.lower() in ("cmd", "cmd.exe"):
-                resolved = os.environ.get("COMSPEC") or shutil.which("cmd") or "cmd"
+                resolved = (child_env or {}).get("COMSPEC") or shutil.which("cmd") or "cmd"
                 return resolved, None
             resolved = shutil.which(shell) or shell
             return resolved, None

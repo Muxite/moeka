@@ -52,14 +52,36 @@ async def test_openai_compat_provider_sets_timeout_on_local_http_client() -> Non
     assert openai_kwargs["http_client"] is sentinel.http_client
 
 
-async def test_openai_compat_provider_timeout_can_be_overridden_by_env(monkeypatch) -> None:
-    monkeypatch.setenv("NANOBOT_OPENAI_COMPAT_TIMEOUT_S", "45")
+async def test_openai_compat_provider_timeout_can_be_overridden_by_env(
+    tmp_path, monkeypatch
+) -> None:
+    """Legacy hosts: NANOBOT_OPENAI_COMPAT_TIMEOUT_S via LegacyEnvironment; kernel hosts: default."""
+    from nanobot.config.schema import Config
+    from nanobot.kernel.legacy import LegacyEnvironment
+    from nanobot.providers.factory import make_provider
+    from tests._kernel_env import credential_env
 
+    monkeypatch.setenv("NANOBOT_OPENAI_COMPAT_TIMEOUT_S", "45")
+    config = Config.model_validate({
+        "providers": {"custom": {"apiKey": "test-key", "apiBase": "https://example.com/v1"}},
+        "agents": {"defaults": {"workspace": str(tmp_path), "model": "custom/gpt-4o"}},
+    })
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
+        provider = make_provider(config, env=LegacyEnvironment.from_config(config))
+        await provider._ensure_client()
+    assert mock_async_openai.call_args.kwargs["timeout"] == 45.0
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
+        provider = make_provider(config, env=credential_env(root=tmp_path / "host"))
+        await provider._ensure_client()
+    _assert_openai_compat_timeout(mock_async_openai.call_args.kwargs["timeout"])
+
+    # A direct construction (no factory, no env) keeps the default.
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
         provider = OpenAICompatProvider(api_key="test-key", api_base="https://example.com/v1")
         await provider._ensure_client()
-
-    assert mock_async_openai.call_args.kwargs["timeout"] == 45.0
+    _assert_openai_compat_timeout(mock_async_openai.call_args.kwargs["timeout"])
 
 
 async def test_missing_langfuse_warning_recommends_plugin_command(monkeypatch) -> None:

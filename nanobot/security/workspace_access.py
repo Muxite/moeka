@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,6 +114,8 @@ class WorkspaceScopeResolver:
     default_workspace: str | Path
     default_restrict_to_workspace: bool
     scoped_channel: str = "websocket"
+    # Host sandbox markers (``sandbox_environ(runtime section)``); None = none.
+    sandbox_env: Mapping[str, str] | None = None
 
     @property
     def sandbox_status(self) -> WorkspaceSandboxStatus:
@@ -123,6 +125,7 @@ class WorkspaceScopeResolver:
         return default_workspace_scope(
             self.default_workspace,
             self.default_restrict_to_workspace,
+            sandbox_env=self.sandbox_env,
         )
 
     def for_message(
@@ -151,6 +154,7 @@ class WorkspaceScopeResolver:
             default_workspace=self.default_workspace,
             default_restrict_to_workspace=self.default_restrict_to_workspace,
             source_channel=channel,
+            sandbox_env=self.sandbox_env,
         )
 
     def persist_message_scope(self, session: Any, msg: Any) -> None:
@@ -169,9 +173,14 @@ def workspace_sandbox_status(
     *,
     restrict_to_workspace: bool,
     workspace: str | Path,
-    environ: dict[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> WorkspaceSandboxStatus:
-    """Return how workspace restriction is enforced in the current host."""
+    """Return how workspace restriction is enforced in the current host.
+
+    *environ* carries the host's sandbox markers (``NANOBOT_*SANDBOX*`` names;
+    see :func:`sandbox_environ`). ``None`` means none: the process environment is
+    never read here.
+    """
 
     workspace_root = str(Path(workspace).expanduser().resolve(strict=False))
     provider = _env_system_provider(environ)
@@ -218,6 +227,7 @@ def build_workspace_scope(
     access_mode: str,
     *,
     source_channel: str | None = None,
+    sandbox_env: Mapping[str, str] | None = None,
 ) -> WorkspaceScope:
     mode = _normalize_access_mode(access_mode)
     root = Path(project_path).expanduser().resolve(strict=False)
@@ -229,6 +239,7 @@ def build_workspace_scope(
         sandbox_status=workspace_sandbox_status(
             restrict_to_workspace=restrict,
             workspace=root,
+            environ=sandbox_env,
         ),
         source_channel=source_channel,
     )
@@ -239,11 +250,13 @@ def default_workspace_scope(
     restrict_to_workspace: bool,
     *,
     source_channel: str | None = None,
+    sandbox_env: Mapping[str, str] | None = None,
 ) -> WorkspaceScope:
     return build_workspace_scope(
         workspace,
         default_access_mode(restrict_to_workspace),
         source_channel=source_channel,
+        sandbox_env=sandbox_env,
     )
 
 
@@ -253,6 +266,7 @@ def validate_workspace_scope_payload(
     default_workspace: str | Path,
     default_restrict_to_workspace: bool,
     source_channel: str | None = None,
+    sandbox_env: Mapping[str, str] | None = None,
 ) -> WorkspaceScope:
     """Validate a client-requested workspace scope."""
     if raw is None:
@@ -260,6 +274,7 @@ def validate_workspace_scope_payload(
             default_workspace,
             default_restrict_to_workspace,
             source_channel=source_channel,
+            sandbox_env=sandbox_env,
         )
     if not isinstance(raw, dict):
         raise WorkspaceScopeError("workspace_scope must be an object")
@@ -285,7 +300,9 @@ def validate_workspace_scope_payload(
         raw_mode = default_access_mode(default_restrict_to_workspace)
     if not isinstance(raw_mode, str):
         raise WorkspaceScopeError("access_mode must be a string")
-    return build_workspace_scope(project, raw_mode, source_channel=source_channel)
+    return build_workspace_scope(
+        project, raw_mode, source_channel=source_channel, sandbox_env=sandbox_env
+    )
 
 
 def workspace_scope_from_metadata(
@@ -294,6 +311,7 @@ def workspace_scope_from_metadata(
     default_workspace: str | Path,
     default_restrict_to_workspace: bool,
     source_channel: str | None = None,
+    sandbox_env: Mapping[str, str] | None = None,
 ) -> WorkspaceScope:
     """Resolve persisted metadata, falling back safely for old or stale sessions."""
     if not isinstance(metadata, dict):
@@ -301,6 +319,7 @@ def workspace_scope_from_metadata(
             default_workspace,
             default_restrict_to_workspace,
             source_channel=source_channel,
+            sandbox_env=sandbox_env,
         )
     try:
         metadata_data = cast(dict[str, Any], metadata)
@@ -309,12 +328,14 @@ def workspace_scope_from_metadata(
             default_workspace=default_workspace,
             default_restrict_to_workspace=default_restrict_to_workspace,
             source_channel=source_channel,
+            sandbox_env=sandbox_env,
         )
     except WorkspaceScopeError:
         return default_workspace_scope(
             default_workspace,
             default_restrict_to_workspace,
             source_channel=source_channel,
+            sandbox_env=sandbox_env,
         )
 
 
@@ -325,6 +346,7 @@ def resolve_effective_workspace_scope(
     default_workspace: str | Path,
     default_restrict_to_workspace: bool,
     source_channel: str | None = None,
+    sandbox_env: Mapping[str, str] | None = None,
 ) -> WorkspaceScope:
     if isinstance(message_metadata, dict) and WORKSPACE_SCOPE_METADATA_KEY in message_metadata:
         message_metadata_data = cast(dict[str, Any], message_metadata)
@@ -333,12 +355,14 @@ def resolve_effective_workspace_scope(
             default_workspace=default_workspace,
             default_restrict_to_workspace=default_restrict_to_workspace,
             source_channel=source_channel,
+            sandbox_env=sandbox_env,
         )
     return workspace_scope_from_metadata(
         session_metadata,
         default_workspace=default_workspace,
         default_restrict_to_workspace=default_restrict_to_workspace,
         source_channel=source_channel,
+        sandbox_env=sandbox_env,
     )
 
 
@@ -393,8 +417,30 @@ def current_scope_allows_loopback(*, enabled: bool) -> bool:
     )
 
 
-def _env_system_provider(environ: dict[str, str] | None = None) -> str | None:
-    env = environ if environ is not None else os.environ
+# runtime-section key -> the sandbox marker name _env_system_provider reads.
+_SANDBOX_RUNTIME_KEYS = {
+    "workspace_sandbox_provider": "NANOBOT_WORKSPACE_SANDBOX_PROVIDER",
+    "workspace_sandbox_enforced": "NANOBOT_WORKSPACE_SANDBOX_ENFORCED",
+    "sandbox_enforced": "NANOBOT_SANDBOX_ENFORCED",
+}
+
+
+def sandbox_environ(runtime: Mapping[str, Any] | None) -> dict[str, str]:
+    """Sandbox markers from a host ``runtime`` section, keyed by their env names.
+
+    The legacy adapter fills these runtime keys from ``NANOBOT_*SANDBOX*``;
+    a kernel-native host sets them (or not) in its own ConfigSource.
+    """
+    markers: dict[str, str] = {}
+    for key, name in _SANDBOX_RUNTIME_KEYS.items():
+        value = (runtime or {}).get(key)
+        if value is not None:
+            markers[name] = str(value)
+    return markers
+
+
+def _env_system_provider(environ: Mapping[str, str] | None = None) -> str | None:
+    env: Mapping[str, str] = environ if environ is not None else {}
     explicit_provider = env.get("NANOBOT_WORKSPACE_SANDBOX_PROVIDER")
     enforced = env.get("NANOBOT_WORKSPACE_SANDBOX_ENFORCED")
     compatibility = env.get("NANOBOT_SANDBOX_ENFORCED")

@@ -41,6 +41,7 @@ from nanobot.utils.prompt_templates import render_template
 if TYPE_CHECKING:
     from nanobot.config.schema import VecConfig
     from nanobot.core.vec_store import VecStore
+    from nanobot.kernel.env import CoreEnvironment
 
 
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -114,6 +115,7 @@ class ContextBuilder:
         vec_config: VecConfig | None = None,
         bootstrap_overrides: Mapping[str, str] | None = None,
         inline_skills: Sequence[Any] | None = None,
+        env: CoreEnvironment | None = None,
     ):
         self.workspace = workspace
         self.timezone = timezone
@@ -128,6 +130,7 @@ class ContextBuilder:
             disabled_skills=set(disabled_skills) if disabled_skills else None,
             allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
             inline_skills=inline_skills,
+            env=env,
         )
 
     def build_system_prompt(

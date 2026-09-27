@@ -129,7 +129,13 @@ class CoreEnvironment:
     strict: bool = False
 
 
-def resolve_credential(env: CoreEnvironment | None, ref: str, scope: str) -> str | None:
+def resolve_credential(
+    env: CoreEnvironment | None,
+    ref: str,
+    scope: str,
+    *,
+    exclude_config: bool = False,
+) -> str | None:
     """Resolve ``ref`` for ``scope`` through the host env (I1); empty values become ``None``.
 
     With an env, only ``env.credentials`` is consulted: a kernel-native host whose
@@ -137,9 +143,18 @@ def resolve_credential(env: CoreEnvironment | None, ref: str, scope: str) -> str
     process. ``env=None`` is the legacy direct-construction path (a tool or provider
     built without a host env): it falls back to the pre-kernel environment variables
     via ``nanobot.kernel.legacy.LEGACY_ENV_REFS``, so behaviour is unchanged there.
+
+    ``exclude_config=True``: the caller already consulted the current config for
+    this value, so a resolver that mirrors config values (the legacy adapter's
+    ``resolve_non_config``) must not hand back its startup copy. Resolvers without
+    that method answer normally.
     """
     if env is not None:
-        value = env.credentials.resolve(ref, scope)
+        non_config = getattr(env.credentials, "resolve_non_config", None)
+        if exclude_config and callable(non_config):
+            value = non_config(ref, scope)
+        else:
+            value = env.credentials.resolve(ref, scope)
     else:
         from nanobot.kernel.legacy import ambient_credential
 

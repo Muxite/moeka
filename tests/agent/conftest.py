@@ -51,6 +51,7 @@ def make_loop(
     hooks: list | None = None,
     provider: MagicMock | None = None,
     patch_deps: bool = False,
+    env=None,
 ) -> AgentLoop:
     """Create a real AgentLoop for testing.
 
@@ -77,6 +78,8 @@ def make_loop(
         kwargs["model_presets"] = model_presets
     if hooks is not None:
         kwargs["hooks"] = hooks
+    if env is not None:
+        kwargs["env"] = env
 
     if patch_deps:
         with patch("nanobot.agent.loop.ContextBuilder"), \

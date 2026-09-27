@@ -251,11 +251,24 @@ class ImageGenerationTool(Tool):
 
 
 async def reload_image_generation_tool(state: Any, registry: ToolRegistry) -> dict[str, Any]:
-    """Apply the persisted image configuration to the running agent."""
-    try:
-        from nanobot.config.loader import load_config, resolve_config_env_vars
+    """Apply the persisted image configuration to the running agent.
 
-        config = resolve_config_env_vars(load_config())
+    The configuration is read from the host env's ConfigSource (``state.env``):
+    the legacy adapter re-reads ``config.json``; a kernel-native host answers from
+    its own source. A state without an env reads the current config file through
+    the legacy adapter (the pre-kernel behaviour).
+    """
+    env = getattr(state, "env", None)
+    try:
+        from nanobot.config.loader import snapshot_config
+
+        if env is not None:
+            source = env.config
+        else:
+            from nanobot.kernel.legacy import file_config_source
+
+            source = file_config_source()
+        config = snapshot_config(source)
         tool_config = config.tools.image_generation
         provider_configs = image_gen_provider_configs(config)
     except Exception as exc:
@@ -268,7 +281,6 @@ async def reload_image_generation_tool(state: Any, registry: ToolRegistry) -> di
         }
 
     # Keep the host env's media root and strict floor across a hot reload.
-    env = getattr(state, "env", None)
     next_tool = (
         ImageGenerationTool(  # pyright: ignore[reportAbstractUsage]
             workspace=state.workspace,

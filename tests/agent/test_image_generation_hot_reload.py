@@ -111,15 +111,11 @@ async def test_image_generation_reload_keeps_host_paths_and_strict_floor(
     """Hot reload must not drop the host env's media root / strict floor (Task 3 carry-forward)."""
     from dataclasses import replace
 
-    from tests._kernel_env import credential_env
+    from tests._kernel_env import DictConfigSource, credential_env
 
-    config_path = tmp_path / "config.json"
-    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
-    config = load_config()
-    config.tools.image_generation.enabled = True
-    save_config(config)
-
-    env = replace(credential_env(root=tmp_path / "host"), strict=True)
+    # A kernel-native host answers from its own ConfigSource, not config.json.
+    source = DictConfigSource({"tools": {"imageGeneration": {"enabled": True}}})
+    env = replace(credential_env(root=tmp_path / "host", config=source), strict=True)
     state = _runtime_state(tmp_path)
     state.env = env
     registry = ToolRegistry()
@@ -129,3 +125,74 @@ async def test_image_generation_reload_keeps_host_paths_and_strict_floor(
     assert isinstance(tool, ImageGenerationTool)
     assert tool._paths is env.paths
     assert tool._legacy_floor is False
+
+
+@pytest.mark.asyncio
+async def test_image_generation_reload_legacy_env_rereads_config_file(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy host's env (file-backed Config) hot-reloads from config.json."""
+    from nanobot.kernel.legacy import LegacyEnvironment
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    config = load_config()
+    config.agents.defaults.workspace = str(tmp_path)
+    config.providers.openrouter.api_key = "first-key"
+    config.tools.image_generation.enabled = True
+    config.tools.image_generation.model = "openai/first-image-model"
+    save_config(config)
+
+    state = _runtime_state(tmp_path)
+    state.env = LegacyEnvironment.from_config(load_config())
+    registry = ToolRegistry()
+    await reload_image_generation_tool(state, registry)
+    first = registry.get("generate_image")
+    assert isinstance(first, ImageGenerationTool)
+    assert first.config.model == "openai/first-image-model"
+
+    config = load_config()
+    config.providers.openrouter.api_key = "second-key"
+    config.tools.image_generation.model = "openai/second-image-model"
+    save_config(config)
+
+    result = await reload_image_generation_tool(state, registry)
+    second = registry.get("generate_image")
+    assert result["requires_restart"] is False
+    assert isinstance(second, ImageGenerationTool)
+    assert second.config.model == "openai/second-image-model"
+    assert second.provider_configs["openrouter"].api_key == "second-key"
+    assert second._paths is state.env.paths
+
+    config_path.write_text("{not json", encoding="utf-8")
+    broken = await reload_image_generation_tool(state, registry)
+    assert broken["ok"] is False
+    assert broken["requires_restart"] is True
+
+
+@pytest.mark.asyncio
+async def test_image_generation_reload_kernel_env_ignores_config_file(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests._kernel_env import DictConfigSource, credential_env
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    config = load_config()
+    config.tools.image_generation.enabled = True
+    save_config(config)
+
+    source = DictConfigSource()
+    state = _runtime_state(tmp_path)
+    state.env = credential_env(root=tmp_path / "host", config=source)
+    registry = ToolRegistry()
+    await reload_image_generation_tool(state, registry)
+    assert not registry.has("generate_image")
+
+    source.sections["tools"] = {"imageGeneration": {"enabled": True, "model": "host/model"}}
+    await reload_image_generation_tool(state, registry)
+    tool = registry.get("generate_image")
+    assert isinstance(tool, ImageGenerationTool)
+    assert tool.config.model == "host/model"

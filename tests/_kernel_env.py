@@ -15,12 +15,23 @@ class _EmptyConfig:
         return {}
 
 
+class DictConfigSource:
+    """A kernel-native ConfigSource over literal sections (mutable for reload tests)."""
+
+    def __init__(self, sections: Mapping[str, dict[str, Any]] | None = None) -> None:
+        self.sections: dict[str, dict[str, Any]] = dict(sections or {})
+
+    def section(self, name: str) -> dict[str, Any]:
+        return dict(self.sections.get(name, {}))
+
+
 def credential_env(
     values: Mapping[str, str] | None = None,
     scopes: Mapping[str, Collection[str]] | None = None,
     *,
     exec_base_env: Mapping[str, str] | None = None,
     root: Path | None = None,
+    config: Any | None = None,
 ) -> CoreEnvironment:
     """Build an env whose resolver holds exactly ``values`` (nothing ambient).
 
@@ -29,7 +40,7 @@ def credential_env(
     """
     base = Path(root) if root is not None else Path("/nonexistent-kernel-test")
     return CoreEnvironment(
-        config=_EmptyConfig(),
+        config=config if config is not None else _EmptyConfig(),
         credentials=StaticCredentialResolver(values or {}, scopes),
         paths=Paths(work_dir=base / "work", state_dir=base / "state"),
         trace=NullTraceSink(),
