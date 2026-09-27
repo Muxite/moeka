@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,7 +14,7 @@ from nanobot.providers.registry import ProviderSpec, create_dynamic_spec, find_b
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
-    from nanobot.kernel.ledger import PricingTable
+    from nanobot.kernel.ledger import ModelPricing, PricingKey, PricingTable
 
 
 @dataclass(frozen=True)
@@ -409,7 +409,7 @@ def make_provider(
         )
 
     if env is not None:
-        _attach_ledger(provider, config, resolved, fallback_presets, env)
+        attach_ledger(provider, env, _ledger_pricing(config, resolved, fallback_presets, env))
     return provider
 
 
@@ -456,17 +456,18 @@ def _ledger_pricing(
     return table
 
 
-def _attach_ledger(
+def attach_ledger(
     provider: LLMProvider,
-    config: Config,
-    resolved: ModelPresetConfig,
-    fallback_presets: list[ModelPresetConfig],
     env: CoreEnvironment,
+    pricing: PricingTable | Mapping[PricingKey, ModelPricing] | None = None,
 ) -> None:
     """The single ledger wiring point: every call through *provider* is measured.
 
     Emits ``model.call`` to ``env.trace`` and records to the ``LLMUsageStore`` under
-    ``env.paths.data_dir``. Fail-open: wiring problems are logged, never raised.
+    ``env.paths.data_dir``. Used by :func:`make_provider` and for host-injected
+    providers (``LLM.register_provider``). *pricing* is a :class:`PricingTable` or
+    the mapping one is built from; ``None`` prices nothing (cost unknown).
+    Fail-open: wiring problems are logged, never raised.
     """
     try:
         from nanobot.kernel.ledger import LedgerObserver
@@ -475,12 +476,23 @@ def _attach_ledger(
         provider.set_llm_call_observer(LedgerObserver(
             sink=env.trace,
             store=get_llm_usage_store(data_dir=env.paths.data_dir),
-            pricing=_ledger_pricing(config, resolved, fallback_presets, env),
+            pricing=pricing,
         ))
     except Exception:
         from loguru import logger
 
         logger.exception("failed to attach the cost ledger to {}", provider.provider_name)
+
+
+def _attach_ledger(
+    provider: LLMProvider,
+    config: Config,
+    resolved: ModelPresetConfig,
+    fallback_presets: list[ModelPresetConfig],
+    env: CoreEnvironment,
+) -> None:
+    """Deprecated private spelling of :func:`attach_ledger` (prices from the config)."""
+    attach_ledger(provider, env, _ledger_pricing(config, resolved, fallback_presets, env))
 
 
 def build_unconfigured_provider_snapshot(config: Config, setup_error: str) -> ProviderSnapshot:

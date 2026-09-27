@@ -271,12 +271,16 @@ class RequestExtras:
     * ``on_unsupported``: ``"drop"`` omits fields the provider cannot honour and
       reports them (``sampling.dropped`` trace event); ``"raise"`` raises
       ``UnsupportedRequestError`` before anything is sent.
+    * ``max_attempts``: caps the standard retry loop's physical attempts for this
+      request (``1`` = no retry); ``None`` keeps the provider's retry schedule.
+      Each fallback candidate gets the same cap. Ignored in persistent mode.
     """
 
     response_format: Mapping[str, Any] | None = None
     sampling: Sampling | None = None
     extra_body: Mapping[str, Any] | None = None
     on_unsupported: Literal["drop", "raise"] = "drop"
+    max_attempts: int | None = None
 
 
 def plain_request_body(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1898,6 +1902,15 @@ class LLMProvider(ABC):
         attempt = 0
         delays = list(self._CHAT_RETRY_DELAYS)
         persistent = retry_mode == "persistent"
+        context = kw.get("provider_context")
+        cap = (
+            context.request.max_attempts
+            if isinstance(context, ProviderCallContext) and context.request is not None
+            else None
+        )
+        if cap is not None and not persistent:
+            # One delay per retry; past the schedule's end, repeat its last delay.
+            delays = [delays[min(i, len(delays) - 1)] for i in range(max(0, cap - 1))]
         last_response: LLMResponse | None = None
         last_error_key: str | None = None
         identical_error_count = 0

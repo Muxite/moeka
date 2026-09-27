@@ -20,42 +20,11 @@ keys and the active model/preset come from the user's existing moeka setup.
 from __future__ import annotations
 
 import asyncio
-import base64
 import dataclasses
-import inspect
 import json
-import mimetypes
-import re
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
-
-
-async def _aclose_provider(provider: Any) -> None:
-    """Best-effort close of a provider's async HTTP client.
-
-    The sync wrappers run each completion via ``asyncio.run``, which closes the
-    loop as soon as the coroutine returns. If the provider's underlying
-    ``AsyncOpenAI`` / ``AsyncAnthropic`` client is left to be garbage-collected,
-    its httpx connection pool tries to close against the now-dead loop and emits
-    noisy ``RuntimeError: Event loop is closed`` / "Task exception was never
-    retrieved" tracebacks. Closing it here — inside the live loop, in a
-    ``finally`` — releases those connections cleanly. Never raises.
-    """
-    targets = [getattr(provider, attr, None) for attr in ("aclose", "close")]
-    client = getattr(provider, "_client", None)
-    if client is not None:
-        targets += [getattr(client, attr, None) for attr in ("close", "aclose")]
-    for fn in targets:
-        if not callable(fn):
-            continue
-        try:
-            res = fn()
-            if inspect.isawaitable(res):
-                await res
-        except Exception:  # noqa: BLE001 — teardown must never break a call
-            pass
-        return
 
 
 def _usage_payload(model: str | None, usage: Any) -> dict[str, Any]:
@@ -87,32 +56,6 @@ def _report_usage(usage_sink: Any, model: str | None, response: Any) -> None:
         pass
 
 
-def _image_part(image: str | bytes | Path) -> dict[str, Any]:
-    """Build an OpenAI-style image content part from a path, URL, or raw bytes.
-
-    Accepts: an http(s)/data URL (passed through), a local file path, or raw
-    image bytes. Local files and bytes are base64-encoded into a data URL.
-    """
-    if isinstance(image, (bytes, bytearray)):
-        data = base64.b64encode(bytes(image)).decode()
-        url = f"data:image/png;base64,{data}"
-    elif isinstance(image, str) and image.startswith(("http://", "https://", "data:")):
-        url = image
-    else:
-        path = Path(image)
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
-        data = base64.b64encode(path.read_bytes()).decode()
-        url = f"data:{mime};base64,{data}"
-    return {"type": "image_url", "image_url": {"url": url}}
-
-
-def _user_content(prompt: str, images: list[str | bytes | Path] | None) -> Any:
-    """Plain string when no images, else a multimodal content-part list."""
-    if not images:
-        return prompt
-    return [{"type": "text", "text": prompt}] + [_image_part(i) for i in images]
-
-
 async def _acomplete_response(
     prompt: str,
     *,
@@ -140,6 +83,8 @@ async def _acomplete_response(
     back to the plain parse-retry path.
     """
     from nanobot.config.loader import config_from_sources
+    from nanobot.kernel.llm import aclose_provider as _aclose_provider
+    from nanobot.kernel.messages import user_content as _user_content
     from nanobot.providers.base import ProviderCallContext, RequestExtras
     from nanobot.providers.factory import make_provider
 
@@ -257,6 +202,8 @@ async def acomplete_stream(
     provider reports an error.
     """
     from nanobot.config.loader import config_from_sources
+    from nanobot.kernel.llm import aclose_provider as _aclose_provider
+    from nanobot.kernel.messages import user_content as _user_content
     from nanobot.providers.factory import make_provider
 
     resolved_config, _ = config_from_sources(
@@ -341,99 +288,6 @@ def complete_stream(
         yield item
 
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-
-
-def _extract_json_text(text: str) -> str:
-    """Best-effort extraction of the JSON payload from a model reply.
-
-    Order: fenced ```json block, then the outermost {...} or [...] span,
-    then the raw text (let json.loads produce the error).
-    """
-    fenced = _FENCE_RE.search(text)
-    if fenced:
-        return fenced.group(1).strip()
-    stripped = text.strip()
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = stripped.find(opener)
-        end = stripped.rfind(closer)
-        if start != -1 and end > start:
-            return stripped[start:end + 1]
-    return stripped
-
-
-def _json_system_suffix(schema: dict[str, Any] | None) -> str:
-    base = (
-        "Respond ONLY with valid JSON — no prose, no markdown fences, "
-        "no explanations before or after."
-    )
-    if schema is not None:
-        base += " The JSON must match this JSON Schema:\n" + json.dumps(schema, indent=2)
-    return base
-
-
-def _json_response_format(schema: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Native provider structured-output request for a JSON Schema.
-
-    OpenAI/OpenRouter ``response_format`` — ``strict: false`` so providers whose
-    models don't do strict schema validation still accept the request (a hard
-    rejection is caught by :func:`acomplete_json` and falls back to the reprompt
-    loop). Returns ``None`` without a schema — no native mode, keep the prompt
-    suffix path.
-    """
-    if not schema:
-        return None
-    return {
-        "type": "json_schema",
-        "json_schema": {"name": "response", "schema": schema, "strict": False},
-    }
-
-
-_UNSOLVED = object()
-
-
-def _coerce_json(parsed: Any, model_cls: type | None) -> Any:
-    """The one validation path for a JSON value, from an LLM reply or a solver."""
-    if model_cls is not None:
-        return model_cls.model_validate(parsed)
-    return parsed
-
-
-def _solve_deterministic(
-    task_type: str,
-    task_payload: dict[str, Any] | None,
-    prompt: str,
-    model_cls: type | None,
-) -> tuple[Any, str | None]:
-    """Solver fast path: ``(coerced value, solver name)``, or ``(_UNSOLVED, None)``."""
-    from loguru import logger
-
-    from nanobot.kernel import solvers
-
-    payload = task_payload if task_payload is not None else {"prompt": prompt}
-    solved = solvers.try_solve(task_type, payload)
-    if solved is None:
-        return _UNSOLVED, None
-    try:
-        return _coerce_json(solved.value, model_cls), solved.solver_name
-    except Exception as exc:
-        logger.warning(
-            "solver {} ({}) value failed validation: {}; falling through to the LLM",
-            solved.solver_name, task_type, exc,
-        )
-        return _UNSOLVED, None
-
-
-def _try_deterministic(
-    task_type: str,
-    task_payload: dict[str, Any] | None,
-    prompt: str,
-    model_cls: type | None,
-) -> Any:
-    """Solver fast path: the coerced value, or ``_UNSOLVED`` to fall through to the LLM."""
-    return _solve_deterministic(task_type, task_payload, prompt, model_cls)[0]
-
-
 async def acomplete_json(
     prompt: str,
     *,
@@ -479,6 +333,13 @@ async def acomplete_json(
     Raises:
         ValueError: When every attempt fails to produce valid JSON.
     """
+    from nanobot.kernel.llm import UNSOLVED as _UNSOLVED
+    from nanobot.kernel.llm import coerce_json as _coerce_json
+    from nanobot.kernel.llm import extract_json_text as _extract_json_text
+    from nanobot.kernel.llm import json_response_format as _json_response_format
+    from nanobot.kernel.llm import json_system_suffix as _json_system_suffix
+    from nanobot.kernel.llm import try_deterministic as _try_deterministic
+
     if task_type is not None:
         solved = _try_deterministic(task_type, task_payload, prompt, model_cls)
         if solved is not _UNSOLVED:
@@ -618,3 +479,31 @@ def complete(
             env=env,
         )
     )
+
+
+# The shared pure helpers moved to the kernel LLM layer; these private names stay
+# importable from here (router, FunctionTool and tests use them). Resolved lazily:
+# ``nanobot.kernel`` imports ``nanobot.core``, which imports this module.
+_KERNEL_HELPERS = {
+    "_UNSOLVED": ("nanobot.kernel.llm", "UNSOLVED"),
+    "_aclose_provider": ("nanobot.kernel.llm", "aclose_provider"),
+    "_coerce_json": ("nanobot.kernel.llm", "coerce_json"),
+    "_extract_json_text": ("nanobot.kernel.llm", "extract_json_text"),
+    "_json_response_format": ("nanobot.kernel.llm", "json_response_format"),
+    "_json_system_suffix": ("nanobot.kernel.llm", "json_system_suffix"),
+    "_solve_deterministic": ("nanobot.kernel.llm", "solve_deterministic"),
+    "_try_deterministic": ("nanobot.kernel.llm", "try_deterministic"),
+    "_image_part": ("nanobot.kernel.messages", "image_part"),
+    "_user_content": ("nanobot.kernel.messages", "user_content"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    target = _KERNEL_HELPERS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    value = getattr(importlib.import_module(target[0]), target[1])
+    globals()[name] = value
+    return value

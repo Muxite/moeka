@@ -34,6 +34,8 @@ import nanobot.core.vec        # noqa: F401
 import nanobot.core.vec_store  # noqa: F401
 import nanobot.api.complete    # noqa: F401
 import moeka                   # noqa: F401
+import moeka.llm               # noqa: F401
+import moeka.testing           # noqa: F401
 import moeka.tools             # noqa: F401
 import moeka.trace             # noqa: F401
 forbidden = {forbidden!r}

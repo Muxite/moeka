@@ -1,8 +1,8 @@
 """``Kernel``: the host-facing engine object built from an :class:`Environment`.
 
-This is the skeleton: it owns the environment, the trace sink and a private
-loop thread (the sync-twin bridge), and has an idempotent close in both sync
-and async form. The LLM layer, agents, sessions and memory attach here.
+It owns the environment, the trace sink, a private loop thread (the sync-twin
+bridge) and the LLM layer (``kernel.llm``), and has an idempotent close in both
+sync and async form. Agents, sessions and memory attach here.
 """
 
 from __future__ import annotations
@@ -10,10 +10,16 @@ from __future__ import annotations
 import asyncio
 import threading
 from types import TracebackType
+from typing import TYPE_CHECKING
+
+from loguru import logger
 
 from nanobot.kernel.bridge import LoopThread
 from nanobot.kernel.hostenv import Environment
 from nanobot.kernel.trace import TraceSink
+
+if TYPE_CHECKING:
+    from nanobot.kernel.llm import LLM
 
 
 class Kernel:
@@ -31,6 +37,7 @@ class Kernel:
         self._close_lock = threading.Lock()
         # Internal: the loop that ``*_sync`` twins run on. Starts lazily on first use.
         self._bridge = LoopThread(name="moeka-kernel-loop")
+        self._llm: LLM | None = None
 
     @property
     def env(self) -> Environment:
@@ -39,6 +46,21 @@ class Kernel:
     @property
     def trace(self) -> TraceSink:
         return self._env.trace
+
+    @property
+    def llm(self) -> LLM:
+        """The model-call layer (created on first access, one per kernel)."""
+        llm = self._llm
+        if llm is None:
+            with self._close_lock:
+                if self._closed:
+                    raise RuntimeError("kernel is closed")
+                if self._llm is None:
+                    from nanobot.kernel.llm import LLM
+
+                    self._llm = LLM(self)
+                llm = self._llm
+        return llm
 
     @property
     def closed(self) -> bool:
@@ -65,10 +87,21 @@ class Kernel:
         with self._close_lock:
             if self._closed:
                 return
+            self._close_llm()
             self._bridge.stop()
             # Only after stop() returned: a failed stop leaves the kernel open
             # so a later close() can retry.
             self._closed = True
+
+    def _close_llm(self) -> None:
+        # Pool providers' HTTP clients live on the loop thread: close them there,
+        # before it stops. Never started = no client was ever used.
+        if self._llm is None or self._bridge._state != "running":
+            return
+        try:
+            self._bridge.run(self._llm._aclose(), timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
+            logger.warning("kernel: closing LLM providers failed: {!r}", exc)
 
     async def aclose(self) -> None:
         """Async :meth:`close`: stops the loop thread off the caller's event loop."""

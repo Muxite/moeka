@@ -223,6 +223,7 @@ def test_observer_maps_record_to_event() -> None:
         cost_usd=pytest.approx(2_000 * 0.25 / 1e6 + 500 * 2.0 / 1e6),
         source="cron",
         usage_source="reported",
+        finish_reason="stop",
     )
     assert len(sink.events) == 1
     emitted = sink.events[0]

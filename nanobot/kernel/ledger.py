@@ -28,17 +28,25 @@ is a hint, never a budget or routing fact.
 Fail-open discipline: :class:`LedgerObserver` never raises into the provider call
 (the same contract as :func:`nanobot.kernel.trace.safe_emit`); a broken sink, a
 failing SQLite write or a bad pricing table is logged and swallowed.
+
+Call attribution: the kernel LLM layer binds a :class:`CallAttribution` (call id,
+model alias, host tags) in a context var around each logical call, so every physical
+attempt's event carries them plus its attempt number. Calls made outside the LLM
+layer (the agent loop) have no attribution and leave those fields empty.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from loguru import logger
 
+from nanobot.kernel.frozen import FrozenMap, thaw
 from nanobot.kernel.trace import TraceSink, safe_emit
 from nanobot.llm_usage.context import (
     LLMUsageSource,
@@ -61,6 +69,41 @@ def usage_source_of(usage: LLMUsage | None) -> UsageSource:
     if usage is None:
         return "none"
     return usage.source
+
+
+@dataclass(slots=True)
+class CallAttribution:
+    """Who one logical LLM call belongs to; bound by the kernel LLM layer.
+
+    Mutable on purpose: the observer counts physical attempts into it and leaves
+    the last attempt's cost, so the caller can read them back after the call.
+    """
+
+    call_id: str
+    alias: str | None = None
+    tags: Mapping[str, Any] = field(default_factory=FrozenMap)
+    cached: bool = False
+    attempts: int = 0
+    cost_usd: float | None = None
+
+
+_CURRENT_CALL: ContextVar[CallAttribution | None] = ContextVar(
+    "moeka_llm_call_attribution", default=None,
+)
+
+
+def current_call_attribution() -> CallAttribution | None:
+    return _CURRENT_CALL.get()
+
+
+@contextmanager
+def call_attribution(attribution: CallAttribution) -> Generator[CallAttribution]:
+    """Attribute nested provider calls (in this task) to *attribution*."""
+    token = _CURRENT_CALL.set(attribution)
+    try:
+        yield attribution
+    finally:
+        _CURRENT_CALL.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +132,13 @@ class LedgerEvent:
     cost_usd: float | None
     source: LLMUsageSource
     usage_source: UsageSource = "none"
+    finish_reason: str | None = None
+    # Kernel LLM-layer attribution; ``None`` / empty for calls made outside it.
+    call_id: str | None = None
+    alias: str | None = None
+    attempt: int | None = None
+    cached: bool = False
+    tags: Mapping[str, Any] = field(default_factory=FrozenMap)
 
     @property
     def cost_is_billed(self) -> bool:
@@ -104,7 +154,9 @@ class LedgerEvent:
         return self.usage_source == "reported"
 
     def to_trace(self) -> dict[str, Any]:
-        return {"event": LEDGER_EVENT, **dataclasses.asdict(self)}
+        fields = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+        fields["tags"] = thaw(self.tags)
+        return {"event": LEDGER_EVENT, **fields}
 
 
 PricingKey = str | tuple[str, str]
@@ -246,8 +298,11 @@ class LedgerObserver:
         return dataclasses.replace(record, tier=pricing.tier, cost_usd=cost)
 
     @staticmethod
-    def _event(record: LLMCallRecord) -> LedgerEvent:
+    def _event(record: LLMCallRecord, *, attempt: int | None = None) -> LedgerEvent:
         usage = record.usage
+        call = current_call_attribution()
+        if call is not None and attempt is None:
+            attempt = call.attempts or None
         return LedgerEvent(
             trace_id=current_llm_usage_trace_id(),
             slot=current_llm_usage_slot(),
@@ -261,6 +316,12 @@ class LedgerObserver:
             cost_usd=record.cost_usd,
             source=record.source,
             usage_source=usage_source_of(usage),
+            finish_reason=record.finish_reason,
+            call_id=call.call_id if call is not None else None,
+            alias=call.alias if call is not None else None,
+            attempt=attempt,
+            cached=call.cached if call is not None else False,
+            tags=call.tags if call is not None else FrozenMap(),
         )
 
     def event_for(self, record: LLMCallRecord) -> LedgerEvent:
@@ -273,9 +334,15 @@ class LedgerObserver:
         except Exception:  # noqa: BLE001
             logger.exception("ledger enrichment failed for {}", record.model)
             enriched = record
+        call = current_call_attribution()
+        attempt: int | None = None
+        if call is not None:
+            call.attempts += 1
+            call.cost_usd = enriched.cost_usd
+            attempt = call.attempts
         if self._sink is not None:
             try:
-                safe_emit(self._sink, self._event(enriched).to_trace())
+                safe_emit(self._sink, self._event(enriched, attempt=attempt).to_trace())
             except Exception:  # noqa: BLE001
                 logger.exception("ledger event build failed for {}", record.model)
         if self._store is not None:
@@ -287,12 +354,15 @@ class LedgerObserver:
 
 __all__ = [
     "LEDGER_EVENT",
+    "CallAttribution",
     "LedgerEvent",
     "LedgerObserver",
     "ModelPricing",
     "PricingKey",
     "PricingTable",
     "UsageSource",
+    "call_attribution",
     "compute_cost",
+    "current_call_attribution",
     "usage_source_of",
 ]
