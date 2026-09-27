@@ -43,6 +43,7 @@ from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.policy import PermissionPolicy
 
 
 class _SubagentOrigin(TypedDict):
@@ -97,6 +98,13 @@ class _SubagentHook(AgentHook):
             self._status.error = str(context.error)
 
 
+def _subagent_principal(task_id: str) -> Any:
+    """The gate principal for one sub-agent run (kind ``subagent``)."""
+    from nanobot.kernel.policy import Principal
+
+    return Principal(name=f"subagent:{task_id}", kind="subagent")
+
+
 class SubagentManager:
     """Manages background subagent execution."""
 
@@ -116,8 +124,12 @@ class SubagentManager:
         tools_deny: list[str] | None = None,
         inline_skills: list | None = None,
         env: "CoreEnvironment | None" = None,
+        policy: "PermissionPolicy | None" = None,
     ):
         self.env = env
+        # The parent loop's gate policy, applied unattenuated for now (per-subagent
+        # attenuation is a later task); None means DefaultPolicy().
+        self.policy = policy
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
         if bus is None:
@@ -463,6 +475,9 @@ class SubagentManager:
                         "llm_usage_source",
                         current_llm_usage_source(),
                     ),
+                    policy=self.policy,
+                    principal=_subagent_principal(task_id),
+                    env=self.env,
                 ))
             finally:
                 if token is not None:

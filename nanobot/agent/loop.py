@@ -117,6 +117,7 @@ if TYPE_CHECKING:
         ToolsConfig,
     )
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.policy import PermissionPolicy
 
 _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
@@ -335,13 +336,21 @@ class AgentLoop:
         recovery_admission: RecoveryAdmission | None = None,
         env: CoreEnvironment | None = None,
         max_concurrent_requests: int | None = None,
+        policy: PermissionPolicy | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
+        from nanobot.kernel.gate import AGENT_PRINCIPAL
+        from nanobot.kernel.policy import DefaultPolicy
 
         _tc = tools_config or ToolsConfig()
         defaults = AgentDefaults()
         self.bus = bus
         self.env = env
+        # Capability gate (kernel P2): every tool call of this loop is checked
+        # against the floors and this policy. DefaultPolicy() is today's
+        # permissive behaviour (floors only).
+        self.policy: PermissionPolicy = policy if policy is not None else DefaultPolicy()
+        self.principal = AGENT_PRINCIPAL
         self._recovery_admission = recovery_admission
         if turn_delivery_factory is not None:
             if turn_delivery_factory.bus is not bus:
@@ -462,6 +471,9 @@ class AgentLoop:
         # duplicating cleanup in each consumer.
         self.sessions.set_delete_observer(self._file_state_store.discard)
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
+        self.tools.configure_gate(
+            policy=self.policy, principal=self.principal, env=env, workspace=workspace,
+        )
         self._exec_session_manager = ExecSessionManager()
         self.runner = AgentRunner()
         self.subagents = SubagentManager(
@@ -477,6 +489,7 @@ class AgentLoop:
             tools_deny=self.tools_deny,
             inline_skills=inline_skills,
             env=env,
+            policy=self.policy,
         )
         self._unified_session = unified_session
         self._running = False
@@ -535,6 +548,7 @@ class AgentLoop:
         *,
         tool_registry: ToolRegistry,
         env: CoreEnvironment | None = None,
+        policy: PermissionPolicy | None = None,
         **extra: Any,
     ) -> AgentLoop:
         """Create an AgentLoop from config with the common parameter set.
@@ -545,6 +559,9 @@ class AgentLoop:
         Extra keyword arguments are forwarded to ``AgentLoop.__init__``,
         allowing callers to override or extend the standard config-derived
         parameters (e.g. ``session_manager``).
+
+        *policy* is the capability-gate policy for every tool call (default
+        ``DefaultPolicy()``: floors only, today's permissive behaviour).
         """
         from nanobot.kernel.legacy import LegacyEnvironment
         from nanobot.providers.factory import make_provider
@@ -607,6 +624,7 @@ class AgentLoop:
             preset_snapshot_loader=preset_snapshot_loader,
             tool_registry=tool_registry,
             env=env,
+            policy=policy,
             **extra,
         )
 
@@ -1317,6 +1335,9 @@ class AgentLoop:
                     metadata=request_metadata,
                 ),
                 events=events,
+                policy=self.policy,
+                principal=self.principal,
+                env=self.env,
             ))
         finally:
             turn_scope_stack.close()
