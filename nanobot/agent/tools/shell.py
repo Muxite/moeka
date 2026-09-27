@@ -33,7 +33,7 @@ from nanobot.agent.tools.exec_session import (
     clamp_session_int,
     format_session_poll,
 )
-from nanobot.agent.tools.sandbox import expand_vars, wrap_command
+from nanobot.agent.tools.sandbox import SANDBOX_BACKENDS, expand_vars, wrap_command
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
@@ -427,6 +427,24 @@ class ExecTool(Tool):
         command = params.get("command") or params.get("cmd") or ""
         return [capability_request("exec.run", command)]
 
+    @property
+    def sandbox_active(self) -> bool:
+        """True when commands really run inside a sandbox backend.
+
+        - ``sandbox`` must name a backend ``wrap_command`` knows (``bwrap``/``seatbelt``).
+        - Always False on Windows, where the sandbox is skipped and commands run bare.
+        Strict mode (``nanobot.kernel.strict``) refuses exec unless this is True.
+        """
+        return bool(self.sandbox) and self.sandbox in SANDBOX_BACKENDS and not _IS_WINDOWS
+
+    def _strict_refusal(self) -> str | None:
+        """The strict-mode refusal when the env is strict and no sandbox is active."""
+        from nanobot.kernel.strict import is_strict, strict_sandbox_message
+
+        if is_strict(self._env) and not self.sandbox_active:
+            return ToolResult.error(strict_sandbox_message(self.name))
+        return None
+
     async def execute(
         self, command: str | None = None, cmd: str | None = None,
         working_dir: str | None = None, workdir: str | None = None,
@@ -436,6 +454,9 @@ class ExecTool(Tool):
         max_output_tokens: int | None = None,
         **kwargs: Any,
     ) -> str:
+        # Strict mode first: without a declared sandbox nothing reaches the guard.
+        if (refusal := self._strict_refusal()) is not None:
+            return refusal
         command = command or cmd
         working_dir = working_dir or workdir
         if not command:

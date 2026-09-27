@@ -137,7 +137,8 @@ class ToolLoader:
                             "Tool name collision: %s from %s overwrites existing",
                             tool.name, cls_label,
                         )
-                    registry.register(tool)
+                    if registry.register(tool) is False:
+                        continue  # strict mode dropped it (fully denied by policy)
                     registered.append(tool.name)
                     if not is_plugin_source:
                         builtin_names.add(tool.name)

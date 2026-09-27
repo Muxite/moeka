@@ -6,7 +6,10 @@ Order, per ``CapabilityRequest`` the tool declares (``Tool.capabilities``):
   against, so floors and policy see the path the tool will really touch.
 - ``check_floors`` runs FIRST with the host's ``ProtectedFloor``; a floor ``Deny``
   short-circuits and the policy is never consulted.
-- ``PermissionPolicy.decide`` runs only when no floor fired.
+- Strict mode (``nanobot.kernel.strict``): in a strict env an ``exec.run`` request from a
+  tool without an active sandbox is denied next, at layer ``"gate"`` with
+  ``STRICT_SANDBOX_MARKER``, before the policy and before the tool's own exec guard.
+- ``PermissionPolicy.decide`` runs only when no floor (or strict refusal) fired.
 - A ``policy.decision`` event goes to the trace sink for EVERY evaluated request
   (allow or deny), via ``safe_emit``: a failing sink never changes the verdict.
 - The first ``Deny`` wins; later requests of the same call are not evaluated.
@@ -43,6 +46,7 @@ from nanobot.kernel.policy import (
     Principal,
     policy_deny,
 )
+from nanobot.kernel.strict import strict_sandbox_deny
 from nanobot.kernel.trace import LoguruTraceSink, TraceSink, safe_emit
 
 if TYPE_CHECKING:
@@ -59,7 +63,8 @@ class GateResult:
     """Outcome of ``gate_call``: ``Allow`` (audited) or the first ``Deny``.
 
     ``layer`` says who denied: ``"floor"`` (``check_floors``), ``"policy"``
-    (``PermissionPolicy.decide``) or ``"gate"`` (the declaration itself failed).
+    (``PermissionPolicy.decide``) or ``"gate"`` (the declaration itself failed, or strict
+    mode refused ``exec.run`` without a sandbox).
     ``events`` are the ``policy.decision`` records emitted for this call.
     """
 
@@ -82,7 +87,8 @@ class GateResult:
         """The denied capability, only when ``PermissionPolicy.decide`` denied.
 
         ``None`` for an allow, a floor deny and a ``"gate"`` deny (the tool's own
-        declaration failed: a tool bug, not the host's policy saying no). Only these
+        declaration failed, or a strict-mode sandbox refusal: not the host's policy
+        saying no). Only these
         policy denials are ``violation:policy:*`` and count toward the per-turn
         denial ceiling (I5).
         """
@@ -273,8 +279,11 @@ def gate_call(
         decision: Allow | Deny
         layer: GateLayer | None
         floor_deny = check_floors(principal, req, protected=floor)
+        strict_deny = strict_sandbox_deny(env, tool, name, req) if floor_deny is None else None
         if floor_deny is not None:
             decision, layer = floor_deny, "floor"
+        elif strict_deny is not None:
+            decision, layer = strict_deny, "gate"
         else:
             layer = "policy"
             try:

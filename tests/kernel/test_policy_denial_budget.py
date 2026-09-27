@@ -64,7 +64,9 @@ def _env(tmp_path: Path) -> CoreEnvironment:
         credentials=StaticCredentialResolver({}),
         paths=Paths(work_dir=tmp_path / "work", state_dir=tmp_path / "state"),
         trace=_NullSink(),
-        strict=True,
+        # Not strict: these tests run a real, unsandboxed ExecTool, which strict mode
+        # refuses (Task 13, tests/kernel/test_strict_mode.py). Paths stay separated.
+        strict=False,
     )
 
 

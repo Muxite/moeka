@@ -46,11 +46,19 @@ class ToolRegistry:
         env: CoreEnvironment | None = None,
         workspace: Path | None = None,
     ) -> None:
-        """Set the policy/principal/env that ``execute`` gates every call with."""
+        """Set the policy/principal/env that ``execute`` gates every call with.
+
+        In strict mode with an explicit *policy*, tools already registered whose whole
+        capability surface the policy denies everywhere are pruned (see ``register``).
+        """
         self.gate_policy = policy
         self.gate_principal = principal
         self.gate_env = env
         self.gate_workspace = workspace
+        for name, tool in list(self._tools.items()):
+            if self._strict_drop(tool):
+                self._tools.pop(name, None)
+                self._cached_definitions = None
 
     def gate(self, tool: Tool, params: Any) -> GateResult:
         """Run the kernel capability gate for one prepared call."""
@@ -71,13 +79,56 @@ class ToolRegistry:
 
         emit_tool_invalid(self.gate_env, name, self.gate_principal, error)
 
-    def register(self, tool: Tool) -> None:
-        """Register a tool (a tool with ``bind_registry`` is handed this registry)."""
+    def _strict_drop(self, tool: Tool) -> bool:
+        """Strict mode: True when the gate policy denies *tool*'s whole surface everywhere.
+
+        - Applies only with a strict ``gate_env`` AND an explicit ``gate_policy``; the
+          permissive default (no policy) never drops anything.
+        - An empty or unknown (``None``) surface is kept: the gate decides per call.
+        - A drop is logged and emitted as a ``tool.dropped`` trace event.
+        """
+        from nanobot.kernel.strict import fully_denied, is_strict
+
+        if self.gate_policy is None or not is_strict(self.gate_env):
+            return False
+        surface_fn = getattr(tool, "capability_surface", None)
+        try:
+            surface = surface_fn() if callable(surface_fn) else None
+        except Exception:  # noqa: BLE001 - an unknown surface keeps the tool
+            surface = None
+        if not fully_denied(self.gate_policy, surface):
+            return False
+        from loguru import logger
+
+        from nanobot.kernel.trace import safe_emit
+
+        name = tool.name
+        logger.info("strict mode: tool {} dropped, every capability is denied", name)
+        assert self.gate_env is not None  # guarded by is_strict()
+        safe_emit(self.gate_env.trace, {
+            "event": "tool.dropped",
+            "tool": name,
+            "capabilities": sorted(surface or ()),
+            "reason": "strict mode: every capability denied for every resource",
+        })
+        return True
+
+    def register(self, tool: Tool) -> bool:
+        """Register a tool (a tool with ``bind_registry`` is handed this registry).
+
+        Returns False when strict mode drops it (``_strict_drop``): the tool is then not
+        registered, any earlier tool of the same name is removed, and the model never
+        sees it.
+        """
+        if self._strict_drop(tool):
+            self.unregister(tool.name)
+            return False
         self._tools[tool.name] = tool
         self._cached_definitions = None
         binder = getattr(tool, "bind_registry", None)
         if callable(binder):
             binder(self)
+        return True
 
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""

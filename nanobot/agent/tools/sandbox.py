@@ -373,6 +373,9 @@ def _seatbelt(
 
 _BACKENDS = {"bwrap": _bwrap, "seatbelt": _seatbelt}
 
+# Backend names ``wrap_command`` accepts (strict mode's "declared sandbox").
+SANDBOX_BACKENDS: frozenset[str] = frozenset(_BACKENDS)
+
 
 def wrap_command(
     sandbox: str,

@@ -1896,6 +1896,14 @@ class AgentRunner:
             # Verbatim: the generic retry hint would invite the model to probe the policy.
             return raw_text, event, None
 
+        from nanobot.kernel.strict import STRICT_SANDBOX_MARKER
+
+        if STRICT_SANDBOX_MARKER in raw_text:
+            # Strict mode refused exec without a sandbox: host configuration, so the
+            # generic "try a different approach" hint would only invite workarounds.
+            event["detail"] = self._event_detail("strict_sandbox: ", raw_text)
+            return raw_text, event, None
+
         if self._is_ssrf_violation(raw_text):
             logger.warning(
                 "Tool {} blocked by SSRF guard; returning non-retryable tool error: {}",

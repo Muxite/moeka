@@ -83,6 +83,24 @@ def policy_deny(principal: Principal, req: CapabilityRequest, why: str) -> Deny:
     )
 
 
+def policy_denies_everywhere(policy: Any, capability: str) -> bool:
+    """Ask *policy* whether it denies *capability* for every resource.
+
+    - Uses the optional ``denies_everywhere`` method (``DefaultPolicy``,
+      ``IntersectionPolicy``). It is not part of the ``PermissionPolicy`` protocol.
+    - A policy without it, or whose answer raises or is not ``True``, is never assumed
+      to deny everywhere: strict mode then keeps the tool and lets the gate decide per
+      call (dropping a tool on a guess would hide a usable one).
+    """
+    ask = getattr(policy, "denies_everywhere", None)
+    if not callable(ask):
+        return False
+    try:
+        return ask(capability) is True
+    except Exception:  # noqa: BLE001 - an unanswerable policy keeps the tool
+        return False
+
+
 class DefaultPolicy:
     """Permissive parity with today, plus optional deny rules and an allowed set.
 
@@ -105,8 +123,15 @@ class DefaultPolicy:
         self.allowed = None if allowed is None else frozenset(allowed)
 
     def denies_everywhere(self, capability: str) -> bool:
-        """True when *capability* is denied for every resource by this policy."""
+        """True when *capability* is denied for every resource by this policy.
+
+        - A ``deny_capabilities`` entry, or a capability outside ``allowed``.
+        - A ``deny_rules`` entry whose glob is ``"*"`` (``fnmatch`` matches every
+          resource, including the empty one). Narrower globs are per-resource only.
+        """
         if capability in self.deny_capabilities:
+            return True
+        if any(cap == capability and glob == "*" for cap, glob in self.deny_rules):
             return True
         return self.allowed is not None and capability not in self.allowed
 
@@ -167,6 +192,10 @@ class IntersectionPolicy:
             parts = member.members if type(member) is IntersectionPolicy else (member,)
             flat.extend(p for p in parts if not any(p is q for q in flat))
         self.members = tuple(flat)
+
+    def denies_everywhere(self, capability: str) -> bool:
+        """True when any member denies *capability* for every resource."""
+        return any(policy_denies_everywhere(m, capability) for m in self.members)
 
     def decide(self, principal: Principal, req: CapabilityRequest, ctx: Any) -> Allow | Deny:
         for member in self.members:

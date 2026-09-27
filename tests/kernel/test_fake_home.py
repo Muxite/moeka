@@ -187,6 +187,12 @@ async def test_strict_kernel_turn_reads_nothing_ambient(tmp_path, monkeypatch) -
         exec_base_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(work)},
         strict=True,
     )
+    # Strict mode refuses exec without a declared sandbox (Task 13) and the test image
+    # has no bwrap. This proof is about ambient reads, so the sandbox precondition is
+    # stubbed; the probe still runs as a real process with env.exec_base_env only.
+    from nanobot.agent.tools.shell import ExecTool
+
+    monkeypatch.setattr(ExecTool, "sandbox_active", property(lambda self: True))
 
     logs: list[str] = []
     sink_id = logger.add(lambda msg: logs.append(str(msg)), level="DEBUG")
