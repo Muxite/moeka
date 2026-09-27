@@ -108,6 +108,9 @@ def _apply_runtime_settings(provider: LLMProvider, env: CoreEnvironment | None) 
         provider.request_timeout_s = resolve_openai_compat_timeout_s(
             runtime.get("openai_compat_timeout_s")
         )
+    if env is not None:
+        # Request-extras drops (``sampling.dropped``) go to the host's trace sink.
+        provider.trace_sink = env.trace
 
 
 def _resolve_model_preset(

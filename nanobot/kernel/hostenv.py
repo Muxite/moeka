@@ -26,6 +26,7 @@ from nanobot.kernel.env import (
     Paths,
     StaticCredentialResolver,
 )
+from nanobot.kernel.frozen import FrozenMap, thaw
 from nanobot.kernel.sampling import Sampling
 from nanobot.kernel.trace import NullTraceSink, TraceSink
 
@@ -41,13 +42,22 @@ class ProviderSpec:
     or any other name for a custom OpenAI-compatible endpoint (``api_base``
     required then). ``credential`` is the credential-resolver ref holding the API
     key; ``None`` means the resolver is asked for ``providers/<name>/api_key``.
+
+    Hashable: ``extra_headers`` / ``extra_body`` accept any mapping and are stored
+    as :class:`~nanobot.kernel.frozen.FrozenMap` (``.as_dict()`` for a plain copy).
     """
 
     name: str
     api_base: str | None = None
     credential: str | None = None
-    extra_headers: Mapping[str, str] = field(default_factory=dict)
-    extra_body: Mapping[str, Any] = field(default_factory=dict)
+    extra_headers: Mapping[str, str] = field(default_factory=FrozenMap)
+    extra_body: Mapping[str, Any] = field(default_factory=FrozenMap)
+
+    def __post_init__(self) -> None:
+        for name in ("extra_headers", "extra_body"):
+            value = getattr(self, name)
+            if not isinstance(value, FrozenMap):
+                object.__setattr__(self, name, FrozenMap(value))
 
 
 @dataclass(frozen=True)
@@ -282,9 +292,9 @@ class Environment:
             if p.api_base is not None:
                 entry["api_base"] = p.api_base
             if p.extra_headers:
-                entry["extra_headers"] = dict(p.extra_headers)
+                entry["extra_headers"] = thaw(p.extra_headers)
             if p.extra_body:
-                entry["extra_body"] = dict(p.extra_body)
+                entry["extra_body"] = thaw(p.extra_body)
             provider_section[p.name] = entry
 
         data: dict[str, Any] = {

@@ -17,6 +17,20 @@ SURFACE: dict[str, list[str]] = {
         "Sampling",
         "StaticCredentialResolver",
     ],
+    "moeka.errors": [
+        "AuthError",
+        "BudgetExceeded",
+        "ContentFilterError",
+        "LLMError",
+        "LLMTimeoutError",
+        "ModelNotFound",
+        "ParseError",
+        "QuotaError",
+        "RateLimitError",
+        "TransientError",
+        "TruncatedError",
+        "UnsupportedRequestError",
+    ],
     "moeka.tools": [
         "CapabilityRequest",
         "DefaultPolicy",
@@ -54,3 +68,13 @@ def test_reexports_are_the_implementation_objects() -> None:
 
     assert moeka.Environment is Environment
     assert moeka.Kernel is Kernel
+
+
+def test_errors_are_the_implementation_classes() -> None:
+    import moeka.errors
+    from nanobot.kernel import llm_errors
+
+    for name in moeka.errors.__all__:
+        assert getattr(moeka.errors, name) is getattr(llm_errors, name)
+    assert not hasattr(moeka.errors, "classify")
+    assert issubclass(moeka.errors.LLMTimeoutError, TimeoutError)

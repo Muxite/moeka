@@ -8,7 +8,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -23,6 +23,9 @@ from nanobot.providers.base import (
     RetryEventCallback,
     RetryStatusCallback,
 )
+
+if TYPE_CHECKING:
+    from nanobot.kernel.trace import TraceSink
 
 # Circuit breaker tuned to match OpenAICompatProvider's Responses API breaker.
 _PRIMARY_FAILURE_THRESHOLD = 3
@@ -151,6 +154,23 @@ class FallbackProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self._primary.get_default_model()
+
+    @property
+    def trace_sink(self) -> TraceSink | None:  # type: ignore[override]
+        return self._primary.trace_sink
+
+    @trace_sink.setter
+    def trace_sink(self, value: TraceSink | None) -> None:
+        self._primary.trace_sink = value
+
+    def _sampling_support(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> frozenset[str] | None:
+        # Decide drop/raise against the primary before anything is sent;
+        # fallback candidates then drop whatever they cannot send themselves.
+        return self._primary._sampling_support(model, reasoning_effort)
 
     def set_fallback_model_observer(self, observer: FallbackModelObserver | None) -> None:
         """Attach a process-level observer without changing request call signatures."""

@@ -22,6 +22,8 @@ from nanobot.events import NO_EVENTS, EventSink, RetryStatusEvent, RetryWaitEven
 from nanobot.utils.helpers import sanitize_surrogates_deep
 
 if TYPE_CHECKING:
+    from nanobot.kernel.sampling import Sampling
+    from nanobot.kernel.trace import TraceSink
     from nanobot.llm_usage.models import LLMCallRecord
 
 STREAM_IDLE_TIMEOUT_ENV = "NANOBOT_STREAM_IDLE_TIMEOUT_S"
@@ -257,12 +259,43 @@ class ProviderConversationState:
 class RequestExtras:
     """Per-request extras that ride on :class:`ProviderCallContext`.
 
-    Kept separate from the continuation/telemetry fields above so a single
-    request-shaped knob (native structured output today; sampling fields are
-    a later addition) doesn't grow the base context's surface.
+    Kept separate from the continuation/telemetry fields above so request-shaped
+    knobs don't grow the base context's (or the abstract ``chat()``) surface.
+
+    * ``response_format``: native structured output (OpenAI/OpenRouter shape).
+    * ``sampling``: explicit fields override the call's ``temperature`` /
+      ``max_tokens`` / ``reasoning_effort`` arguments (and so the preset's
+      ``GenerationSettings``); providers map the rest natively or drop them.
+    * ``extra_body``: per-request body fields, deep-merged after the provider's
+      configured ``extra_body``.
+    * ``on_unsupported``: ``"drop"`` omits fields the provider cannot honour and
+      reports them (``sampling.dropped`` trace event); ``"raise"`` raises
+      ``UnsupportedRequestError`` before anything is sent.
     """
 
     response_format: Mapping[str, Any] | None = None
+    sampling: Sampling | None = None
+    extra_body: Mapping[str, Any] | None = None
+    on_unsupported: Literal["drop", "raise"] = "drop"
+
+
+def plain_request_body(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Deep-copy a (possibly frozen) mapping into plain dicts/lists for the wire."""
+
+    def _thaw(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            return {key: _thaw(sub) for key, sub in cast(Mapping[Any, Any], item).items()}
+        if isinstance(item, (list, tuple)):
+            return [_thaw(sub) for sub in cast(list[Any], item)]
+        return item
+
+    return cast(dict[str, Any], _thaw(value))
+
+
+# Sampling fields every provider honours through the ``chat()`` arguments.
+CORE_SAMPLING_FIELDS: frozenset[str] = frozenset({"temperature", "max_tokens", "reasoning_effort"})
+# Pseudo-field for ``RequestExtras.extra_body`` in the supported-field sets.
+EXTRA_BODY_FIELD = "extra_body"
 
 
 @dataclass(frozen=True)
@@ -644,6 +677,12 @@ class LLMProvider(ABC):
     # Streaming idle timeout (seconds); the provider factory sets it from the
     # host env's ``runtime`` section, direct constructions keep the default.
     stream_idle_timeout_s: float = DEFAULT_STREAM_IDLE_TIMEOUT_S
+    # Host trace sink (the factory sets it from ``env.trace``); ``None`` = no env,
+    # request-extras drops are then only logged at debug.
+    trace_sink: TraceSink | None = None
+    # ``RequestExtras.sampling`` fields (plus ``"extra_body"``) this provider can
+    # send. Anything else is dropped or raised on per ``on_unsupported``.
+    supported_sampling_fields: frozenset[str] = CORE_SAMPLING_FIELDS
 
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _PERSISTENT_MAX_DELAY = 60
@@ -1462,6 +1501,90 @@ class LLMProvider(ABC):
             stream=True,
         )
 
+    def _sampling_support(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> frozenset[str] | None:
+        """Request-extras fields this call can honour; ``None`` = pass them through.
+
+        Providers with model-dependent limits override this; routing wrappers
+        return their primary's set.
+        """
+        _ = model, reasoning_effort
+        return self.supported_sampling_fields
+
+    def _apply_request_extras(self, kw: dict[str, Any]) -> None:
+        """Resolve ``RequestExtras`` once per call, before any attempt is sent.
+
+        Drops (or raises on) fields the provider cannot honour, then lets the
+        explicit sampling ``temperature`` / ``max_tokens`` / ``reasoning_effort``
+        override the call arguments. The narrowed extras replace the context in
+        ``kw`` with ``on_unsupported="drop"`` so inner fallback candidates drop
+        what they cannot send instead of failing mid-chain.
+        """
+        context = kw.get("provider_context")
+        if not isinstance(context, ProviderCallContext) or context.request is None:
+            return
+        extras = context.request
+        sampling = extras.sampling
+        if sampling is not None and sampling.reasoning_effort is not None:
+            effort = sampling.reasoning_effort
+        else:
+            effort = kw.get("reasoning_effort")
+        supported = self._sampling_support(kw.get("model"), effort)
+        if supported is None:
+            return
+
+        requested = list(sampling.set_fields()) if sampling is not None else []
+        if extras.extra_body:
+            requested.append(EXTRA_BODY_FIELD)
+        unsupported = [name for name in requested if name not in supported]
+        model_name = kw.get("model") or self.get_default_model()
+        if unsupported:
+            if extras.on_unsupported == "raise":
+                from nanobot.kernel.llm_errors import UnsupportedRequestError
+
+                raise UnsupportedRequestError(
+                    fields=unsupported, provider=self.provider_name, model=model_name,
+                )
+            self._report_dropped_fields(model_name, unsupported)
+            if sampling is not None:
+                sampling = replace(sampling, **{
+                    name: (() if name == "stop" else None)
+                    for name in unsupported
+                    if name != EXTRA_BODY_FIELD
+                })
+            if EXTRA_BODY_FIELD in unsupported:
+                extras = replace(extras, extra_body=None)
+
+        if sampling is not None:
+            if sampling.temperature is not None:
+                kw["temperature"] = sampling.temperature
+            if sampling.max_tokens is not None:
+                kw["max_tokens"] = sampling.max_tokens
+            if sampling.reasoning_effort is not None:
+                kw["reasoning_effort"] = sampling.reasoning_effort
+        kw["provider_context"] = replace(
+            context,
+            request=replace(extras, sampling=sampling, on_unsupported="drop"),
+        )
+
+    def _report_dropped_fields(self, model: str, fields: list[str]) -> None:
+        event = {
+            "event": "sampling.dropped",
+            "provider": self.provider_name,
+            "model": model,
+            "fields": list(fields),
+        }
+        sink = self.trace_sink
+        if sink is None:
+            logger.debug("request extras dropped (no trace sink): {}", event)
+            return
+        from nanobot.kernel.trace import safe_emit
+
+        safe_emit(sink, event)
+
     async def chat_stream_with_retry(
         self,
         messages: list[dict[str, Any]],
@@ -1514,6 +1637,7 @@ class LLMProvider(ABC):
         )
         if provider_context is not None:
             kw["provider_context"] = provider_context
+            self._apply_request_extras(kw)
         if on_stream_recover and getattr(self, "supports_stream_recover_callback", False):
             kw["on_stream_recover"] = _recover_stream
         on_retry_wait, on_retry_exhausted, on_retry_status = await self._retry_notifications(
@@ -1569,6 +1693,7 @@ class LLMProvider(ABC):
         )
         if provider_context is not None:
             kw["provider_context"] = provider_context
+            self._apply_request_extras(kw)
         on_retry_wait, on_retry_exhausted, on_retry_status = await self._retry_notifications(
             provider_context, on_retry_wait, on_retry_exhausted, on_retry_status,
         )

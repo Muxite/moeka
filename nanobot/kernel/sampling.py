@@ -7,12 +7,18 @@ provider does not support) lives with the providers.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+
+from nanobot.kernel.frozen import FrozenMap
 
 
 @dataclass(frozen=True)
 class Sampling:
-    """Sampling knobs for one model call; ``None`` / ``()`` means "provider default"."""
+    """Sampling knobs for one model call; ``None`` / ``()`` means "provider default".
+
+    Hashable: ``logit_bias`` accepts any mapping and is stored as a
+    :class:`~nanobot.kernel.frozen.FrozenMap` (``dict(s.logit_bias)`` for a copy).
+    """
 
     temperature: float | None = None
     top_p: float | None = None
@@ -34,6 +40,15 @@ class Sampling:
             object.__setattr__(self, "stop", (self.stop,))
         elif not isinstance(self.stop, tuple):
             object.__setattr__(self, "stop", tuple(self.stop))
+        if self.logit_bias is not None and not isinstance(self.logit_bias, FrozenMap):
+            object.__setattr__(self, "logit_bias", FrozenMap(self.logit_bias))
+
+    def set_fields(self) -> tuple[str, ...]:
+        """Names of the fields this call sets (non-``None``, non-empty ``stop``)."""
+        return tuple(
+            f.name for f in fields(self)
+            if getattr(self, f.name) is not None and getattr(self, f.name) != ()
+        )
 
 
 __all__ = ["Sampling"]

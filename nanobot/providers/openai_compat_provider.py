@@ -24,6 +24,8 @@ from pydantic.alias_generators import to_snake
 
 from nanobot.kernel.env import resolve_credential
 from nanobot.providers.base import (
+    CORE_SAMPLING_FIELDS,
+    EXTRA_BODY_FIELD,
     LLMProvider,
     LLMResponse,
     LLMUsage,
@@ -31,6 +33,7 @@ from nanobot.providers.base import (
     ProviderConversationState,
     ToolCallRequest,
     parse_tool_arguments,
+    plain_request_body,
     tool_arguments_json_for_replay,
 )
 from nanobot.providers.openai_responses import (
@@ -511,6 +514,47 @@ def _merge_responses_extra_body(
     return merged
 
 
+# Sampling fields sent as top-level Chat Completions parameters.
+_NATIVE_CHAT_SAMPLING = ("top_p", "presence_penalty", "frequency_penalty", "seed")
+# Not in the OpenAI schema, but vLLM, llama-server and OpenRouter read them
+# from the request body, so they ride in ``extra_body``.
+_EXTRA_BODY_SAMPLING = ("top_k", "min_p", "repetition_penalty")
+_CHAT_SAMPLING_FIELDS = frozenset({
+    *CORE_SAMPLING_FIELDS,
+    *_NATIVE_CHAT_SAMPLING,
+    *_EXTRA_BODY_SAMPLING,
+    "stop",
+    "logit_bias",
+    EXTRA_BODY_FIELD,
+})
+# The Responses API has no penalties/seed/stop/logit_bias/top_k.
+_RESPONSES_SAMPLING_FIELDS = frozenset({*CORE_SAMPLING_FIELDS, "top_p", EXTRA_BODY_FIELD})
+
+
+def _effective_sampling_args(
+    provider_context: ProviderCallContext | None,
+    max_tokens: int,
+    temperature: float,
+    reasoning_effort: str | None,
+) -> tuple[Any, int, float, str | None]:
+    """Return ``(sampling, max_tokens, temperature, reasoning_effort)`` with explicit
+    ``RequestExtras.sampling`` values overriding the call arguments."""
+    request = provider_context.request if provider_context is not None else None
+    sampling = request.sampling if request is not None else None
+    if sampling is None:
+        return None, max_tokens, temperature, reasoning_effort
+    return (
+        sampling,
+        sampling.max_tokens if sampling.max_tokens is not None else max_tokens,
+        sampling.temperature if sampling.temperature is not None else temperature,
+        (
+            sampling.reasoning_effort
+            if sampling.reasoning_effort is not None
+            else reasoning_effort
+        ),
+    )
+
+
 class OpenAICompatProvider(LLMProvider):
     """Unified provider for all OpenAI-compatible APIs.
 
@@ -522,6 +566,7 @@ class OpenAICompatProvider(LLMProvider):
     # Request timeout (seconds); the provider factory sets it from the host env's
     # ``runtime`` section, direct constructions keep the default.
     request_timeout_s: float = _OPENAI_COMPAT_REQUEST_TIMEOUT_S
+    supported_sampling_fields = _CHAT_SAMPLING_FIELDS
 
     def __init__(
         self,
@@ -925,6 +970,19 @@ class OpenAICompatProvider(LLMProvider):
         name = model_name.lower()
         return not any(token in name for token in ("gpt-5", "o1", "o3", "o4"))
 
+    def _sampling_support(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> frozenset[str] | None:
+        supported = self.supported_sampling_fields
+        if self._should_use_responses_api(model, reasoning_effort):
+            supported = supported & _RESPONSES_SAMPLING_FIELDS
+        request_model = self._request_model_name(model or self.default_model)
+        if not self._supports_temperature(request_model, reasoning_effort):
+            supported = supported - {"temperature"}
+        return supported
+
     def _opencode_affinity_headers(
         self,
         provider_context: "ProviderCallContext | None",
@@ -953,6 +1011,9 @@ class OpenAICompatProvider(LLMProvider):
     ) -> dict[str, Any]:
         model_name = model or self.default_model
         spec = self._spec
+        sampling, max_tokens, temperature, reasoning_effort = _effective_sampling_args(
+            provider_context, max_tokens, temperature, reasoning_effort,
+        )
 
         if spec and spec.supports_prompt_caching:
             model_name = model or self.default_model
@@ -1113,6 +1174,33 @@ class OpenAICompatProvider(LLMProvider):
         # otherwise lets extra_body.tools replace nanobot's generated functions.
         if self._extra_body:
             kwargs = _merge_chat_extra_body(kwargs, self._extra_body)
+
+        # Explicit per-request sampling, then per-request extra_body, win over
+        # the configured extra_body.
+        if sampling is not None:
+            for name in _NATIVE_CHAT_SAMPLING:
+                value = getattr(sampling, name)
+                if value is not None:
+                    kwargs[name] = value
+            if sampling.stop:
+                kwargs["stop"] = list(sampling.stop)
+            if sampling.logit_bias:
+                # The wire format keys token ids as strings.
+                kwargs["logit_bias"] = {str(k): v for k, v in sampling.logit_bias.items()}
+            body_sampling = {
+                name: getattr(sampling, name)
+                for name in _EXTRA_BODY_SAMPLING
+                if getattr(sampling, name) is not None
+            }
+            if body_sampling:
+                kwargs["extra_body"] = _deep_merge(kwargs.get("extra_body", {}), body_sampling)
+        request_extra_body = (
+            provider_context.request.extra_body
+            if provider_context is not None and provider_context.request is not None
+            else None
+        )
+        if request_extra_body:
+            kwargs = _merge_chat_extra_body(kwargs, plain_request_body(request_extra_body))
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
 
@@ -1291,6 +1379,9 @@ class OpenAICompatProvider(LLMProvider):
         provider_context: ProviderCallContext | None = None,
     ) -> dict[str, Any]:
         """Build a Responses API body for direct OpenAI requests."""
+        sampling, max_tokens, temperature, reasoning_effort = _effective_sampling_args(
+            provider_context, max_tokens, temperature, reasoning_effort,
+        )
         model_name = model or self.default_model
         model_name = self._request_model_name(model_name)
         sanitized_messages = self._sanitize_messages(
@@ -1364,6 +1455,15 @@ class OpenAICompatProvider(LLMProvider):
             ]
         if extra_body:
             body = _merge_responses_extra_body(body, extra_body)
+        if sampling is not None and sampling.top_p is not None:
+            body["top_p"] = sampling.top_p
+        request_extra_body = (
+            provider_context.request.extra_body
+            if provider_context is not None and provider_context.request is not None
+            else None
+        )
+        if request_extra_body:
+            body = _merge_responses_extra_body(body, plain_request_body(request_extra_body))
 
         if self._hosted_web_search_enabled():
             configured_tools = body.get("tools")
@@ -2140,6 +2240,7 @@ class OpenAICompatProvider(LLMProvider):
                 messages, tools, model, max_tokens, temperature,
                 reasoning_effort, tool_choice,
                 extra_headers=affinity,
+                provider_context=provider_context,
             )
             if self._spec and self._spec.name == "zhipu" and tools and on_tool_call_delta:
                 # Z.AI/GLM keeps streaming tool-call arguments behind an

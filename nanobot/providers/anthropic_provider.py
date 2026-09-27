@@ -15,10 +15,14 @@ from typing import Any, cast
 from loguru import logger
 
 from nanobot.providers.base import (
+    CORE_SAMPLING_FIELDS,
+    EXTRA_BODY_FIELD,
     LLMProvider,
     LLMResponse,
     LLMUsage,
+    ProviderCallContext,
     ToolCallRequest,
+    plain_request_body,
     tool_arguments_object_for_replay,
 )
 
@@ -46,6 +50,10 @@ _THINKING_DISABLE_MIN_VERSIONS = {
     "sonnet": (5, 0),
 }
 _SAMPLING_DEPRECATED_MODELS = {"claude-mythos-preview"}
+# RequestExtras sampling the Messages API accepts (stop -> stop_sequences).
+_ANTHROPIC_SAMPLING_FIELDS = frozenset({
+    *CORE_SAMPLING_FIELDS, "top_p", "top_k", "stop", EXTRA_BODY_FIELD,
+})
 
 
 def _model_version_at_least(
@@ -83,6 +91,8 @@ class AnthropicProvider(LLMProvider):
     Handles message format conversion (OpenAI → Anthropic Messages API),
     prompt caching, extended thinking, tool calls, and streaming.
     """
+
+    supported_sampling_fields = _ANTHROPIC_SAMPLING_FIELDS
 
     def __init__(
         self,
@@ -573,6 +583,28 @@ class AnthropicProvider(LLMProvider):
     # Build API kwargs
     # ------------------------------------------------------------------
 
+    def _omits_sampling(self, model_name: str) -> bool:
+        """Models that reject temperature/top_p/top_k outright."""
+        return (
+            _model_version_at_least(model_name, _ADAPTIVE_ONLY_MIN_VERSIONS)
+            or model_name.lower() in _SAMPLING_DEPRECATED_MODELS
+        )
+
+    def _sampling_support(
+        self,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> frozenset[str] | None:
+        supported = self.supported_sampling_fields
+        model_name = self._strip_prefix(model or self.default_model)
+        if self._omits_sampling(model_name):
+            supported = supported - {"temperature", "top_p", "top_k"}
+        effort = (reasoning_effort or "").lower()
+        if effort not in ("", "none"):
+            # Extended thinking pins temperature and rejects top_k.
+            supported = supported - {"temperature", "top_k"}
+        return supported
+
     def _build_kwargs(
         self,
         messages: list[dict[str, Any]],
@@ -583,7 +615,17 @@ class AnthropicProvider(LLMProvider):
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
         supports_caching: bool = True,
+        provider_context: ProviderCallContext | None = None,
     ) -> dict[str, Any]:
+        request = provider_context.request if provider_context is not None else None
+        sampling = request.sampling if request is not None else None
+        if sampling is not None:
+            if sampling.max_tokens is not None:
+                max_tokens = sampling.max_tokens
+            if sampling.temperature is not None:
+                temperature = sampling.temperature
+            if sampling.reasoning_effort is not None:
+                reasoning_effort = sampling.reasoning_effort
         model_name = self._strip_prefix(model or self.default_model)
         system, anthropic_msgs = self._convert_messages(self._sanitize_empty_content(messages))
         anthropic_tools = self._convert_tools(tools)
@@ -644,6 +686,16 @@ class AnthropicProvider(LLMProvider):
             tc = self._convert_tool_choice(tool_choice, thinking_enabled)
             if tc:
                 kwargs["tool_choice"] = tc
+
+        if sampling is not None:
+            if sampling.top_p is not None and not omit_temperature:
+                kwargs["top_p"] = sampling.top_p
+            if sampling.top_k is not None and not omit_temperature and not thinking_enabled:
+                kwargs["top_k"] = sampling.top_k
+            if sampling.stop:
+                kwargs["stop_sequences"] = list(sampling.stop)
+        if request is not None and request.extra_body:
+            kwargs["extra_body"] = plain_request_body(request.extra_body)
 
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
@@ -730,6 +782,23 @@ class AnthropicProvider(LLMProvider):
         on substring so a future SDK message tweak doesn't break detection."""
         return isinstance(e, ValueError) and "streaming is required" in str(e).lower()
 
+    async def chat_with_context(
+        self,
+        *,
+        provider_context: ProviderCallContext,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        # Only the request extras are consumed; there is no continuation state.
+        return await self.chat(**kwargs, provider_context=provider_context)
+
+    async def chat_stream_with_context(
+        self,
+        *,
+        provider_context: ProviderCallContext,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        return await self.chat_stream(**kwargs, provider_context=provider_context)
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -739,10 +808,12 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        provider_context: ProviderCallContext | None = None,
     ) -> LLMResponse:
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
+            provider_context=provider_context,
         )
         try:
             response = cast(Any, await self._client.messages.create(**kwargs))
@@ -762,6 +833,7 @@ class AnthropicProvider(LLMProvider):
                     temperature=temperature,
                     reasoning_effort=reasoning_effort,
                     tool_choice=tool_choice,
+                    provider_context=provider_context,
                 )
             return self._handle_error(e)
 
@@ -777,10 +849,12 @@ class AnthropicProvider(LLMProvider):
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        provider_context: ProviderCallContext | None = None,
     ) -> LLMResponse:
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
+            provider_context=provider_context,
         )
         idle_timeout_s = self.stream_idle_timeout_s
         kwargs["timeout"] = idle_timeout_s
