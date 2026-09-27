@@ -7,7 +7,7 @@ import hashlib
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext
@@ -29,6 +29,9 @@ from nanobot.security.protected_paths import (
 from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.utils.file_edit_events import FileDiff, FileEditResult, display_file_edit_path
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import Paths
 
 
 class FileToolsConfig(Base):
@@ -66,8 +69,14 @@ class _FsTool(Tool):
         sandbox_restricts_workspace: bool = False,
         extra_read_allowed_files: list[Path] | None = None,
         max_write_bytes: int = DEFAULT_MAX_WRITE_BYTES,
+        paths: "Paths | None" = None,
+        legacy_floor: bool = True,
     ):
         self._workspace = workspace
+        # Host paths (env.paths): the floor and the media root come from here.
+        # ``None`` keeps the legacy ambient behaviour (direct constructions).
+        self._paths = paths
+        self._legacy_floor = legacy_floor
         self._max_write_bytes = max_write_bytes
         self._allowed_dir = allowed_dir
         # Legacy alias: extra_allowed_dirs is read-only. Write-capable tools
@@ -113,6 +122,7 @@ class _FsTool(Tool):
         )
         sandbox_restricts = bool(ctx.config.exec.sandbox)
         allowed_dir = agent_workspace if restrict else None
+        env = ctx.env
         # Agent-owned skills stay available from project scopes. History is a narrower
         # capability: expose only the append-only log, not the surrounding memory directory.
         return cls(
@@ -123,6 +133,8 @@ class _FsTool(Tool):
             file_states=ctx.file_state_store,
             restrict_to_workspace=ctx.config.restrict_to_workspace,
             sandbox_restricts_workspace=sandbox_restricts,
+            paths=env.paths if env is not None else None,
+            legacy_floor=env is None or not env.strict,
         )
 
     @property
@@ -167,10 +179,18 @@ class _FsTool(Tool):
             extra_allowed_dirs,
             extra_allowed_files,
             include_media_dir=include_media_dir,
+            media_dir=self._paths.media_dir if self._paths is not None else None,
         )
 
     def _protected_floor(self) -> ProtectedFloor:
         """The non-configurable floor (applies whatever the allow settings say)."""
+        if self._paths is not None:
+            from nanobot.kernel.legacy import legacy_floor_extras
+
+            extra_dirs, config_files = legacy_floor_extras() if self._legacy_floor else ([], [])
+            return ProtectedFloor.from_paths(
+                self._paths, extra_data_dirs=extra_dirs, config_files=config_files,
+            )
         return ProtectedFloor(
             data_dir=default_data_dirs(),
             workspace=self._workspace,

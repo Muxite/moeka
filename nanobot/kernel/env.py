@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -14,24 +14,56 @@ class PathsOverlapError(ValueError):
     """work_dir and state_dir alias, or one is nested inside the other."""
 
 
+PathOverride = Path | Callable[[], Path] | None
+
+
 @dataclass(frozen=True)
 class Paths:
-    """Separated work (agent-visible) and state (kernel-private) directories."""
+    """Separated work (agent-visible) and state (kernel-private) directories.
+
+    ``sessions_root``/``data_dir``/``logs_dir``/``media_dir`` derive from the two
+    roots unless an explicit ``*_override`` is given. An override is a path or a
+    zero-argument callable; a callable is evaluated on first access (never at
+    construction) and cached, so an adapter can defer ambient lookups.
+    """
 
     work_dir: Path
     state_dir: Path
     overlap_ok: bool = False
+    sessions_root_override: PathOverride = None
+    data_dir_override: PathOverride = None
+    logs_dir_override: PathOverride = None
+    media_dir_override: PathOverride = None
+    _resolved: dict[str, Path] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         work = Path(self.work_dir).resolve()
         state = Path(self.state_dir).resolve()
         object.__setattr__(self, "work_dir", work)
         object.__setattr__(self, "state_dir", state)
+        for name in ("sessions_root", "data_dir", "logs_dir", "media_dir"):
+            value = getattr(self, f"{name}_override")
+            if value is not None and not callable(value):
+                object.__setattr__(self, f"{name}_override", Path(value).resolve())
         if not self.overlap_ok and self.overlaps:
             raise PathsOverlapError(
                 f"work_dir {work} and state_dir {state} overlap; "
                 "pass overlap_ok=True for the legacy flat layout"
             )
+
+    def _dir(self, name: str, default: Path) -> Path:
+        override = getattr(self, f"{name}_override")
+        if override is None:
+            return default
+        if not callable(override):
+            return override
+        cached = self._resolved.get(name)
+        if cached is None:
+            cached = Path(override()).resolve()
+            self._resolved[name] = cached
+        return cached
 
     @property
     def overlaps(self) -> bool:
@@ -41,19 +73,19 @@ class Paths:
 
     @property
     def sessions_root(self) -> Path:
-        return self.state_dir / "sessions"
+        return self._dir("sessions_root", self.state_dir / "sessions")
 
     @property
     def data_dir(self) -> Path:
-        return self.state_dir / "data"
+        return self._dir("data_dir", self.state_dir / "data")
 
     @property
     def logs_dir(self) -> Path:
-        return self.state_dir / "logs"
+        return self._dir("logs_dir", self.state_dir / "logs")
 
     @property
     def media_dir(self) -> Path:
-        return self.work_dir / "media"
+        return self._dir("media_dir", self.work_dir / "media")
 
 
 class CredentialResolver(Protocol):

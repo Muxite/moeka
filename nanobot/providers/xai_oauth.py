@@ -253,20 +253,32 @@ class XAIOAuthLoginFlow:
             self._server_thread.join(timeout=2)
 
 
-def get_xai_oauth_storage_path() -> Path:
-    """Return the instance-scoped xAI OAuth credential path."""
-    return get_data_dir() / "auth" / "xai.json"
+def get_xai_oauth_storage_path(data_dir: Path | None = None) -> Path:
+    """Return the instance-scoped xAI OAuth credential path.
+
+    *data_dir* is the host's data dir (``env.paths.data_dir``); ``None`` keeps the
+    legacy ``get_data_dir()``.
+    """
+    base = data_dir if data_dir is not None else get_data_dir()
+    return base / "auth" / "xai.json"
 
 
-def get_xai_oauth_login_status() -> XAIToken | None:
+def _storage_path(data_dir: Path | None) -> Path:
+    # The zero-argument call keeps ``get_xai_oauth_storage_path`` patchable.
+    if data_dir is None:
+        return get_xai_oauth_storage_path()
+    return get_xai_oauth_storage_path(data_dir)
+
+
+def get_xai_oauth_login_status(data_dir: Path | None = None) -> XAIToken | None:
     """Return locally stored login state without making a network request."""
-    return _load_token()
+    return _load_token(data_dir) if data_dir is not None else _load_token()
 
 
-def logout_xai_oauth() -> bool:
+def logout_xai_oauth(data_dir: Path | None = None) -> bool:
     """Remove this instance's credentials while excluding token refreshes."""
-    path = get_xai_oauth_storage_path()
-    with _token_lock():
+    path = _storage_path(data_dir)
+    with _token_lock(data_dir):
         try:
             path.unlink()
         except FileNotFoundError:
@@ -353,9 +365,15 @@ def get_xai_oauth_token(
     proxy: str | None = None,
     min_ttl_ms: int = _TOKEN_REFRESH_MARGIN_MS,
     force_refresh: bool = False,
+    data_dir: Path | None = None,
 ) -> XAIToken:
     """Load a usable token, refreshing it under an inter-process lock when needed."""
-    token = _load_token()
+
+    def load() -> XAIToken | None:
+        # Looked up at call time so tests can swap ``_load_token``.
+        return _load_token(data_dir) if data_dir is not None else _load_token()
+
+    token = load()
     if token is None:
         raise XAIOAuthError(
             "xAI is not signed in. Run `nanobot provider login xai-grok` first."
@@ -370,8 +388,8 @@ def get_xai_oauth_token(
             "Run `nanobot provider login xai-grok` again."
         )
 
-    with _token_lock():
-        latest = _load_token()
+    with _token_lock(data_dir):
+        latest = load()
         if latest is None:
             raise XAIOAuthError(
                 "xAI is not signed in. Run `nanobot provider login xai-grok` first."
@@ -384,7 +402,7 @@ def get_xai_oauth_token(
                 "Run `nanobot provider login xai-grok` again."
             )
         refreshed = _refresh_token(latest, proxy)
-        _write_token(refreshed)
+        _write_token(refreshed, data_dir=data_dir)
         return refreshed
 
 
@@ -715,14 +733,14 @@ def _http_client(proxy: str | None) -> httpx.Client:
     return httpx.Client(**kwargs)
 
 
-def _token_lock() -> FileLock:
-    path = get_xai_oauth_storage_path()
+def _token_lock(data_dir: Path | None = None) -> FileLock:
+    path = _storage_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     return FileLock(str(path.with_suffix(".lock")), timeout=15)
 
 
-def _load_token() -> XAIToken | None:
-    path = get_xai_oauth_storage_path()
+def _load_token(data_dir: Path | None = None) -> XAIToken | None:
+    path = _storage_path(data_dir)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -733,8 +751,8 @@ def _load_token() -> XAIToken | None:
     return XAIToken.from_dict(payload)
 
 
-def _write_token(token: XAIToken) -> None:
-    path = get_xai_oauth_storage_path()
+def _write_token(token: XAIToken, *, data_dir: Path | None = None) -> None:
+    path = _storage_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with suppress(OSError):
         os.chmod(path.parent, 0o700)

@@ -9,6 +9,7 @@ import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -77,11 +78,17 @@ class XAIGrokProvider(LLMProvider):
         extra_body: dict[str, Any] | None = None,
         *,
         provider_name: str = "xai_grok",
+        data_dir: Path | None = None,
     ):
         super().__init__(api_key=None, api_base=None, provider_name=provider_name)
         self.default_model = default_model
+        # Host data dir for the OAuth token store; ``None`` = legacy get_data_dir().
+        self._data_dir = data_dir
         self.proxy = proxy or None
         self._extra_body = dict(extra_body or {})
+
+    def _token_kwargs(self) -> dict[str, Any]:
+        return {"data_dir": self._data_dir} if self._data_dir is not None else {}
 
     async def _supports_backend_search(self, model: str) -> bool:
         catalog = await asyncio.to_thread(
@@ -115,7 +122,9 @@ class XAIGrokProvider(LLMProvider):
 
         stage = "oauth_token"
         try:
-            token = await asyncio.to_thread(get_xai_oauth_token, proxy=self.proxy)
+            token = await asyncio.to_thread(
+                get_xai_oauth_token, proxy=self.proxy, **self._token_kwargs(),
+            )
             configured_tools = self._extra_body.get("tools")
             tools_are_explicit = "tools" in self._extra_body
             configured_hosted_search = isinstance(configured_tools, list) and any(
@@ -190,6 +199,7 @@ class XAIGrokProvider(LLMProvider):
                         get_xai_oauth_token,
                         proxy=self.proxy,
                         force_refresh=True,
+                        **self._token_kwargs(),
                     )
                     headers = _build_headers(token.access, wire_model)
                     stage = "xai_request_after_oauth_refresh"

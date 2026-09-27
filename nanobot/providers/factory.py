@@ -152,6 +152,7 @@ def _make_provider_core(
     *,
     preset: ModelPresetConfig,
     model: str | None = None,
+    data_dir: Path | None = None,
 ) -> LLMProvider:
     """Create a plain LLM provider without failover wrapping."""
     setup = _resolve_provider_setup(
@@ -182,6 +183,7 @@ def _make_provider_core(
             proxy=getattr(p, "proxy", None) if p else None,
             extra_body=p.extra_body if p else None,
             provider_name=provider_name,
+            data_dir=data_dir,
         )
     elif backend == "azure_openai":
         from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
@@ -276,21 +278,24 @@ def make_provider(
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
     model: str | None = None,
+    data_dir: Path | None = None,
 ) -> LLMProvider:
     """Create the LLM provider implied by config.
 
     When *model* is given, it overrides the resolved/preset model — used by
-    the failover path to create providers for fallback models.
+    the failover path to create providers for fallback models. *data_dir* is the
+    host's instance data dir (``env.paths.data_dir``) for OAuth token stores;
+    ``None`` keeps the legacy ``get_data_dir()``.
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
-    provider = _make_provider_core(config, preset=resolved, model=model)
+    provider = _make_provider_core(config, preset=resolved, model=model, data_dir=data_dir)
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
     if fallback_presets:
         provider = FallbackProvider(
             primary=provider,
             fallback_presets=fallback_presets,
-            provider_factory=lambda fb: _make_provider_core(config, preset=fb),
+            provider_factory=lambda fb: _make_provider_core(config, preset=fb, data_dir=data_dir),
             primary_context_window_tokens=resolved.context_window_tokens,
         )
 

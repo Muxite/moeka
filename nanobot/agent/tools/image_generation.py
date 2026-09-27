@@ -45,6 +45,7 @@ from nanobot.utils.helpers import detect_image_mime
 if TYPE_CHECKING:
     from nanobot.agent.tools.context import ToolContext
     from nanobot.config.schema import ProviderConfig
+    from nanobot.kernel.env import Paths
 
 
 class ImageGenerationToolConfig(Base):
@@ -101,6 +102,8 @@ class ImageGenerationTool(Tool):
             workspace=ctx.workspace,
             config=ctx.config.image_generation,
             provider_configs=ctx.image_generation_provider_configs,
+            paths=ctx.env.paths if ctx.env is not None else None,
+            legacy_floor=ctx.env is None or not ctx.env.strict,
         )
 
     def __init__(
@@ -110,8 +113,13 @@ class ImageGenerationTool(Tool):
         config: ImageGenerationToolConfig,
         provider_config: ProviderConfig | None = None,
         provider_configs: dict[str, ProviderConfig] | None = None,
+        paths: Paths | None = None,
+        legacy_floor: bool = True,
     ) -> None:
         self.workspace = Path(workspace).expanduser()
+        # Host paths (env.paths); ``None`` keeps the legacy ambient media/floor.
+        self._paths = paths
+        self._legacy_floor = legacy_floor
         self.config = config
         self.provider_configs = dict(provider_configs or {})
         if provider_config is not None and "openrouter" not in self.provider_configs:
@@ -148,6 +156,19 @@ class ImageGenerationTool(Tool):
         }
         return cls(**kwargs)
 
+    def _media_dir(self) -> Path:
+        return self._paths.media_dir if self._paths is not None else get_media_dir()
+
+    def _protected_floor(self) -> ProtectedFloor:
+        if self._paths is None:
+            return ProtectedFloor(data_dir=default_data_dirs(), workspace=self.workspace)
+        extra_dirs: list[Path] = []
+        if self._legacy_floor:
+            from nanobot.kernel.legacy import legacy_floor_extras
+
+            extra_dirs = legacy_floor_extras()[0]
+        return ProtectedFloor.from_paths(self._paths, extra_data_dirs=extra_dirs)
+
     def _resolve_reference_image(self, value: str) -> str:
         access = current_tool_workspace(self.workspace, restrict_to_workspace=True)
         workspace = access.project_path or self.workspace
@@ -156,7 +177,7 @@ class ImageGenerationTool(Tool):
                 value,
                 workspace=workspace,
                 allowed_root=access.allowed_root,
-                extra_allowed_roots=[get_media_dir()] if access.allowed_root is not None else None,
+                extra_allowed_roots=[self._media_dir()] if access.allowed_root is not None else None,
                 strict=True,
             )
         except WorkspaceBoundaryError as exc:
@@ -165,9 +186,7 @@ class ImageGenerationTool(Tool):
             ) from exc
         except OSError as exc:
             raise ImageGenerationError(f"reference image not found: {value}") from exc
-        floor_reason = ProtectedFloor(
-            data_dir=default_data_dirs(), workspace=self.workspace,
-        ).reason(resolved, write=False)
+        floor_reason = self._protected_floor().reason(resolved, write=False)
         if floor_reason is not None:
             raise ImageGenerationError(floor_reason)
         if not resolved.is_file():
@@ -221,6 +240,7 @@ class ImageGenerationTool(Tool):
                         source_images=refs,
                         save_dir=self.config.save_dir,
                         provider=self.config.provider,
+                        media_dir=self._paths.media_dir if self._paths is not None else None,
                     )
                     artifacts.append(artifact)
                     if len(artifacts) >= requested:

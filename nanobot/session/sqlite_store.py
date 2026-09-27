@@ -70,6 +70,7 @@ from nanobot.session.recovery import recovery_state_from_metadata
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
 if TYPE_CHECKING:
+    from nanobot.kernel.env import Paths
     from nanobot.session.manager import SessionManager
 
 # sqlite3.Error is included so SQLite I/O failures (locked db, corrupt file,
@@ -974,7 +975,7 @@ def get_store(session_manager: Any) -> SqliteSessionStore:
 
 
 def _resolve_workspace_and_sessions_root(
-    workspace: Path | str | None, sessions_root: Path | None,
+    workspace: Path | str | None, sessions_root: Path | None, paths: Paths | None = None,
 ) -> tuple[Path, Path]:
     """Shared path resolution for the two factories below.
 
@@ -987,6 +988,10 @@ def _resolve_workspace_and_sessions_root(
     can never drift apart — see the asymmetry risk documented in
     ``.agent/upstream-sync-handover.md`` §6.
     """
+    if paths is not None:
+        # A host ``Paths`` (``env.paths``) wins over the sibling heuristic.
+        workspace = workspace if workspace is not None else paths.work_dir
+        sessions_root = sessions_root if sessions_root is not None else paths.sessions_root
     resolved_workspace = Path(workspace).expanduser() if workspace is not None else get_state_home()
     resolved_root = (
         Path(sessions_root).expanduser()
@@ -997,7 +1002,10 @@ def _resolve_workspace_and_sessions_root(
 
 
 def build_sqlite_session_store(
-    workspace: Path | str | None = None, *, sessions_root: Path | None = None,
+    workspace: Path | str | None = None,
+    *,
+    sessions_root: Path | None = None,
+    paths: Paths | None = None,
 ) -> SqliteSessionStore:
     """Single construction seam for the default ``SqliteSessionStore`` backend.
 
@@ -1005,13 +1013,16 @@ def build_sqlite_session_store(
     factory the test suite can mock in one place.
     """
     resolved_workspace, resolved_root = _resolve_workspace_and_sessions_root(
-        workspace, sessions_root,
+        workspace, sessions_root, paths,
     )
     return SqliteSessionStore(resolved_workspace, sessions_root=resolved_root)
 
 
 def build_default_session_manager(
-    workspace: Path | str | None = None, *, sessions_root: Path | None = None,
+    workspace: Path | str | None = None,
+    *,
+    sessions_root: Path | None = None,
+    paths: Paths | None = None,
 ) -> "SessionManager":
     """Build a ``SessionManager`` wired to the default ``SqliteSessionStore``.
 
@@ -1032,7 +1043,7 @@ def build_default_session_manager(
     from nanobot.session.manager import SessionManager
 
     resolved_workspace, resolved_root = _resolve_workspace_and_sessions_root(
-        workspace, sessions_root,
+        workspace, sessions_root, paths,
     )
     store = SqliteSessionStore(resolved_workspace, sessions_root=resolved_root)
     return SessionManager(resolved_workspace, sessions_root=resolved_root, store=store)

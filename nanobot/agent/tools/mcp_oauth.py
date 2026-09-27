@@ -98,8 +98,10 @@ class _RefreshLease:
     token_issuer: str
 
 
-def _store_path() -> Path:
-    return get_data_dir() / "auth" / "mcp.json"
+def _store_path(data_dir: Path | None = None) -> Path:
+    """MCP OAuth store; *data_dir* is ``env.paths.data_dir`` (``None`` = legacy)."""
+    base = data_dir if data_dir is not None else get_data_dir()
+    return base / "auth" / "mcp.json"
 
 
 def _server_fingerprint(server_url: str) -> str:
@@ -208,14 +210,17 @@ def _write_store_unlocked(path: Path, payload: _CredentialStore) -> None:
 class MCPOAuthStorage:
     """Persistent MCP SDK token storage, isolated by config name and server URL."""
 
-    def __init__(self, server_name: str, server_url: str) -> None:
+    def __init__(
+        self, server_name: str, server_url: str, *, data_dir: Path | None = None,
+    ) -> None:
+        self._data_dir = data_dir
         self.server_name = server_name
         self.server_fingerprint = _server_fingerprint(server_url)
         self._observed_generation = self._read_generation_sync()
         self._write_lease: str | None = None
 
     def _read_generation_sync(self) -> str | None:
-        path = _store_path()
+        path = _store_path(self._data_dir)
         if not path.exists():
             return None
         # Writes replace the whole file atomically, so this observes either side
@@ -264,7 +269,7 @@ class MCPOAuthStorage:
         return entry, changed
 
     def _read_entry_sync(self) -> _StoredServer | None:
-        path = _store_path()
+        path = _store_path(self._data_dir)
         with _with_store_lock(path):
             payload = _read_store_unlocked(path)
             entry, changed = self._bind_entry_unlocked(payload, create=False)
@@ -279,7 +284,7 @@ class MCPOAuthStorage:
         create: bool = True,
         claim: bool = False,
     ) -> bool:
-        path = _store_path()
+        path = _store_path(self._data_dir)
         with _with_store_lock(path):
             payload = _read_store_unlocked(path)
             if claim:
@@ -464,7 +469,7 @@ class MCPOAuthStorage:
         return access_token, refresh_token, token_issuer
 
     def refresh_lock(self) -> BaseAsyncFileLock:
-        path = _store_path()
+        path = _store_path(self._data_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         identity = hashlib.sha256(
             f"{self.server_name}\0{self.server_fingerprint}".encode("utf-8")
@@ -481,7 +486,7 @@ class MCPOAuthStorage:
         *,
         clear_client: bool,
     ) -> bool:
-        path = _store_path()
+        path = _store_path(self._data_dir)
         with _with_store_lock(path):
             payload = _read_store_unlocked(path)
             entry, changed = self._bind_entry_unlocked(payload, create=False)
@@ -813,9 +818,11 @@ async def create_mcp_oauth_auth(
     server_name: str,
     server_url: str,
     handlers: MCPOAuthHandlers | None = None,
+    *,
+    data_dir: Path | None = None,
 ) -> OAuthClientProvider:
     """Build the official MCP SDK OAuth provider for one configured server."""
-    storage = MCPOAuthStorage(server_name, server_url)
+    storage = MCPOAuthStorage(server_name, server_url, data_dir=data_dir)
     if handlers is not None:
         await storage.prepare_redirect_uri(
             handlers.redirect_uri,
@@ -856,14 +863,16 @@ async def create_mcp_oauth_auth(
     )
 
 
-def mcp_oauth_has_credentials(server_name: str, server_url: str) -> bool:
+def mcp_oauth_has_credentials(
+    server_name: str, server_url: str, *, data_dir: Path | None = None,
+) -> bool:
     """Return whether this exact configured MCP instance has an access token."""
-    return MCPOAuthStorage(server_name, server_url).has_credentials()
+    return MCPOAuthStorage(server_name, server_url, data_dir=data_dir).has_credentials()
 
 
-def delete_mcp_oauth_credentials(server_name: str) -> bool:
+def delete_mcp_oauth_credentials(server_name: str, *, data_dir: Path | None = None) -> bool:
     """Delete credentials for one config name without touching other MCP instances."""
-    path = _store_path()
+    path = _store_path(data_dir)
     with _with_store_lock(path):
         payload = _read_store_unlocked(path)
         servers = payload["servers"]

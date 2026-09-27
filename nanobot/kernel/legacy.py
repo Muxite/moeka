@@ -6,6 +6,7 @@ This module (with ``nanobot/config/*``) is where ambient reads are allowed (R2).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -49,19 +50,51 @@ def _collect_credentials(config: Any) -> dict[str, str]:
     return values
 
 
+def _legacy_data_dir() -> Path:
+    """Today's ``get_data_dir()`` value, without creating it (evaluated lazily)."""
+    from nanobot.config import loader
+
+    return loader.get_config_path().parent
+
+
+def _legacy_paths(config: Any) -> Paths:
+    """Paths that keep every legacy on-disk location where it is today.
+
+    - ``sessions_root``: the ``<workspace>-sessions`` sibling (``default_sessions_root``).
+    - A config loaded from a file (``load_config`` binds its source path): data,
+      media and logs stay at ``get_data_dir()``/``get_media_dir()``/``get_logs_dir()``,
+      resolved lazily so building the env performs no filesystem or ``~`` access.
+    - A purely in-memory config: data/logs/media derive from its own state dir
+      (the workspace), never from ``~/.nanobot``.
+    """
+    from nanobot.session.sqlite_store import default_sessions_root
+
+    workspace = Path(config.workspace_path).resolve()
+    overrides: dict[str, Any] = {"sessions_root_override": default_sessions_root(workspace)}
+    if getattr(config, "runtime_data_dir", None) is not None:
+        overrides.update(
+            data_dir_override=_legacy_data_dir,
+            media_dir_override=lambda: _legacy_data_dir() / "media",
+            logs_dir_override=lambda: _legacy_data_dir() / "logs",
+        )
+    return Paths(work_dir=workspace, state_dir=workspace, overlap_ok=True, **overrides)
+
+
+def legacy_floor_extras() -> tuple[list[Path], list[Path]]:
+    """Ambient floor roots for legacy hosts: config-file data dirs and config files."""
+    from nanobot.security.protected_paths import default_config_files, default_data_dirs
+
+    return default_data_dirs(), default_config_files()
+
+
 class LegacyEnvironment:
     @staticmethod
     def from_config(config: Any) -> CoreEnvironment:
         """Wrap a ``Config`` (keys already ``${VAR}``-expanded) as a CoreEnvironment."""
         global _OVERLAP_WARNED
-        # Legacy flat layout: sessions.db, memory and vec.db all live in the workspace
-        # today, so the kernel-private state dir is the workspace itself. (Resolving
-        # the config-file home here would touch ~/.nanobot for in-memory embeds.)
-        paths = Paths(
-            work_dir=config.workspace_path,
-            state_dir=config.workspace_path,
-            overlap_ok=True,
-        )
+        # Legacy flat layout: memory and vec.db live in the workspace today, so the
+        # kernel-private state dir is the workspace itself (overlap allowed).
+        paths = _legacy_paths(config)
         trace = LoguruTraceSink()
         env = CoreEnvironment(
             config=_ConfigSectionSource(config),

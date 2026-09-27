@@ -56,8 +56,8 @@ def _safe_relative_dir(save_dir: str) -> Path:
     return Path(*rel.parts)
 
 
-def _artifact_root(save_dir: str) -> Path:
-    media_root = get_media_dir().resolve()
+def _artifact_root(save_dir: str, media_dir: Path | None = None) -> Path:
+    media_root = (media_dir if media_dir is not None else get_media_dir()).resolve()
     root = (media_root / _safe_relative_dir(save_dir)).resolve()
     try:
         root.relative_to(media_root)
@@ -75,15 +75,20 @@ def store_generated_image_artifact(
     save_dir: str = "generated",
     provider: str = "openrouter",
     created_at: datetime | None = None,
+    media_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Persist a generated image and sidecar metadata under the media root."""
+    """Persist a generated image and sidecar metadata under the media root.
+
+    *media_dir* is the host's media root (``env.paths.media_dir``); ``None`` falls
+    back to the legacy ``get_media_dir()``.
+    """
     raw, mime = decode_image_data_url(data_url)
     ext = _MIME_EXTENSIONS.get(mime)
     if ext is None:
         raise ArtifactError(f"unsupported image MIME type: {mime}")
 
     now = created_at or datetime.now().astimezone()
-    day_dir = ensure_dir(_artifact_root(save_dir) / now.strftime("%Y-%m-%d"))
+    day_dir = ensure_dir(_artifact_root(save_dir, media_dir) / now.strftime("%Y-%m-%d"))
     artifact_id = f"img_{uuid.uuid4().hex[:12]}"
     image_path = day_dir / f"{artifact_id}{ext}"
     metadata_path = day_dir / f"{artifact_id}.json"

@@ -274,6 +274,7 @@ class ExecTool(Tool):
             deny_patterns=cfg.deny_patterns,
             allow_sudo=cfg.allow_sudo,
             session_manager=ctx.exec_session_manager,
+            media_dir=ctx.env.paths.media_dir if ctx.env is not None else None,
         )
 
     _SUDO_PATTERN = re.compile(r"(?:^|\s|[;&|`(\n])\s*sudo\b", re.MULTILINE)
@@ -316,8 +317,11 @@ class ExecTool(Tool):
         allow_sudo: bool = False,
         session_manager: ExecSessionManager | None = None,
         max_capture_bytes: int = 4 * 1024 * 1024,
+        media_dir: Path | None = None,
     ):
         self.timeout = timeout
+        # Host media root (env.paths.media_dir); ``None`` = legacy get_media_dir().
+        self.media_dir = media_dir
         # Per-stream byte cap for one-shot output capture (see _BoundedCapture);
         # execute() never lets it drop below 4x the effective output limit.
         self.max_capture_bytes = max_capture_bytes
@@ -643,6 +647,7 @@ class ExecTool(Tool):
                     cwd,
                     sandbox_ro_binds=[str(p) for p in self.sandbox_ro_binds],
                     sandbox_rw_binds=[str(p) for p in self.sandbox_rw_binds],
+                    media_dir=self.media_dir,
                 )
                 cwd = str(Path(workspace).resolve())
 
@@ -1066,7 +1071,9 @@ class ExecTool(Tool):
                 if self._is_benign_device_path(str(p)):
                     continue
 
-                media_path = get_media_dir().resolve()
+                media_path = (
+                    self.media_dir if self.media_dir is not None else get_media_dir()
+                ).resolve()
                 allowed = (
                     is_path_within(p, cwd_path)
                     or is_path_within(p, media_path)

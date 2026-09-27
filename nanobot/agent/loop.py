@@ -406,7 +406,9 @@ class AgentLoop:
         if session_manager is not None:
             self.sessions = session_manager
         else:
-            _sessions_root = default_sessions_root(workspace)
+            _sessions_root = (
+                env.paths.sessions_root if env is not None else default_sessions_root(workspace)
+            )
             # Two explicit statements, in this order, deliberately: the store
             # must be fully constructed -- including its one-time legacy
             # jsonl import -- before SessionManager exists, or its own
@@ -523,21 +525,26 @@ class AgentLoop:
         from nanobot.kernel.legacy import LegacyEnvironment
         from nanobot.providers.factory import make_provider
 
+        # An explicit host env owns the agent's work dir (I2); the legacy adapter
+        # keeps ``config.workspace_path`` exactly as before.
+        workspace = env.paths.work_dir if env is not None else config.workspace_path
         env = env or LegacyEnvironment.from_config(config)
         if bus is None:
             bus = MessageBus()
         defaults = config.agents.defaults
         if "session_manager" not in extra:
-            sessions_root = default_sessions_root(config.workspace_path)
+            sessions_root = env.paths.sessions_root
             # See the matching comment in __init__ above: store built first,
             # as an explicit separate statement, then SessionManager.
-            _default_store = SqliteSessionStore(config.workspace_path, sessions_root=sessions_root)
+            _default_store = SqliteSessionStore(workspace, sessions_root=sessions_root)
             extra["session_manager"] = SessionManager(
-                config.workspace_path,
+                workspace,
                 sessions_root=sessions_root,
                 store=_default_store,
             )
-        provider = extra.pop("provider", None) or make_provider(config)
+        provider = extra.pop("provider", None) or make_provider(
+            config, data_dir=env.paths.data_dir,
+        )
         resolved = config.resolve_preset()
         model = extra.pop("model", None) or resolved.model
         context_window_tokens = extra.pop("context_window_tokens", None) or resolved.context_window_tokens
@@ -549,7 +556,7 @@ class AgentLoop:
         return cls(
             bus=bus,
             provider=provider,
-            workspace=config.workspace_path,
+            workspace=workspace,
             model=model,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,

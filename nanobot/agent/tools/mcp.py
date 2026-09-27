@@ -11,6 +11,7 @@ import shutil
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack, suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import httpx
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 
     from nanobot.agent.tools.mcp_oauth import MCPOAuthHandlers
     from nanobot.config.schema import Config, MCPServerConfig
+    from nanobot.kernel.env import CoreEnvironment
 
 # Transient connection errors that warrant a single retry.
 # These typically happen when an MCP server restarts or a network
@@ -606,8 +608,10 @@ class MCPToolWrapper(_MCPWrapperBase):
         server_name: str,
         tool_def: MCPToolDefinition,
         tool_timeout: int = 30,
+        media_dir: Path | None = None,
     ):
         self._set_mcp_connection(session, server_name)
+        self._media_dir = media_dir
         self._original_name = tool_def.name
         self._name = _sanitize_mcp_tool_name(f"mcp_{server_name}_{tool_def.name}")
         self._description = sanitize_description(tool_def.description or tool_def.name)
@@ -747,6 +751,7 @@ class MCPToolWrapper(_MCPWrapperBase):
                 model=str(arguments.get("model") or ""),
                 save_dir="generated",
                 provider=f"mcp:{self._server_name}",
+                media_dir=self._media_dir,
             )
         except (ArtifactError, OSError) as exc:
             logger.warning(
@@ -1005,8 +1010,13 @@ async def connect_mcp_servers(
     registry: ToolRegistry,
     *,
     oauth_handlers: Mapping[str, MCPOAuthHandlers] | None = None,
+    data_dir: Path | None = None,
+    media_dir: Path | None = None,
 ) -> dict[str, MCPConnection]:
     """Connect to configured MCP servers and register their tools, resources, prompts.
+
+    *data_dir* (OAuth store) and *media_dir* (image artifacts) are the host's
+    ``env.paths`` values; ``None`` keeps the legacy ambient directories.
 
     Returns one connection handle per server.  Each handle keeps the task that
     entered the MCP SDK contexts alive so reconnect and shutdown can close
@@ -1062,6 +1072,7 @@ async def connect_mcp_servers(
                         name,
                         cfg.url,
                         (oauth_handlers or {}).get(name),
+                        **({"data_dir": data_dir} if data_dir is not None else {}),
                     )
                 except MCPAuthorizationRequiredError:
                     logger.info("MCP server '{}': waiting for browser authorization", name)
@@ -1160,7 +1171,9 @@ async def connect_mcp_servers(
                         name,
                     )
                     continue
-                wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
+                wrapper = MCPToolWrapper(
+                    session, name, tool_def, tool_timeout=cfg.tool_timeout, media_dir=media_dir,
+                )
                 registry.register(wrapper)
                 logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)
                 registered_count += 1
@@ -1355,8 +1368,13 @@ class MCPProvider:
         registry: ToolRegistry,
         *,
         server_loader: MCPServerLoader | None = None,
+        data_dir: Path | None = None,
+        media_dir: Path | None = None,
     ) -> None:
         self._servers = dict(servers)
+        # Host paths (env.paths); ``None`` keeps the legacy ambient dirs.
+        self._data_dir = data_dir
+        self._media_dir = media_dir
         self._registry = registry
         self._server_loader = server_loader or _load_current_servers
         self._connections: dict[str, MCPConnection] = {}
@@ -1371,12 +1389,30 @@ class MCPProvider:
         registry: ToolRegistry,
         *,
         server_loader: MCPServerLoader | None = None,
+        env: CoreEnvironment | None = None,
     ) -> MCPProvider:
         return cls(
             _configured_servers(config),
             registry,
             server_loader=server_loader,
+            data_dir=env.paths.data_dir if env is not None else None,
+            media_dir=env.paths.media_dir if env is not None else None,
         )
+
+    def _path_kwargs(self) -> dict[str, Path]:
+        kwargs: dict[str, Path] = {}
+        if self._data_dir is not None:
+            kwargs["data_dir"] = self._data_dir
+        if self._media_dir is not None:
+            kwargs["media_dir"] = self._media_dir
+        return kwargs
+
+    def _has_oauth_credentials(self, name: str, url: str | None) -> bool:
+        from nanobot.agent.tools.mcp_oauth import mcp_oauth_has_credentials
+
+        if self._data_dir is None:
+            return mcp_oauth_has_credentials(name, url)
+        return mcp_oauth_has_credentials(name, url, data_dir=self._data_dir)
 
     @property
     def configured_server_names(self) -> set[str]:
@@ -1429,12 +1465,10 @@ class MCPProvider:
             }
             authorization_pending: set[str] = set()
             if oauth_servers:
-                from nanobot.agent.tools.mcp_oauth import mcp_oauth_has_credentials
-
                 authorization_pending = {
                     name
                     for name, cfg in oauth_servers.items()
-                    if not mcp_oauth_has_credentials(name, cfg.url)
+                    if not self._has_oauth_credentials(name, cfg.url)
                 }
             for name in authorization_pending:
                 self._runtime_statuses.pop(name, None)
@@ -1447,7 +1481,9 @@ class MCPProvider:
                 return
             self._set_runtime_status(missing_servers, "connecting")
             try:
-                connected = await connect_mcp_servers(missing_servers, self._registry)
+                connected = await connect_mcp_servers(
+                    missing_servers, self._registry, **self._path_kwargs(),
+                )
                 if self._closing:
                     await _close_mcp_connections(connected)
                     return
@@ -1495,12 +1531,10 @@ class MCPProvider:
             current_servers = dict(self._servers)
             current_names = set(current_servers)
             next_names = set(next_servers)
-            from nanobot.agent.tools.mcp_oauth import mcp_oauth_has_credentials
-
             authorization_pending = {
                 name
                 for name, cfg in next_servers.items()
-                if cfg.auth == "oauth" and not mcp_oauth_has_credentials(name, cfg.url)
+                if cfg.auth == "oauth" and not self._has_oauth_credentials(name, cfg.url)
             }
             removed = sorted(current_names - next_names)
             added = sorted(next_names - current_names)
@@ -1536,7 +1570,9 @@ class MCPProvider:
             if to_connect:
                 self._set_runtime_status(to_connect, "connecting")
                 try:
-                    connected = await connect_mcp_servers(to_connect, self._registry)
+                    connected = await connect_mcp_servers(
+                        to_connect, self._registry, **self._path_kwargs(),
+                    )
                 except BaseException:
                     self._set_runtime_status(to_connect, "failed")
                     raise
@@ -1651,6 +1687,7 @@ class MCPProvider:
             connected = await connect_mcp_servers(
                 {server_name: cfg},
                 self._registry,
+                **self._path_kwargs(),
             )
             if self._closing:
                 await _close_mcp_connections(connected)

@@ -133,9 +133,12 @@ class Nanobot:
         elif model_preset is not None:
             config.agents.defaults.model_preset = model_preset
 
+        from nanobot.kernel.legacy import LegacyEnvironment
+
+        env = env or LegacyEnvironment.from_config(config)
         defaults = config.agents.defaults
         tools = ToolRegistry()
-        mcp_provider = MCPProvider.from_config(config, tools)
+        mcp_provider = MCPProvider.from_config(config, tools, env=env)
         loop = AgentLoop.from_config(
             config,
             image_generation_provider_configs=image_gen_provider_configs(config),

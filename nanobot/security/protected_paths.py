@@ -17,8 +17,12 @@ import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from nanobot.security.workspace_policy import WORKSPACE_BOUNDARY_NOTE, WorkspaceBoundaryError
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import Paths
 
 PROTECTED_MARKER = "protected internal path (not configurable)"
 
@@ -130,6 +134,34 @@ class ProtectedFloor:
             for candidate in (Path(os.path.abspath(cfg.expanduser())), resolved):
                 if candidate is not None and candidate not in self._config_files:
                     self._config_files.append(candidate)
+
+    @classmethod
+    def from_paths(
+        cls,
+        paths: Paths,
+        *,
+        extra_data_dirs: Sequence[Path] = (),
+        config_files: Sequence[Path] = (),
+    ) -> ProtectedFloor:
+        """Floor for a host's ``Paths`` (the agent's file tools run in ``work_dir``).
+
+        Covers ``auth/``, ``plugin-data/`` and ``sessions/`` under ``data_dir``, the
+        ``sessions_root``, and the workspace-internal write-only files. When
+        ``work_dir`` and ``state_dir`` are separated, all of ``state_dir`` is
+        denied. In the legacy flat layout ``state_dir`` is the workspace, so only
+        the named subtrees are protected there. *extra_data_dirs*/*config_files*
+        carry the legacy ambient roots (``default_data_dirs()``/``default_config_files()``).
+        """
+        bases: list[Path] = [paths.data_dir, *extra_data_dirs]
+        floor = cls(data_dir=bases, workspace=paths.work_dir, config_files=config_files)
+        extra = [paths.sessions_root]
+        if not paths.overlaps:
+            extra.append(paths.state_dir)
+        for root in extra:
+            resolved = _safe_resolve(root)
+            if resolved is not None and resolved not in floor._roots:
+                floor._roots.append(resolved)
+        return floor
 
     def matches(self, path: Path, *, write: bool, resolve: bool = True) -> bool:
         """True when *path* (as given, and after ``resolve()``) is protected."""

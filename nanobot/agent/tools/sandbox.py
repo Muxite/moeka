@@ -11,6 +11,17 @@ from pathlib import Path
 from typing import Iterable
 
 from nanobot.config.paths import get_media_dir
+from nanobot.utils.helpers import ensure_dir
+
+
+def _media_root(media_dir: Path | None) -> Path:
+    """The host media root (``env.paths.media_dir``), else the legacy ``get_media_dir()``.
+
+    Created if missing: the sandbox bind-mounts it read-only.
+    """
+    if media_dir is None:
+        return get_media_dir().resolve()
+    return ensure_dir(Path(media_dir)).resolve()
 
 
 def _normalize_bind_paths(
@@ -52,6 +63,7 @@ def _bwrap(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    media_dir: Path | None = None,
 ) -> str:
     """Wrap command in a bubblewrap sandbox (requires bwrap in container).
 
@@ -60,7 +72,7 @@ def _bwrap(
     bind-mounted read-only so exec commands can read uploaded attachments.
     """
     ws = Path(workspace).resolve()
-    media = get_media_dir().resolve()
+    media = _media_root(media_dir)
 
     try:
         sandbox_cwd = str(ws / Path(cwd).resolve().relative_to(ws))
@@ -188,6 +200,7 @@ def _seatbelt(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    media_dir: Path | None = None,
 ) -> str:
     """Wrap command in a macOS Seatbelt sandbox (requires sandbox-exec(1)).
 
@@ -206,7 +219,7 @@ def _seatbelt(
     ``--unshare-net``).
     """
     ws = Path(workspace).resolve()
-    media = get_media_dir().resolve()
+    media = _media_root(media_dir)
 
     try:
         sandbox_cwd = str(ws / Path(cwd).resolve().relative_to(ws))
@@ -317,6 +330,7 @@ def wrap_command(
     *,
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
+    media_dir: Path | None = None,
 ) -> str:
     """Wrap *command* using the named sandbox backend."""
     if backend := _BACKENDS.get(sandbox):
@@ -326,5 +340,6 @@ def wrap_command(
             cwd,
             sandbox_ro_binds=sandbox_ro_binds,
             sandbox_rw_binds=sandbox_rw_binds,
+            media_dir=media_dir,
         )
     raise ValueError(f"Unknown sandbox backend {sandbox!r}. Available: {list(_BACKENDS)}")
