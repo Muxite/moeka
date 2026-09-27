@@ -1693,7 +1693,11 @@ class AgentRunner:
         if prep_error:
             from nanobot.kernel.gate import emit_tool_invalid
 
-            emit_tool_invalid(spec.env, tool_call.name, spec.principal, prep_error)
+            emit_tool_invalid(
+                spec.env, tool_call.name, spec.principal, prep_error, call_id=tool_call.id,
+            )
+            # No gate runs for this call, so awaiting here cannot split a gate verdict.
+            await hook.on_tool_invalid(context, tool_call, prep_error)
             event = {
                 "name": tool_call.name,
                 "status": "error",

@@ -10,11 +10,13 @@ carries that span):
   ``finish_reason``, ``usage`` (this iteration's tokens, ``None`` when unknown).
 - ``tool.call``: ``session_key``, ``iteration``, ``tool``, ``call_id``, ``ok``,
   ``args_valid``, ``error_kind``, ``error`` (first 200 chars), ``duration_ms``.
-  The runner only calls tool hooks for calls whose arguments validated and that
-  passed the capability gate, so ``args_valid`` is always ``True`` here; invalid
-  arguments are traced as ``tool.invalid`` and denials as ``policy.decision``.
-  ``error_kind`` is the exception class name, or ``"tool_error"`` for an error
-  result (``"result_invalid"`` when the result failed the tool's output schema).
+  A call that failed preparation (unknown tool or arguments that failed validation,
+  ``on_tool_invalid``) gives ``ok=False``, ``args_valid=False``,
+  ``error_kind="invalid_args"`` and ``duration_ms=None``; the matching
+  ``tool.invalid`` event carries the same ``call_id``. Otherwise ``args_valid`` is
+  ``True``; ``error_kind`` is the exception class name, or ``"tool_error"`` for an
+  error result (``"result_invalid"`` when the result failed the tool's output
+  schema). Calls denied by the capability gate reach no hook (``policy.decision``).
 - ``run.completed``: ``session_key``, ``model``, ``stop_reason``, ``iterations``,
   ``usage`` (run totals), ``tools_used``, ``error``. Emitted from ``on_finally``, so
   exactly once per run, including runs that raised or were cancelled.
@@ -113,6 +115,14 @@ class TraceHook(AgentHook):
             context, tool_call, ok=False, error_kind=kind, error=str(error)[:_ERROR_CHARS],
         )
 
+    async def on_tool_invalid(
+        self, context: AgentHookContext, tool_call: Any, error: str,
+    ) -> None:
+        self._tool_event(
+            context, tool_call, ok=False, args_valid=False, error_kind="invalid_args",
+            error=str(error)[:_ERROR_CHARS],
+        )
+
     async def on_finally(self, context: AgentRunHookContext) -> None:
         error = context.error
         if error is None and context.exception is not None:
@@ -140,6 +150,7 @@ class TraceHook(AgentHook):
         tool_call: Any,
         *,
         ok: bool,
+        args_valid: bool = True,
         error_kind: str | None = None,
         error: str | None = None,
     ) -> None:
@@ -152,7 +163,7 @@ class TraceHook(AgentHook):
             "tool": getattr(tool_call, "name", None),
             "call_id": getattr(tool_call, "id", None),
             "ok": ok,
-            "args_valid": True,
+            "args_valid": args_valid,
             "error_kind": error_kind,
             "error": error,
             "duration_ms": duration,

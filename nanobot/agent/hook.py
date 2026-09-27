@@ -133,6 +133,18 @@ class AgentHook:
     ) -> None:
         pass
 
+    async def on_tool_invalid(
+        self,
+        context: AgentHookContext,
+        tool_call: ToolCallRequest,
+        error: str,
+    ) -> None:
+        """Observe a call that failed preparation (unknown tool or invalid arguments).
+
+        Such a call never reaches ``before_execute_tool`` or the capability gate.
+        """
+        pass
+
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
         pass
 
@@ -255,6 +267,14 @@ class CompositeHook(AgentHook):
             params,
             error,
         )
+
+    async def on_tool_invalid(
+        self,
+        context: AgentHookContext,
+        tool_call: ToolCallRequest,
+        error: str,
+    ) -> None:
+        await self._for_each_hook_safe("on_tool_invalid", context, tool_call, error)
 
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
         await self._for_each_hook_safe("emit_reasoning", reasoning_content)

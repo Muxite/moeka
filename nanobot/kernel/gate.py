@@ -409,14 +409,20 @@ def emit_tool_invalid(
     tool_name: str,
     principal: Principal | None,
     error: str,
+    *,
+    call_id: str | None = None,
 ) -> None:
-    """Record a call that failed preparation (unknown tool, bad params)."""
+    """Record a call that failed preparation (unknown tool, bad params).
+
+    ``call_id`` is the model's tool-call id (``None`` from ``ToolRegistry.execute``).
+    """
     principal = principal or AGENT_PRINCIPAL
     safe_emit(_sink(env), {
         "event": "tool.invalid",
         "actor": principal.name,
         "principal_kind": principal.kind,
         "tool": tool_name,
+        "call_id": call_id,
         "error": str(error)[:500],
     })
 

@@ -279,12 +279,16 @@ def test_duck_typed_tool_without_capabilities_declares_nothing(tmp_path):
 
 def test_tool_invalid_event(tmp_path):
     sink = RecordingSink()
-    emit_tool_invalid(_env(tmp_path, sink), "nope", AGENT_PRINCIPAL, "Error: Tool 'nope' not found")
+    emit_tool_invalid(
+        _env(tmp_path, sink), "nope", AGENT_PRINCIPAL, "Error: Tool 'nope' not found",
+        call_id="c9",
+    )
     assert sink.events == [{
         "event": "tool.invalid",
         "actor": "agent",
         "principal_kind": "agent",
         "tool": "nope",
+        "call_id": "c9",
         "error": "Error: Tool 'nope' not found",
     }]
     emit_tool_invalid(_env(tmp_path, RaisingSink()), "nope", AGENT_PRINCIPAL, "x")  # no raise

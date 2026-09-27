@@ -49,9 +49,10 @@ Storage:
   floor (the documented exec caveat); real containment needs OS isolation.
 
 Trace:
-- A committed ``record`` emits ``{"event": "fact.recorded", "trace_id",
-  "source_kind", "source_ref", "span"}`` through :func:`safe_emit`. The value is
-  never put on the trace. A rejected ``record`` emits nothing.
+- A committed ``record`` emits ``{"event": "fact.recorded", "fact_id",
+  "source_kind", "source_ref", "source_span"}`` through :func:`safe_emit` (the
+  fact's id and source span; the stamp's ``trace_id``/``span`` are the run's). The
+  value is never put on the trace. A rejected ``record`` emits nothing.
 
 Wiring (what is live):
 - :meth:`FactStore.from_env` builds the store a host gets from a ``CoreEnvironment``
@@ -267,10 +268,10 @@ class FactStore:
                 )
         safe_emit(self._trace, {
             "event": "fact.recorded",
-            "trace_id": trace_id,
+            "fact_id": trace_id,
             "source_kind": source_kind,
             "source_ref": source_ref,
-            "span": span,
+            "source_span": span,
         })
         return trace_id
 

@@ -409,6 +409,47 @@ async def test_trace_hook_event_sequence(sink) -> None:
     assert "echo" in done["tools_used"]  # the runner's own tools_used list
 
 
+class _Strict(_Echo):
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"],
+        }
+
+
+async def test_invalid_args_give_an_invalid_tool_call_in_the_same_trace(tmp_path, sink) -> None:
+    tools = ToolRegistry()
+    tools.register(_Strict("count"))
+    provider = MagicMock()
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        LLMResponse(content="calling", tool_calls=[
+            ToolCallRequest(id="bad1", name="count", arguments={"n": "three"}),
+            ToolCallRequest(id="ghost1", name="nope", arguments={}),
+            ToolCallRequest(id="good1", name="count", arguments={"n": 3}),
+        ]),
+        LLMResponse(content="done", tool_calls=[]),
+    ])
+    with span("rollout") as s:
+        await AgentRunner().run(make_run_spec(
+            provider, initial_messages=[user("go")], tools=tools, model="m",
+            max_iterations=4, max_tool_result_chars=10_000, hook=TraceHook(sink),
+            env=_core_env(tmp_path, sink),
+        ))
+    calls = {e["call_id"]: e for e in sink.of("tool.call")}
+    assert set(calls) == {"bad1", "ghost1", "good1"}
+    for bad in ("bad1", "ghost1"):
+        event = calls[bad]
+        assert (event["ok"], event["args_valid"], event["error_kind"]) == (
+            False, False, "invalid_args",
+        )
+        assert event["duration_ms"] is None and event["trace_id"] == s.trace_id
+    assert calls["good1"]["args_valid"] is True and calls["good1"]["ok"] is True
+    invalid = {e["call_id"]: e for e in sink.of("tool.invalid")}
+    assert set(invalid) == {"bad1", "ghost1"}
+    assert all(e["trace_id"] == s.trace_id for e in invalid.values())
+    assert invalid["bad1"]["tool"] == "count"
+
+
 async def test_trace_hook_run_completed_on_exception(sink) -> None:
     provider = MagicMock()
     provider.chat_stream_with_retry = AsyncMock(side_effect=RuntimeError("provider down"))

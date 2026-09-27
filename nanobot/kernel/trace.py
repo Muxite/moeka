@@ -360,7 +360,8 @@ EVENTS: Mapping[str, str] = MappingProxyType({
     # every event also carries trace_id, span, tags and ts (see the module docstring)
     "policy.decision": "actor, principal_kind, tool, capability, resource, verdict "
                        "(allow|deny), layer, marker",
-    "tool.invalid": "actor, principal_kind, tool, error (arguments failed validation)",
+    "tool.invalid": "actor, principal_kind, tool, call_id (the model's tool-call id; "
+                    "joins tool.call.call_id), error (unknown tool or invalid arguments)",
     "tool.result_invalid": "actor, principal_kind, tool, marker, error (result failed "
                            "the tool's output schema)",
     "tool.dropped": "tool, capabilities, reason (strict mode removed the tool)",
@@ -372,8 +373,8 @@ EVENTS: Mapping[str, str] = MappingProxyType({
     "model.call": "one provider call (ledger): trace_id, slot, tier, model, provider, "
                   "tokens_in, tokens_out, tokens_cache_read, latency_ms, cost_usd, source, "
                   "usage_source, finish_reason, call_id, alias, attempt, cached, tags",
-    "fact.recorded": "trace_id (the fact id, not the span trace), source_kind, "
-                     "source_ref, span (the fact's source span)",
+    "fact.recorded": "fact_id, source_kind, source_ref, source_span (the fact's "
+                     "source character span)",
     "artifact.proposed": "artifact_id, kind, committed {path: fact id}, provisional",
     "artifact.rejected": "artifact_id, kind, reason (error class), paths",
     "paths.overlap_allowed": "work_dir, state_dir (legacy layout shares them)",
@@ -385,8 +386,8 @@ EVENTS: Mapping[str, str] = MappingProxyType({
     "run.started": "session_key, model (agent run began)",
     "iteration": "session_key, iteration, tool_calls, finish_reason, usage (this "
                  "iteration's token delta)",
-    "tool.call": "session_key, iteration, tool, call_id, ok, args_valid, error_kind, "
-                 "error, duration_ms",
+    "tool.call": "session_key, iteration, tool, call_id, ok, args_valid (False for "
+                 "invalid arguments / unknown tool), error_kind, error, duration_ms",
     "run.completed": "session_key, model, stop_reason, iterations, usage (totals), "
                      "tools_used, error",
     "skill.listed": "skills (names rendered into the system prompt), active (always-on "

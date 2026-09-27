@@ -316,12 +316,19 @@ def test_record_emits_trace_event(tmp_path: Path) -> None:
     assert sink.events == [
         {
             "event": "fact.recorded",
-            "trace_id": tid,
+            "fact_id": tid,
             "source_kind": "document",
             "source_ref": "doc:9",
-            "span": "0-4",
+            "source_span": "0-4",
         }
     ]
+    # Inside a run's span the stamp carries the run's trace, not the fact's.
+    from nanobot.kernel.trace import span
+
+    with FactStore(tmp_path / "state", trace=sink) as s, span("rollout") as run:
+        fid = s.record("document", "doc:9", "v", span="1-2")
+    last = sink.events[-1]
+    assert (last["fact_id"], last["trace_id"], last["span"]) == (fid, run.trace_id, "rollout")
     # The value itself is never put on the trace (size, and it may be user data).
     assert "value" not in sink.events[0]
 
