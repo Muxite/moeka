@@ -942,9 +942,65 @@ def test_exec_guard_expands_vars_from_host_exec_env_not_process(tmp_path, monkey
         return ExecTool(restrict_to_workspace=True, env=env)
 
     command = "cat /$MOEKA_GUARD_DIR/notes.txt"
-    monkeypatch.setenv("MOEKA_GUARD_DIR", "not-the-workspace")
-    assert _tool({"MOEKA_GUARD_DIR": rel_ws})._guard_command(command, str(ws)) is None
-
+    # The process env is never consulted: a process-only value pointing into the
+    # workspace does not make the path look safe.
     monkeypatch.setenv("MOEKA_GUARD_DIR", rel_ws)
     error = _tool({})._guard_command(command, str(ws))
     assert error is not None and "path outside working dir" in error
+    # A base-env-only variable is not in the child env (HOME/LANG/TERM + allowed
+    # keys), so the child expands it to "" and reads /notes.txt: still blocked.
+    error = _tool({"MOEKA_GUARD_DIR": rel_ws})._guard_command(command, str(ws))
+    assert error is not None and "path outside working dir" in error
+    # HOME is passed to the child from the base env and is expanded from there.
+    assert _tool({"HOME": str(ws)})._guard_command("cat $HOME/notes.txt", str(ws)) is None
+
+
+def test_exec_guard_expands_allowed_env_keys_from_resolver(tmp_path) -> None:
+    """Strict env: an allowed key resolved via env.credentials is expanded by the guard.
+
+    The child sees ``allowedEnvKeys`` from the resolver even though they are not in
+    exec_base_env, so ``$KEY/...`` must be checked as the path the child will open.
+    """
+    from nanobot.kernel.env import CoreEnvironment, Paths, StaticCredentialResolver
+    from nanobot.kernel.trace import NullTraceSink
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside-state"
+    outside.mkdir()
+    env = CoreEnvironment(
+        config=None,  # type: ignore[arg-type]
+        credentials=StaticCredentialResolver(
+            {"MOEKA_DATA": str(outside), "MOEKA_INSIDE": str(ws)},
+            scopes={"MOEKA_DATA": ("exec",), "MOEKA_INSIDE": ("exec",)},
+        ),
+        paths=Paths(work_dir=ws, state_dir=tmp_path / "state"),
+        trace=NullTraceSink(),
+        exec_base_env={"PATH": "/usr/bin:/bin"},
+        strict=True,
+    )
+    tool = ExecTool(
+        restrict_to_workspace=True, env=env, allowed_env_keys=["MOEKA_DATA", "MOEKA_INSIDE"]
+    )
+    assert tool._build_env()["MOEKA_DATA"] == str(outside)
+
+    literal = tool._guard_command(f"cat {outside}/x", str(ws))
+    assert literal is not None and "path outside working dir" in literal
+    for command in ("cat $MOEKA_DATA/x", "cat ${MOEKA_DATA}/x"):
+        error = tool._guard_command(command, str(ws))
+        assert error is not None and "path outside working dir" in error, command
+    assert tool._guard_command("cat $MOEKA_INSIDE/notes.txt", str(ws)) is None
+
+
+def test_exec_guard_blocks_leading_variable_path_outside_workspace(tmp_path, monkeypatch) -> None:
+    """``cat $HOME/x`` is checked as the expanded path (legacy env=None too)."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside_home = tmp_path / "home"
+    outside_home.mkdir()
+    monkeypatch.setenv("HOME", str(outside_home))
+    tool = ExecTool(restrict_to_workspace=True)
+    for command in ("cat $HOME/.ssh/id_rsa", "cat ${HOME}/x", 'cat "$HOME/x"'):
+        error = tool._guard_command(command, str(ws))
+        assert error is not None and "path outside working dir" in error, command
+    assert tool._guard_command("echo $UNSET_MOEKA_VAR done", str(ws)) is None

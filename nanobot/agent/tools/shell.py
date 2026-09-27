@@ -1070,8 +1070,20 @@ class ExecTool(Tool):
                 resolved_workspace or cwd_path
             )
 
-            expand_env = self._exec_base_env()
-            for raw in self._extract_absolute_paths(cmd):
+            # Expand against the env the child actually gets (base env plus the
+            # allowedEnvKeys resolved through env.credentials), so ``$KEY/...`` is
+            # checked as the path the child will open. Words that start with a
+            # variable (``$KEY/x``) are not path tokens until expanded, so the
+            # command is also scanned once with every reference expanded (unset
+            # variables become empty, as in the shell).
+            expand_env = self._build_env()
+            candidates = self._extract_absolute_paths(cmd)
+            if "$" in cmd or (_IS_WINDOWS and "%" in cmd):
+                expanded_cmd = expand_vars(cmd, expand_env, unset="")
+                for extra in self._extract_absolute_paths(expanded_cmd):
+                    if extra not in candidates:
+                        candidates.append(extra)
+            for raw in candidates:
                 try:
                     expanded = expand_vars(raw.strip(), expand_env)
                     # Python's expanduser() intentionally does not implement

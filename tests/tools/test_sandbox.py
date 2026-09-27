@@ -513,6 +513,7 @@ class TestExpandVars:
         assert expand_vars("$MOEKA_TEST_ONLY_IN_PROCESS/x", env) == "$MOEKA_TEST_ONLY_IN_PROCESS/x"
         assert expand_vars("${}/x", env) == "${}/x"
         assert expand_vars("/plain/path", {}) == "/plain/path"
+        assert expand_vars("$MISSING/x:${MISSING}", env, unset="") == "/x:"
 
     def test_bind_paths_expand_against_given_env(self, tmp_path):
         ws = str(tmp_path / "project")

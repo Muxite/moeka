@@ -18,23 +18,32 @@ _POSIX_VAR_RE = re.compile(r"\$(\w+|\{[^}]*\})", re.ASCII)
 _WINDOWS_VAR_RE = re.compile(r"%([^%]+)%")
 
 
-def expand_vars(value: str, env_vars: Mapping[str, str]) -> str:
-    """``os.path.expandvars`` over an explicit *env_vars*; unknown variables stay as-is.
+def expand_vars(
+    value: str, env_vars: Mapping[str, str], *, unset: str | None = None,
+) -> str:
+    """``os.path.expandvars`` over an explicit *env_vars*.
 
-    Kernel code expands ``$VAR``/``${VAR}`` (and ``%VAR%`` on Windows) against the
-    host's exec base env (``env.exec_base_env``), never the process env (I1).
+    Kernel code expands ``$VAR``/``${VAR}`` (and ``%VAR%`` on Windows) against an
+    env the host supplied (``env.exec_base_env`` or the exec child env), never the
+    process env (I1). Unknown variables stay as-is, or become *unset* when given
+    (``""`` mirrors what a POSIX shell does with an unset variable).
     """
+
+    def _lookup(name: str, original: str) -> str:
+        if name in env_vars:
+            return env_vars[name]
+        return original if unset is None else unset
 
     def _posix(match: re.Match[str]) -> str:
         name = match.group(1)
         if name.startswith("{"):
             name = name[1:-1]
-        return env_vars.get(name, match.group(0))
+        return _lookup(name, match.group(0))
 
     if "$" in value:
         value = _POSIX_VAR_RE.sub(_posix, value)
     if os.name == "nt" and "%" in value:
-        value = _WINDOWS_VAR_RE.sub(lambda m: env_vars.get(m.group(1), m.group(0)), value)
+        value = _WINDOWS_VAR_RE.sub(lambda m: _lookup(m.group(1), m.group(0)), value)
     return value
 
 
