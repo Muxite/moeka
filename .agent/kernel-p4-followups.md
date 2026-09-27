@@ -90,6 +90,25 @@ flowchart LR
   MCP `outputSchema` using them is only partly re-checked by the kernel. Pydantic, and the MCP SDK's own
   `jsonschema` check, still validate fully. Open: full JSON Schema needs a dependency decision (`jsonschema` is
   only transitive, via `mcp`).
+- The partial validator is worse than first disclosed for typeless schemas. Object keywords (`required`,
+  `properties`, `additionalProperties`) are only checked when `type` is `"object"`, so `{"required": ["n"]}`
+  enforces nothing. Open (review round 1).
+- Fixed in review round 1:
+  - An empty `output_schema` (`{}`) now accepts any value, prose included. This matches the `Operation`
+    contract.
+  - A `type` list is a union.
+  - An integral float satisfies `integer` in results. Arguments stay strict.
+  - Deeply nested JSON text fails with the marker instead of a bare `RecursionError`.
+  - `FunctionTool` results are trusted as the pydantic `output_model` instance instead of being re-checked in
+    their dumped form, which a `field_serializer` can change.
+- The SDK's `Invalid schema for tool ...` `RuntimeError` is not mapped, so it stays a generic MCP failure
+  without the marker. Open.
+- `tool.result_invalid` fires only for `validate_result`'s own rejections, not for `FunctionTool` or
+  SDK-raised failures. Open.
+- Field names can appear in failure text: a path, or an unexpected key under `additionalProperties: false`.
+  Values never do. The docstrings now say this. By design.
+- There is no positive test that a legacy-mode plugin declaring its own `output_schema` is enforced through
+  `_LegacyErrorPrefixTool`. Open.
 - No built-in tool declares an `output_schema`, so typed results are opt-in. By design: built-in results are
   free text for the model. Open: typed results for the outside-service tools (web fetch, search) when P5
   needs them.

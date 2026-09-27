@@ -298,6 +298,100 @@ async def test_untyped_tool_unchanged_on_every_path(tmp_path):
     assert _tool_messages(result)[0] == "not json at all"
     assert result.tool_events[0]["status"] == "ok"
 
+    from nanobot.agent.tools.execution import execute_tool_calls
+
+    results, events = await execute_tool_calls(
+        tools,
+        [ToolCallRequest(id="c2", name="svc", arguments={})],
+        concurrent=False,
+        external_lookup_counts={},
+        workspace_violation_counts={},
+        hook=SpyHook(),
+        context=AgentHookContext(iteration=0, messages=[]),
+    )
+    assert results == ["not json at all"] and events[0]["status"] == "ok"
+
+
+# -- review fix round 1: JSON Schema semantics the SDK already accepts -----------------
+
+
+@pytest.mark.parametrize("value", ["plain prose", "", {"a": 1}, 3])
+def test_empty_output_schema_accepts_anything_including_prose(value):
+    """``{}`` accepts any value (the ``Operation`` contract), prose included."""
+    assert validate_result(ReturnTool(value, {}), value) is value
+
+
+async def test_kernel_plugin_operation_with_empty_output_schema_passes_prose(
+    tmp_path, plugin_base,
+):
+    op = {**_OP, "output_schema": {}}
+    registry = _load_plugin(tmp_path, _OpPlugin(plugin_base, [op]), kernel=True)
+    assert registry.get("forecast").output_schema == {}
+    assert await registry.execute("forecast", {"out": "sunny, no json"}) == "sunny, no json"
+
+
+def test_type_list_is_a_union():
+    schema = {"type": "object", "properties": {"v": {"type": ["string", "integer"]}}}
+    tool = ReturnTool(None, schema)
+    for good in ({"v": "five"}, {"v": 5}):
+        assert validate_result(tool, good) is good
+    out = validate_result(tool, {"v": [5]})
+    assert RESULT_SCHEMA_MARKER in out and "v: expected string or integer, got array" in out
+    # A union member's own keywords still apply once it matched.
+    bounded = {"type": ["string", "integer"], "minimum": 10}
+    assert "expected >= 10" in validate_result(ReturnTool(None, bounded), 5)
+    # Nullable unions keep working, and the legacy argument message is unchanged.
+    from nanobot.agent.tools.base import Schema
+
+    assert Schema.validate_json_schema_value(None, {"type": ["string", "integer", "null"]}) == []
+    assert Schema.validate_json_schema_value([1], {"type": ["string", "integer"]}, "v") == [
+        "v should be string"
+    ]
+
+
+def test_integral_float_satisfies_integer_in_results():
+    tool = ReturnTool(None, _SCHEMA)
+    value = {"city": "Oslo", "temp": {"c": 4.0}}
+    assert validate_result(tool, value) is value
+    assert validate_result(tool, json.dumps(value)) == json.dumps(value)
+    assert "temp.c: expected integer, got number" in validate_result(
+        tool, {"city": "Oslo", "temp": {"c": 4.5}},
+    )
+
+
+def test_integral_float_still_rejected_for_arguments():
+    """Arguments keep the strict check: a tool never receives 4.0 for an integer param."""
+    from nanobot.agent.tools.base import Schema
+
+    assert Schema.validate_json_schema_value(4.0, {"type": "integer"}, "n") == [
+        "n should be integer"
+    ]
+
+
+def test_deeply_nested_json_text_fails_with_the_marker():
+    text = "[" * 100000 + "]" * 100000
+    out = validate_result(ReturnTool(text, {"type": "array"}), text)
+    assert is_tool_error_result(out)
+    assert RESULT_SCHEMA_MARKER in out and "not valid JSON" in out
+
+
+async def test_function_tool_field_serializer_is_not_rejected_by_recheck():
+    from pydantic import field_serializer
+
+    class Count(BaseModel):
+        n: int
+
+        @field_serializer("n")
+        def _as_text(self, v: int) -> str:
+            return str(v)
+
+    tool = FunctionTool(lambda: {"n": 3}, name="cnt", output_model=Count)
+    tools = ToolRegistry()
+    tools.register(tool)
+    out = await tools.execute("cnt", {})
+    assert not is_tool_error_result(out), out
+    assert json.loads(out) == {"n": "3"}
+
 
 # -- structured argument errors ---------------------------------------------------------
 

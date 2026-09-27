@@ -120,8 +120,9 @@ class FunctionTool(Tool):
     through ``nanobot.api.complete._coerce_json`` (the same path ``acomplete_json``
     uses) and returned as ``ToolResult(<model JSON>, structured=<model instance>)``;
     a mismatch returns ``ToolResult.error`` with ``RESULT_SCHEMA_MARKER`` and the field
-    paths, never raises. ``output_schema`` is then the model's JSON Schema, so the
-    kernel's ``validate_result`` re-checks the dumped payload on every call path.
+    paths, never raises. ``output_schema`` is then the model's JSON Schema (it declares
+    the tool as typed); the kernel's ``validate_result`` trusts the pydantic instance
+    rather than re-checking its dumped form, which a ``field_serializer`` may change.
     Without it the return value passes exactly as before.
     """
 
@@ -164,6 +165,11 @@ class FunctionTool(Tool):
     @property
     def read_only(self) -> bool:
         return self._read_only
+
+    @property
+    def output_model(self) -> type[BaseModel] | None:
+        """The pydantic model results are validated with (``None``: untyped)."""
+        return self._output_model
 
     async def execute(self, **kwargs: Any) -> Any:
         result = self._fn(**kwargs)

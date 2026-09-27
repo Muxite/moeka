@@ -5,15 +5,20 @@
   the runner or the model, on every call path (``AgentRunner._run_tool``,
   ``ToolRegistry.execute``, ``nanobot.agent.tools.execution``). It is re-exported from
   ``nanobot.kernel.gate``, the module that owns the other per-call checks.
-- No ``output_schema``: the result passes unchanged (the same object). Error results
-  (``ToolResult.error``) are never validated.
+- No ``output_schema``, or an empty one (``{}``, which accepts any value): the result
+  passes unchanged (the same object). Error results (``ToolResult.error``) are never
+  validated. A ``ToolResult`` whose ``structured`` is an instance of the tool's own
+  pydantic ``output_model`` (``FunctionTool``) is trusted: pydantic already checked it.
+- JSON semantics: a ``type`` list is a union, and an integral float (``4.0``) satisfies
+  ``integer``, as ``jsonschema`` and the MCP SDK agree.
 - The value checked is, in order: a ``ToolResult``'s ``structured`` payload when it has
   one; else a ``str`` parsed as JSON (text that is not JSON fails); else the Python
   value itself (``dict``, ``list``, numbers, ``None``, a pydantic model dumped in JSON
   mode). The validator is ``Schema.schema_violations``, the one arguments already use.
 - A failing result becomes ``ToolResult.error`` whose text carries
   :data:`RESULT_SCHEMA_MARKER` and each field path with what was expected
-  (``temp.c: expected integer, got string``). The rejected payload is never echoed.
+  (``temp.c: expected integer, got string``). Values are not quoted in the message,
+  but field names are (an unexpected key under ``additionalProperties: false`` shows).
   A ``tool.result_invalid`` event goes to the trace sink.
 - Classification: its own class, NOT a gate denial. The call was allowed and ran; the
   service returned data that breaks its own contract. So: no deferred-log entry (the
@@ -102,7 +107,7 @@ def _structured_value(result: Any) -> tuple[bool, Any]:
     elif isinstance(result, str):
         try:
             return True, json.loads(result)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             return False, None
     else:
         value = result
@@ -110,6 +115,24 @@ def _structured_value(result: Any) -> tuple[bool, Any]:
     if callable(dump) and not isinstance(value, type):
         value = dump(mode="json")
     return True, value
+
+
+def _validated_by_output_model(tool: Any, result: Any) -> bool:
+    """True when *result* carries an instance of the tool's own pydantic ``output_model``.
+
+    ``FunctionTool(output_model=)`` already validated it with pydantic; the kernel does
+    not re-derive a check from its dumped (serialization) form, which can legitimately
+    differ from the validation schema (a ``field_serializer``, ``inf``).
+    """
+    from nanobot.agent.tools.base import ToolResult
+
+    if not (isinstance(result, ToolResult) and result.has_structured):
+        return False
+    try:
+        model_cls = getattr(tool, "output_model", None)
+    except Exception:  # noqa: BLE001 - no trusted model: validate normally
+        return False
+    return isinstance(model_cls, type) and isinstance(result.structured, model_cls)
 
 
 def validate_result(
@@ -136,15 +159,20 @@ def validate_result(
                        env, principal)
     if schema is None:
         return result
+    if isinstance(schema, dict) and not schema:
+        # ``{}`` accepts any value (the ``Operation`` contract): prose passes too.
+        return result
     if not isinstance(schema, dict):
         return _reject(name, ["(value): the tool's output_schema is not a JSON Schema object"],
                        env, principal)
+    if _validated_by_output_model(tool, result):
+        return result
     parsed, value = _structured_value(result)
     if not parsed:
         return _reject(name, ["(value): not valid JSON, expected a value matching the "
                               "declared output schema"], env, principal)
     try:
-        violations = Schema.schema_violations(value, schema)
+        violations = Schema.schema_violations(value, schema, integral_floats=True)
     except Exception as exc:  # noqa: BLE001 - a schema the validator cannot apply fails closed
         logger.warning("tool {} output_schema could not be applied: {!r}", name, exc)
         return _reject(name, [f"(value): the output schema could not be applied "

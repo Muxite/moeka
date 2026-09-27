@@ -185,7 +185,7 @@ class SchemaViolation(typing.NamedTuple):
 
     - ``path``: the field path, ``a.b[0].c``; ``""`` for the value itself.
     - ``detail``: what was expected, ``expected integer, got string``. It names the
-      offending value's JSON type, never the value (a rejected result is not echoed).
+      offending value's JSON type, never the value; field names (the path) do appear.
     - ``message``: the legacy text (``a.b should be integer``) kept byte-identical for
       :meth:`Schema.validate_json_schema_value` and the tests that pin it.
     """
@@ -229,8 +229,25 @@ class Schema(ABC):
         return [v.message for v in Schema.schema_violations(val, schema, path)]
 
     @staticmethod
+    def _matches_type(val: Any, t: str, integral_floats: bool) -> bool:
+        """True when *val* is of JSON type *t* (an unknown type name matches anything)."""
+        if t == "integer":
+            if isinstance(val, int) and not isinstance(val, bool):
+                return True
+            return (
+                integral_floats and isinstance(val, float)
+                and math.isfinite(val) and val.is_integer()
+            )
+        if t == "number":
+            return isinstance(val, _JSON_TYPE_MAP["number"]) and not isinstance(val, bool)
+        if t == "null":
+            return val is None
+        expected = _JSON_TYPE_MAP.get(t)
+        return expected is None or isinstance(val, expected)
+
+    @staticmethod
     def schema_violations(
-        val: Any, schema: dict[str, Any], path: str = "",
+        val: Any, schema: dict[str, Any], path: str = "", *, integral_floats: bool = False,
     ) -> list[SchemaViolation]:
         """Validate ``val`` against a JSON Schema fragment; one structured record per problem.
 
@@ -241,8 +258,32 @@ class Schema(ABC):
         ``minimum``/``maximum``, ``minLength``/``maxLength``, ``properties``,
         ``required``, ``additionalProperties``, ``items``, ``minItems``/``maxItems``.
         Any other keyword is ignored (accepted).
+
+        - A ``type`` list is a union: the value passes when it matches ANY listed type,
+          and is then checked against the schema's other keywords as that type. On a
+          mismatch the legacy message names the first non-null type, as before.
+        - ``integral_floats`` (results only, ``nanobot.kernel.typed``): a finite float with
+          no fractional part (``4.0``) satisfies ``integer``, as in JSON Schema. Argument
+          validation keeps it off, so a tool never receives ``4.0`` for an integer param.
         """
         raw_type = schema.get("type")
+        if isinstance(raw_type, list):
+            members = [x for x in raw_type if isinstance(x, str) and x != "null"]
+            if len(members) > 1:
+                if "null" in raw_type and val is None:
+                    return []
+                for member in members:
+                    if Schema._matches_type(val, member, integral_floats):
+                        return Schema.schema_violations(
+                            val, {**schema, "type": member}, path,
+                            integral_floats=integral_floats,
+                        )
+                label = path or "parameter"
+                return [SchemaViolation(
+                    path,
+                    f"expected {' or '.join(members)}, got {json_type_name(val)}",
+                    f"{label} should be {members[0]}",
+                )]
         nullable = (isinstance(raw_type, list) and "null" in raw_type) or schema.get("nullable", False)
         t = Schema.resolve_json_schema_type(raw_type)
         label = path or "parameter"
@@ -257,7 +298,7 @@ class Schema(ABC):
 
         if nullable and val is None:
             return []
-        if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
+        if t == "integer" and not Schema._matches_type(val, "integer", integral_floats):
             return mismatch("integer")
         if t == "number" and (
             not isinstance(val, _JSON_TYPE_MAP["number"]) or isinstance(val, bool)
@@ -308,14 +349,19 @@ class Schema(ABC):
             for k, v in object_value.items():
                 sub = Schema.subpath(path, k)
                 if k in props:
-                    errors.extend(Schema.schema_violations(v, props[k], sub))
+                    errors.extend(Schema.schema_violations(
+                        v, props[k], sub, integral_floats=integral_floats,
+                    ))
                 elif additional is False:
                     errors.append(SchemaViolation(
                         sub, "unexpected field (not in the schema)", f"unexpected parameter {sub}",
                     ))
                 elif isinstance(additional, dict):
                     errors.extend(
-                        Schema.schema_violations(v, cast(dict[str, Any], additional), sub)
+                        Schema.schema_violations(
+                            v, cast(dict[str, Any], additional), sub,
+                            integral_floats=integral_floats,
+                        )
                     )
         if t == "array":
             array_value = cast(list[Any], val)
@@ -333,7 +379,10 @@ class Schema(ABC):
                 prefix = f"{path}[{{}}]" if path else "[{}]"
                 for i, item in enumerate(array_value):
                     errors.extend(
-                        Schema.schema_violations(item, schema["items"], prefix.format(i))
+                        Schema.schema_violations(
+                            item, schema["items"], prefix.format(i),
+                            integral_floats=integral_floats,
+                        )
                     )
         return errors
 
@@ -448,6 +497,8 @@ class Tool(ABC):
     # as returned. A tool that opts in returns JSON text, a JSON value, or a
     # ``ToolResult`` with ``structured``; anything else fails with
     # ``RESULT_SCHEMA_MARKER``. Class- or instance-level, like ``_capability_names``.
+    # By design, text is JSON: ``{"type": "string"}`` needs JSON-quoted text, and plain
+    # prose fails. An empty schema (``{}``) accepts anything, prose included.
     output_schema: dict[str, Any] | None = None
 
     @classmethod
