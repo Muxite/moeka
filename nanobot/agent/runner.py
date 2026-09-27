@@ -29,6 +29,7 @@ from nanobot.agent.context_governance import (
 )
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
+from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.file_state import file_read_context
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.events import NO_EVENTS, EventSink
@@ -1739,7 +1740,8 @@ class AgentRunner:
                     policy_capability=gate.policy_capability,
                 )
                 if handled is not None:
-                    return handled
+                    # An escalation rewrite replaces the denial text: keep the note.
+                    return self._with_deferred_note(handled) if gate.deferred else handled
                 return denial + hint, event, None
         await hook.before_execute_tool(context, tool_call, tool, params)
         try:
@@ -1775,7 +1777,9 @@ class AgentRunner:
                 policy_denials=policy_denials,
             )
             if handled is not None:
-                return handled
+                return self._defer_exec_guard_denial(
+                    spec, tool_call, tool, params, str(exc), handled,
+                )
             return payload, event, None
 
         if is_tool_error_result(result):
@@ -1795,7 +1799,9 @@ class AgentRunner:
                 policy_denials=policy_denials,
             )
             if handled is not None:
-                return handled
+                return self._defer_exec_guard_denial(
+                    spec, tool_call, tool, params, str(result), handled,
+                )
             return result + hint, event, None
 
         await hook.after_execute_tool(context, tool_call, tool, params, result)
@@ -1970,6 +1976,61 @@ class AgentRunner:
                 tool_call.name,
                 signature,
             )
+
+    @staticmethod
+    def _with_deferred_note(
+        handled: tuple[Any, dict[str, str], BaseException | None],
+    ) -> tuple[Any, dict[str, str], BaseException | None]:
+        """*handled* with ``DEFERRED_NOTE`` on its text payload (``ToolResult`` kept)."""
+        from nanobot.kernel.deferred import with_deferred_note
+
+        payload, event, error = handled
+        if not isinstance(payload, str):
+            return handled
+        noted = with_deferred_note(payload)
+        if isinstance(payload, ToolResult):
+            noted = ToolResult(noted, is_error=payload.is_error)
+        return noted, event, error
+
+    def _defer_exec_guard_denial(
+        self,
+        spec: AgentRunSpec,
+        tool_call: ToolCallRequest,
+        tool: Any,
+        params: Any,
+        raw_text: str,
+        handled: tuple[Any, dict[str, str], BaseException | None],
+    ) -> tuple[Any, dict[str, str], BaseException | None]:
+        """Log an ``ExecTool`` guard denial (allowlist, deny pattern, floor) as deferred.
+
+        These denials come back as tool results, so the gate never saw them; the
+        ``exec_guard_denial`` event prefix set by ``_classify_violation`` identifies
+        them. The entry is a direct write: it changes neither the classification nor
+        the I5 count (already charged in ``_classify_violation``).
+        """
+        if not handled[1].get("detail", "").startswith("exec_guard_denial"):
+            return handled
+        from nanobot.kernel.deferred import deferred_work_dir, record_gate_denial
+        from nanobot.kernel.floors import EXEC_CAPABILITIES
+
+        capability = "exec.run"
+        declare = getattr(tool, "capabilities", None)
+        if declare is not None and isinstance(params, dict):
+            try:
+                capability = next(
+                    (r.capability for r in declare(params) if r.capability in EXEC_CAPABILITIES),
+                    capability,
+                )
+            except Exception:  # noqa: BLE001 - only the entry's capability field is at stake
+                pass
+        logged = record_gate_denial(
+            deferred_work_dir(spec.env, spec.workspace),
+            tool=tool_call.name,
+            arguments=params if isinstance(params, dict) else tool_call.arguments,
+            reason=raw_text,
+            capability=capability,
+        )
+        return self._with_deferred_note(handled) if logged else handled
 
     @classmethod
     def _skip_after_policy_ceiling(

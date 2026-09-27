@@ -10,6 +10,9 @@ Order, per ``CapabilityRequest`` the tool declares (``Tool.capabilities``):
 - A ``policy.decision`` event goes to the trace sink for EVERY evaluated request
   (allow or deny), via ``safe_emit``: a failing sink never changes the verdict.
 - The first ``Deny`` wins; later requests of the same call are not evaluated.
+- Every ``Deny`` (any layer) appends one ``source="gate"`` entry to the deferred-action
+  log (``nanobot.kernel.deferred``, design 5a) and ``error_text`` then ends with
+  ``DEFERRED_NOTE``. The write is direct and never counts toward the I5 ceiling.
 
 Call sites: ``AgentRunner._run_tool`` (between prepare_call and the first hook),
 ``ToolRegistry.execute`` and ``nanobot.agent.tools.execution``. A denied call never
@@ -28,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from nanobot.kernel.deferred import deferred_work_dir, record_gate_denial, with_deferred_note
 from nanobot.kernel.floors import FS_CAPABILITIES, check_floors
 from nanobot.kernel.policy import (
     POLICY_MARKER,
@@ -62,6 +66,8 @@ class GateResult:
     decision: Allow | Deny
     layer: GateLayer | None = None
     events: tuple[dict[str, Any], ...] = field(default=(), repr=False)
+    # True when this denial was appended to the deferred-action log (design 5a).
+    deferred: bool = False
 
     @property
     def allowed(self) -> bool:
@@ -86,12 +92,18 @@ class GateResult:
         return deny.capability
 
     def error_text(self) -> str:
-        """Tool-facing error text (``""`` when allowed); always starts with ``Error``."""
+        """Tool-facing error text (``""`` when allowed); always starts with ``Error``.
+
+        When the denial was logged (``deferred``) the text ends with
+        ``DEFERRED_NOTE``; the deny reason (and its pinned marker) comes first,
+        unchanged.
+        """
         deny = self.deny
         if deny is None:
             return ""
         reason = deny.reason.strip()
-        return reason if reason.startswith("Error") else f"Error: {reason}"
+        text = reason if reason.startswith("Error") else f"Error: {reason}"
+        return with_deferred_note(text) if self.deferred else text
 
 
 def _normalize_fs_resource(resource: str, workspace: Path | None) -> str:
@@ -243,7 +255,7 @@ def gate_call(
         )
         event = _decision_event(principal, name, req, deny, "gate")
         safe_emit(sink, event)
-        return GateResult(deny, "gate", (event,))
+        return _denied(name, params, deny, "gate", (event,), env, workspace)
 
     events: list[dict[str, Any]] = []
     floor: ProtectedFloor | None = None
@@ -274,8 +286,33 @@ def gate_call(
         events.append(event)
         safe_emit(sink, event)
         if isinstance(decision, Deny):
-            return GateResult(decision, layer, tuple(events))
+            return _denied(name, params, decision, layer, tuple(events), env, workspace)
     return GateResult(Allow(), None, tuple(events))
+
+
+def _denied(
+    name: str,
+    params: Any,
+    deny: Deny,
+    layer: GateLayer | None,
+    events: tuple[dict[str, Any], ...],
+    env: CoreEnvironment | None,
+    workspace: Path | None,
+) -> GateResult:
+    """Every denial (floor, policy, gate) appends one deferred entry (design 5a).
+
+    A direct write, not a gated call: it is never classified as a denial and never
+    counts toward the I5 ceiling. Without an env or explicit workspace there is
+    nowhere to write, and ``deferred`` stays False so the text does not claim it.
+    """
+    logged = record_gate_denial(
+        deferred_work_dir(env, workspace),
+        tool=name,
+        arguments=params if isinstance(params, dict) else {"_raw": params},
+        reason=deny.reason,
+        capability=deny.capability,
+    )
+    return GateResult(deny, layer, events, deferred=logged)
 
 
 def emit_tool_invalid(
