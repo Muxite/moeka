@@ -21,7 +21,12 @@ Purpose: fix what the kernel owns, what the host injects, and what runs as an un
 - The kernel must provide only GENERIC mechanics: provenance records, typed artifact deltas, graph scheduling.
 - The kernel never contains domain schemas. Resume extraction, skill extraction and social simulation live in
   plugins or in awork.
-- **Plugins** are untrusted. They reach the environment only through the gate, with attenuated grants.
+- **Plugins** are untrusted. Their declared capability requests go through the gate, with attenuated grants.
+  - As built (P4), a kernel plugin's code runs in-process and unsandboxed, with the host's full ambient
+    Python authority: it can open files, sockets or subprocesses the gate never sees a request for.
+  - The grant binds only the requests the plugin itself declares in `capabilities()`. A plugin that does not
+    declare something it does is not contained at all (`nanobot/kernel/gate.py` module docstring).
+  - Real containment of plugin code needs OS isolation (a sandboxed process), which is not built.
 - Shell execution must run inside a sandbox plugin or container that sees only `/work`.
 - Every gate decision must be emitted to the host's `TraceSink`, allow or deny.
 
@@ -132,6 +137,10 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   - Facade (Task 25, `nanobot/core/core.py`): `kernel.facts` and `kernel.artifacts` are built lazily from
     `kernel.env` under `env.paths.state_dir` and share one fact store; `kernel.propose` and `kernel.answer`
     pass through. No env: both are `None` and the methods raise `RuntimeError`.
+  - "No env" almost never happens for a real kernel: every `MoekaKernel.create()` path builds a
+    `LegacyEnvironment` when the host passes none (`agent/loop.py:573`). Its flat layout makes `state_dir` the
+    live legacy workspace, so `facts.db` and `artifacts.db` appear there on first property access unless the
+    host builds a strict or explicit env (`.agent/kernel-p5-followups.md`).
   - Proof: `tests/kernel/test_artifact_store.py` (an uncited delta never reaches `committed()`; every
     committed leaf's trace ID resolves; a missing-fact cite is rejected; accumulation, validation,
     persistence, concurrent threads and processes on a fresh file) and `tests/kernel/test_p5_integration.py`
@@ -140,6 +149,15 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
     is the caller's), and it is not proof against an exec-capable agent: `exec` bypasses the file floor
     and can forge `facts.db` or `artifacts.db`. Real containment needs a sandboxed exec backend (strict mode
     refuses exec without one).
+  - The same exec-forgery caveat covers the cost ledger's SQLite store, `<data_dir>/llm_usage.sqlite3`
+    (`nanobot/llm_usage/__init__.py`, Task 14). An RSI harness scoring cost or denial rate must trust the
+    host's `TraceSink` stream (`model.call`, `policy.decision`) over the raw SQLite contents unless exec is
+    sandboxed.
+  - Additional gap: the file floor protects `llm_usage.sqlite3` only in the split layout, where all of
+    `state_dir` (and so `data_dir = state_dir/data`) is denied. In the legacy flat layout `data_dir` is the
+    legacy instance dir and the floor names only its `auth/`, `plugin-data/` and `sessions/` subtrees, so even
+    the file tools can read and write `llm_usage.sqlite3` there. `facts.db`, `artifacts.db` and
+    `kernel-plugins.json` are protected by name in both layouts.
   - Not automatic: no gateway, `AgentLoop` or built-in tool path records facts or proposes artifacts. A host
     does, or a host action the agent calls (as in the P5 integration test). Typed tool results are not bound
     into artifacts automatically either.
@@ -152,17 +170,42 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
 - Status: met for sub-agents (P2, Checkpoint 2). Each child's policy is the parent's attenuated to its tools'
   static capability surface minus `session.send`, intersected with any narrower set; a foreign parent policy is
   never trusted to attenuate itself (`tests/kernel/test_subagent_attenuation.py`, including the child and
-  grandchild subset property test). Plugins (manifest intersection) remain P4.
+  grandchild subset property test).
+- Plugins: built (P4, Tasks 17-21). In kernel mode (a `ToolLoader` given a `plugin_registry`) a plugin loads
+  only when host-activated at its on-disk hash, and its tools carry the grant `policy ∩
+  capabilities_requested`, enforced per declared request by the gate (`tests/kernel/test_loader_integration.py`).
+  The grant binds declared requests only; plugin code itself runs in-process and unsandboxed (section 2).
+- Gap: kernel mode has no production caller. `AgentLoop` (`agent/loop.py:746`) and
+  `SubagentManager._build_tools` (`agent/subagent.py:274`) both build a bare `ToolLoader()` with no
+  `plugin_registry`. So sub-agents always run legacy plugin loading: a plugin that kernel mode would
+  quarantine or refuse to activate is still importable and usable inside every sub-agent, with no manifest,
+  hash or grant check. Wire sub-agents first when kernel mode reaches the runtime
+  (`.agent/kernel-p4-followups.md`, Task 19).
 
 **I5 Hard failure limits**
 - A turn must terminate as soon as it exceeds its step budget or 6 policy denials.
 - Enforced by: `budget.iterations` and `budget.policy_denials` in the runner, with the existing
   budget-exhausted finalisation.
 - Proven by: the incident replay test (a whitelist-only policy, 50 distinct commands, turn ends at 6 denials).
-- Status: met (P2, Checkpoint 2). The 6-denial ceiling counts permission-policy denials and the configurable
-  exec-guard layer (`allowPatterns` / `denyPatterns`), not the exec floor, and ends the turn through the
-  budget-exhausted finalisation (`tests/kernel/test_incident_replay.py`, including the real
-  `tools.exec.allowPatterns` incident configuration).
+- Status: met (P2, Checkpoint 2). The 6-denial ceiling ends the turn through the budget-exhausted
+  finalisation (`tests/kernel/test_incident_replay.py`, including the real `tools.exec.allowPatterns`
+  incident configuration).
+- What counts toward the 6-denial ceiling (the one place to check; code: `GateResult.policy_capability` in
+  `nanobot/kernel/gate.py`, `BUDGETED_EXEC_GUARD_SIGNATURES` and `_record_policy_denial` in
+  `nanobot/agent/runner.py`):
+  - Counted: gate denials at layer `policy`, which are `PermissionPolicy.decide` denials and kernel plugin
+    grant denials.
+  - Counted: exec-guard denials from the configurable `allowPatterns` / `denyPatterns` layer
+    (`violation:exec-allowlist`, `violation:exec-denyguard`).
+  - Not counted: the exec floor (fork bomb, internal-state writes) and the fs floor.
+  - Not counted: strict-mode "requires a declared sandbox" refusals (layer `gate`) and failed capability
+    declarations.
+  - Not counted: SSRF and workspace-violation denials, and result-schema failures (tool errors, not denials).
+  - Not counted: router `model.dispatch` denials (the router runs outside a turn).
+  - Sub-agents: each sub-agent run gets its own fresh 6-denial budget (`SubagentManager.max_policy_denials`).
+    Nothing is carved from the parent's remaining budget.
+- The uncounted classes are bounded only by the iteration limit (default 200), plus the third-hit
+  "stop retrying" escalation text.
 
 **I6 Pareto simplicity and cost ceiling**
 - For a sub-task T with target quality tau, moeka's expected cost must not exceed the cheapest adequate
@@ -177,7 +220,8 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
 - A task solvable by a compact lower-tier model must never dispatch a frontier model (budget violation).
 - I6 is a target enforced by measurement and routing, not a theorem. Section 6 lists the four enforcement parts.
 - Proven by: the RSI baseline comparator per task family, and a runtime test that an over-tier dispatch is denied.
-- Status: measured, routed and gate-enforced (P3, Checkpoint 3). What is built:
+- Status: measured; router and gate built but opt-in, so nothing live routes by default (P3, Checkpoint 3).
+  What is built:
   - Ledger (`nanobot/kernel/ledger.py`): every call from an env-built provider is a `model.call` event with
     tokens, tier, latency, cost and `usage_source`. Pricing is keyed by `(provider, model)` (Ruling J), and an
     estimated cost is flagged (`cost_is_billed` is False), never ground truth.
@@ -244,7 +288,8 @@ flowchart LR
 
 Purpose: one choke point decides, audits and throttles every tool call.
 
-- The gate must sit in `AgentRunner._run_tool` (`nanobot/agent/runner.py:1530`) and in `ToolRegistry.execute`.
+- The gate must sit in `AgentRunner._run_tool` (the `gate_call` at `nanobot/agent/runner.py:1717`) and in
+  `ToolRegistry.execute`.
 - Hooks stay observers: `before_execute_tool` returns None (`nanobot/agent/hook.py:107`), so the gate is never a hook.
 - A denial must be a `ToolResult.error` whose text embeds a pinned marker phrase.
 
@@ -272,7 +317,7 @@ sequenceDiagram
     end
     alt any Deny
         R->>R: ToolResult.error with marker, classify, policy_denials += 1
-        Note over R,H: hooks never see a denied call
+        Note over R,H: per-call hooks never see a denied call (the batch before_execute_tools hook already ran)
     else all Allow
         R->>H: before_execute_tool
         R->>T: execute(params)
@@ -280,6 +325,14 @@ sequenceDiagram
         R->>H: after_execute_tool
     end
 ```
+
+- Exception: the batch-level `before_execute_tools` hook (`nanobot/agent/runner.py:617`) runs once per
+  batch before any call is gated, so it sees calls that are later denied. It is an intent announcement, not
+  an execution; the per-call hooks (`before_execute_tool`, `after_execute_tool`) never see a denied call.
+- Policy and plugin grants see every view of an `fs.*` path (final review I1): the lexical path and the
+  symlink-resolved path, and a deny on either denies. A path that is an existing directory (the root of
+  `grep`, `find_files`, `list_dir`) is a subtree request: `DefaultPolicy` denies it when a deny rule could
+  match anything beneath it, and a grant must cover the whole subtree (`tests/kernel/test_gate.py`).
 
 **Floors** (checked before policy; no rule, flag or config removes them):
 - The exec fork bomb and internal-state writes (`_FLOOR_DENY_PATTERNS`, `nanobot/agent/tools/shell.py:299`).
@@ -291,13 +344,16 @@ sequenceDiagram
 **June-2026 retry-loop protection:**
 - Every denial carries a marker the runner already classifies; a new "blocked by permission policy" marker joins in P2.
 - Repeated denials escalate on the third hit with "not configurable by the agent, stop retrying".
-- The 6-denial ceiling (I5) ends the turn; the 200-iteration loop cannot recur.
+- The 6-denial ceiling (I5) ends the turn, so the June 2026 incident class (policy denials and exec
+  `allowPatterns`/`denyPatterns` denials) cannot reach the 200-iteration limit again. Workspace, SSRF and floor
+  denials do not count (I5 status), so they are still bounded only by the iteration limit.
 - A capability denied for every resource is dropped at registration, so the model never sees the tool
   (strict mode with an explicit policy; section 4).
 
 **Sub-agent attenuation:**
 - A child's rules are the parent's rules intersected with an optional narrower set.
-- Budgets are carved from the parent's remainder; `session.send` is denied by default.
+- Design goal, not built: budgets carved from the parent's remainder. Today each sub-agent run gets its
+  own fresh 6-denial budget and its own iteration limit (I5 status). `session.send` is denied by default.
 - A child gets its own exec-session quota.
 
 **Capability names** (the one table; grammar and resources are in the earlier spec, section 5):
@@ -573,6 +629,15 @@ flowchart TD
 
 Purpose: a plugin runs only when the host activated it at a pinned hash, and the mutator edits only tier 1.
 
+- Trust boundary as built: a kernel plugin's code runs in-process and unsandboxed, with full ambient Python
+  authority. The gate binds only the capability requests the plugin declares in `capabilities()`; an
+  undeclared action is not contained at all (`nanobot/kernel/gate.py` docstring). Containing plugin code needs
+  OS isolation, which is not built.
+- Activation is not proof against an exec-capable agent. With `exec`, an agent can write its own package plus
+  a matching "active" entry in `kernel-plugins.json`, hashed with the public `compute_version_hash`, and
+  `check_active` then passes. The file floor stops only the file tools. Strict mode plus a sandbox that does
+  not bind `state_dir` read-write closes this gap (Task 18 residual risk).
+
 ```mermaid
 stateDiagram-v2
     [*] --> candidate
@@ -586,7 +651,8 @@ stateDiagram-v2
 
 **Tiers:**
 - Tier 1: skills, prompts, tool descriptions, tuning config. Automated edits behind the harness gate.
-- Tier 2: plugin code. Sandboxed and gated; not in RSI v1.
+- Tier 2: plugin code. Gated on its declared requests only; runs in-process, unsandboxed (see above). Not in
+  RSI v1.
 - Tier 3: core code. Human-reviewed proposals only.
 - Tier 4: policy, sandbox, evaluator, resolver, plugin list and hash pins. Never self-editable.
 
@@ -669,8 +735,12 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Proof: a changed description hash quarantines the plugin; an exec-written marker does not activate it; a service result that violates its schema is a tool error and never reaches the artifact store.
 - Proof status (Checkpoint 4, 2026-09-27): all green.
   - `tests/kernel/test_plugin_registry.py` and `test_loader_integration.py` show that a changed package or
-    description hash quarantines the plugin and never imports it. They also show that an exec-written or
-    legacy "enabled" marker does not activate it: only a host-principal `activate` at the on-disk hash does.
+    description hash quarantines the plugin and never imports it. They also show that the legacy Agent
+    Plugin "enabled" marker (the one an exec-capable agent could write) does not activate it: only a
+    host-principal `activate` at the on-disk hash, recorded in `kernel-plugins.json`, does.
+  - Not proof against an exec-capable agent: `exec` can also forge the package and a matching
+    `kernel-plugins.json` entry (section 9). Strict mode plus a sandbox that does not bind `state_dir`
+    read-write closes this gap.
   - `tests/kernel/test_descriptions_data.py` and `test_description_golden.py` show that built-in and plugin
     descriptions are hashed data files, byte-identical to the old strings.
   - `tests/kernel/test_typed_results.py` shows that a result violating its `output_schema` (direct, MCP,
@@ -679,7 +749,8 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
     artifact store yet (P5), so "never reaches the artifact store" holds because nothing downstream receives
     a failed result as a success. (After P5: the store exists, but nothing binds tool results into it
     automatically, so the same reasoning still holds.)
-  - The full suite passes (5647), and the awork suite keeps the same 8 pre-existing failures.
+  - The full suite passes (5667 after Task 21's fix rounds), and the awork suite keeps the same 8
+    pre-existing failures.
   - Deferred minors: `.agent/kernel-p4-followups.md`.
 
 **P5 epistemic and artifact stores.** Goal: I3 holds by construction.

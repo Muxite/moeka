@@ -60,8 +60,11 @@ State file:
   ``state_dir`` is protected (``ProtectedFloor.from_paths``, Task 3); in the legacy
   flat layout (``state_dir`` is the workspace) the file is protected by name.
 - ``exec`` is not stopped by the file floor (the documented exec caveat). A forged
-  entry still has to match the package bytes at load, but real containment needs OS
-  isolation.
+  entry has to match the package bytes at load, but that is no protection against an
+  exec-capable agent: it can write its own package AND a matching "active" entry,
+  hashed with the public ``compute_version_hash``, and ``check_active`` then returns
+  True. Not proof against an exec-capable agent; strict mode plus a sandbox that does
+  not bind ``state_dir`` read-write closes this gap.
 - Every call re-reads the file, so two instances on one ``state_dir`` agree. A corrupt
   file fails closed: ``check_active`` returns ``False``, other calls raise
   :class:`PluginRegistryError`. Writers are serialised per instance only; the host is

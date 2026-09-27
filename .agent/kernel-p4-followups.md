@@ -12,6 +12,17 @@ flowchart LR
     Ledger --> Design["by design: documented"]
 ```
 
+## Trust boundary (final review I3)
+
+- Kernel plugin code runs in-process and unsandboxed, with the host's full ambient Python authority. It can
+  open files, sockets or subprocesses the gate never sees a request for.
+- The grant (`policy ∩ capabilities_requested`) binds only the capability requests the plugin declares in
+  `capabilities()`. A plugin that under-declares is not contained at all (`nanobot/kernel/gate.py` docstring).
+- "Sandboxed" in older text means the design goal for tier 2, not what is built. Containing plugin code needs
+  OS isolation (a sandboxed process). Open.
+- Kernel mode itself has no production caller (Task 19 below), and sub-agents always load plugins in legacy
+  mode. Both are in the design doc's I4 status.
+
 ## Task 17 (manifest model)
 
 - Capability names are shape-checked only, so a misspelling passes silently. There is no importable
@@ -27,7 +38,7 @@ flowchart LR
   re-reads and re-validates the manifest from disk and never trusts a copy.
 - `config_schema`, `input_schema` and `output_schema` are still mutable dicts. By design: they are not
   capability bounds. Task 21 reads `Operation` schemas at call time, so an in-process mutation would change
-  what is checked. That is in-process code, which only the sandbox contains.
+  what is checked. That is in-process code, which nothing contains today (see "Trust boundary").
 - Description edits (tier 1) sit inside the tier-2 package hash, so an edit quarantines the plugin until the
   host re-pins it. By design (Task 20 kept one hash); a separate description hash is open.
 - The `config_schema` form (an inline JSON Schema) differs from the host design sketch's `module:Class`
@@ -37,7 +48,9 @@ flowchart LR
 
 - Residual risk: an agent with exec can write its own package and a matching "active" entry in
   `kernel-plugins.json`, and `check_active` then passes. By design (the documented exec caveat: real isolation
-  is the sandbox). The registry docstring should say this plainly. Open (wording).
+  is the sandbox). Fixed (wording, final review I2): the registry docstring, design section 9, the P4 proof
+  and `docs/core-map/05-kernel.md` now say it is not proof against an exec-capable agent; strict mode plus a
+  sandbox that does not bind `state_dir` read-write closes the gap.
 - `register()` copies kind, version and tier from the caller's manifest, while the hash pin covers the manifest
   re-read from disk. Open (low risk: the caller is the host).
 - `check_active(name, current_hash)` trusts the caller's hash. Fixed in Task 19: the loader passes a hash it

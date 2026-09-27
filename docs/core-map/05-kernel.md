@@ -45,10 +45,10 @@ flowchart TD
 | `legacy.py` | I1 | builds a `CoreEnvironment` from a legacy `Config` (kernel/legacy.py:352-354) |
 | `trace.py` | all | `TraceSink`, `NullTraceSink`, `LoguruTraceSink`, `safe_emit` (kernel/trace.py:11,17,24,31) |
 | `policy.py` | I4 | principals, requests, `DefaultPolicy`, `IntersectionPolicy` (kernel/policy.py:27,35,104,186) |
-| `floors.py` | I5 | non-removable floors, checked before any policy (kernel/floors.py:73) |
+| `floors.py` | I2 (mechanism) | non-removable floors, checked before any policy; the fs floor keeps agents out of `state_dir` (kernel/floors.py:73) |
 | `strict.py` | I2 | strict mode: exec needs a sandbox; fully denied tools dropped (kernel/strict.py:34-73) |
 | `gate.py` | I4, I5 | `gate_call`: floors -> strict -> plugin grant -> policy (kernel/gate.py:256) |
-| `deferred.py` | I5 | scratchpad and deferred-action log (kernel/deferred.py:125,193) |
+| `deferred.py` | mechanism (design 5a) | scratchpad and deferred-action log; its writes never count toward I5 (kernel/deferred.py:125,193) |
 | `solvers.py` | I6 | deterministic-solver registry (kernel/solvers.py:64,150) |
 | `router.py` | I6 | solver -> fast tier -> verify -> escalate (kernel/router.py:277) |
 | `ledger.py` | I6 | per-call cost events (kernel/ledger.py:200) |
@@ -90,7 +90,14 @@ flowchart TD
 - Order and rules: kernel/gate.py:1-28. Call sites: `AgentRunner._run_tool` (agent/runner.py:1717),
   `ToolRegistry` (agent/tools/registry.py:67) and `agent/tools/execution.py:177`.
 - Every deny appends one deferred entry and the error text ends with `DEFERRED_NOTE` (kernel/deferred.py:41).
-- The turn ends after `max_policy_denials` policy denials, stop reason `policy_denials` (agent/runner.py:146,205-207).
+- The turn ends after `max_policy_denials` counted denials, stop reason `policy_denials`
+  (agent/runner.py:146,205-207). Counted: gate policy-layer denials (including plugin-grant denials) and
+  exec-guard `allowPatterns`/`denyPatterns` denials (agent/runner.py:140-143). Not counted: floors, strict-mode
+  sandbox refusals, SSRF and workspace violations, result-schema failures and router denials. Each sub-agent
+  run gets its own fresh budget. The full list is the design doc's I5 status.
+- Policy and plugin grants check an `fs.*` path both as named and symlink-resolved (a deny on either denies),
+  and a directory root (grep, find_files, list_dir) is a subtree request: a deny rule that could match anything
+  beneath it denies the call (kernel/gate.py `_fs_views`, kernel/policy.py `resource_matches`).
 - Floors are policy-free and mode-free (kernel/floors.py:1-18). The file floor also covers `facts.db` and
   `artifacts.db` with their SQLite sidecars (security/protected_paths.py:115-123).
 
@@ -103,7 +110,20 @@ flowchart TD
 
 ## 5. Plugins and typed calls (P4)
 
-- A kernel plugin loads only when the host activated it at the on-disk hash (kernel/registry.py:408).
+- In kernel mode, a kernel plugin loads only when the host activated it at the on-disk hash
+  (kernel/registry.py:408). This is not proof against an exec-capable agent: `exec` can write its own package
+  plus a matching `kernel-plugins.json` entry (hashed with the public `compute_version_hash`), and it then
+  loads. Strict mode plus a sandbox that does not bind `state_dir` read-write closes this gap.
+- Trust boundary: kernel plugin code runs in-process and unsandboxed, with full ambient Python authority. The
+  grant (`policy ∩ capabilities_requested`) binds only the requests the plugin declares in `capabilities()`;
+  an undeclared action is not contained at all (kernel/gate.py:12-19).
+- Kernel mode has zero callers outside `agent/tools/loader.py` itself. `AgentLoop` (agent/loop.py:746) and
+  `SubagentManager._build_tools` (agent/subagent.py:274) both build a bare `ToolLoader()` with no
+  `plugin_registry`, so no documented entry point reaches it. A host that wants kernel-mode plugin gating must
+  wire a `ToolLoader(plugin_registry=...)` in by hand.
+- I4 and sub-agents: sub-agents always use legacy plugin loading, even under a kernel-mode parent. A plugin
+  kernel mode would quarantine or refuse is still importable and usable inside every sub-agent (design doc,
+  I4 status).
 - A tool with `output_schema` has its result validated on all three call paths (agent/runner.py:1763,
   agent/tools/registry.py:318, agent/tools/execution.py:215). A failure is a tool error with the marker
   `result failed schema`, not a gate denial (kernel/typed.py:1-28).
@@ -143,7 +163,11 @@ flowchart TD
   trace IDs only (kernel/facts.py:268-274).
 - What "committed" means: the cite resolved to a real fact when it was proposed. It does not mean the fact
   supports the value; that audit is the caller's (`clarify`). It is not proof against an exec-capable agent:
-  `exec` is not stopped by the file floor and can write `facts.db` directly.
+  `exec` is not stopped by the file floor and can write `facts.db` directly. The same holds for the cost
+  ledger's `llm_usage.sqlite3`, which in the legacy flat layout is not even floor-protected from the file
+  tools (design doc, I3 status).
+- Store location in practice: `create()` without an explicit env uses `LegacyEnvironment`, whose `state_dir` is
+  the live legacy workspace, so the stores land there on first access.
 - Not automatic: the gateway, `AgentLoop` and built-in tools never record facts or propose artifacts. A host
   does it, or a host action the agent calls. The live question loop (ask, wait for the turn, answer) is the
   host's job.
