@@ -39,8 +39,25 @@ Contract:
     this delta: :class:`ArtifactValidationError`;
   - an existing ``artifact_id`` of another kind: :class:`ArtifactKindMismatchError`.
   Uncited leaves are validated too: provisional means "not grounded", never
-  "not typed". Leaf values are stored as the field type's JSON dump (``"4"`` for
-  an ``int`` field is stored as ``4``).
+  "not typed".
+- Leaf validation runs through the registered model ITSELF (review fix, option a):
+  ``model.__pydantic_validator__.validate_assignment`` on a ``model_construct()``
+  instance, per leaf, on the model that owns the field (a nested model for a nested
+  leaf). So the field type and constraints, ``@field_validator``s, Annotated
+  validators and ``model_config`` (``strict=True`` rejects ``"4"`` for an ``int``)
+  all apply, and the stored value is the model's own JSON dump of the validated
+  value: a normalising validator's output is what ``committed()`` returns, the same
+  value ``committed_model()`` yields. Caveat: a field validator reading
+  ``info.data`` sees only defaults for the other fields, never the artifact's
+  other leaves.
+- ``@model_validator``s are cross-field and cannot be honoured leaf by leaf (and
+  would run against a partial instance), so :meth:`ArtifactStore.register_kind`
+  REFUSES a model that defines one, on the root or on any nested model the leaf walk
+  descends into (option b for that part). A model inside a single leaf (e.g.
+  ``list[Pair]``) is validated whole, so its model validators do run and are allowed.
+- A nested model INSTANCE as a delta value is walked like a dict of the fields it
+  set (``model_dump(exclude_unset=True)``), so it gets per-leaf cites too; defaults it
+  did not set are not leaves.
 - Accumulation: ``propose`` on an existing artifact merges leaf by leaf; it never
   replaces the artifact wholesale. ``artifact_id=None`` creates ``art-<32 hex>``;
   an unknown explicit ID creates that artifact.
@@ -121,9 +138,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from nanobot.kernel.facts import FactStore, _enable_wal
 from nanobot.kernel.trace import NullTraceSink, TraceSink, safe_emit
@@ -202,10 +219,32 @@ def _nested_model(annotation: Any) -> type[BaseModel] | None:
     return None
 
 
-def _leaf_adapter(field: Any) -> TypeAdapter[Any]:
-    if field.metadata:
-        return TypeAdapter(Annotated[(field.annotation, *field.metadata)])
-    return TypeAdapter(field.annotation)
+def _walked_models(
+    model: type[BaseModel], prefix: str = "", seen: frozenset[type] = frozenset(),
+) -> list[tuple[str, type[BaseModel]]]:
+    """``model`` and every nested model the leaf walk descends into, with their paths."""
+    out = [(prefix, model)]
+    if model in seen:
+        return out
+    for name, field in model.model_fields.items():
+        sub = _nested_model(field.annotation)
+        if sub is not None:
+            out.extend(_walked_models(sub, f"{prefix}{name}.", seen | {model}))
+    return out
+
+
+def _validate_leaf(model: type[BaseModel], key: str, value: Any) -> Any:
+    """Validate one field value through the model's OWN validator; return its JSON dump.
+
+    ``validate_assignment`` on a ``model_construct()`` instance runs the field's type,
+    constraints, ``@field_validator``s (before/after/wrap/plain), Annotated validators
+    and the model config (``strict``, ...), exactly as the model would, without
+    requiring the other fields. The dump goes through the model's serializer, so a
+    normalising validator's output is what gets stored.
+    """
+    instance = model.model_construct()
+    model.__pydantic_validator__.validate_assignment(instance, key, value)
+    return instance.model_dump(mode="json", include={key})[key]
 
 
 def _flatten(model: type[BaseModel], delta: Any, prefix: str = "") -> dict[str, Any]:
@@ -231,6 +270,10 @@ def _flatten(model: type[BaseModel], delta: Any, prefix: str = "") -> dict[str, 
             bad.append(path)
             continue
         sub = _nested_model(field.annotation)
+        if sub is not None and isinstance(value, BaseModel):
+            # A model instance is walked like a dict of the fields it set, so it gets
+            # the same per-leaf cites; defaults it did not set are not leaves.
+            value = value.model_dump(exclude_unset=True)
         if sub is not None and isinstance(value, dict):
             try:
                 leaves.update(_flatten(sub, value, path + "."))
@@ -238,9 +281,8 @@ def _flatten(model: type[BaseModel], delta: Any, prefix: str = "") -> dict[str, 
                 errors.append(str(exc))
                 bad.extend(exc.paths)
             continue
-        adapter = _leaf_adapter(field)
         try:
-            leaves[path] = adapter.dump_python(adapter.validate_python(value), mode="json")
+            leaves[path] = _validate_leaf(model, key, value)
         except ValidationError as exc:
             detail = "; ".join(e["msg"] for e in exc.errors())
             errors.append(f"{path}: {detail}")
@@ -306,6 +348,14 @@ class ArtifactStore:
             raise ValueError("kind name must be a non-empty string")
         if not (isinstance(model, type) and issubclass(model, BaseModel)):
             raise TypeError("kind model must be a pydantic BaseModel subclass")
+        for path, sub in _walked_models(model):
+            if sub.__pydantic_decorators__.model_validators:
+                where = path.rstrip(".") or "<root>"
+                raise ValueError(
+                    f"artifact kind {name!r}: {sub.__name__} at {where} defines a "
+                    "model_validator; cross-field validators cannot be honoured per leaf, "
+                    "so the model is refused (field validators and config are honoured)"
+                )
         with self._lock:
             current = self._kinds.get(name)
             if current is not None and current is not model and not replace:

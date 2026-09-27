@@ -461,6 +461,12 @@ Purpose: facts enter the artifact only with provenance, and the user is asked on
   - a commit replaces the committed value and cite at that leaf and clears its provisional value;
   - an uncited change to a committed leaf stays a provisional pending edit; the committed value is kept;
   - every leaf, cited or not, must fit the kind's model (unknown fields and type errors are rejected);
+  - each leaf is validated through the model's own validator (`validate_assignment` on a `model_construct()`
+    instance): field validators, constraints and `strict` config apply, and the stored value is the model's
+    own dump, so `committed()` and `committed_model()` agree;
+  - `register_kind` refuses a model with a `@model_validator` on any walked model (cross-field checks cannot
+    run per leaf); a model inside a single leaf (`list[M]`) is validated whole and is allowed;
+  - a nested model instance in a delta is walked like a dict of the fields it set;
   - `committed()` is a partial dict; `committed_model()` requires every required field committed.
 
 ```mermaid

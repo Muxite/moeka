@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nanobot.kernel.artifacts import (
     ARTIFACTS_DB_FILENAME,
@@ -347,6 +347,134 @@ def test_errors_share_a_base(store: ArtifactStore) -> None:
         assert issubclass(cls, ArtifactError)
 
 
+def test_mixed_validity_delta_stores_nothing(store: ArtifactStore, facts: FactStore) -> None:
+    tid = _tool_fact(facts, "nas")
+    with pytest.raises(ArtifactValidationError, match="cores"):
+        store.propose("server", {"hostname": "nas", "cores": "many"}, {"hostname": tid},
+                      artifact_id="mixed")
+    with pytest.raises(ArtifactNotFoundError):
+        store.committed("mixed")
+
+
+# -- the registered model's own validators ----------------------------------------------
+
+
+class Checked(BaseModel):
+    hostname: str
+    cores: int | None = None
+    home: Address | None = None
+
+    @field_validator("hostname")
+    @classmethod
+    def _no_spaces_lowercase(cls, value: str) -> str:
+        if " " in value:
+            raise ValueError("hostname must not contain spaces")
+        return value.lower()
+
+
+class StrictBox(BaseModel):
+    model_config = ConfigDict(strict=True)
+    cores: int | None = None
+
+
+class CheckedCity(BaseModel):
+    city: str
+
+    @field_validator("city")
+    @classmethod
+    def _title(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("city must not be blank")
+        return value.title()
+
+
+class Site(BaseModel):
+    where: CheckedCity | None = None
+
+
+def test_field_validator_rejects_cited_leaf(store: ArtifactStore, facts: FactStore) -> None:
+    store.register_kind("checked", Checked)
+    tid = _tool_fact(facts, "Bad Name")
+    with pytest.raises(ArtifactValidationError, match="spaces"):
+        store.propose("checked", {"hostname": "Bad Name"}, {"hostname": tid}, artifact_id="c")
+    with pytest.raises(ArtifactNotFoundError):
+        store.committed("c")
+
+
+def test_field_validator_rejects_uncited_leaf(store: ArtifactStore) -> None:
+    store.register_kind("checked", Checked)
+    with pytest.raises(ArtifactValidationError, match="spaces"):
+        store.propose("checked", {"hostname": "Bad Name"})
+
+
+def test_normalising_validator_output_is_stored(store: ArtifactStore, facts: FactStore) -> None:
+    """committed() and committed_model() agree: the validator's output is what is stored."""
+    store.register_kind("checked", Checked)
+    aid = store.propose("checked", {"hostname": "NAS"}, {"hostname": _tool_fact(facts, "NAS")},
+                        ).artifact_id
+    assert store.committed(aid) == {"hostname": "nas"}
+    assert store.committed_model(aid).hostname == "nas"
+
+
+def test_strict_model_config_is_honoured(store: ArtifactStore) -> None:
+    store.register_kind("strict", StrictBox)
+    with pytest.raises(ArtifactValidationError, match="cores"):
+        store.propose("strict", {"cores": "4"})
+    aid = store.propose("strict", {"cores": 4}).artifact_id
+    assert store.provisional(aid) == {"cores": 4}
+
+
+def test_nested_model_field_validator_runs(store: ArtifactStore, facts: FactStore) -> None:
+    store.register_kind("site", Site)
+    with pytest.raises(ArtifactValidationError, match="where.city"):
+        store.propose("site", {"where": {"city": "  "}})
+    aid = store.propose("site", {"where": {"city": "oslo"}},
+                        {"where.city": _tool_fact(facts, "oslo")}).artifact_id
+    assert store.committed(aid) == {"where": {"city": "Oslo"}}
+    assert store.committed_model(aid) == Site(where=CheckedCity(city="Oslo"))
+
+
+def test_model_validators_refused_at_register(store: ArtifactStore) -> None:
+    """Cross-field model validators cannot be honoured per leaf: the model is refused."""
+    class Pair(BaseModel):
+        low: int = 0
+        high: int = 0
+
+        @model_validator(mode="after")
+        def _ordered(self) -> Pair:
+            if self.low > self.high:
+                raise ValueError("low > high")
+            return self
+
+    class Holder(BaseModel):
+        pair: Pair | None = None
+
+    class ListHolder(BaseModel):
+        pairs: list[Pair] = []  # a single leaf: validated whole, so allowed
+
+    with pytest.raises(ValueError, match="model_validator"):
+        store.register_kind("pair", Pair)
+    with pytest.raises(ValueError, match="pair"):
+        store.register_kind("holder", Holder)
+    store.register_kind("lists", ListHolder)
+    with pytest.raises(ArtifactValidationError, match="low > high"):
+        store.propose("lists", {"pairs": [{"low": 2, "high": 1}]})
+    assert "pair" not in store.kinds() and "holder" not in store.kinds()
+
+
+def test_model_instance_value_is_walked_like_a_dict(
+    store: ArtifactStore, facts: FactStore,
+) -> None:
+    """A nested model instance gets per-leaf cites, like a dict; unset fields are not leaves."""
+    tid = _tool_fact(facts, "Oslo")
+    res = store.propose("server", {"address": Address(city="Oslo")}, {"address.city": tid})
+    assert res.committed == {"address.city": tid}
+    assert res.provisional == ()
+    assert store.committed(res.artifact_id) == {"address": {"city": "Oslo"}}
+    res2 = store.propose("server", {"address": Address(city="Oslo", zip_code="0150")})
+    assert set(res2.provisional) == {"address.city", "address.zip_code"}
+
+
 # -- views ----------------------------------------------------------------------------
 
 
@@ -425,20 +553,18 @@ def test_newer_schema_refused(tmp_path: Path, facts: FactStore) -> None:
 # -- concurrency ----------------------------------------------------------------------
 
 
-def test_concurrent_threads_distinct_leaves(tmp_path: Path, facts: FactStore) -> None:
-    """Fresh file, many instances at once (the Task 22 WAL-switch race), one artifact."""
-    class Wide(BaseModel):
-        model_config = {"extra": "forbid"}
-        f0: int | None = None
-        f1: int | None = None
-        f2: int | None = None
-        f3: int | None = None
-        f4: int | None = None
-        f5: int | None = None
+class _Wide(BaseModel):
+    model_config = {"extra": "forbid"}
+    f0: int | None = None
+    f1: int | None = None
+    f2: int | None = None
+    f3: int | None = None
+    f4: int | None = None
+    f5: int | None = None
 
-    state = tmp_path / "art-state"
-    n = 6
-    tids = [_tool_fact(facts, i) for i in range(n)]
+
+def _race_fresh_file(state: Path, facts: FactStore, tids: list[str]) -> None:
+    n = len(tids)
     errors: list[BaseException] = []
     barrier = threading.Barrier(n)
 
@@ -446,8 +572,8 @@ def test_concurrent_threads_distinct_leaves(tmp_path: Path, facts: FactStore) ->
         try:
             barrier.wait(timeout=60)
             with ArtifactStore(state, facts) as s:
-                s.register_kind("wide", Wide)
-                for _ in range(10):
+                s.register_kind("wide", _Wide)
+                for _ in range(5):
                     s.propose("wide", {f"f{idx}": idx}, {f"f{idx}": tids[idx]},
                               artifact_id="w")
         except BaseException as exc:  # noqa: BLE001
@@ -459,11 +585,74 @@ def test_concurrent_threads_distinct_leaves(tmp_path: Path, facts: FactStore) ->
         t.start()
     for t in threads:
         t.join()
-    assert not errors, errors
+    assert not errors, (state, errors)
     with ArtifactStore(state, facts) as s:
         assert s.committed("w") == {f"f{i}": i for i in range(n)}
         assert s.citations("w") == {f"f{i}": tids[i] for i in range(n)}
     _assert_integrity(state)
+
+
+def test_concurrent_threads_distinct_leaves(tmp_path: Path, facts: FactStore) -> None:
+    """Fresh file, many instances at once (the Task 22 WAL-switch race), one artifact.
+
+    Repeated over 15 fresh files: one round hits the race only sometimes, so a single
+    round is a weak guard. ``test_enable_wal_retries_*`` prove the retry deterministically.
+    """
+    tids = [_tool_fact(facts, i) for i in range(6)]
+    for round_no in range(15):
+        _race_fresh_file(tmp_path / f"art-state-{round_no}", facts, tids)
+
+
+class _LockedThenOk:
+    """A fake connection whose WAL switch reports ``database is locked`` ``fails`` times."""
+
+    def __init__(self, fails: int, message: str = "database is locked") -> None:
+        self.fails = fails
+        self.message = message
+        self.calls = 0
+
+    def execute(self, sql: str) -> None:
+        assert sql == "PRAGMA journal_mode=WAL"
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise sqlite3.OperationalError(self.message)
+
+
+def test_enable_wal_retries_until_unlocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deterministic proof of the retry the artifact store relies on (Task 22 race)."""
+    from nanobot.kernel import facts as facts_mod
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(facts_mod.time, "sleep", sleeps.append)
+    conn = _LockedThenOk(fails=5)
+    facts_mod._enable_wal(conn)  # type: ignore[arg-type]
+    assert conn.calls == 6
+    assert len(sleeps) == 5 and sleeps == sorted(sleeps)  # backoff grows
+
+
+def test_enable_wal_gives_up_at_deadline_and_on_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nanobot.kernel import facts as facts_mod
+
+    clock = [0.0]
+    monkeypatch.setattr(facts_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(facts_mod.time, "sleep", lambda d: clock.__setitem__(0, clock[0] + d))
+    forever = _LockedThenOk(fails=10**9)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        facts_mod._enable_wal(forever)  # type: ignore[arg-type]
+    assert clock[0] >= facts_mod._BUSY_TIMEOUT_MS / 1000
+    other = _LockedThenOk(fails=1, message="disk I/O error")
+    with pytest.raises(sqlite3.OperationalError, match="disk"):
+        facts_mod._enable_wal(other)  # type: ignore[arg-type]
+    assert other.calls == 1
+
+
+def test_artifact_store_uses_the_retrying_wal_switch() -> None:
+    from nanobot.kernel import artifacts as art_mod
+    from nanobot.kernel import facts as facts_mod
+
+    assert art_mod._enable_wal is facts_mod._enable_wal
 
 
 _WRITER = """
