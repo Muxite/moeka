@@ -54,11 +54,12 @@ Trace:
   never put on the trace. A rejected ``record`` emits nothing.
 
 Wiring (what is live):
-- Library only. :meth:`FactStore.from_env` builds the store a host gets from a
-  ``CoreEnvironment`` (``env.paths.state_dir`` and ``env.trace``). Nothing in the
-  gateway, ``AgentLoop``, typed tool results or ``MoekaCore.ingest_text``/``retrieve``
-  records facts yet; the artifact store and clarification loop (Tasks 23-25) are the
-  intended callers.
+- :meth:`FactStore.from_env` builds the store a host gets from a ``CoreEnvironment``
+  (``env.paths.state_dir`` and ``env.trace``). ``MoekaKernel.facts`` (Task 25) is that
+  store, built lazily from the kernel's env; the host records facts through it.
+- Nothing in the gateway, ``AgentLoop``, typed tool results or
+  ``MoekaCore.ingest_text``/``retrieve`` records facts automatically; the host (or its
+  actions) calls ``record``, and ``clarify.record_answer`` records ``user`` facts.
 
 Imports: stdlib and ``nanobot.kernel.trace`` only; import-cheap.
 """

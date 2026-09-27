@@ -129,9 +129,11 @@ Trace (values never on the trace):
 - ``{"event": "artifact.rejected", "artifact_id", "kind", "reason": <error class>,
   "paths": [paths]}`` per rejected ``propose``.
 
-Wiring (what is live): library only. :meth:`ArtifactStore.from_env` builds the store
-(and, unless given, its fact store) from a ``CoreEnvironment``. No gateway,
-``AgentLoop`` or tool path proposes artifacts yet.
+Wiring (what is live): :meth:`ArtifactStore.from_env` builds the store (and, unless
+given, its fact store) from a ``CoreEnvironment``. ``MoekaKernel.artifacts`` (Task 25)
+is that store over ``MoekaKernel.facts``, and ``MoekaKernel.propose`` passes through to
+:meth:`ArtifactStore.propose`. No gateway, ``AgentLoop`` or built-in tool path proposes
+artifacts on its own: a host (or a host action the agent calls) does.
 
 Imports: stdlib, pydantic and kernel modules only; import-cheap.
 """

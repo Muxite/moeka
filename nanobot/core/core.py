@@ -8,6 +8,10 @@ chat-bot runtime never exposed:
   * **Actions** — register a plain Python callable as a tool the agent can call.
   * **Documents** — ingest arbitrary text/files into a vector collection and
     retrieve over them (RAG for host knowledge, alongside the agent's own memory).
+  * **Epistemic stores** (P5, design I3) — ``kernel.facts`` (values with provenance),
+    ``kernel.artifacts`` (typed artifacts whose committed leaves cite facts),
+    ``kernel.propose`` and ``kernel.answer`` (commit a user's answer to a
+    clarification question). Built lazily under ``env.paths.state_dir``.
 
 Usage::
 
@@ -57,6 +61,12 @@ class MoekaCore:
         # Set by :meth:`create` when a named profile was applied.
         self.profile: Any | None = None
         self.profile_name: str | None = None
+        # P5 epistemic stores (I3): built lazily from ``self.env`` on first use, or
+        # injected by the host. ``_owns_*`` marks the ones :meth:`cleanup` closes.
+        self._facts: Any | None = None
+        self._artifacts: Any | None = None
+        self._owns_facts = False
+        self._owns_artifacts = False
 
     # ------------------------------------------------------------------
     # Construction
@@ -376,6 +386,7 @@ class MoekaCore:
         Order matters: close before rmtree, or the ephemeral case unlinks files
         out from under live connections.
         """
+        self._close_epistemic_stores()
         for store_name in ("vec_store", "sessions"):
             store = getattr(self._loop, store_name, None)
             closer = getattr(store, "close", None)
@@ -392,6 +403,148 @@ class MoekaCore:
 
         shutil.rmtree(ws, ignore_errors=True)
         self._ephemeral_workspace = None
+
+    # ------------------------------------------------------------------
+    # Epistemic stores (P5, design I3 / section 7)
+    # ------------------------------------------------------------------
+
+    @property
+    def env(self) -> Any | None:
+        """The :class:`~nanobot.kernel.env.CoreEnvironment` the loop runs with.
+
+        The explicit ``env=`` given to :meth:`create`/:meth:`from_config`, else the
+        loop's ``LegacyEnvironment`` (flat layout: ``state_dir`` is the workspace).
+        ``None`` only for a hand-built loop that carries no ``CoreEnvironment``.
+        """
+        from nanobot.kernel.env import CoreEnvironment
+
+        env = getattr(self._loop, "env", None)
+        return env if isinstance(env, CoreEnvironment) else None
+
+    @property
+    def facts(self) -> Any | None:
+        """The kernel's :class:`~nanobot.kernel.facts.FactStore` (values with provenance).
+
+        Built on first access with ``FactStore.from_env(self.env)``
+        (``<state_dir>/facts.db``, tracing to ``env.trace``) unless the host assigned
+        one. ``None`` when there is no :attr:`env` (graceful degradation; nothing is
+        created on disk until first access).
+        """
+        if self._facts is None:
+            env = self.env
+            if env is None:
+                return None
+            from nanobot.kernel.facts import FactStore
+
+            self._facts = FactStore.from_env(env)
+            self._owns_facts = True
+        return self._facts
+
+    @facts.setter
+    def facts(self, store: Any) -> None:
+        if self._artifacts is not None and self._artifacts.facts is not store:
+            if not self._owns_artifacts:
+                raise ValueError(
+                    "the assigned artifact store resolves cites against another fact "
+                    "store; assign a matching artifact store"
+                )
+            self._close_owned("artifacts")  # rebuilt over the new fact store on next use
+        self._close_owned("facts")
+        self._facts = store
+        self._owns_facts = False
+
+    @property
+    def artifacts(self) -> Any | None:
+        """The kernel's :class:`~nanobot.kernel.artifacts.ArtifactStore` (I3 typed artifacts).
+
+        Built on first access with ``ArtifactStore.from_env(self.env, facts=self.facts)``
+        (``<state_dir>/artifacts.db``), so it resolves cites against :attr:`facts`,
+        unless the host assigned one. ``None`` when there is no :attr:`env`. Kinds are
+        registered on it by the host: ``kernel.artifacts.register_kind(name, model)``.
+        """
+        if self._artifacts is None:
+            env = self.env
+            facts = self.facts
+            if env is None or facts is None:
+                return None
+            from nanobot.kernel.artifacts import ArtifactStore
+
+            self._artifacts = ArtifactStore.from_env(env, facts=facts)
+            self._owns_artifacts = True
+        return self._artifacts
+
+    @artifacts.setter
+    def artifacts(self, store: Any) -> None:
+        if self._facts is not None and store.facts is not self._facts and not self._owns_facts:
+            raise ValueError(
+                "the artifact store resolves cites against another fact store than the "
+                "assigned kernel.facts; assign its fact store to kernel.facts first"
+            )
+        self._close_owned("artifacts")
+        if self._facts is not store.facts:
+            self._close_owned("facts")
+            self._facts = store.facts
+            self._owns_facts = False
+        self._artifacts = store
+        self._owns_artifacts = False
+
+    def _require_artifacts(self) -> Any:
+        artifacts = self.artifacts
+        if artifacts is None:
+            raise RuntimeError(
+                "no CoreEnvironment: this kernel has no fact/artifact store; build it "
+                "with MoekaKernel.create(env=...) or assign kernel.facts/kernel.artifacts"
+            )
+        return artifacts
+
+    def propose(
+        self,
+        kind: str,
+        delta: dict[str, Any],
+        cites: dict[str, str] | None = None,
+        *,
+        artifact_id: str | None = None,
+    ) -> Any:
+        """Merge ``delta`` into an artifact: cited leaves commit, uncited stay provisional.
+
+        Thin passthrough to :meth:`ArtifactStore.propose
+        <nanobot.kernel.artifacts.ArtifactStore.propose>` on :attr:`artifacts`
+        (``cites`` maps a dotted leaf path to a :attr:`facts` trace ID). Raises
+        ``RuntimeError`` when there is no store (no :attr:`env`).
+        """
+        return self._require_artifacts().propose(kind, delta, cites, artifact_id=artifact_id)
+
+    def answer(self, question: Any, answer: Any, turn_ref: str) -> Any:
+        """Commit the user's ``answer`` to a clarification ``question``'s leaf.
+
+        Thin passthrough to :func:`nanobot.kernel.clarify.record_answer`: records the
+        answer as a ``user`` fact (``source_ref=turn_ref``) in :attr:`facts`, then
+        commits it through :attr:`artifacts` citing that fact. Raises ``RuntimeError``
+        when there is no store (no :attr:`env`).
+        """
+        artifacts = self._require_artifacts()
+        from nanobot.kernel.clarify import record_answer
+
+        return record_answer(artifacts.facts, artifacts, question, answer, turn_ref)
+
+    def _close_owned(self, which: str) -> None:
+        owned = self._owns_artifacts if which == "artifacts" else self._owns_facts
+        store = self._artifacts if which == "artifacts" else self._facts
+        if store is None or not owned:
+            return
+        try:
+            store.close()
+        except Exception:  # never let teardown mask the caller's error
+            logger.exception("MoekaCore: failed to close the {} store", which)
+        if which == "artifacts":
+            self._artifacts, self._owns_artifacts = None, False
+        else:
+            self._facts, self._owns_facts = None, False
+
+    def _close_epistemic_stores(self) -> None:
+        """Close the stores this kernel built (artifacts first); injected ones stay open."""
+        self._close_owned("artifacts")
+        self._close_owned("facts")
 
     # ------------------------------------------------------------------
     # Actions — connect host code to the agent

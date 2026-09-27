@@ -71,8 +71,10 @@ Answers (:func:`record_answer`):
   ``ArtifactValidationError`` and stores nothing; the ``user`` fact stays recorded,
   since the user did say it (facts are immutable).
 
-Wiring (what is live): library only. No gateway, ``AgentLoop`` or tool path calls
-this module yet.
+Wiring (what is live): ``MoekaKernel.answer(question, answer, turn_ref)`` (Task 25) is a
+thin passthrough to :func:`record_answer` over the kernel's own stores. The host calls
+:func:`resolve_divergence` and asks the question; no gateway, ``AgentLoop`` or tool
+path runs this loop on its own.
 
 Imports: stdlib and kernel modules only; no model or provider imports.
 """
