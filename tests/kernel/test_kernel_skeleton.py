@@ -8,7 +8,7 @@ import pytest
 
 from nanobot.kernel.hostenv import Environment, ModelSpec, ProviderSpec
 from nanobot.kernel.kernel import Kernel
-from nanobot.kernel.trace import NullTraceSink
+from nanobot.kernel.trace import NullTraceSink, Tracer
 
 
 class _Trace:
@@ -41,8 +41,13 @@ def test_env_and_trace(tmp_path) -> None:
     env = _env(tmp_path, trace)
     with Kernel(env) as kernel:
         assert kernel.env is env
-        assert kernel.trace is trace
-    assert isinstance(Kernel(_env(tmp_path)).trace, NullTraceSink)
+        # The kernel's Tracer forwards to the host sink; kernel components get it.
+        assert isinstance(kernel.trace, Tracer) and kernel.trace.sink is trace
+        assert kernel.core_env.trace is kernel.trace
+        assert env.trace is trace  # the host's Environment is untouched
+        kernel.trace.emit({"event": "x"})
+        assert [e["event"] for e in trace.events] == ["x"]
+    assert isinstance(Kernel(_env(tmp_path)).trace.sink, NullTraceSink)
 
 
 def test_rejects_non_environment(tmp_path) -> None:

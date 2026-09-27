@@ -37,6 +37,7 @@ from nanobot.kernel.policy import (
 )
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.security.protected_paths import PROTECTED_MARKER
+from tests._trace import unstamped
 from tests.agent.runner_helpers import make_run_spec
 
 _MAX_CHARS = AgentDefaults().max_tool_result_chars
@@ -48,7 +49,7 @@ class RecordingSink:
         self.events: list[dict[str, Any]] = []
 
     def emit(self, event: dict[str, Any]) -> None:
-        self.events.append(dict(event))
+        self.events.append(unstamped(event))
 
     def decisions(self) -> list[dict[str, Any]]:
         return [e for e in self.events if e.get("event") == "policy.decision"]

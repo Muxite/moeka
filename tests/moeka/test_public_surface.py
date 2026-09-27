@@ -56,7 +56,10 @@ SURFACE: dict[str, list[str]] = {
         "PluginRegistry",
         "Tool",
     ],
-    "moeka.trace": ["LoguruTraceSink", "NullTraceSink", "TraceSink"],
+    "moeka.trace": [
+        "EVENTS", "FanoutSink", "JsonlTraceSink", "LoguruTraceSink", "MemoryTraceSink",
+        "NullTraceSink", "TraceSink", "Tracer",
+    ],
 }
 
 

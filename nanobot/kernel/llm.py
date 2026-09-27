@@ -18,8 +18,10 @@ Rules every entry point follows:
   and :class:`~nanobot.kernel.llm_errors.LLMTimeoutError` is raised.
 
 Each logical call gets a ``call_id``; the ledger's ``model.call`` events for all of
-its physical attempts carry that id, the alias, the attempt number and the host's
-tags (bound through :func:`nanobot.kernel.ledger.call_attribution`).
+its physical attempts carry that id, the alias, the attempt number and the call's
+effective tags (bound through :func:`nanobot.kernel.ledger.call_attribution`): the
+active trace span's tags with ``GenerateOptions.tags`` merged over them. The LLM
+layer never opens spans itself.
 
 With a kernel ``cache`` (and ``opts.cache``), a logical call is first looked up by
 :meth:`LLM.request_key`; a hit makes no provider call and no budget admission.
@@ -86,7 +88,7 @@ from nanobot.kernel.llm_errors import (
 )
 from nanobot.kernel.messages import ImageInput, user_content
 from nanobot.kernel.sampling import Sampling
-from nanobot.kernel.trace import safe_emit
+from nanobot.kernel.trace import current_tags, safe_emit
 
 if TYPE_CHECKING:
     from nanobot.kernel.kernel import Kernel
@@ -111,7 +113,8 @@ class GenerateOptions:
     - ``cache``: whether a response cache may serve this call (used from Task 6).
     - ``affinity_key``: stable routing key (provider ``session_id``) that keeps a
       provider-side prefix cache warm across related calls.
-    - ``tags``: host labels copied onto every ledger event of the call.
+    - ``tags``: host labels copied onto every ledger event of the call (merged over
+      the active trace span's tags; these win).
     - ``on_unsupported``: ``"drop"`` (report and omit) or ``"raise"`` for request
       fields the provider cannot honour.
     """
@@ -490,7 +493,7 @@ class LLM:
         self._ledgers: dict[int, tuple[LLMProvider, PricingTable]] = {}
         budget = kernel.budget
         self._metering: Metering | None = (
-            Metering(budget, kernel.env.trace) if budget is not None else None
+            Metering(budget, kernel.trace) if budget is not None else None
         )
         # alias -> the BudgetedProvider around that alias's provider (with a budget).
         self._wrapped: dict[str, BudgetedProvider] = {}
@@ -514,15 +517,14 @@ class LLM:
 
         if not isinstance(spec, ModelSpec):
             raise TypeError(f"spec must be a ModelSpec, got {type(spec).__name__}")
-        env = self._kernel.env
         pricing = _spec_pricing(spec)
         with self._lock:
             entry = self._ledgers.get(id(provider))
             if entry is None:
                 table = PricingTable()
                 self._ledgers[id(provider)] = (provider, table)
-                provider.trace_sink = env.trace
-                attach_ledger(provider, env.core, table)
+                provider.trace_sink = self._kernel.trace
+                attach_ledger(provider, self._kernel.core_env, table)
             else:
                 table = entry[1]
             if pricing is not None:
@@ -562,7 +564,9 @@ class LLM:
 
             env = self._kernel.env
             try:
-                provider = make_provider(env.config, preset_name=alias, env=env.core)
+                provider = make_provider(
+                    env.config, preset_name=alias, env=self._kernel.core_env,
+                )
             except Exception as exc:
                 raise ModelNotFound(
                     f"no provider can serve model {alias!r}: {exc}", model=alias,
@@ -694,6 +698,7 @@ class LLM:
         model_cls: type | None = None,
         retries: int = 0,
     ) -> _Plan:
+        opts = self._with_span_tags(opts)
         route = self._route(opts.model)
         source = tuple(messages)
         if kind == "generate":
@@ -710,6 +715,18 @@ class LLM:
             kind, route, opts, source, _with_json_system(source, json_system_suffix(schema)),
             native, schema=schema, model_cls=model_cls, retries=max(retries, 0),
         )
+
+    @staticmethod
+    def _with_span_tags(opts: GenerateOptions) -> GenerateOptions:
+        """*opts* with the active trace span's tags merged under ``opts.tags`` (opts win).
+
+        The effective tags feed the budget estimate (``per_tag`` caps), the
+        ``cache.hit`` event and the ledger's ``model.call`` events.
+        """
+        span_tags = current_tags()
+        if not span_tags:
+            return opts
+        return replace(opts, tags={**span_tags, **opts.tags})
 
     def _plan_request(self, request: Request) -> _Plan:
         if not isinstance(request, Request):
@@ -844,7 +861,7 @@ class LLM:
         if not isinstance(hit, Completion):
             logger.warning("response cache returned {} (not a Completion); ignored", type(hit))
             return key, None
-        safe_emit(self._kernel.env.trace, {
+        safe_emit(self._kernel.trace, {
             "event": "cache.hit",
             "call_id": call_id,
             "key": key[:16],
@@ -1227,7 +1244,7 @@ class LLM:
         estimate = self._estimate_plan(plan, call_id)
         with self._admitted(estimate) as settle:
             attribution = CallAttribution(
-                call_id=call_id, alias=route.alias, tags=opts.tags, on_event=settle,
+                call_id=call_id, alias=route.alias, tags=plan.opts.tags, on_event=settle,
             )
             context = self._context(route, opts, opts.response_format)
             queue: asyncio.Queue[Any] = asyncio.Queue()

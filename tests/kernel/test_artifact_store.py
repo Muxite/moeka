@@ -53,6 +53,7 @@ from nanobot.kernel.facts import FactStore
 from nanobot.kernel.floors import check_floors
 from nanobot.kernel.policy import CapabilityRequest, Principal
 from nanobot.security.protected_paths import PROTECTED_MARKER, ProtectedFloor
+from tests._trace import unstamped
 
 AGENT = Principal("main", "agent", parent=Principal("host", "host"))
 MISSING = "fact-" + "0" * 32
@@ -77,7 +78,7 @@ class RecordingSink:
         self.events: list[dict[str, Any]] = []
 
     def emit(self, event: dict[str, Any]) -> None:
-        self.events.append(event)
+        self.events.append(unstamped(event))
 
 
 class _EmptyConfig:

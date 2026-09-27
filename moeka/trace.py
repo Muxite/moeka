@@ -1,5 +1,28 @@
-"""Trace sinks: where the kernel's structured events go."""
+"""Trace: where the kernel's structured events go.
 
-from nanobot.kernel.trace import LoguruTraceSink, NullTraceSink, TraceSink
+``kernel.trace`` is a :class:`Tracer`: ``span(name, **tags)`` (sync or async context
+manager), ``subscribe(event, fn)``. Every event carries ``trace_id``, ``span``,
+``tags`` and ``ts``; :data:`EVENTS` lists the event names and their payload keys.
+"""
 
-__all__ = ["LoguruTraceSink", "NullTraceSink", "TraceSink"]
+from nanobot.kernel.trace import (
+    EVENTS,
+    FanoutSink,
+    JsonlTraceSink,
+    LoguruTraceSink,
+    MemoryTraceSink,
+    NullTraceSink,
+    Tracer,
+    TraceSink,
+)
+
+__all__ = [
+    "EVENTS",
+    "FanoutSink",
+    "JsonlTraceSink",
+    "LoguruTraceSink",
+    "MemoryTraceSink",
+    "NullTraceSink",
+    "TraceSink",
+    "Tracer",
+]

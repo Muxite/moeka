@@ -244,6 +244,7 @@ class SkillsLoader:
         exclude: set[str] | None = None,
         *,
         workspace: Path | None = None,
+        listed: list[str] | None = None,
     ) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
@@ -254,6 +255,7 @@ class SkillsLoader:
         Args:
             exclude: Set of skill names to omit from the summary.
             workspace: Effective project workspace used to choose safe display paths.
+            listed: When given, the names of the skills rendered are appended to it.
 
         Returns:
             Markdown-formatted skills summary.
@@ -310,6 +312,8 @@ class SkillsLoader:
                     f"  `{Path(entry['path']).relative_to(root).as_posix()}`"
                 )
                 lines.append(f"- **{skill_name}** — {desc}{suffix}{path_hint}")
+                if listed is not None:
+                    listed.append(skill_name)
             sections.append("\n".join(lines))
         return "\n\n".join(sections)
 

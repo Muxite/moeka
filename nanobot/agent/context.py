@@ -124,6 +124,8 @@ class ContextBuilder:
         # In-memory bootstrap sections (name -> content). A key matching one of
         # BOOTSTRAP_FILES shadows the workspace file; other keys are appended.
         self.bootstrap_overrides: dict[str, str] = dict(bootstrap_overrides or {})
+        # Host env: ``skill.listed`` goes to ``env.trace`` (none without an env).
+        self._env = env
         self.memory = MemoryStore(workspace, vec_store=vec_store, env=env)
         self.skills = SkillsLoader(
             workspace,
@@ -177,17 +179,21 @@ class ContextBuilder:
                 parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
         active_skills = self.skills.get_always_skills()
+        active_content = ""
         if active_skills:
             active_content = self.skills.load_skills_for_context(active_skills)
             if active_content:
                 parts.append(f"# Active Skills\n\n{active_content}")
 
+        listed: list[str] = []
         skills_summary = self.skills.build_skills_summary(
             exclude=set(active_skills),
             workspace=root,
+            listed=listed,
         )
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
+        self._trace_skills_listed(active_skills if active_content else [], listed)
 
         if include_memory_recent_history:
             history_section = self._build_history_section(
@@ -207,6 +213,17 @@ class ContextBuilder:
             )
 
         return "\n\n---\n\n".join(parts)
+
+    def _trace_skills_listed(self, active: list[str], listed: list[str]) -> None:
+        """Emit ``skill.listed`` (skills rendered into the prompt) to the env's trace."""
+        env = getattr(self, "_env", None)
+        if env is None or not (active or listed):
+            return
+        from nanobot.kernel.trace import safe_emit
+
+        safe_emit(env.trace, {
+            "event": "skill.listed", "skills": [*active, *listed], "active": list(active),
+        })
 
     def _build_history_section(
         self,

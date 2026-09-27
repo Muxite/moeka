@@ -55,6 +55,8 @@ class _FsTool(Tool):
     """Shared base for filesystem tools — common init and path resolution."""
 
     config_key = "file"
+    # Host trace sink (``env.trace``, set by ``create``); ``None`` = no trace events.
+    _trace_sink: Any = None
 
     @classmethod
     def config_cls(cls):
@@ -137,7 +139,7 @@ class _FsTool(Tool):
         env = ctx.env
         # Agent-owned skills stay available from project scopes. History is a narrower
         # capability: expose only the append-only log, not the surrounding memory directory.
-        return cls(
+        tool = cls(
             workspace=agent_workspace,
             allowed_dir=allowed_dir,
             extra_read_allowed_dirs=[BUILTIN_SKILLS_DIR, resolved_agent_workspace / "skills"],
@@ -149,6 +151,8 @@ class _FsTool(Tool):
             legacy_floor=env is None or not env.strict,
             plugin_data_root=plugin_data_root(env),
         )
+        tool._trace_sink = env.trace if env is not None else None
+        return tool
 
     @property
     def _file_states(self) -> FileStates:
@@ -375,6 +379,15 @@ class ReadFileTool(_FsTool):
     def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
         return [capability_request("fs.read", params.get("path"))]
 
+    def _trace_skill_read(self, fp: Path) -> None:
+        """Emit ``skill.read`` when *fp* is a ``skills/<name>/SKILL.md`` file."""
+        sink = self._trace_sink
+        if sink is None or fp.name != "SKILL.md" or fp.parent.parent.name != "skills":
+            return
+        from nanobot.kernel.trace import safe_emit
+
+        safe_emit(sink, {"event": "skill.read", "skill": fp.parent.name, "path": str(fp)})
+
     def _is_scratchpad(self, fp: Path) -> bool:
         """True for a file under ``<work_dir>/scratchpad`` (untrusted on read-back)."""
         from nanobot.kernel.deferred import is_scratchpad_path
@@ -408,6 +421,7 @@ class ReadFileTool(_FsTool):
                 return ToolResult.error(f"Error: File not found: {path}")
             if not fp.is_file():
                 return ToolResult.error(f"Error: Not a file: {path}")
+            self._trace_skill_read(fp)
 
             file_size = fp.stat().st_size
             if file_size > self._MAX_FILE_SIZE_BYTES:

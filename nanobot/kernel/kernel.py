@@ -1,6 +1,6 @@
 """``Kernel``: the host-facing engine object built from an :class:`Environment`.
 
-It owns the environment, the trace sink, a private loop thread (the sync-twin
+It owns the environment, the :class:`~nanobot.kernel.trace.Tracer`, a private loop thread (the sync-twin
 bridge) and the LLM layer (``kernel.llm``), and has an idempotent close in both
 sync and async form. Agents, sessions and memory attach here.
 
@@ -8,11 +8,18 @@ The host may pass a :class:`~nanobot.kernel.budget.Budget` (every model call is
 admitted against it, see :mod:`nanobot.kernel.budget`), a
 :class:`~nanobot.kernel.budget.ResponseCache`, and ``max_concurrency`` (the
 default concurrency of ``kernel.llm.batch``).
+
+Trace routing: ``kernel.trace`` is a :class:`~nanobot.kernel.trace.Tracer` wrapping
+``env.trace`` (the host's sink). Everything the kernel builds (pool providers, their
+ledgers, budget metering, cache events) is handed ``kernel.core_env``, a copy of
+``env.core`` whose ``trace`` is that Tracer, so subscribers see every kernel-internal
+event. The host's ``Environment`` itself is left untouched.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 from types import TracebackType
 from typing import TYPE_CHECKING
@@ -21,10 +28,11 @@ from loguru import logger
 
 from nanobot.kernel.bridge import LoopThread
 from nanobot.kernel.hostenv import Environment
-from nanobot.kernel.trace import TraceSink
+from nanobot.kernel.trace import Tracer
 
 if TYPE_CHECKING:
     from nanobot.kernel.budget import Budget, ResponseCache
+    from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.llm import LLM
 
 
@@ -57,6 +65,8 @@ class Kernel:
                 or max_concurrency < 1:
             raise ValueError(f"max_concurrency must be a positive int, got {max_concurrency!r}")
         self._env = env
+        self._tracer = Tracer(env.trace)
+        self._core_env = dataclasses.replace(env.core, trace=self._tracer)
         self._budget = budget
         self._cache = cache
         self._max_concurrency = max_concurrency
@@ -71,8 +81,14 @@ class Kernel:
         return self._env
 
     @property
-    def trace(self) -> TraceSink:
-        return self._env.trace
+    def trace(self) -> Tracer:
+        """The kernel's :class:`Tracer` (forwards to ``env.trace``; ``span``/``subscribe``)."""
+        return self._tracer
+
+    @property
+    def core_env(self) -> CoreEnvironment:
+        """``env.core`` with ``trace`` set to :attr:`trace`: what kernel components get."""
+        return self._core_env
 
     @property
     def budget(self) -> Budget | None:

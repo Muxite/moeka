@@ -20,6 +20,7 @@ from nanobot.providers.base import (
 from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 from nanobot.providers.registry import find_by_name
+from tests._trace import unstamped
 
 EVERY_FIELD = Sampling(
     temperature=0.2,
@@ -35,6 +36,7 @@ EVERY_FIELD = Sampling(
     max_tokens=256,
     reasoning_effort="low",
 )
+
 MESSAGES = [{"role": "user", "content": "hi"}]
 
 
@@ -43,7 +45,7 @@ class RecordingSink:
         self.events: list[dict[str, Any]] = []
 
     def emit(self, event: dict[str, Any]) -> None:
-        self.events.append(event)
+        self.events.append(unstamped(event))
 
 
 def _openai_client(calls: list[dict[str, Any]]) -> Any:
