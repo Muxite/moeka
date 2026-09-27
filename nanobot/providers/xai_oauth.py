@@ -30,7 +30,6 @@ import httpx
 from filelock import FileLock
 from loguru import logger
 
-from nanobot.config.paths import get_data_dir
 from nanobot.utils.helpers import _write_text_atomic  # pyright: ignore[reportPrivateUsage]
 
 XAI_OAUTH_ISSUER = "https://auth.x.ai"
@@ -257,9 +256,14 @@ def get_xai_oauth_storage_path(data_dir: Path | None = None) -> Path:
     """Return the instance-scoped xAI OAuth credential path.
 
     *data_dir* is the host's data dir (``env.paths.data_dir``); ``None`` keeps the
-    legacy ``get_data_dir()``.
+    legacy instance data dir (``nanobot.kernel.legacy.legacy_data_dir``).
     """
-    base = data_dir if data_dir is not None else get_data_dir()
+    if data_dir is not None:
+        base = data_dir
+    else:
+        from nanobot.kernel.legacy import legacy_data_dir
+
+        base = legacy_data_dir()
     return base / "auth" / "xai.json"
 
 

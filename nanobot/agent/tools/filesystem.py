@@ -71,8 +71,11 @@ class _FsTool(Tool):
         max_write_bytes: int = DEFAULT_MAX_WRITE_BYTES,
         paths: "Paths | None" = None,
         legacy_floor: bool = True,
+        plugin_data_root: Path | None = None,
     ):
         self._workspace = workspace
+        # Parent of plugin-data (``plugin_data_root(env)``); ``None`` = legacy config dir.
+        self._plugin_data_root = plugin_data_root
         # Host paths (env.paths): the floor and the media root come from here.
         # ``None`` keeps the legacy ambient behaviour (direct constructions).
         self._paths = paths
@@ -112,6 +115,7 @@ class _FsTool(Tool):
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
+        from nanobot.agent.plugins import plugin_data_root
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 
         agent_workspace = Path(ctx.workspace)
@@ -135,6 +139,7 @@ class _FsTool(Tool):
             sandbox_restricts_workspace=sandbox_restricts,
             paths=env.paths if env is not None else None,
             legacy_floor=env is None or not env.strict,
+            plugin_data_root=plugin_data_root(env),
         )
 
     @property
@@ -235,6 +240,7 @@ class _FsTool(Tool):
                         enabled_agent_plugin_skill_dirs(
                             Path(self._workspace),
                             requested_path=candidate.resolve(strict=False),
+                            data_root=self._plugin_data_root,
                         )
                     )
             except (OSError, RuntimeError):

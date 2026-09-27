@@ -21,7 +21,6 @@ from weakref import WeakValueDictionary
 from filelock import FileLock
 from loguru import logger
 
-from nanobot.config.paths import get_legacy_sessions_dir, get_runtime_subdir
 from nanobot.providers.base import ProviderConversationState
 from nanobot.runtime_context import (
     public_history_message,
@@ -513,6 +512,13 @@ class SessionStore(Protocol):
     def list_sessions(self) -> list[SessionInfo]: ...
 
 
+def _legacy_runtime_sessions_root() -> Path:
+    """Upstream default JSONL root (``<data dir>/sessions``) when no root was given."""
+    from nanobot.kernel.legacy import legacy_runtime_subdir
+
+    return legacy_runtime_subdir("sessions").resolve(strict=False)
+
+
 class JsonlSessionStore:
     """JSONL implementation of session persistence."""
 
@@ -522,7 +528,7 @@ class JsonlSessionStore:
         root = (
             Path(sessions_root).expanduser().resolve(strict=False)
             if sessions_root is not None
-            else get_runtime_subdir("sessions").resolve(strict=False)
+            else _legacy_runtime_sessions_root()
         )
         if root == canonical_workspace or root.is_relative_to(canonical_workspace):
             raise RuntimeError(
@@ -545,12 +551,18 @@ class JsonlSessionStore:
                 workspace_id,
             )
             self.sessions_dir = ensure_dir(root / workspace_id)
-            self.legacy_sessions_dir = get_legacy_sessions_dir()
             self._session_files_lock = FileLock(
                 str(self.sessions_dir / _SESSION_FILES_LOCK_FILENAME)
             )
             with self._session_files_lock:
                 self._migrate_from_workspace(canonical_workspace)
+
+    @property
+    def legacy_sessions_dir(self) -> Path:
+        """Legacy global session dir (``~/.nanobot/sessions``), resolved on use only."""
+        from nanobot.kernel.legacy import legacy_sessions_dir
+
+        return legacy_sessions_dir()
 
     @contextmanager
     def locked_session_files(self) -> Generator[Path, None, None]:
@@ -1623,12 +1635,16 @@ class SessionManager:
         self._jsonl_store = JsonlSessionStore(workspace, sessions_root=sessions_root)
         self._store: SessionStore = store if store is not None else self._jsonl_store
         self.sessions_dir = self._jsonl_store.sessions_dir
-        self.legacy_sessions_dir = self._jsonl_store.legacy_sessions_dir
         self._cache: OrderedDict[str, Session] = OrderedDict()
         # Preserve identity for sessions held by active callers without retaining idle ones.
         self._overflow_cache: WeakValueDictionary[str, Session] = WeakValueDictionary()
         self._max_cached_sessions = SESSION_CACHE_MAX_SIZE
         self._delete_observer: Callable[[str], None] | None = None
+
+    @property
+    def legacy_sessions_dir(self) -> Path:
+        """Legacy global session dir; resolved on use (never at construction)."""
+        return self._jsonl_store.legacy_sessions_dir
 
     def _remember(self, session: Session) -> None:
         """Keep recent sessions strongly cached without duplicating live objects."""

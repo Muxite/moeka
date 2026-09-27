@@ -33,14 +33,13 @@ from nanobot.agent.tools.exec_session import (
     clamp_session_int,
     format_session_poll,
 )
-from nanobot.agent.tools.sandbox import wrap_command
+from nanobot.agent.tools.sandbox import expand_vars, wrap_command
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
     StringSchema,
     tool_parameters_schema,
 )
-from nanobot.config.paths import get_media_dir
 from nanobot.config_base import Base
 from nanobot.security.workspace_access import current_scope_allows_loopback, current_tool_workspace
 from nanobot.security.workspace_policy import is_path_within
@@ -50,6 +49,13 @@ if TYPE_CHECKING:
 
 _IS_WINDOWS = sys.platform == "win32"
 _PROCESS_TREE_OWNER_ATTR = "_nanobot_process_tree_owner"
+
+
+def _legacy_media_dir() -> Path:
+    """Legacy media root (env-less fallback), via the ambient adapter (I1)."""
+    from nanobot.kernel.legacy import legacy_media_dir
+
+    return legacy_media_dir()
 
 
 class _ProcessTreeOwner(Protocol):
@@ -330,7 +336,7 @@ class ExecTool(Tool):
         # allowed_env_keys resolve via env.credentials (scope "exec"). ``None``
         # keeps the legacy behaviour: a copy of the process environment.
         self._env = env
-        # Host media root (env.paths.media_dir); ``None`` = legacy get_media_dir().
+        # Host media root (env.paths.media_dir); ``None`` = legacy media dir.
         self.media_dir = media_dir
         # Per-stream byte cap for one-shot output capture (see _BoundedCapture);
         # execute() never lets it drop below 4x the effective output limit.
@@ -355,8 +361,9 @@ class ExecTool(Tool):
         self.webui_allow_local_service_access = webui_allow_local_service_access
         self.path_prepend = path_prepend
         self.path_append = path_append
-        self.sandbox_ro_binds = self._normalize_bind_roots(sandbox_ro_binds)
-        self.sandbox_rw_binds = self._normalize_bind_roots(sandbox_rw_binds)
+        bind_env = self._exec_base_env() if sandbox_ro_binds or sandbox_rw_binds else {}
+        self.sandbox_ro_binds = self._normalize_bind_roots(sandbox_ro_binds, bind_env)
+        self.sandbox_rw_binds = self._normalize_bind_roots(sandbox_rw_binds, bind_env)
         self.allowed_env_keys = allowed_env_keys or []
         self._session_manager = session_manager or DEFAULT_EXEC_SESSION_MANAGER
 
@@ -658,6 +665,7 @@ class ExecTool(Tool):
                     sandbox_ro_binds=[str(p) for p in self.sandbox_ro_binds],
                     sandbox_rw_binds=[str(p) for p in self.sandbox_rw_binds],
                     media_dir=self.media_dir,
+                    env_vars=self._exec_base_env(),
                 )
                 cwd = str(Path(workspace).resolve())
 
@@ -948,6 +956,14 @@ class ExecTool(Tool):
         owner.release()
         ExecTool._drop_process_tree_owner(process)
 
+    def _exec_base_env(self) -> Mapping[str, str]:
+        """The base env a child sees (R3): ``env.exec_base_env``, else a legacy snapshot."""
+        if self._env is not None:
+            return self._env.exec_base_env
+        from nanobot.kernel.legacy import process_env_snapshot
+
+        return process_env_snapshot()
+
     def _build_env(self) -> dict[str, str]:
         """Build a minimal environment for subprocess execution.
 
@@ -959,12 +975,7 @@ class ExecTool(Tool):
         set of system variables (including PATH) is forwarded.  API keys and
         other secrets are still excluded.
         """
-        if self._env is not None:
-            base: Mapping[str, str] = self._env.exec_base_env
-        else:
-            from nanobot.kernel.legacy import process_env_snapshot
-
-            base = process_env_snapshot()
+        base = self._exec_base_env()
         if _IS_WINDOWS:
             sr = base.get("SYSTEMROOT", r"C:\Windows")
             env = {
@@ -1059,9 +1070,10 @@ class ExecTool(Tool):
                 resolved_workspace or cwd_path
             )
 
+            expand_env = self._exec_base_env()
             for raw in self._extract_absolute_paths(cmd):
                 try:
-                    expanded = os.path.expandvars(raw.strip())
+                    expanded = expand_vars(raw.strip(), expand_env)
                     # Python's expanduser() intentionally does not implement
                     # shell directory-stack forms. ``~+`` is the active cwd,
                     # while ``~-`` and indexed forms can resolve outside it;
@@ -1090,7 +1102,7 @@ class ExecTool(Tool):
                     continue
 
                 media_path = (
-                    self.media_dir if self.media_dir is not None else get_media_dir()
+                    self.media_dir if self.media_dir is not None else _legacy_media_dir()
                 ).resolve()
                 allowed = (
                     is_path_within(p, cwd_path)
@@ -1435,14 +1447,16 @@ class ExecTool(Tool):
         return paths
 
     @staticmethod
-    def _normalize_bind_roots(paths: list[str] | None) -> list[Path]:
+    def _normalize_bind_roots(
+        paths: list[str] | None, env_vars: Mapping[str, str] | None = None,
+    ) -> list[Path]:
         roots: list[Path] = []
         seen: set[str] = set()
         for raw in paths or []:
             value = str(raw).strip()
             if not value:
                 continue
-            path = Path(os.path.expandvars(value)).expanduser()
+            path = Path(expand_vars(value, env_vars or {})).expanduser()
             if not path.is_absolute():
                 continue
             with suppress(OSError, RuntimeError, ValueError):

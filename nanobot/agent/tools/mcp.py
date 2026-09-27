@@ -1357,18 +1357,21 @@ def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def _configured_servers(
-    config: Config, workspace: Path | None = None,
+    config: Config, workspace: Path | None = None, data_root: Path | None = None,
 ) -> dict[str, MCPServerConfig]:
     from nanobot.agent.plugins import agent_plugin_mcp_servers
 
     return agent_plugin_mcp_servers(
         workspace if workspace is not None else config.workspace_path,
         config.tools.mcp_servers,
+        data_root=data_root,
     )
 
 
 def _source_server_loader(
-    source: ConfigSource | None, workspace: Path | None = None,
+    source: ConfigSource | None,
+    workspace: Path | None = None,
+    data_root: Path | None = None,
 ) -> MCPServerLoader:
     """Hot-reload loader over a host ConfigSource (``None`` = current config file).
 
@@ -1384,7 +1387,7 @@ def _source_server_loader(
             from nanobot.kernel.legacy import file_config_source
 
             current = file_config_source()
-        return _configured_servers(snapshot_config(current), workspace)
+        return _configured_servers(snapshot_config(current), workspace, data_root)
 
     return _load
 
@@ -1428,11 +1431,15 @@ class MCPProvider:
             return cls(_configured_servers(config), registry, server_loader=server_loader)
         # An explicit host env owns the work dir (plugin MCP servers live there)
         # and the hot-reload source (env.config).
+        from nanobot.agent.plugins import plugin_data_root
+
         workspace = env.paths.work_dir
+        data_root = plugin_data_root(env)
         return cls(
-            _configured_servers(config, workspace),
+            _configured_servers(config, workspace, data_root),
             registry,
-            server_loader=server_loader or _source_server_loader(env.config, workspace),
+            server_loader=server_loader
+            or _source_server_loader(env.config, workspace, data_root),
             data_dir=env.paths.data_dir,
             media_dir=env.paths.media_dir,
             base_env=env.exec_base_env,

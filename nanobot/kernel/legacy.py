@@ -270,6 +270,53 @@ def _legacy_data_dir() -> Path:
     return loader.get_config_path().parent
 
 
+# Legacy env-less fallbacks. Kernel-side modules call these (lazily imported) when a
+# caller passed no host path (``data_dir=None``/``workspace=None``); they are the
+# only route from kernel code to the ambient config/state locations (I1, R2).
+
+
+def legacy_data_dir() -> Path:
+    """``get_data_dir()`` (created if missing): the legacy instance data dir."""
+    from nanobot.config.paths import get_data_dir
+
+    return get_data_dir()
+
+
+def legacy_state_home() -> Path:
+    """``get_state_home()``: the legacy instance dir (``MOEKA_WORKSPACE`` chain / ``~``)."""
+    from nanobot.config.paths import get_state_home
+
+    return get_state_home()
+
+
+def legacy_runtime_subdir(name: str) -> Path:
+    """``get_runtime_subdir(name)`` (created if missing) under the legacy data dir."""
+    from nanobot.config.paths import get_runtime_subdir
+
+    return get_runtime_subdir(name)
+
+
+def legacy_media_dir() -> Path:
+    """``get_media_dir()`` (created if missing): the legacy media root."""
+    from nanobot.config.paths import get_media_dir
+
+    return get_media_dir()
+
+
+def legacy_sessions_dir() -> Path:
+    """``get_legacy_sessions_dir()``: the pre-workspace global session dir (not created)."""
+    from nanobot.config.paths import get_legacy_sessions_dir
+
+    return get_legacy_sessions_dir()
+
+
+def legacy_config_path() -> Path:
+    """``get_config_path()``: the current legacy ``config.json`` path (not created)."""
+    from nanobot.config.loader import get_config_path
+
+    return get_config_path()
+
+
 def _legacy_paths(config: Any) -> Paths:
     """Paths that keep every legacy on-disk location where it is today.
 
@@ -353,7 +400,13 @@ __all__ = [
     "ambient_credential",
     "ambient_env_var",
     "file_config_source",
+    "legacy_config_path",
+    "legacy_data_dir",
+    "legacy_media_dir",
     "legacy_runtime_settings",
+    "legacy_runtime_subdir",
+    "legacy_sessions_dir",
+    "legacy_state_home",
     "legacy_scope_for_ref",
     "process_env_snapshot",
 ]

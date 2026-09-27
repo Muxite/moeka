@@ -33,7 +33,6 @@ from mcp.shared.auth import (
 )
 from pydantic import AnyHttpUrl, AnyUrl
 
-from nanobot.config.paths import get_data_dir
 from nanobot.utils.helpers import _write_text_atomic  # pyright: ignore[reportPrivateUsage]
 
 MCP_OAUTH_CALLBACK_PATH = "/auth/mcp/callback"
@@ -100,7 +99,12 @@ class _RefreshLease:
 
 def _store_path(data_dir: Path | None = None) -> Path:
     """MCP OAuth store; *data_dir* is ``env.paths.data_dir`` (``None`` = legacy)."""
-    base = data_dir if data_dir is not None else get_data_dir()
+    if data_dir is not None:
+        base = data_dir
+    else:
+        from nanobot.kernel.legacy import legacy_data_dir
+
+        base = legacy_data_dir()
     return base / "auth" / "mcp.json"
 
 

@@ -160,23 +160,18 @@ def _isolate_sessions_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    # Both session stores reach the legacy runtime/global-session dirs only through
+    # the ambient adapter's helpers (lazily imported at call time), so patching
+    # them there covers nanobot.session.manager and nanobot.session.sqlite_store.
+    # SqliteSessionStore never calls legacy_runtime_subdir (its default root is
+    # workspace-relative, see default_sessions_root()); legacy_sessions_dir is
+    # resolved on use only.
     monkeypatch.setattr(
-        "nanobot.session.manager.get_runtime_subdir",
+        "nanobot.kernel.legacy.legacy_runtime_subdir",
         runtime_subdir,
     )
     monkeypatch.setattr(
-        "nanobot.session.manager.get_legacy_sessions_dir",
-        lambda: legacy_root,
-    )
-    # moeka: SqliteSessionStore (nanobot/session/sqlite_store.py) never calls
-    # get_runtime_subdir — its default sessions_root is workspace-relative
-    # (see default_sessions_root() there), which stays inside whatever tmp_path
-    # tree a test already uses, so no redirection is needed for it. It does
-    # still read get_legacy_sessions_dir() (informational only, never scanned),
-    # imported into its own module namespace, so that one still needs its own
-    # patch target.
-    monkeypatch.setattr(
-        "nanobot.session.sqlite_store.get_legacy_sessions_dir",
+        "nanobot.kernel.legacy.legacy_sessions_dir",
         lambda: legacy_root,
     )
     yield

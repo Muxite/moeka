@@ -41,7 +41,7 @@ def test_read_session_methods_ignore_legacy_lossy_stem(
     SessionManager construction must not be picked up by reads — the SQLite
     store only imports legacy files once, at construction time."""
     monkeypatch.setattr(
-        "nanobot.session.manager.get_legacy_sessions_dir",
+        "nanobot.kernel.legacy.legacy_sessions_dir",
         lambda: tmp_path / "legacy_sessions",
     )
     manager = SessionManager(tmp_path / "workspace")

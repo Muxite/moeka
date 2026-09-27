@@ -120,14 +120,16 @@ class SkillsLoader:
         Returns:
             List of skill info dicts with 'name', 'path', 'source'.
         """
-        from nanobot.agent.plugins import enabled_agent_plugin_skills
+        from nanobot.agent.plugins import enabled_agent_plugin_skills, plugin_data_root
 
         inline_names = set(self.inline_skills)
         skills = self._skill_entries_from_dir(
             self.workspace_skills, "workspace", skip_names=inline_names
         )
         seen_names = {entry["name"] for entry in skills} | inline_names
-        plugin_skills = enabled_agent_plugin_skills(self.workspace)
+        plugin_skills = enabled_agent_plugin_skills(
+            self.workspace, data_root=plugin_data_root(self._env)
+        )
         for name, path in plugin_skills:
             if name in seen_names:
                 continue

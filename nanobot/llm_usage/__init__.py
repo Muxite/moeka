@@ -9,7 +9,6 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.config.paths import get_data_dir
 from nanobot.llm_usage.models import LLMCallRecord
 from nanobot.llm_usage.store import LLMUsageStore
 
@@ -40,8 +39,13 @@ def empty_usage_payload() -> dict[str, Any]:
 
 
 def llm_usage_store_path(data_dir: Path | None = None) -> Path:
-    """Usage DB under *data_dir* (``env.paths.data_dir``); ``None`` = legacy ``get_data_dir()``."""
-    base = data_dir if data_dir is not None else get_data_dir()
+    """Usage DB under *data_dir* (``env.paths.data_dir``); ``None`` = legacy data dir."""
+    if data_dir is not None:
+        base = data_dir
+    else:
+        from nanobot.kernel.legacy import legacy_data_dir
+
+        base = legacy_data_dir()
     return base / "llm_usage.sqlite3"
 
 

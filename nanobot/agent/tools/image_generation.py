@@ -24,7 +24,6 @@ from nanobot.bus.events import (
     InboundMessage,
 )
 from nanobot.bus.queue import MessageBus
-from nanobot.config.paths import get_media_dir
 from nanobot.config_base import Base
 from nanobot.providers.image_generation import (
     ImageGenerationError,
@@ -46,6 +45,13 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.context import ToolContext
     from nanobot.config.schema import ProviderConfig
     from nanobot.kernel.env import Paths
+
+
+def _legacy_media_dir() -> Path:
+    """Legacy media root (env-less fallback), via the ambient adapter (I1)."""
+    from nanobot.kernel.legacy import legacy_media_dir
+
+    return legacy_media_dir()
 
 
 class ImageGenerationToolConfig(Base):
@@ -157,7 +163,7 @@ class ImageGenerationTool(Tool):
         return cls(**kwargs)
 
     def _media_dir(self) -> Path:
-        return self._paths.media_dir if self._paths is not None else get_media_dir()
+        return self._paths.media_dir if self._paths is not None else _legacy_media_dir()
 
     def _protected_floor(self) -> ProtectedFloor:
         if self._paths is None:

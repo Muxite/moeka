@@ -215,9 +215,9 @@ def default_data_dirs() -> list[Path]:
     TARGET. Both are returned (deduplicated) so the floor covers either.
     """
     try:
-        from nanobot.config.paths import get_config_path
+        from nanobot.kernel.legacy import legacy_config_path
 
-        config = get_config_path().expanduser()
+        config = legacy_config_path().expanduser()
     except Exception:
         return []
     link_base = _safe_resolve(config.parent)  # get_data_dir() convention
@@ -236,9 +236,9 @@ def default_config_files() -> list[Path]:
     Computed without creating anything; empty when the path cannot be read.
     """
     try:
-        from nanobot.config.loader import get_config_path
+        from nanobot.kernel.legacy import legacy_config_path
 
-        config = get_config_path().expanduser()
+        config = legacy_config_path().expanduser()
     except Exception:
         return []
     files = [Path(os.path.abspath(config))]

@@ -124,7 +124,7 @@ class ContextBuilder:
         # In-memory bootstrap sections (name -> content). A key matching one of
         # BOOTSTRAP_FILES shadows the workspace file; other keys are appended.
         self.bootstrap_overrides: dict[str, str] = dict(bootstrap_overrides or {})
-        self.memory = MemoryStore(workspace, vec_store=vec_store)
+        self.memory = MemoryStore(workspace, vec_store=vec_store, env=env)
         self.skills = SkillsLoader(
             workspace,
             disabled_skills=set(disabled_skills) if disabled_skills else None,

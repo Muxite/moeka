@@ -6,21 +6,59 @@ and register it in _BACKENDS below.
 """
 
 import os
+import re
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Iterable
 
-from nanobot.config.paths import get_media_dir
 from nanobot.utils.helpers import ensure_dir
+
+_POSIX_VAR_RE = re.compile(r"\$(\w+|\{[^}]*\})", re.ASCII)
+_WINDOWS_VAR_RE = re.compile(r"%([^%]+)%")
+
+
+def expand_vars(value: str, env_vars: Mapping[str, str]) -> str:
+    """``os.path.expandvars`` over an explicit *env_vars*; unknown variables stay as-is.
+
+    Kernel code expands ``$VAR``/``${VAR}`` (and ``%VAR%`` on Windows) against the
+    host's exec base env (``env.exec_base_env``), never the process env (I1).
+    """
+
+    def _posix(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name.startswith("{"):
+            name = name[1:-1]
+        return env_vars.get(name, match.group(0))
+
+    if "$" in value:
+        value = _POSIX_VAR_RE.sub(_posix, value)
+    if os.name == "nt" and "%" in value:
+        value = _WINDOWS_VAR_RE.sub(lambda m: env_vars.get(m.group(1), m.group(0)), value)
+    return value
+
+
+def _legacy_exec_env() -> dict[str, str]:
+    """Legacy exec base env (a process-env snapshot) for env-less callers."""
+    from nanobot.kernel.legacy import process_env_snapshot
+
+    return process_env_snapshot()
+
+
+def _legacy_media_dir() -> Path:
+    """Legacy media root (env-less fallback), via the ambient adapter (I1)."""
+    from nanobot.kernel.legacy import legacy_media_dir
+
+    return legacy_media_dir()
 
 
 def _media_root(media_dir: Path | None) -> Path:
-    """The host media root (``env.paths.media_dir``), else the legacy ``get_media_dir()``.
+    """The host media root (``env.paths.media_dir``), else the legacy media dir.
 
     Created if missing: the sandbox bind-mounts it read-only.
     """
     if media_dir is None:
-        return get_media_dir().resolve()
+        return _legacy_media_dir().resolve()
     return ensure_dir(Path(media_dir)).resolve()
 
 
@@ -28,6 +66,7 @@ def _normalize_bind_paths(
     paths: Iterable[str] | None,
     *,
     workspace: Path | None = None,
+    env_vars: Mapping[str, str] | None = None,
 ) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -35,7 +74,9 @@ def _normalize_bind_paths(
         value = str(raw).strip()
         if not value:
             continue
-        path = Path(os.path.expandvars(value)).expanduser()
+        if env_vars is None and ("$" in value or "%" in value):
+            env_vars = _legacy_exec_env()
+        path = Path(expand_vars(value, env_vars or {})).expanduser()
         if not path.is_absolute():
             continue
         resolved_path = path.resolve(strict=False)
@@ -64,6 +105,7 @@ def _bwrap(
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
     media_dir: Path | None = None,
+    env_vars: Mapping[str, str] | None = None,
 ) -> str:
     """Wrap command in a bubblewrap sandbox (requires bwrap in container).
 
@@ -105,9 +147,9 @@ def _bwrap(
         "--bind", str(ws), str(ws),
         "--ro-bind-try", str(media), str(media),  # read-only access to media
     ]
-    for p in _normalize_bind_paths(sandbox_ro_binds, workspace=ws):
+    for p in _normalize_bind_paths(sandbox_ro_binds, workspace=ws, env_vars=env_vars):
         args += ["--ro-bind-try", p, p]
-    for p in _normalize_bind_paths(sandbox_rw_binds, workspace=ws):
+    for p in _normalize_bind_paths(sandbox_rw_binds, workspace=ws, env_vars=env_vars):
         args += ["--bind-try", p, p]
     args += ["--chdir", sandbox_cwd, "--", "sh", "-c", command]
     return shlex.join(args)
@@ -201,6 +243,7 @@ def _seatbelt(
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
     media_dir: Path | None = None,
+    env_vars: Mapping[str, str] | None = None,
 ) -> str:
     """Wrap command in a macOS Seatbelt sandbox (requires sandbox-exec(1)).
 
@@ -229,8 +272,8 @@ def _seatbelt(
     def subpaths(paths: Iterable[str]) -> str:
         return " ".join(f"(subpath {_sbpl_quote(p)})" for p in paths)
 
-    ro_binds = _normalize_bind_paths(sandbox_ro_binds, workspace=ws)
-    rw_binds = _normalize_bind_paths(sandbox_rw_binds, workspace=ws)
+    ro_binds = _normalize_bind_paths(sandbox_ro_binds, workspace=ws, env_vars=env_vars)
+    rw_binds = _normalize_bind_paths(sandbox_rw_binds, workspace=ws, env_vars=env_vars)
 
     rules = [
         "(version 1)",
@@ -331,8 +374,13 @@ def wrap_command(
     sandbox_ro_binds: Iterable[str] | None = None,
     sandbox_rw_binds: Iterable[str] | None = None,
     media_dir: Path | None = None,
+    env_vars: Mapping[str, str] | None = None,
 ) -> str:
-    """Wrap *command* using the named sandbox backend."""
+    """Wrap *command* using the named sandbox backend.
+
+    *env_vars* expands ``$VAR`` in bind paths (the host exec base env); ``None``
+    falls back to a legacy process-env snapshot.
+    """
     if backend := _BACKENDS.get(sandbox):
         return backend(
             command,
@@ -341,5 +389,6 @@ def wrap_command(
             sandbox_ro_binds=sandbox_ro_binds,
             sandbox_rw_binds=sandbox_rw_binds,
             media_dir=media_dir,
+            env_vars=env_vars,
         )
     raise ValueError(f"Unknown sandbox backend {sandbox!r}. Available: {list(_BACKENDS)}")

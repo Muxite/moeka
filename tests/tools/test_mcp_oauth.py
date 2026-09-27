@@ -23,7 +23,7 @@ from nanobot.config.schema import MCPServerConfig
 
 
 def _use_data_dir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("nanobot.agent.tools.mcp_oauth.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("nanobot.kernel.legacy.legacy_data_dir", lambda: tmp_path)
 
 
 def _oauth_metadata() -> OAuthMetadata:

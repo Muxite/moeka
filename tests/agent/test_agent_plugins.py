@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,7 +30,7 @@ from nanobot.security.workspace_access import (
 @pytest.fixture(autouse=True)
 def _isolate_plugin_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        agent_plugins, "get_config_path", lambda: tmp_path / "config" / "config.json"
+        agent_plugins, "_legacy_config_path", lambda: tmp_path / "config" / "config.json"
     )
 
 
@@ -364,7 +365,7 @@ def test_plugin_state_symlink_cannot_escape_config_root(
         (config / "plugin-data").symlink_to(outside, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"directory symlink unavailable: {exc}")
-    monkeypatch.setattr(agent_plugins, "get_config_path", lambda: config / "config.json")
+    monkeypatch.setattr(agent_plugins, "_legacy_config_path", lambda: config / "config.json")
     _plugin(tmp_path, "desktop")
 
     with pytest.raises(RuntimeError, match="escapes its parent"):
@@ -509,3 +510,43 @@ def test_plugin_activation_does_not_survive_in_place_code_replacement(
     assert discover_agent_plugins(tmp_path)[0].enabled is False
     assert enabled_agent_plugin_skill_dirs(tmp_path) == ()
     assert agent_plugin_mcp_servers(tmp_path) == {}
+
+
+def test_strict_env_keeps_plugin_state_under_host_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A strict (kernel-native) env never consults the legacy config path (I1)."""
+    from nanobot.agent.plugins import plugin_data_root
+    from nanobot.kernel.env import CoreEnvironment, Paths, StaticCredentialResolver
+    from nanobot.kernel.trace import NullTraceSink
+
+    def _no_config_path() -> Path:
+        raise AssertionError("legacy config path read under a strict env")
+
+    monkeypatch.setattr(agent_plugins, "_legacy_config_path", _no_config_path)
+    work = tmp_path / "work"
+    state = tmp_path / "state"
+    env = CoreEnvironment(
+        config=MagicMock(),
+        credentials=StaticCredentialResolver({}),
+        paths=Paths(work_dir=work, state_dir=state),
+        trace=NullTraceSink(),
+        strict=True,
+    )
+    root = plugin_data_root(env)
+    assert root == env.paths.data_dir
+    plugin = _plugin(work, "desktop")
+    _skill(plugin / "skills", "demo")
+
+    set_agent_plugin_enabled(work, "desktop", True, data_root=root)
+
+    assert [name for name, _ in enabled_agent_plugin_skills(work, data_root=root)] == ["demo"]
+    assert list((state / "data" / "plugin-data").rglob("enabled"))
+    assert plugin_data_root(None) is None
+    legacy_env = CoreEnvironment(
+        config=MagicMock(),
+        credentials=StaticCredentialResolver({}),
+        paths=Paths(work_dir=work, state_dir=work, overlap_ok=True),
+        trace=NullTraceSink(),
+    )
+    assert plugin_data_root(legacy_env) is None

@@ -316,7 +316,7 @@ class TestWorkspaceRestriction:
         media_file = media_dir / "photo.txt"
         media_file.write_text("shared media", encoding="utf-8")
 
-        monkeypatch.setattr("nanobot.agent.tools.path_utils.get_media_dir", lambda: media_dir)
+        monkeypatch.setattr("nanobot.kernel.legacy.legacy_media_dir", lambda: media_dir)
 
         tool = ReadFileTool(workspace=workspace, allowed_dir=workspace)
         result = await tool.execute(path=str(media_file))
@@ -330,7 +330,7 @@ class TestWorkspaceRestriction:
         media_dir = tmp_path / "media"
         media_dir.mkdir()
 
-        monkeypatch.setattr("nanobot.agent.tools.path_utils.get_media_dir", lambda: media_dir)
+        monkeypatch.setattr("nanobot.kernel.legacy.legacy_media_dir", lambda: media_dir)
 
         tool = WriteFileTool(workspace=workspace, allowed_dir=workspace)
         result = await tool.execute(path=str(media_dir / "hack.txt"), content="pwned")

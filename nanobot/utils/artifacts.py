@@ -11,7 +11,6 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from nanobot.config.paths import get_media_dir
 from nanobot.utils.helpers import detect_image_mime, ensure_dir
 
 _DATA_IMAGE_RE = re.compile(r"^data:(image/[A-Za-z0-9.+-]+);base64,(.*)$", re.DOTALL)
@@ -21,6 +20,13 @@ _MIME_EXTENSIONS = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+
+def _legacy_media_dir() -> Path:
+    """Legacy media root (env-less fallback), via the ambient adapter (I1)."""
+    from nanobot.kernel.legacy import legacy_media_dir
+
+    return legacy_media_dir()
+
 
 class ArtifactError(ValueError):
     """Raised when an artifact cannot be safely decoded or stored."""
@@ -57,7 +63,7 @@ def _safe_relative_dir(save_dir: str) -> Path:
 
 
 def _artifact_root(save_dir: str, media_dir: Path | None = None) -> Path:
-    media_root = (media_dir if media_dir is not None else get_media_dir()).resolve()
+    media_root = (media_dir if media_dir is not None else _legacy_media_dir()).resolve()
     root = (media_root / _safe_relative_dir(save_dir)).resolve()
     try:
         root.relative_to(media_root)
@@ -80,7 +86,7 @@ def store_generated_image_artifact(
     """Persist a generated image and sidecar metadata under the media root.
 
     *media_dir* is the host's media root (``env.paths.media_dir``); ``None`` falls
-    back to the legacy ``get_media_dir()``.
+    back to the legacy media dir.
     """
     raw, mime = decode_image_data_url(data_url)
     ext = _MIME_EXTENSIONS.get(mime)

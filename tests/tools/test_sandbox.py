@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.agent.tools.sandbox import _sbpl_quote, _seatbelt_is_within, wrap_command
+from nanobot.agent.tools.sandbox import (
+    _sbpl_quote,
+    _seatbelt_is_within,
+    expand_vars,
+    wrap_command,
+)
 
 
 def _parse(cmd: str) -> list[str]:
@@ -140,7 +145,7 @@ class TestBwrapBackend:
         fake_media = tmp_path / "media"
         fake_media.mkdir()
         monkeypatch.setattr(
-            "nanobot.agent.tools.sandbox.get_media_dir",
+            "nanobot.kernel.legacy.legacy_media_dir",
             lambda: fake_media,
         )
         ws = str(tmp_path / "project")
@@ -344,7 +349,7 @@ class TestSeatbeltBackend:
         fake_media = (tmp_path / "media").resolve()
         fake_media.mkdir()
         monkeypatch.setattr(
-            "nanobot.agent.tools.sandbox.get_media_dir",
+            "nanobot.kernel.legacy.legacy_media_dir",
             lambda: fake_media,
         )
         ws = (tmp_path / "project").resolve()
@@ -396,7 +401,7 @@ class TestSeatbeltBackend:
         ws = (tmp_path / "workspace").resolve()
         ro = ws / 'tree with "quotes' / "branch" / "readonly"
         media = ro if source == "media" else tmp_path / "media"
-        monkeypatch.setattr("nanobot.agent.tools.sandbox.get_media_dir", lambda: media)
+        monkeypatch.setattr("nanobot.kernel.legacy.legacy_media_dir", lambda: media)
         profile = self._profile(wrap_command(
             "seatbelt", "ls", str(ws), str(ws),
             sandbox_ro_binds=[str(ro)] if source == "bind" else [],
@@ -413,7 +418,7 @@ class TestSeatbeltBackend:
         ws = (tmp_path / "workspace").resolve()
         ro = ws / "tree" / "readonly"
         rw = {"root": ro, "parent": ro.parent, "child": ro / "cache"}[override]
-        monkeypatch.setattr("nanobot.agent.tools.sandbox.get_media_dir", lambda: ro)
+        monkeypatch.setattr("nanobot.kernel.legacy.legacy_media_dir", lambda: ro)
         profile = self._profile(wrap_command(
             "seatbelt", "ls", str(ws), str(ws),
             sandbox_ro_binds=[str(ro)], sandbox_rw_binds=[str(rw)],
@@ -495,3 +500,26 @@ class TestUnknownBackend:
         ws = str(tmp_path / "project")
         with pytest.raises(ValueError):
             wrap_command("", "ls", ws, ws)
+
+
+class TestExpandVars:
+    """``$VAR`` expansion uses the host's exec base env, never ``os.environ`` (I1)."""
+
+    def test_expands_from_explicit_mapping_only(self, monkeypatch):
+        monkeypatch.setenv("MOEKA_TEST_ONLY_IN_PROCESS", "/leak")
+        env = {"TOOLS": "/opt/tools"}
+        assert expand_vars("$TOOLS/bin", env) == "/opt/tools/bin"
+        assert expand_vars("${TOOLS}/bin", env) == "/opt/tools/bin"
+        assert expand_vars("$MOEKA_TEST_ONLY_IN_PROCESS/x", env) == "$MOEKA_TEST_ONLY_IN_PROCESS/x"
+        assert expand_vars("${}/x", env) == "${}/x"
+        assert expand_vars("/plain/path", {}) == "/plain/path"
+
+    def test_bind_paths_expand_against_given_env(self, tmp_path):
+        ws = str(tmp_path / "project")
+        extra = tmp_path / "extra"
+        result = wrap_command(
+            "bwrap", "ls", ws, ws,
+            sandbox_ro_binds=["$EXTRA_ROOT"],
+            env_vars={"EXTRA_ROOT": str(extra)},
+        )
+        assert str(extra.resolve()) in _parse(result)

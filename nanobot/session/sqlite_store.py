@@ -48,7 +48,6 @@ from typing import TYPE_CHECKING, Any, cast
 from filelock import FileLock
 from loguru import logger
 
-from nanobot.config.paths import get_legacy_sessions_dir, get_state_home
 from nanobot.providers.base import ProviderConversationState
 from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.history_visibility import is_hidden_history_message
@@ -178,7 +177,6 @@ class SqliteSessionStore:
                 root, canonical_workspace, workspace_id,
             )
             self.sessions_dir = ensure_dir(root / workspace_id)
-            self.legacy_sessions_dir = get_legacy_sessions_dir()
             self.db_path = self.sessions_dir / "sessions.db"
             self._conn_obj: sqlite3.Connection | None = None
             self._write_lock = threading.Lock()
@@ -255,6 +253,13 @@ class SqliteSessionStore:
     # ------------------------------------------------------------------
     # One-time migrations
     # ------------------------------------------------------------------
+
+    @property
+    def legacy_sessions_dir(self) -> Path:
+        """Legacy global session dir (``~/.nanobot/sessions``), resolved on use only."""
+        from nanobot.kernel.legacy import legacy_sessions_dir
+
+        return legacy_sessions_dir()
 
     def _warn_if_legacy_db_in_workspace(self) -> None:
         """Detect a pre-ADR-0001 in-workspace ``sessions.db`` and warn loudly.
@@ -992,7 +997,12 @@ def _resolve_workspace_and_sessions_root(
         # A host ``Paths`` (``env.paths``) wins over the sibling heuristic.
         workspace = workspace if workspace is not None else paths.work_dir
         sessions_root = sessions_root if sessions_root is not None else paths.sessions_root
-    resolved_workspace = Path(workspace).expanduser() if workspace is not None else get_state_home()
+    if workspace is not None:
+        resolved_workspace = Path(workspace).expanduser()
+    else:
+        from nanobot.kernel.legacy import legacy_state_home
+
+        resolved_workspace = legacy_state_home()
     resolved_root = (
         Path(sessions_root).expanduser()
         if sessions_root is not None

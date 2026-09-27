@@ -360,3 +360,24 @@ def test_paths_stays_frozen(tmp_path):
     p = Paths(work_dir=tmp_path / "w", state_dir=tmp_path / "s")
     with pytest.raises(dataclasses.FrozenInstanceError):
         p.data_dir_override = tmp_path  # type: ignore[misc]
+
+
+def test_strict_dream_tools_use_host_paths(tmp_path):
+    """Dream's hand-built file tools take the host floor, not the legacy one (Task 3 minor g)."""
+    from nanobot.agent.memory import MemoryStore
+
+    env = _strict_env(tmp_path)
+    store = MemoryStore(env.paths.work_dir, env=env)
+    tools = store.build_dream_tools()
+    names = tools.tool_names
+    assert names
+    for name in names:
+        tool = tools.get(name)
+        assert tool._paths is env.paths
+        assert tool._legacy_floor is False
+        assert tool._plugin_data_root == env.paths.data_dir
+
+    legacy = MemoryStore(tmp_path / "legacy-ws").build_dream_tools()
+    for name in legacy.tool_names:
+        assert legacy.get(name)._paths is None
+        assert legacy.get(name)._legacy_floor is True

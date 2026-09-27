@@ -432,7 +432,7 @@ def test_exec_guard_allows_media_path_outside_workspace(tmp_path, monkeypatch) -
     media_file = media_dir / "photo.jpg"
     media_file.write_text("ok", encoding="utf-8")
 
-    monkeypatch.setattr("nanobot.agent.tools.shell.get_media_dir", lambda: media_dir)
+    monkeypatch.setattr("nanobot.kernel.legacy.legacy_media_dir", lambda: media_dir)
 
     tool = ExecTool(restrict_to_workspace=True)
     error = tool._guard_command(f'cat "{media_file}"', str(tmp_path / "workspace"))
@@ -919,3 +919,32 @@ def test_cast_nullable_param_no_crash() -> None:
     assert result["name"] == "hello"
     result = tool.cast_params({"name": None})
     assert result["name"] is None
+
+
+def test_exec_guard_expands_vars_from_host_exec_env_not_process(tmp_path, monkeypatch) -> None:
+    """Under a host env, ``$VAR`` in guarded paths expands against env.exec_base_env (I1)."""
+    from nanobot.kernel.env import CoreEnvironment, Paths, StaticCredentialResolver
+    from nanobot.kernel.trace import NullTraceSink
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    rel_ws = str(ws.resolve()).lstrip("/")
+
+    def _tool(base: dict[str, str]) -> ExecTool:
+        env = CoreEnvironment(
+            config=None,  # type: ignore[arg-type]
+            credentials=StaticCredentialResolver({}),
+            paths=Paths(work_dir=ws, state_dir=tmp_path / "state"),
+            trace=NullTraceSink(),
+            exec_base_env=base,
+            strict=True,
+        )
+        return ExecTool(restrict_to_workspace=True, env=env)
+
+    command = "cat /$MOEKA_GUARD_DIR/notes.txt"
+    monkeypatch.setenv("MOEKA_GUARD_DIR", "not-the-workspace")
+    assert _tool({"MOEKA_GUARD_DIR": rel_ws})._guard_command(command, str(ws)) is None
+
+    monkeypatch.setenv("MOEKA_GUARD_DIR", rel_ws)
+    error = _tool({})._guard_command(command, str(ws))
+    assert error is not None and "path outside working dir" in error

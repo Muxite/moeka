@@ -80,8 +80,12 @@ class MemoryStore:
         workspace: Path,
         max_history_entries: int = _DEFAULT_MAX_HISTORY,
         vec_store: VecStore | None = None,
+        env: Any | None = None,
     ):
         self.workspace = workspace
+        # Host env (``CoreEnvironment``): Dream's file tools take their floor and
+        # plugin state root from it; ``None`` keeps the legacy ambient floor.
+        self._env = env
         self.max_history_entries = max_history_entries
         self.vec_store = vec_store
         self.memory_dir = ensure_dir(workspace / "memory")
@@ -666,6 +670,7 @@ class MemoryStore:
 
     def build_dream_tools(self) -> ToolRegistry:
         """Build the restricted tool registry used by Dream runs."""
+        from nanobot.agent.plugins import plugin_data_root
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
         from nanobot.agent.tools.apply_patch import ApplyPatchTool
         from nanobot.agent.tools.file_state import FileStates
@@ -674,6 +679,12 @@ class MemoryStore:
 
         tools = ToolRegistry()
         file_states = FileStates()
+        env = self._env
+        host: dict[str, Any] = {
+            "paths": env.paths if env is not None else None,
+            "legacy_floor": env is None or not env.strict,
+            "plugin_data_root": plugin_data_root(env),
+        }
         workspace = self.workspace
         skills_dir = workspace / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -686,24 +697,28 @@ class MemoryStore:
             allowed_dir=workspace,
             extra_read_allowed_dirs=extra_read,
             file_states=file_states,
+            **host,
         ))
         tools.register(EditFileTool(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            **host,
         ))
         tools.register(ApplyPatchTool(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            **host,
         ))
         tools.register(WriteFileTool(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            **host,
         ))
         return tools
 
