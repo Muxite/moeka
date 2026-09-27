@@ -9,6 +9,14 @@ Order, per ``CapabilityRequest`` the tool declares (``Tool.capabilities``):
 - Strict mode (``nanobot.kernel.strict``): in a strict env an ``exec.run`` request from a
   tool without an active sandbox is denied next, at layer ``"gate"`` with
   ``STRICT_SANDBOX_MARKER``, before the policy and before the tool's own exec guard.
+- Kernel plugin grant (Task 19): a tool carrying a ``capability_grant`` tuple (set by
+  the kernel-mode loader on registry-active plugins: ``policy ∩ capabilities_requested``)
+  has every declared request outside that grant denied next, at layer ``"policy"`` with
+  ``POLICY_MARKER`` (it is the plugin's attenuated policy, so it counts toward I5). A
+  grant rule ``cap`` covers every resource; ``cap:pattern`` covers resources matching
+  ``pattern`` (``fnmatch``, after fs normalisation). Built-ins carry no grant. The gate
+  is declaration-based: a plugin that under-declares in ``capabilities`` is not
+  contained by this (in-process code needs the sandbox).
 - ``PermissionPolicy.decide`` runs only when no floor (or strict refusal) fired.
 - A ``policy.decision`` event goes to the trace sink for EVERY evaluated request
   (allow or deny), via ``safe_emit``: a failing sink never changes the verdict.
@@ -27,6 +35,7 @@ lazily (Ruling C).
 
 from __future__ import annotations
 
+import fnmatch
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,7 +72,7 @@ class GateResult:
     """Outcome of ``gate_call``: ``Allow`` (audited) or the first ``Deny``.
 
     ``layer`` says who denied: ``"floor"`` (``check_floors``), ``"policy"``
-    (``PermissionPolicy.decide``) or ``"gate"`` (the declaration itself failed, or strict
+    (``PermissionPolicy.decide``, or a kernel plugin's capability grant) or ``"gate"`` (the declaration itself failed, or strict
     mode refused ``exec.run`` without a sandbox).
     ``events`` are the ``policy.decision`` records emitted for this call.
     """
@@ -219,6 +228,24 @@ def _decision_event(
     }
 
 
+def plugin_grant_deny(tool: Any, principal: Principal, req: CapabilityRequest) -> Deny | None:
+    """Deny *req* when *tool* carries a kernel plugin grant that does not cover it."""
+    try:
+        grant = getattr(tool, "capability_grant", None)
+    except Exception:  # noqa: BLE001 - a broken grant property fails closed
+        grant = ()
+    if not isinstance(grant, tuple):
+        return None  # built-ins and legacy tools carry no grant
+    for rule in grant:
+        cap, sep, pattern = str(rule).partition(":")
+        if cap == req.capability and (not sep or fnmatch.fnmatchcase(req.resource, pattern)):
+            return None
+    return policy_deny(
+        principal, req,
+        "outside the plugin's capability grant, policy ∩ capabilities_requested",
+    )
+
+
 def gate_call(
     tool: Any,
     params: Any,
@@ -280,10 +307,16 @@ def gate_call(
         layer: GateLayer | None
         floor_deny = check_floors(principal, req, protected=floor)
         strict_deny = strict_sandbox_deny(env, tool, name, req) if floor_deny is None else None
+        grant_deny = (
+            plugin_grant_deny(tool, principal, req)
+            if floor_deny is None and strict_deny is None else None
+        )
         if floor_deny is not None:
             decision, layer = floor_deny, "floor"
         elif strict_deny is not None:
             decision, layer = strict_deny, "gate"
+        elif grant_deny is not None:
+            decision, layer = grant_deny, "policy"
         else:
             layer = "policy"
             try:
@@ -346,5 +379,6 @@ __all__ = [
     "GateResult",
     "emit_tool_invalid",
     "gate_call",
+    "plugin_grant_deny",
     "protected_floor",
 ]
