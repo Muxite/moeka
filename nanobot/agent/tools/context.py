@@ -90,3 +90,6 @@ class ToolContext:
     workspace_sandbox: WorkspaceSandboxStatus | None = None
     runtime_control: RuntimeControl | None = None
     env: CoreEnvironment | None = None
+    # Kernel-mode plugin loading only: the instance ``config_cls()`` validated from
+    # ``env.config.section(<plugin name>)``. ``None`` for built-ins and legacy loading.
+    plugin_config: Any = None
