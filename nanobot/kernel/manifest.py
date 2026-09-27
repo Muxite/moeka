@@ -38,12 +38,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
 
 MANIFEST_FILENAME = "moeka-plugin.json"
 
@@ -101,7 +103,9 @@ def _check_schema(schema: Any, path: str = "$") -> None:
         _check_schema(schema["items"], f"{path}.items")
 
 
-def _check_capabilities(values: list[str], pattern: re.Pattern[str], what: str) -> list[str]:
+def _check_capabilities(
+    values: tuple[str, ...], pattern: re.Pattern[str], what: str,
+) -> tuple[str, ...]:
     for value in values:
         if not isinstance(value, str) or pattern.fullmatch(value) is None:
             raise ValueError(f"malformed {what} {value!r}: expected 'family.action'")
@@ -121,7 +125,7 @@ class Operation(BaseModel):
     name: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: tuple[str, ...] = ()
 
     @field_validator("name")
     @classmethod
@@ -138,7 +142,7 @@ class Operation(BaseModel):
 
     @field_validator("capabilities")
     @classmethod
-    def _caps(cls, v: list[str]) -> list[str]:
+    def _caps(cls, v: tuple[str, ...]) -> tuple[str, ...]:
         return _check_capabilities(v, CAPABILITY_NAME, "capability name")
 
 
@@ -151,6 +155,12 @@ class PluginManifest(BaseModel):
     a root-relative POSIX path inside the package. ``config_schema`` is the plugin's
     config section as a JSON Schema (``None``: no config). ``entry`` is a
     ``module:attr`` object reference, the ``nanobot.tools`` entry-point format.
+
+    Immutability: ``frozen=True`` only blocks attribute reassignment, so the
+    collection fields are immutable types too (``capabilities_requested`` and
+    ``operations`` are tuples as in host design 6.1, ``descriptions`` is a
+    ``MappingProxyType``). A holder cannot widen the capability upper bound in place.
+    The JSON Schema dicts stay plain dicts (not security-relevant bounds).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -160,11 +170,11 @@ class PluginManifest(BaseModel):
     version: str
     version_hash: str
     tier: PluginTier
-    capabilities_requested: list[str] = Field(default_factory=list)
+    capabilities_requested: tuple[str, ...] = ()
     config_schema: dict[str, Any] | None = None
     entry: str
-    descriptions: dict[str, str] | None = None
-    operations: list[Operation] = Field(default_factory=list)
+    descriptions: Mapping[str, str] | None = None
+    operations: tuple[Operation, ...] = ()
 
     @field_validator("tier", mode="before")
     @classmethod
@@ -203,7 +213,7 @@ class PluginManifest(BaseModel):
 
     @field_validator("capabilities_requested")
     @classmethod
-    def _caps(cls, v: list[str]) -> list[str]:
+    def _caps(cls, v: tuple[str, ...]) -> tuple[str, ...]:
         return _check_capabilities(v, CAPABILITY_RULE, "capability rule")
 
     @field_validator("config_schema")
@@ -215,12 +225,19 @@ class PluginManifest(BaseModel):
 
     @field_validator("descriptions")
     @classmethod
-    def _descriptions(cls, v: dict[str, str] | None) -> dict[str, str] | None:
-        for tool, rel in (v or {}).items():
+    def _descriptions(cls, v: Mapping[str, str] | None) -> Mapping[str, str] | None:
+        if v is None:
+            return None
+        for tool, rel in v.items():
             if not tool:
                 raise ValueError("description tool name must be non-empty")
             _check_relative(rel)
-        return v
+        # Read-only view: frozen=True only blocks reassignment, not in-place mutation.
+        return MappingProxyType(dict(v))
+
+    @field_serializer("descriptions")
+    def _dump_descriptions(self, v: Mapping[str, str] | None) -> dict[str, str] | None:
+        return None if v is None else dict(v)
 
     @model_validator(mode="after")
     def _unique_operations(self) -> PluginManifest:
@@ -239,11 +256,29 @@ def _check_relative(rel: str) -> None:
         raise ValueError(f"description path {rel!r} must stay inside the package")
 
 
+def _reject_symlinks(root: Path) -> None:
+    """Raise ``ValueError`` if any entry under ``root`` is a symlink.
+
+    ``_package_fingerprint`` hashes a symlink's target PATH, not the bytes behind it,
+    so a link to a file outside the package could be rewritten without changing the
+    hash. A kernel plugin package therefore may not contain symlinks at all (simpler
+    and stricter than resolving links that stay inside the package). The Agent Plugin
+    fingerprint keeps its own link handling unchanged.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for entry in (*dirnames, *filenames):
+            path = Path(dirpath) / entry
+            if path.is_symlink():
+                rel = path.relative_to(root).as_posix()
+                raise ValueError(f"plugin package {root} contains a symlink: {rel}")
+
+
 def compute_version_hash(root: Path, manifest: PluginManifest | Mapping[str, Any]) -> str:
     """sha256 over the package, the manifest and every description file.
 
-    Extends ``nanobot.agent.plugins._package_fingerprint`` (paths, link targets and
-    file bytes under ``root``) with:
+    Extends ``nanobot.agent.plugins._package_fingerprint`` (paths and file bytes under
+    ``root``; a package containing any symlink is rejected, see :func:`_reject_symlinks`)
+    with:
 
     - the manifest content as canonical JSON, minus ``version_hash`` (so widening
       ``capabilities_requested`` changes the hash), with the ``moeka-plugin.json``
@@ -255,7 +290,8 @@ def compute_version_hash(root: Path, manifest: PluginManifest | Mapping[str, Any
     ``manifest`` may be a :class:`PluginManifest` or the raw mapping (a packager
     computes the hash before it has one to stamp); a mapping is validated through the
     model first. Raises ``ValueError`` (a pydantic ``ValidationError`` is one) when
-    the manifest is invalid or the package or a description file cannot be read.
+    the manifest is invalid, the package holds a symlink, a description file resolves
+    outside the package, or the package or a description file cannot be read.
     """
     from nanobot.agent import plugins as agent_plugins  # lazy: Ruling C
 
@@ -268,6 +304,8 @@ def compute_version_hash(root: Path, manifest: PluginManifest | Mapping[str, Any
 
     if not root.is_dir():
         raise ValueError(f"plugin package {root} is not a directory")
+    _reject_symlinks(root)
+    real_root = root.resolve()
     fingerprint = agent_plugins._package_fingerprint(
         root, exclude=frozenset({MANIFEST_FILENAME}),
     )
@@ -283,8 +321,11 @@ def compute_version_hash(root: Path, manifest: PluginManifest | Mapping[str, Any
     descriptions = payload.get("descriptions") or {}
     for tool in sorted(descriptions):
         rel = descriptions[tool]
+        target = (root / rel).resolve()
+        if not target.is_relative_to(real_root):
+            raise ValueError(f"description file for {tool!r} escapes the package: {rel}")
         try:
-            data = (root / rel).read_bytes()
+            data = target.read_bytes()
         except OSError as exc:
             raise ValueError(f"description file for {tool!r} unreadable: {rel}") from exc
         digest.update(b"\0description\0")

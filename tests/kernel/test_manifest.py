@@ -66,7 +66,7 @@ def test_valid_manifest_parses_all_fields():
     assert m.version == "1.2.3"
     assert m.version_hash == _HASH
     assert m.tier == 2
-    assert m.capabilities_requested == ["net.fetch:api.search.brave.com", "secret.read"]
+    assert m.capabilities_requested == ("net.fetch:api.search.brave.com", "secret.read")
     assert m.config_schema["required"] == ["api_key"]
     assert m.entry == "brave_plugin.backend:create"
     assert m.descriptions == {"web_search": "descriptions/web_search.md"}
@@ -74,7 +74,7 @@ def test_valid_manifest_parses_all_fields():
     op = m.operations[0]
     assert isinstance(op, Operation)
     assert op.name == "search"
-    assert op.capabilities == ["net.fetch"]
+    assert op.capabilities == ("net.fetch",)
     assert op.output_schema["type"] == "array"
 
 
@@ -85,8 +85,8 @@ def test_optional_fields_default():
     m = PluginManifest.model_validate(payload)
     assert m.config_schema is None
     assert m.descriptions is None
-    assert m.operations == []
-    assert m.capabilities_requested == []
+    assert m.operations == ()
+    assert m.capabilities_requested == ()
 
 
 @pytest.mark.parametrize("field", ["name", "kind", "version", "version_hash", "tier", "entry"])
@@ -106,6 +106,39 @@ def test_manifest_is_frozen():
     m = PluginManifest.model_validate(_payload())
     with pytest.raises(ValidationError):
         m.tier = 1
+
+
+def test_collection_fields_immutable_in_place():
+    """frozen=True blocks reassignment only; the contents must not be mutable either."""
+    m = PluginManifest.model_validate(_payload())
+    with pytest.raises(AttributeError):
+        m.capabilities_requested.append("exec.run")
+    with pytest.raises(TypeError):
+        m.capabilities_requested[0] = "exec.run"
+    with pytest.raises(AttributeError):
+        m.operations.append(m.operations[0])
+    with pytest.raises(TypeError):
+        m.operations[0] = m.operations[0]
+    with pytest.raises(AttributeError):
+        m.operations[0].capabilities.append("exec.run")
+    with pytest.raises(TypeError):
+        m.operations[0].capabilities[0] = "exec.run"
+    with pytest.raises(TypeError):
+        m.descriptions["web_search"] = "evil.md"
+    with pytest.raises(TypeError):
+        m.descriptions["new_tool"] = "evil.md"
+    with pytest.raises(AttributeError):
+        m.descriptions.pop("web_search")
+    assert m.capabilities_requested == ("net.fetch:api.search.brave.com", "secret.read")
+    assert dict(m.descriptions) == {"web_search": "descriptions/web_search.md"}
+
+
+def test_dump_roundtrips_with_immutable_fields():
+    m = PluginManifest.model_validate(_payload())
+    dumped = m.model_dump(mode="json")
+    assert dumped["descriptions"] == {"web_search": "descriptions/web_search.md"}
+    assert dumped["capabilities_requested"] == ["net.fetch:api.search.brave.com", "secret.read"]
+    assert PluginManifest.model_validate(dumped) == m
 
 
 def test_kind_closed_set():
@@ -182,7 +215,7 @@ def test_bad_entry_rejected(entry):
 )
 def test_capabilities_requested_accepts_well_shaped(cap):
     m = PluginManifest.model_validate(_payload(capabilities_requested=[cap]))
-    assert m.capabilities_requested == [cap]
+    assert m.capabilities_requested == (cap,)
 
 
 @pytest.mark.parametrize(
@@ -197,7 +230,7 @@ def test_capabilities_requested_rejects_malformed(cap):
 @pytest.mark.parametrize("cap", ["net.fetch", "calendar.write", "budget.output_bytes"])
 def test_operation_capability_accepts_names(cap):
     op = Operation(name="op", input_schema={}, output_schema={}, capabilities=[cap])
-    assert op.capabilities == [cap]
+    assert op.capabilities == (cap,)
 
 
 @pytest.mark.parametrize("cap", ["net", "net.fetch:host", "NET.FETCH", "net..fetch", ""])
@@ -244,7 +277,7 @@ def test_malformed_json_schema_rejected(schema):
 
 def test_empty_schema_means_any():
     op = Operation(name="op", input_schema={}, output_schema={})
-    assert op.input_schema == {} and op.capabilities == []
+    assert op.input_schema == {} and op.capabilities == ()
 
 
 @pytest.mark.parametrize(
@@ -370,10 +403,80 @@ def test_hash_unreadable_package_raises(tmp_path):
 
 
 def test_package_fingerprint_exclude_is_opt_in(tmp_path):
-    """The existing Agent Plugin fingerprint is unchanged when no exclude is given."""
     from nanobot.agent.plugins import _package_fingerprint
 
     _write_package(tmp_path)
     full = _package_fingerprint(tmp_path)
-    assert full == _package_fingerprint(tmp_path, exclude=frozenset())
     assert full != _package_fingerprint(tmp_path, exclude=frozenset({MANIFEST_FILENAME}))
+
+
+def test_package_fingerprint_default_digest_pinned(tmp_path):
+    """Agent Plugin fingerprint default behaviour, pinned to the digest at base 6446e90d.
+
+    Includes a symlink: the Agent Plugin path keeps hashing the link target path.
+    """
+    from nanobot.agent.plugins import _package_fingerprint
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_bytes(b"x = 1\n")
+    (tmp_path / "README.md").write_bytes(b"hello\n")
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "link").symlink_to("pkg/mod.py")
+    assert _package_fingerprint(tmp_path) == (
+        "ac624841e3a7b51b1594d50216c59494a6430d56a145894cf6b8272b244b2b40"
+    )
+
+
+# -- symlinks (kernel path only) ---------------------------------------------
+
+
+def test_hash_rejects_symlink_to_outside_file(tmp_path):
+    """Reviewer probe: a code file symlinked outside the package bypassed the hash."""
+    pkg, outside = tmp_path / "pkg", tmp_path / "outside.py"
+    pkg.mkdir()
+    payload = _write_package(pkg)
+    outside.write_text("def create():\n    return None\n")
+    (pkg / "brave_plugin" / "backend.py").unlink()
+    (pkg / "brave_plugin" / "backend.py").symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        compute_version_hash(pkg, payload)
+    outside.write_text("import os; os.system('x')\n")
+    with pytest.raises(ValueError, match="symlink"):
+        compute_version_hash(pkg, payload)
+
+
+def test_hash_rejects_symlink_inside_package(tmp_path):
+    payload = _write_package(tmp_path)
+    (tmp_path / "alias.py").symlink_to("brave_plugin/backend.py")
+    with pytest.raises(ValueError, match="alias.py"):
+        compute_version_hash(tmp_path, payload)
+
+
+def test_hash_rejects_symlinked_directory(tmp_path):
+    pkg, outside = tmp_path / "pkg", tmp_path / "outside"
+    pkg.mkdir()
+    outside.mkdir()
+    (outside / "web_search.md").write_text("elsewhere")
+    payload = _write_package(pkg)
+    (pkg / "descriptions" / "web_search.md").unlink()
+    (pkg / "descriptions").rmdir()
+    (pkg / "descriptions").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        compute_version_hash(pkg, payload)
+
+
+def test_description_resolving_outside_package_rejected(tmp_path, monkeypatch):
+    """Belt and braces: the resolve() check holds even if the symlink scan is bypassed."""
+    from nanobot.kernel import manifest as manifest_mod
+
+    pkg, outside = tmp_path / "pkg", tmp_path / "outside"
+    pkg.mkdir()
+    outside.mkdir()
+    (outside / "web_search.md").write_text("elsewhere")
+    payload = _write_package(pkg)
+    (pkg / "descriptions" / "web_search.md").unlink()
+    (pkg / "descriptions").rmdir()
+    (pkg / "descriptions").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(manifest_mod, "_reject_symlinks", lambda root: None)
+    with pytest.raises(ValueError, match="escapes the package"):
+        compute_version_hash(pkg, payload)
