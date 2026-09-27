@@ -278,7 +278,15 @@ async def test_deadline(make_kernel, sink) -> None:
     assert result.stop_reason == "deadline"
     assert fake.calls and fake.calls[0].cancelled
     completed = [e for e in _for_trace(sink, result.trace_id) if e["event"] == "run.completed"]
-    assert completed and completed[0]["stop_reason"] == "cancelled"
+    assert completed and completed[0]["stop_reason"] == "deadline"
+
+
+async def test_budget_refusal_traces_budget(make_kernel, sink) -> None:
+    kernel = make_kernel(FakeProvider(["x"]), budget=_RefuseAfter(0, CapBudget(limit_usd=1.0)))
+    result = await kernel.agent(AgentSpec(name="b0")).run("hi")
+    assert result.stop_reason == "budget"
+    completed = [e for e in _for_trace(sink, result.trace_id) if e["event"] == "run.completed"]
+    assert completed[0]["stop_reason"] == "budget"
 
 
 async def test_spec_deadline_applies(make_kernel) -> None:
@@ -481,3 +489,52 @@ async def test_goal_runtime_template_uses_variant_roots(tmp_path, make_kernel) -
     agent.tools  # noqa: B018 - builds the loop
     tool = agent._loop.tools.get("create_goal")
     assert tool._template_roots == (tmp_path / "templates",)
+
+
+# -- model switches stay metered; same-key runs are serialised --------------------------------
+
+
+ALT = ModelSpec(
+    name="alt", model="fake-alt", provider="openai", price_in=3.0, price_out=6.0,
+    max_tokens=100,
+)
+
+
+async def test_model_switch_stays_on_kernel_pool(tmp_path, sink) -> None:
+    env = Environment.for_host(
+        state_dir=tmp_path / "state", work_dir=tmp_path / "work",
+        credentials={"oa": "sk-test"},
+        providers=[ProviderSpec(name="openai", credential="oa")],
+        models=[ModelSpec(name="main", model="gpt-4.1", provider="openai"),
+                ModelSpec(name="alt", model="gpt-4.1-mini", provider="openai")],
+        default_model="main", trace=sink,
+    )
+    cap = CapBudget(limit_usd=10.0)
+    main_fake, alt_fake = FakeProvider(default="from main"), FakeProvider(default="from alt")
+    async with Kernel(env, budget=cap) as kernel:
+        kernel.llm.register_provider("main", main_fake, MAIN)
+        kernel.llm.register_provider("alt", alt_fake, ALT)
+        agent = kernel.agent(AgentSpec(name="sw"))
+        await agent.run("/model alt")
+        spent = cap.spent_usd
+        result = await agent.run("hi")
+        assert result.content == "from alt"
+        assert alt_fake.calls and not main_fake.calls
+        assert cap.spent_usd > spent
+        calls = [e for e in _for_trace(sink, result.trace_id) if e["event"] == "model.call"]
+        assert calls and all(e["alias"] == "alt" and e["model"] == "fake-alt" for e in calls)
+        assert result.cost_usd == pytest.approx(sum(e["cost_usd"] for e in calls))
+
+
+async def test_same_session_key_serialised_across_agents(make_kernel) -> None:
+    fake = FakeProvider(default="reply", delay=0.05)
+    kernel = make_kernel(fake)
+    a = kernel.agent(AgentSpec(name="a"))
+    b = kernel.agent(AgentSpec(name="b"))
+    await asyncio.gather(a.run("from a", session="shared"), b.run("from b", session="shared"))
+    session = kernel._session_manager().get_or_create("shared")
+    turns = [(m["role"], m.get("content")) for m in session.messages
+             if m["role"] in ("user", "assistant")]
+    assert len(turns) == 4
+    assert [role for role, _ in turns] == ["user", "assistant", "user", "assistant"]
+    assert {turns[0][1], turns[2][1]} == {"from a", "from b"}

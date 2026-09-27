@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, get_args
@@ -435,6 +435,9 @@ class Agent:
             )
             extra["vec_config"] = vec
             extra["vec_store"] = self._vec_store
+        # Runtime preset switches (/model, the my tool, the Dream model override)
+        # resolve through the kernel pool too, so they stay metered and ledgered.
+        extra["preset_snapshot_loader"] = self._preset_loader(cfg)
         loop = AgentLoop.from_config(
             cfg,
             tool_registry=ToolRegistry(),
@@ -444,6 +447,36 @@ class Agent:
         )
         self._route = route
         return loop
+
+    def _preset_loader(self, cfg: Any) -> Callable[[str], Any]:
+        """A ``preset_snapshot_loader`` backed by the kernel LLM pool.
+
+        Preset ``"default"`` is ``env.default_model``; any other name must be a kernel
+        model alias (``env.models`` / ``register_provider``), else ``KeyError``.
+        """
+        from nanobot.providers.factory import ProviderSnapshot
+
+        kernel = self._kernel
+
+        def load(name: str) -> ProviderSnapshot:
+            alias = kernel.env.default_model if name == "default" else name
+            route = kernel.llm._route(alias)
+            if route.alias is None:
+                raise KeyError(f"model preset {name!r} is not a model of this kernel")
+            preset = cfg.model_presets.get(name) or cfg.resolve_default_preset()
+            window = preset.context_window_tokens
+            if route.spec is not None and route.spec.context_window is not None:
+                window = route.spec.context_window
+            return ProviderSnapshot(
+                provider=route.provider,
+                model=route.model,
+                context_window_tokens=window,
+                signature=("kernel", route.alias, route.model),
+                generation=preset.to_generation_settings(),
+                model_preset=name,
+            )
+
+        return load
 
     async def _on_loop(self, coro: Any) -> Any:
         """Await *coro* on the kernel loop thread (directly when already on it)."""
@@ -603,22 +636,35 @@ class Agent:
                 messages=tuple(freeze(m) for m in capture.messages),
             )
 
+        timeout = asyncio.timeout(deadline)
+
+        def trace_stop(context: AgentRunHookContext) -> str | None:
+            # run.completed must say what the RunResult says.
+            if timeout.expired():
+                return "deadline"
+            if isinstance(context.exception, BudgetExceeded):
+                return "budget"
+            return None
+
+        hooks = [capture, TraceHook(
+            self._kernel.trace, session_key=session_key, model=route.model,
+            stop_reason=trace_stop,
+        )]
         try:
             with run_span, turn_request_extras(self._request_extras(sampling)):
                 token = _ACTIVE_RUN.set(cost)
                 try:
-                    timeout = asyncio.timeout(deadline)
                     try:
                         async with timeout:
-                            response = await loop.process_direct(
-                                message,
-                                session_key=session_key,
-                                media=list(media) or None,
-                                hooks=[capture, TraceHook(
-                                    self._kernel.trace, session_key=session_key,
-                                    model=route.model,
-                                )],
-                            )
+                            # Serialise same-key runs across the kernel's agents: they
+                            # share one SessionManager (and its cached Session objects).
+                            async with self._kernel._session_lock(session_key):
+                                response = await loop.process_direct(
+                                    message,
+                                    session_key=session_key,
+                                    media=list(media) or None,
+                                    hooks=hooks,
+                                )
                     except BudgetExceeded as exc:
                         return result("budget", error=exc)
                     except LLMError as exc:  # before TimeoutError: LLMTimeoutError is one

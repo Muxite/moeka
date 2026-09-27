@@ -124,6 +124,8 @@ class Kernel:
         # Not _close_lock: a run building its loop on the loop thread must never wait
         # on a close() that is itself waiting for the loop thread.
         self._agents_lock = threading.Lock()
+        # Per session key, across all agents (runs execute on the kernel loop thread).
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def env(self) -> Environment:
@@ -214,6 +216,13 @@ class Kernel:
                 agent = Agent(self, spec)
                 self._agents[spec] = agent
             return agent
+
+    def _session_lock(self, key: str) -> asyncio.Lock:
+        """The kernel-wide lock for one session key (use on the kernel loop only)."""
+        lock = self._session_locks.get(key)
+        if lock is None:
+            lock = self._session_locks[key] = asyncio.Lock()
+        return lock
 
     def _session_manager(self) -> SessionManager:
         """The one ``SessionManager`` all of this kernel's agents share (state dir)."""

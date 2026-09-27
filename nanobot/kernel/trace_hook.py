@@ -19,7 +19,10 @@ carries that span):
   schema). Calls denied by the capability gate reach no hook (``policy.decision``).
 - ``run.completed``: ``session_key``, ``model``, ``stop_reason``, ``iterations``,
   ``usage`` (run totals), ``tools_used``, ``error``. Emitted from ``on_finally``, so
-  exactly once per run, including runs that raised or were cancelled.
+  exactly once per run, including runs that raised or were cancelled. A host that
+  knows better why a run ended (the kernel ``Agent``: ``deadline``, ``budget``) passes
+  ``stop_reason=fn(context) -> str | None``; a non-``None`` answer replaces the
+  runner's ``stop_reason`` in this event.
 
 Use one ``TraceHook`` per run (it keeps per-run counters). It never raises.
 """
@@ -27,6 +30,7 @@ Use one ``TraceHook`` per run (it keeps per-run counters). It never raises.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
@@ -54,9 +58,15 @@ class TraceHook(AgentHook):
     """Emit ``run.*``, ``iteration`` and ``tool.call`` events to *sink*."""
 
     def __init__(
-        self, sink: TraceSink, *, session_key: str | None = None, model: str | None = None,
+        self,
+        sink: TraceSink,
+        *,
+        session_key: str | None = None,
+        model: str | None = None,
+        stop_reason: Callable[[AgentRunHookContext], str | None] | None = None,
     ) -> None:
         super().__init__()
+        self._stop_reason = stop_reason
         self._sink = sink
         self._session_key = session_key
         self._model = model
@@ -127,11 +137,17 @@ class TraceHook(AgentHook):
         error = context.error
         if error is None and context.exception is not None:
             error = f"{type(context.exception).__name__}: {context.exception}"[:_ERROR_CHARS]
+        stop_reason = context.stop_reason
+        if self._stop_reason is not None:
+            try:
+                stop_reason = self._stop_reason(context) or stop_reason
+            except Exception:  # noqa: BLE001 - the hook never raises
+                pass
         self._emit({
             "event": "run.completed",
             "session_key": self._session_key,
             "model": self._model,
-            "stop_reason": context.stop_reason,
+            "stop_reason": stop_reason,
             "iterations": self._iterations,
             "usage": usage_dict(context.usage),
             "tools_used": list(context.tools_used),
