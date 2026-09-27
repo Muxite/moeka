@@ -37,7 +37,11 @@ class LoopThread:
         self._lock = threading.Lock()
         self._state = "idle"  # idle -> running -> stopping -> stopped
         self._stopped_event = threading.Event()
-        self._pending: set[Future[Any]] = set()
+        # future -> the raw coroutine it wraps, until a task takes ownership
+        # of it (then the entry is nulled to None). Lets a leftover callback
+        # that never got to run be settled *and* have its coroutine closed,
+        # instead of leaking a "coroutine was never awaited" warning.
+        self._pending: dict[Future[Any], Any] = {}
 
     # -- lifecycle ---------------------------------------------------
 
@@ -85,13 +89,18 @@ class LoopThread:
 
     def _fail_pending_futures(self) -> None:
         with self._lock:
-            pending = list(self._pending)
+            pending = dict(self._pending)
             self._pending.clear()
-        for fut in pending:
+        for fut, coro in pending.items():
             if not fut.done():
                 try:
                     fut.set_exception(RuntimeError("bridge stopped"))
                 except Exception:  # noqa: BLE001 - fut may settle concurrently
+                    pass
+            if coro is not None:
+                try:
+                    coro.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
                     pass
 
     def _settle(
@@ -103,7 +112,7 @@ class LoopThread:
         cancelled: bool = False,
     ) -> None:
         with self._lock:
-            self._pending.discard(fut)
+            self._pending.pop(fut, None)
         if fut.done():
             return
         try:
@@ -126,24 +135,25 @@ class LoopThread:
         bridge rejected the call before that point). Both ``run`` and
         ``submit`` build on this so the accept/reject/cancel logic lives in
         one place.
+
+        The state check, the bookkeeping that lets a stopped bridge close
+        this exact coroutine later, and the actual scheduling onto the loop
+        all happen under one lock hold — so a ``stop()`` that runs
+        concurrently either happens strictly before this call (and the call
+        is rejected up front) or strictly after it (and the resulting task
+        is guaranteed to be visible to ``stop()``'s drain). There is no
+        window where the call is accepted against a loop that's already
+        gone.
         """
-        with self._lock:
-            if self._state in ("stopping", "stopped"):
-                coro.close()
-                fut: Future[Any] = Future()
-                fut.set_exception(RuntimeError("bridge stopped"))
-                return fut, {}
-            if self._state == "idle":
-                self._start_locked()
-            loop = self._loop
-        assert loop is not None
-        self._check_not_on_loop_thread(method_name)
+        try:
+            self._check_not_on_loop_thread(method_name)
+        except RuntimeError:
+            coro.close()
+            raise
 
         ctx = contextvars.copy_context()
-        fut = Future()
+        fut: Future[Any] = Future()
         handle: dict[str, Any] = {"task": None}
-        with self._lock:
-            self._pending.add(fut)
 
         def _on_fut_settled(f: Future[Any]) -> None:
             # Lets fut.cancel() (submit's caller cancelling, or run()'s own
@@ -158,8 +168,6 @@ class LoopThread:
                 except RuntimeError:
                     pass  # loop already closed
 
-        fut.add_done_callback(_on_fut_settled)
-
         def _on_loop() -> None:
             with self._lock:
                 accept = self._state == "running"
@@ -170,6 +178,8 @@ class LoopThread:
             if fut.done():
                 # Cancelled (or otherwise settled) before we got to start it.
                 coro.close()
+                with self._lock:
+                    self._pending.pop(fut, None)
                 return
             try:
                 task = loop.create_task(coro, context=ctx)
@@ -177,6 +187,15 @@ class LoopThread:
                 self._settle(fut, exc=exc)
                 return
             handle["task"] = task
+            with self._lock:
+                # The task now owns the coroutine; nothing left to close by
+                # hand even if the bridge stops before the task finishes.
+                self._pending[fut] = None
+            if fut.cancelled():
+                # Cancelled between the fut.done() check above and task
+                # creation (e.g. create_task() itself yielding to another
+                # thread) — stop it before its body ever runs.
+                task.cancel()
 
             def _on_task_done(t: asyncio.Task[Any]) -> None:
                 if fut.done():
@@ -192,7 +211,27 @@ class LoopThread:
 
             task.add_done_callback(_on_task_done)
 
-        loop.call_soon_threadsafe(_on_loop)
+        with self._lock:
+            if self._state in ("stopping", "stopped"):
+                coro.close()
+                fut.set_exception(RuntimeError("bridge stopped"))
+                return fut, {}
+            if self._state == "idle":
+                self._start_locked()
+            loop = self._loop
+            assert loop is not None
+            self._pending[fut] = coro
+            try:
+                loop.call_soon_threadsafe(_on_loop)
+            except RuntimeError:
+                # Only reachable if the loop closed despite us holding the
+                # lock stop() also needs to transition state — defensive.
+                self._pending.pop(fut, None)
+                coro.close()
+                fut.set_exception(RuntimeError("bridge stopped"))
+                return fut, {}
+
+        fut.add_done_callback(_on_fut_settled)
         return fut, handle
 
     def submit(self, coro: Any) -> Future[Any]:
@@ -286,7 +325,16 @@ class LoopThread:
         and joins the thread. After this, ``run``/``submit`` always raise
         ``RuntimeError("bridge stopped")``. Concurrent callers all block
         until the one doing the actual work finishes; none of them raise.
+        Calling this from the bridge's own loop thread would deadlock (the
+        thread would be joining itself), so it raises immediately instead,
+        matching ``run``/``submit``/``iterate``.
         """
+        if threading.current_thread() is self._thread:
+            raise RuntimeError(
+                "LoopThread.stop() called from its own loop thread would deadlock; "
+                "call it from another thread instead"
+            )
+
         with self._lock:
             if self._state == "stopped":
                 return
@@ -302,62 +350,77 @@ class LoopThread:
                 owner = True
 
         if not owner:
-            self._stopped_event.wait()
+            # Bounded: the owner's try/finally below always resolves this,
+            # but a caller here should never block forever regardless.
+            self._stopped_event.wait(timeout=timeout + 15.0)
             return
 
         loop = self._loop
         thread = self._thread
         assert loop is not None and thread is not None
 
-        async def _drain_and_shutdown() -> None:
-            running_loop = asyncio.get_running_loop()
-            deadline = running_loop.time() + timeout
-            while True:
-                current = asyncio.current_task()
-                pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
-                if not pending:
-                    break
-                remaining = deadline - running_loop.time()
-                if remaining <= 0:
-                    break
-                await asyncio.wait(pending, timeout=remaining)
-                # Loop again: draining may itself have let new tasks start.
-            current = asyncio.current_task()
-            stragglers = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
-            for t in stragglers:
-                t.cancel()
-            if stragglers:
-                await asyncio.gather(*stragglers, return_exceptions=True)
-            await running_loop.shutdown_asyncgens()
-
-        drain_done: Future[None] = Future()
-
-        def _start_drain() -> None:
-            task = loop.create_task(_drain_and_shutdown())
-
-            def _done(t: asyncio.Task[None]) -> None:
-                if t.cancelled():
-                    drain_done.set_result(None)
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    drain_done.set_exception(exc)
-                else:
-                    drain_done.set_result(None)
-
-            task.add_done_callback(_done)
-
-        loop.call_soon_threadsafe(_start_drain)
         try:
-            drain_done.result(timeout=timeout + 5.0)
-        except Exception as exc:  # noqa: BLE001 - shutdown must not raise into caller
-            logger.warning("LoopThread.stop: drain/shutdown failed: {!r}", exc)
+            async def _drain_and_shutdown() -> None:
+                running_loop = asyncio.get_running_loop()
+                deadline = running_loop.time() + timeout
+                while True:
+                    current = asyncio.current_task()
+                    pending = [
+                        t for t in asyncio.all_tasks() if t is not current and not t.done()
+                    ]
+                    if not pending:
+                        break
+                    remaining = deadline - running_loop.time()
+                    if remaining <= 0:
+                        break
+                    await asyncio.wait(pending, timeout=remaining)
+                    # Loop again: draining may itself have let new tasks start.
+                current = asyncio.current_task()
+                stragglers = [
+                    t for t in asyncio.all_tasks() if t is not current and not t.done()
+                ]
+                for t in stragglers:
+                    t.cancel()
+                if stragglers:
+                    await asyncio.gather(*stragglers, return_exceptions=True)
+                await running_loop.shutdown_asyncgens()
 
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=timeout + 5.0)
-        # _run's finally already closed the loop and failed any leftover
-        # pending futures once run_forever() returned above.
+            drain_done: Future[None] = Future()
 
-        with self._lock:
-            self._state = "stopped"
-        self._stopped_event.set()
+            def _start_drain() -> None:
+                task = loop.create_task(_drain_and_shutdown())
+
+                def _done(t: asyncio.Task[None]) -> None:
+                    if t.cancelled():
+                        drain_done.set_result(None)
+                        return
+                    exc = t.exception()
+                    if exc is not None:
+                        drain_done.set_exception(exc)
+                    else:
+                        drain_done.set_result(None)
+
+                task.add_done_callback(_done)
+
+            try:
+                loop.call_soon_threadsafe(_start_drain)
+            except RuntimeError as exc:
+                drain_done.set_exception(exc)
+
+            try:
+                drain_done.result(timeout=timeout + 5.0)
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise into caller
+                logger.warning("LoopThread.stop: drain/shutdown failed: {!r}", exc)
+
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass  # loop already stopped/closed some other way
+            thread.join(timeout=timeout + 5.0)
+            # _run's finally already closed the loop and failed (and closed
+            # the coroutines of) any leftover pending futures once
+            # run_forever() returned above.
+        finally:
+            with self._lock:
+                self._state = "stopped"
+            self._stopped_event.set()

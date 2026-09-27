@@ -393,5 +393,82 @@ def test_submit_future_cancel_cancels_task(bridge, caplog):
     assert "Event loop is closed" not in caplog.text
 
 
+def test_submit_cancel_racing_task_creation_still_cancels(bridge):
+    """fut.cancel() lands between _on_loop's fut.done() check and the
+    moment the task handle is recorded (e.g. create_task() itself yields
+    control). The task must still never run its body to completion.
+    """
+    bridge.start()
+    loop = bridge._loop
+    orig_create_task = loop.create_task
+    fut_holder: dict[str, Any] = {}
+    gate = threading.Event()
+    ran_to_end = threading.Event()
+
+    def patched_create_task(coro, **kwargs):
+        gate.wait(timeout=2.0)
+        fut_holder["fut"].cancel()
+        loop.create_task = orig_create_task
+        return orig_create_task(coro, **kwargs)
+
+    loop.create_task = patched_create_task
+
+    async def body():
+        await asyncio.sleep(0.05)
+        ran_to_end.set()
+
+    fut = bridge.submit(body())
+    fut_holder["fut"] = fut
+    gate.set()
+
+    with pytest.raises(BaseException):  # noqa: PT011 - CancelledError
+        fut.result(timeout=2.0)
+
+    assert not ran_to_end.wait(timeout=0.5), "task ran to completion despite the cancel race"
+
+
+def test_schedule_atomic_with_stop_never_leaks_or_crashes():
+    """A slow caller-side check (e.g. contended lock, GC pause) that spans
+    a concurrent full stop() must resolve to a clean "bridge stopped"
+    rejection — never a raw 'Event loop is closed' RuntimeError, and never
+    a hang.
+    """
+    lt = LoopThread(name="atomic-schedule-race")
+    lt.start()
+    entered = threading.Event()
+    gate = threading.Event()
+    orig_check = lt._check_not_on_loop_thread
+
+    def slow_check(method: str) -> None:
+        entered.set()
+        gate.wait(timeout=2.0)
+        orig_check(method)
+
+    lt._check_not_on_loop_thread = slow_check  # type: ignore[method-assign]
+
+    result: dict[str, Any] = {}
+
+    async def coro():
+        return 1
+
+    def caller() -> None:
+        try:
+            result["value"] = lt.run(coro())
+        except BaseException as exc:  # noqa: BLE001
+            result["value"] = exc
+
+    t = threading.Thread(target=caller)
+    t.start()
+    assert entered.wait(timeout=2.0)
+    lt.stop(timeout=1.0)  # completes fully while the caller is still parked
+    gate.set()
+    t.join(timeout=3.0)
+
+    assert not t.is_alive()
+    assert isinstance(result.get("value"), RuntimeError)
+    assert "bridge stopped" in str(result["value"])
+    assert "Event loop is closed" not in str(result["value"])
+
+
 async def _noop_coro() -> None:
     return None
