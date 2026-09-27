@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -224,6 +225,43 @@ def test_legacy_loop_sessions_root_unchanged(tmp_path, monkeypatch):
     loop.sessions.save(loop.sessions.get_or_create("cli:direct"))
     assert loop.env.paths.sessions_root == default_sessions_root(workspace.resolve())
     assert list(default_sessions_root(workspace.resolve()).rglob("sessions.db"))
+
+
+def test_legacy_loop_sessions_root_unchanged_for_symlinked_workspace(tmp_path):
+    """Pre-kernel code used ``default_sessions_root(<unresolved workspace>)``."""
+    real = tmp_path / "real" / "ws"
+    real.mkdir(parents=True)
+    link = tmp_path / "link"
+    os.symlink(real, link)
+    old_root = default_sessions_root(link)  # what the pre-kernel loop used
+    assert old_root.resolve() != default_sessions_root(real.resolve())  # the two differ
+
+    loop = AgentLoop.from_config(
+        _config(link), tool_registry=ToolRegistry(), provider=_provider(),
+    )
+    loop.sessions.save(loop.sessions.get_or_create("cli:direct"))
+    assert loop.env.paths.sessions_root == old_root.resolve()
+    assert list(old_root.rglob("sessions.db"))
+    assert not default_sessions_root(real).exists()
+    # The default legacy env keeps the loop workspace as configured.
+    assert loop.workspace == _config(link).workspace_path
+
+
+def test_facade_keeps_configured_workspace_for_symlink(tmp_path):
+    from unittest.mock import patch
+
+    from nanobot.nanobot import Nanobot
+
+    real = tmp_path / "real" / "ws"
+    real.mkdir(parents=True)
+    link = tmp_path / "link"
+    os.symlink(real, link)
+    config = _config(link)
+    with patch("nanobot.config.loader.load_config", return_value=config), \
+         patch("nanobot.providers.factory.make_provider", return_value=_provider()):
+        bot = Nanobot.from_config()
+    assert bot._loop.workspace == config.workspace_path
+    assert bot._loop.env.paths.sessions_root == default_sessions_root(link).resolve()
 
 
 def test_legacy_in_memory_env_touches_nothing_under_home(tmp_path, monkeypatch):

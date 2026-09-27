@@ -135,10 +135,13 @@ class Nanobot:
 
         from nanobot.kernel.legacy import LegacyEnvironment
 
-        env = env or LegacyEnvironment.from_config(config)
+        # The loop builds its own legacy env when none is given, so its workspace
+        # stays ``config.workspace_path``; the MCP provider gets equal paths.
         defaults = config.agents.defaults
         tools = ToolRegistry()
-        mcp_provider = MCPProvider.from_config(config, tools, env=env)
+        mcp_provider = MCPProvider.from_config(
+            config, tools, env=env or LegacyEnvironment.from_config(config),
+        )
         loop = AgentLoop.from_config(
             config,
             image_generation_provider_configs=image_gen_provider_configs(config),

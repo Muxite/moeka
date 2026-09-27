@@ -69,7 +69,9 @@ def _legacy_paths(config: Any) -> Paths:
     """
     from nanobot.session.sqlite_store import default_sessions_root
 
-    workspace = Path(config.workspace_path).resolve()
+    # Sibling of the workspace path AS CONFIGURED (not resolved): for a symlinked
+    # workspace that is ``<link>-sessions``, where the pre-kernel loop kept it.
+    workspace = Path(config.workspace_path)
     overrides: dict[str, Any] = {"sessions_root_override": default_sessions_root(workspace)}
     if getattr(config, "runtime_data_dir", None) is not None:
         overrides.update(
