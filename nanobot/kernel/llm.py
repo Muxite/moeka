@@ -93,6 +93,7 @@ from nanobot.kernel.trace import current_tags, safe_emit
 if TYPE_CHECKING:
     from nanobot.kernel.kernel import Kernel
     from nanobot.kernel.ledger import PricingTable
+    from nanobot.kernel.solvers import SolverRegistry
     from nanobot.providers.base import LLMProvider, LLMResponse, LLMUsage
 
 
@@ -327,12 +328,20 @@ def solve_deterministic(
     task_payload: dict[str, Any] | None,
     prompt: str,
     model_cls: type | None,
+    registry: SolverRegistry | None = None,
 ) -> tuple[Any, str | None]:
-    """Solver fast path: ``(coerced value, solver name)``, or ``(UNSOLVED, None)``."""
+    """Solver fast path: ``(coerced value, solver name)``, or ``(UNSOLVED, None)``.
+
+    *registry* is the registry to consult (a kernel's ``kernel.solvers``); ``None``
+    is the process-wide default registry.
+    """
     from nanobot.kernel import solvers
 
     payload = task_payload if task_payload is not None else {"prompt": prompt}
-    solved = solvers.try_solve(task_type, payload)
+    solved = (
+        registry.try_solve(task_type, payload) if registry is not None
+        else solvers.try_solve(task_type, payload)
+    )
     if solved is None:
         return UNSOLVED, None
     try:
@@ -1036,7 +1045,9 @@ class LLM:
     ) -> Completion:
         if task_type is not None:
             started = time.monotonic()
-            value, solver = solve_deterministic(task_type, task_payload, prompt, model_cls)
+            value, solver = solve_deterministic(
+                task_type, task_payload, prompt, model_cls, getattr(self._kernel, "solvers", None),
+            )
             if solver is not None:  # the solver path is never cached nor admitted
                 return self._solved(value, solver, opts, _new_call_id(), started)
         plan = self._plan(

@@ -62,6 +62,7 @@ from nanobot.llm_usage.context import llm_usage_slot
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.gate import GateResult
+    from nanobot.kernel.solvers import SolverRegistry
 
 MODEL_DISPATCH = "model.dispatch"
 ROUTE_EVENT = "model.route"
@@ -266,11 +267,14 @@ def _default_dispatch(
 
 def _solve(
     task_type: str, payload: dict[str, Any] | None, prompt: str, model_cls: type | None,
+    registry: SolverRegistry | None = None,
 ) -> tuple[Any, str | None]:
     """The ``acomplete_json`` solver path (same lookup, same coercion), run once."""
     complete_api = importlib.import_module("nanobot.api.complete")
 
-    value, solver_name = complete_api._solve_deterministic(task_type, payload, prompt, model_cls)
+    value, solver_name = complete_api._solve_deterministic(
+        task_type, payload, prompt, model_cls, registry,
+    )
     return (value, solver_name) if solver_name is not None else (None, None)
 
 
@@ -289,6 +293,7 @@ async def route(
     policy: PermissionPolicy | None = None,
     principal: Principal | None = None,
     env: CoreEnvironment | None = None,
+    solvers: SolverRegistry | None = None,
     **complete_kwargs: Any,
 ) -> RouteResult:
     """Route one sub-task through the cascade (module docstring) and return the outcome.
@@ -299,7 +304,9 @@ async def route(
     so the ledger measures it); the rest of *complete_kwargs* (``schema``,
     ``system``, ``retries``, ...) is forwarded to it. A dispatch exception
     propagates (it is not a verification failure). A ``model.dispatch`` denial is
-    returned as ``RouteResult.denial``, never raised.
+    returned as ``RouteResult.denial``, never raised. *solvers* is the solver
+    registry to try first (a kernel's ``kernel.solvers``); ``None`` is the
+    process-wide default.
     """
     if not isinstance(slot, str) or not slot:
         raise ValueError("slot must be a non-empty string")
@@ -309,7 +316,7 @@ async def route(
     base_event = {"event": ROUTE_EVENT, "slot": slot, "task_type": task_type}
 
     if task_type is not None:
-        value, solver_name = _solve(task_type, payload, prompt, model_cls)
+        value, solver_name = _solve(task_type, payload, prompt, model_cls, solvers)
         if solver_name is not None:
             safe_emit(sink, {**base_event, "tier": None, "preset": None, "ceiling": None,
                              "reason": "solved", "check": "solver", "verdict": "allow",

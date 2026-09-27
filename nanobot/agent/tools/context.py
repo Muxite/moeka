@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
     from nanobot.config.schema import ProviderConfig, ToolsConfig
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.variants import Variant
     from nanobot.providers.factory import ProviderSnapshot
     from nanobot.security.workspace_access import WorkspaceSandboxStatus
     from nanobot.session.manager import SessionManager
@@ -93,3 +94,6 @@ class ToolContext:
     # Kernel-mode plugin loading only: the instance ``config_cls()`` validated from
     # ``env.config.section(<plugin name>)``. ``None`` for built-ins and legacy loading.
     plugin_config: Any = None
+    # The loop's ``Variant`` (Task 8): ``ToolLoader`` applies its description overrides
+    # to each tool it builds; file tools may read its ``builtin_skills_dir``.
+    variant: Variant | None = None

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from nanobot.config.schema import VecConfig
     from nanobot.core.vec_store import VecStore
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.variants import Variant
 
 
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -116,19 +117,29 @@ class ContextBuilder:
         bootstrap_overrides: Mapping[str, str] | None = None,
         inline_skills: Sequence[Any] | None = None,
         env: CoreEnvironment | None = None,
+        variant: Variant | None = None,
     ):
         self.workspace = workspace
+        # Variant (Task 8): template roots, bundled-skills dir and bootstrap entries.
+        # ``None`` / ``Variant()`` = the built-ins, byte for byte.
+        self.variant = variant
+        self._template_roots = variant.template_roots if variant is not None else ()
         self.timezone = timezone
         self.vec_store = vec_store
         self.vec_config = vec_config
         # In-memory bootstrap sections (name -> content). A key matching one of
-        # BOOTSTRAP_FILES shadows the workspace file; other keys are appended.
-        self.bootstrap_overrides: dict[str, str] = dict(bootstrap_overrides or {})
+        # BOOTSTRAP_FILES shadows the workspace file; other keys are appended. The
+        # variant's entries come first; an explicit override of the same name wins.
+        self.bootstrap_overrides: dict[str, str] = {
+            **(variant.bootstrap if variant is not None else {}),
+            **(bootstrap_overrides or {}),
+        }
         # Host env: ``skill.listed`` goes to ``env.trace`` (none without an env).
         self._env = env
         self.memory = MemoryStore(workspace, vec_store=vec_store, env=env)
         self.skills = SkillsLoader(
             workspace,
+            builtin_skills_dir=variant.builtin_skills_dir if variant is not None else None,
             disabled_skills=set(disabled_skills) if disabled_skills else None,
             allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
             inline_skills=inline_skills,
@@ -146,8 +157,13 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
+        trace: bool = True,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt from identity, bootstrap files, memory, and skills.
+
+        ``trace=False`` skips the ``skill.listed`` event (``variants.fingerprint``
+        renders the prompt without it being a turn).
+        """
         root = workspace or self.workspace
         parts = [self._get_identity(channel=channel, workspace=root)]
 
@@ -156,7 +172,8 @@ class ContextBuilder:
             parts.append(bootstrap)
 
         parts.append(self._behavioral_guidelines())
-        parts.append(render_template("agent/tool_contract.md"))
+        roots = getattr(self, "_template_roots", ())
+        parts.append(render_template("agent/tool_contract.md", roots=roots))
 
         project_path = root.expanduser().resolve()
         if project_path != self.workspace.expanduser().resolve():
@@ -192,8 +209,12 @@ class ContextBuilder:
             listed=listed,
         )
         if skills_summary:
-            parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
-        self._trace_skills_listed(active_skills if active_content else [], listed)
+            parts.append(render_template(
+                "agent/skills_section.md", roots=roots,
+                skills_summary=skills_summary,
+            ))
+        if trace:
+            self._trace_skills_listed(active_skills if active_content else [], listed)
 
         if include_memory_recent_history:
             history_section = self._build_history_section(
@@ -351,12 +372,16 @@ class ContextBuilder:
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
+        roots = getattr(self, "_template_roots", ())
         return render_template(
             "agent/identity.md",
+            roots=roots,
             workspace_path=workspace_path,
             agent_workspace_path=agent_workspace_path,
             runtime=runtime,
-            platform_policy=render_template("agent/platform_policy.md", system=system),
+            platform_policy=render_template(
+                "agent/platform_policy.md", roots=roots, system=system,
+            ),
             channel=channel or "",
         )
 

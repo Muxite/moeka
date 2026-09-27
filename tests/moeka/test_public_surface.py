@@ -39,6 +39,8 @@ SURFACE: dict[str, list[str]] = {
         "LLM",
         "Request",
         "Sampling",
+        "Solved",
+        "SolverRegistry",
         "TextStream",
         "Usage",
         "assistant",
@@ -60,6 +62,7 @@ SURFACE: dict[str, list[str]] = {
         "EVENTS", "FanoutSink", "JsonlTraceSink", "LoguruTraceSink", "MemoryTraceSink",
         "NullTraceSink", "TraceSink", "Tracer",
     ],
+    "moeka.variants": ["Fingerprint", "Variant"],
 }
 
 

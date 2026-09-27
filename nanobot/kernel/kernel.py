@@ -9,6 +9,12 @@ admitted against it, see :mod:`nanobot.kernel.budget`), a
 :class:`~nanobot.kernel.budget.ResponseCache`, and ``max_concurrency`` (the
 default concurrency of ``kernel.llm.batch``).
 
+Per kernel (Task 8): ``variant`` (a :class:`~nanobot.kernel.variants.Variant`, stored as
+``kernel.variant`` and handed to the agents the kernel builds) and the ``solvers`` /
+``baselines`` registries. ``None`` registries are the process-wide defaults (unchanged
+behaviour); a kernel given its own registry never sees solvers registered elsewhere.
+``kernel.llm.complete_json``'s deterministic fast path consults ``kernel.solvers``.
+
 Trace routing: ``kernel.trace`` is a :class:`~nanobot.kernel.trace.Tracer` wrapping
 ``env.trace`` (the host's sink). Everything the kernel builds (pool providers, their
 ledgers, budget metering, cache events) is handed ``kernel.core_env``, a copy of
@@ -31,9 +37,12 @@ from nanobot.kernel.hostenv import Environment
 from nanobot.kernel.trace import Tracer
 
 if TYPE_CHECKING:
+    from nanobot.kernel.baselines import BaselineRegistry
     from nanobot.kernel.budget import Budget, ResponseCache
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.llm import LLM
+    from nanobot.kernel.solvers import SolverRegistry
+    from nanobot.kernel.variants import Variant
 
 
 class Kernel:
@@ -46,14 +55,20 @@ class Kernel:
         *,
         budget: Budget | None = None,
         cache: ResponseCache | None = None,
+        variant: Variant | None = None,
         max_concurrency: int = 16,
+        solvers: SolverRegistry | None = None,
+        baselines: BaselineRegistry | None = None,
     ) -> None:
         if not isinstance(env, Environment):
             raise TypeError(
                 f"Kernel(env) needs a moeka Environment, got {type(env).__name__}; "
                 "build one with Environment.for_host(...) or Environment.from_config(...)"
             )
+        from nanobot.kernel import baselines as _baselines
+        from nanobot.kernel import solvers as _solvers
         from nanobot.kernel.budget import Budget, ResponseCache
+        from nanobot.kernel.variants import Variant
 
         if budget is not None and not isinstance(budget, Budget):
             raise TypeError(
@@ -61,6 +76,14 @@ class Kernel:
             )
         if cache is not None and not isinstance(cache, ResponseCache):
             raise TypeError(f"cache must implement get/put, got {type(cache).__name__}")
+        if variant is not None and not isinstance(variant, Variant):
+            raise TypeError(f"variant must be a Variant, got {type(variant).__name__}")
+        if solvers is not None and not isinstance(solvers, _solvers.SolverRegistry):
+            raise TypeError(f"solvers must be a SolverRegistry, got {type(solvers).__name__}")
+        if baselines is not None and not isinstance(baselines, _baselines.BaselineRegistry):
+            raise TypeError(
+                f"baselines must be a BaselineRegistry, got {type(baselines).__name__}"
+            )
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) \
                 or max_concurrency < 1:
             raise ValueError(f"max_concurrency must be a positive int, got {max_concurrency!r}")
@@ -70,6 +93,10 @@ class Kernel:
         self._budget = budget
         self._cache = cache
         self._max_concurrency = max_concurrency
+        self._variant = variant
+        # ``None`` = the process-wide default, looked up on each access.
+        self._solvers = solvers
+        self._baselines = baselines
         self._closed = False
         self._close_lock = threading.Lock()
         # Internal: the loop that ``*_sync`` twins run on. Starts lazily on first use.
@@ -101,6 +128,29 @@ class Kernel:
     @property
     def max_concurrency(self) -> int:
         return self._max_concurrency
+
+    @property
+    def variant(self) -> Variant | None:
+        """The kernel's :class:`Variant` (``None`` = built-ins); agents it builds use it."""
+        return self._variant
+
+    @property
+    def solvers(self) -> SolverRegistry:
+        """This kernel's solver registry (the process-wide default unless one was passed)."""
+        if self._solvers is not None:
+            return self._solvers
+        from nanobot.kernel.solvers import default_registry
+
+        return default_registry()
+
+    @property
+    def baselines(self) -> BaselineRegistry:
+        """This kernel's baseline registry (the process-wide default unless one was passed)."""
+        if self._baselines is not None:
+            return self._baselines
+        from nanobot.kernel.baselines import default_registry
+
+        return default_registry()
 
     @property
     def llm(self) -> LLM:

@@ -32,6 +32,11 @@ Two plugin modes (built-in tools load the same way in both):
   code is imported, and its bytes are part of the hash step 2 checked. A file that is
   not UTF-8 rejects the plugin.
 
+Variants (Task 8): when ``ToolContext.variant`` is set, each tool the loader builds gets
+``variant.description_for(tool.name)`` as its per-instance description override
+(``Tool.set_description_override``); for a kernel plugin it also wins over the
+manifest's description. Nothing class-level or process-wide is changed.
+
   Steps 1-3 failing skip the plugin with a logged error and a ``plugin.load`` deny
   trace event. The registered tool carries ``capability_grant`` = the manifest's
   ``capabilities_requested`` minus what the ToolRegistry's gate policy denies
@@ -59,7 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool, ToolResult
+from nanobot.agent.tools.base import DescriptionFileError, Tool, ToolResult
 from nanobot.agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -76,7 +81,8 @@ _SKIP_MODULES = frozenset({
 
 
 class LoadError(Exception):
-    """Kernel-mode plugin load failure that aborts ``ToolLoader.load`` (name collision)."""
+    """Load failure that aborts ``ToolLoader.load``: a kernel-mode plugin name collision,
+    or an unreadable variant description file."""
 
 
 class _PluginRejectedError(Exception):
@@ -193,6 +199,7 @@ class ToolLoader:
                         allow_set is not None and tool.name not in allow_set
                     ):
                         continue
+                    _apply_variant(ctx, tool)
                     if is_plugin_source:
                         tool = _LegacyErrorPrefixTool(tool)
                     if registry.has(tool.name):
@@ -211,6 +218,8 @@ class ToolLoader:
                     registered.append(tool.name)
                     if not is_plugin_source:
                         builtin_names.add(tool.name)
+                except LoadError:
+                    raise  # a broken variant file fails the load, never drops a tool
                 except Exception:
                     logger.exception("Failed to register tool: %s", cls_label)
         if self._plugin_registry is not None:
@@ -264,8 +273,10 @@ class ToolLoader:
                 )
             grant = _capability_grant(manifest, registry.gate_policy)
             operation = next((op for op in manifest.operations if op.name == name), None)
+            variant_text = _apply_variant(ctx, tool)
             wrapped = _KernelPluginTool(
-                tool, plugin=manifest.name, grant=grant, description=descriptions.get(name),
+                tool, plugin=manifest.name, grant=grant,
+                description=variant_text if variant_text is not None else descriptions.get(name),
                 operation=operation,
             )
             if registry.register(wrapped):
@@ -443,6 +454,20 @@ def _capability_grant(
         rule for rule in manifest.capabilities_requested
         if not policy_denies_everywhere(effective, rule.split(":", 1)[0])
     )
+
+
+def _apply_variant(ctx: ToolContext, tool: Tool) -> str | None:
+    """Set the variant's description override on *tool* (this instance); return it."""
+    variant = getattr(ctx, "variant", None)
+    if variant is None:
+        return None
+    try:
+        text = variant.description_for(tool.name)
+    except DescriptionFileError as exc:
+        raise LoadError(f"variant {variant.name!r}: {exc}") from exc
+    if text is not None:
+        tool.set_description_override(text)
+    return text
 
 
 def _emit(ctx: ToolContext, event: dict[str, Any]) -> None:

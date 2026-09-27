@@ -57,6 +57,9 @@ class _FsTool(Tool):
     config_key = "file"
     # Host trace sink (``env.trace``, set by ``create``); ``None`` = no trace events.
     _trace_sink: Any = None
+    # The bundled-skills root for this instance: ``BUILTIN_SKILLS_DIR``, or a variant's
+    # ``builtin_skills_dir`` (Task 8). ``None`` = the module default.
+    _builtin_skills_dir: Path | None = None
 
     @classmethod
     def config_cls(cls):
@@ -137,12 +140,18 @@ class _FsTool(Tool):
         sandbox_restricts = bool(ctx.config.exec.sandbox)
         allowed_dir = agent_workspace if restrict else None
         env = ctx.env
+        variant = getattr(ctx, "variant", None)
+        skills_dir = (
+            variant.builtin_skills_dir
+            if variant is not None and variant.builtin_skills_dir is not None
+            else BUILTIN_SKILLS_DIR
+        )
         # Agent-owned skills stay available from project scopes. History is a narrower
         # capability: expose only the append-only log, not the surrounding memory directory.
         tool = cls(
             workspace=agent_workspace,
             allowed_dir=allowed_dir,
-            extra_read_allowed_dirs=[BUILTIN_SKILLS_DIR, resolved_agent_workspace / "skills"],
+            extra_read_allowed_dirs=[skills_dir, resolved_agent_workspace / "skills"],
             extra_read_allowed_files=[resolved_agent_workspace / "memory" / "history.jsonl"],
             file_states=ctx.file_state_store,
             restrict_to_workspace=ctx.config.restrict_to_workspace,
@@ -152,6 +161,7 @@ class _FsTool(Tool):
             plugin_data_root=plugin_data_root(env),
         )
         tool._trace_sink = env.trace if env is not None else None
+        tool._builtin_skills_dir = skills_dir
         return tool
 
     @property
@@ -319,8 +329,11 @@ def _is_blocked_device(path: str | Path) -> bool:
     return False
 
 
-def _builtin_skill_read_path(path: str) -> Path | None:
-    """Map workspace-relative skills/<name>/... reads onto bundled skills."""
+def _builtin_skill_read_path(path: str, skills_dir: Path | None = None) -> Path | None:
+    """Map workspace-relative skills/<name>/... reads onto bundled skills.
+
+    *skills_dir* is the tool's bundled-skills root (a variant's); default the module's.
+    """
     from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 
     requested = Path(path)
@@ -329,7 +342,7 @@ def _builtin_skill_read_path(path: str) -> Path | None:
     parts = requested.parts
     if len(parts) < 2 or parts[0] != "skills":
         return None
-    root = BUILTIN_SKILLS_DIR.resolve()
+    root = (skills_dir or BUILTIN_SKILLS_DIR).resolve()
     candidate = (root / Path(*parts[1:])).resolve()
     if candidate != root and root not in candidate.parents:
         return None
@@ -380,13 +393,25 @@ class ReadFileTool(_FsTool):
         return [capability_request("fs.read", params.get("path"))]
 
     def _trace_skill_read(self, fp: Path) -> None:
-        """Emit ``skill.read`` when *fp* is a ``skills/<name>/SKILL.md`` file."""
+        """Emit ``skill.read`` when *fp* is a ``skills/<name>/SKILL.md`` file (or a
+        ``SKILL.md`` directly under a variant's bundled-skills root)."""
         sink = self._trace_sink
-        if sink is None or fp.name != "SKILL.md" or fp.parent.parent.name != "skills":
+        if sink is None or fp.name != "SKILL.md":
+            return
+        if fp.parent.parent.name != "skills" and not self._under_variant_skills(fp):
             return
         from nanobot.kernel.trace import safe_emit
 
         safe_emit(sink, {"event": "skill.read", "skill": fp.parent.name, "path": str(fp)})
+
+    def _under_variant_skills(self, fp: Path) -> bool:
+        root = self._builtin_skills_dir
+        if root is None:
+            return False
+        try:
+            return fp.resolve().parent.parent == root.resolve()
+        except OSError:
+            return False
 
     def _is_scratchpad(self, fp: Path) -> bool:
         """True for a file under ``<work_dir>/scratchpad`` (untrusted on read-back)."""
@@ -414,7 +439,7 @@ class ReadFileTool(_FsTool):
 
             fp = self._resolve_read(path)
             if not fp.exists():
-                fp = _builtin_skill_read_path(path) or fp
+                fp = _builtin_skill_read_path(path, self._builtin_skills_dir) or fp
             if _is_blocked_device(fp):
                 return ToolResult.error(f"Error: Reading {fp} is blocked (device path that could hang or produce infinite output).")
             if not fp.exists():

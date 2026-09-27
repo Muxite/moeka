@@ -44,6 +44,7 @@ from nanobot.utils.prompt_templates import render_template
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.policy import PermissionPolicy
+    from nanobot.kernel.variants import Variant
 
 
 class _SubagentOrigin(TypedDict):
@@ -131,8 +132,11 @@ class SubagentManager:
         policy: "PermissionPolicy | None" = None,
         max_policy_denials: int = DEFAULT_MAX_POLICY_DENIALS,
         child_policy: "PermissionPolicy | None" = None,
+        variant: "Variant | None" = None,
     ):
         self.env = env
+        # The parent loop's Variant (Task 8): children see the same overrides.
+        self.variant = variant
         # The parent loop's gate policy; None means DefaultPolicy(). Each run gets
         # ``policy.attenuate(requested, narrower=child_policy)`` (I4, ``_child_policy``).
         self.policy = policy
@@ -270,6 +274,7 @@ class SubagentManager:
                 ),
             ),
             env=self.env,
+            variant=getattr(self, "variant", None),
         )
         ToolLoader().load(
             ctx, registry, scope="subagent",
@@ -627,6 +632,7 @@ class SubagentManager:
 
         announce_content = render_template(
             "agent/subagent_announce.md",
+            roots=self._template_roots(),
             label=label,
             status_text=status_text,
             task=task,
@@ -657,14 +663,20 @@ class SubagentManager:
         await self.bus.publish_inbound(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
 
+    def _template_roots(self) -> tuple[Path, ...]:
+        variant = getattr(self, "variant", None)
+        return variant.template_roots if variant is not None else ()
+
     def _build_subagent_prompt(self, workspace: Path | None = None) -> str:
         """Build a focused system prompt for the subagent."""
         from nanobot.agent.skills import SkillsLoader
 
         agent_workspace = self.workspace.expanduser().resolve()
         project_workspace = workspace.expanduser().resolve() if workspace else agent_workspace
+        variant = getattr(self, "variant", None)
         skills_summary = SkillsLoader(
             self.workspace,
+            builtin_skills_dir=variant.builtin_skills_dir if variant is not None else None,
             disabled_skills=self.disabled_skills,
             inline_skills=self.inline_skills,
             env=self.env,
@@ -676,6 +688,7 @@ class SubagentManager:
         )
         return render_template(
             "agent/subagent_system.md",
+            roots=self._template_roots(),
             workspace=str(project_workspace),
             agent_workspace=str(agent_workspace),
             history_log=history_log,

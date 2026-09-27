@@ -112,6 +112,11 @@ class description_from_file:  # noqa: N801 - used in place of ``@property``
         # touch the file (a missing file would then break importing the module).
         if obj is None:
             return self
+        # A variant's per-instance override (Task 8, set by ``ToolLoader``) wins; the
+        # built-in file stays cached process-wide and is never mutated.
+        override = getattr(obj, "_description_override", None)
+        if override is not None:
+            return override
         return builtin_description(self.file_name)
 
 
@@ -500,6 +505,9 @@ class Tool(ABC):
     # By design, text is JSON: ``{"type": "string"}`` needs JSON-quoted text, and plain
     # prose fails. An empty schema (``{}``) accepts anything, prose included.
     output_schema: dict[str, Any] | None = None
+    # A variant's description for THIS instance (Task 8, ``set_description_override``).
+    # ``to_schema`` uses it for every tool; ``.description`` shows it for data-file tools.
+    _description_override: str | None = None
 
     @classmethod
     def config_cls(cls) -> type[BaseModel] | None:
@@ -650,13 +658,18 @@ class Tool(ABC):
         schema = self.parameters or {}
         return Schema.schema_violations(params, {**schema, "type": "object"}, "")
 
+    def set_description_override(self, text: str | None) -> None:
+        """Replace the description the model sees for this instance only (``None`` clears)."""
+        self._description_override = text
+
     def to_schema(self) -> dict[str, Any]:
         """OpenAI function schema."""
+        override = self._description_override
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": override if override is not None else self.description,
                 "parameters": self.parameters,
             },
         }

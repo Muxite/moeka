@@ -147,6 +147,11 @@ class BaselineRegistry:
 _DEFAULT_REGISTRY = BaselineRegistry()
 
 
+def default_registry() -> BaselineRegistry:
+    """The process-wide registry used by :func:`declare_baseline` and :func:`get_baseline`."""
+    return _DEFAULT_REGISTRY
+
+
 def declare_baseline(baseline: Baseline, *, replace: bool = False) -> None:
     """Declare *baseline* on the process-wide registry."""
     _DEFAULT_REGISTRY.register(baseline, replace=replace)
@@ -163,5 +168,6 @@ __all__ = [
     "compare_cost",
     "cost_ratio",
     "declare_baseline",
+    "default_registry",
     "get_baseline",
 ]

@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     )
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.policy import PermissionPolicy
+    from nanobot.kernel.variants import Variant
 
 _T = TypeVar("_T")
 _SUBAGENT_PROVIDER_TASK_META = "subagent_provider_task_id"
@@ -338,6 +339,7 @@ class AgentLoop:
         env: CoreEnvironment | None = None,
         max_concurrent_requests: int | None = None,
         policy: PermissionPolicy | None = None,
+        variant: Variant | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
         from nanobot.kernel.gate import AGENT_PRINCIPAL
@@ -347,6 +349,9 @@ class AgentLoop:
         defaults = AgentDefaults()
         self.bus = bus
         self.env = env
+        # Variant (Task 8): prompt templates, skills dir, bootstrap entries and tool
+        # descriptions for this loop only; sub-agents inherit it. None = built-ins.
+        self.variant = variant
         # Capability gate (kernel P2): every tool call of this loop is checked
         # against the floors and this policy. DefaultPolicy() is today's
         # permissive behaviour (floors only).
@@ -435,6 +440,7 @@ class AgentLoop:
             bootstrap_overrides=bootstrap_overrides,
             inline_skills=inline_skills,
             env=env,
+            variant=variant,
         )
         if session_manager is not None:
             self.sessions = session_manager
@@ -491,6 +497,7 @@ class AgentLoop:
             inline_skills=inline_skills,
             env=env,
             policy=self.policy,
+            variant=variant,
         )
         self._unified_session = unified_session
         self._running = False
@@ -563,6 +570,7 @@ class AgentLoop:
 
         *policy* is the capability-gate policy for every tool call (default
         ``DefaultPolicy()``: floors only, today's permissive behaviour).
+        ``variant=`` (via *extra*) is the loop's :class:`~nanobot.kernel.variants.Variant`.
         """
         from nanobot.kernel.legacy import LegacyEnvironment
         from nanobot.providers.factory import make_provider
@@ -742,6 +750,7 @@ class AgentLoop:
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_control=AgentRuntimeControl(self),
             env=self.env,
+            variant=self.variant,
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools, allow=self.tools_allow, deny=self.tools_deny)
@@ -753,12 +762,13 @@ class AgentLoop:
             "my" not in self.tools_deny
         )
         if self.tools_config.my.enable and my_allowed:
-            self.tools.register(
-                MyTool(
-                    runtime_control=AgentRuntimeControl(self),
-                    modify_allowed=self.tools_config.my.allow_set,
-                )
+            my_tool = MyTool(
+                runtime_control=AgentRuntimeControl(self),
+                modify_allowed=self.tools_config.my.allow_set,
             )
+            if self.variant is not None:
+                my_tool.set_description_override(self.variant.description_for("my"))
+            self.tools.register(my_tool)
             registered.append("my")
 
         logger.info("Registered {} tools: {}", len(registered), registered)
