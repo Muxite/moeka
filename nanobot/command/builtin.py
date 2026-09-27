@@ -263,6 +263,7 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
         usage = await fetch_search_usage(
             provider=search_cfg.provider,
             api_key=search_cfg.api_key or None,
+            env=getattr(loop, "env", None),
         )
         search_usage_text = usage.format()
     active_tasks = loop._active_tasks.get(ctx.key, [])  # pyright: ignore[reportPrivateUsage]

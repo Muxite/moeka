@@ -359,3 +359,29 @@ async def test_chat_error_maps_retry_metadata() -> None:
     assert result.error_should_retry is True
     assert result.error_code == "throttlingexception"
     assert result.retry_after == 3
+
+
+# --- Region through the host resolver (Task 4) -------------------------------
+
+
+def test_region_comes_from_resolver_not_process_env(monkeypatch):
+    from tests._kernel_env import credential_env
+
+    monkeypatch.setenv("AWS_REGION", "ambient-must-be-ignored")
+    empty = BedrockProvider(client=FakeClient(), env=credential_env())
+    assert empty.region is None
+    env = credential_env({"providers/bedrock/region": "eu-west-1"})
+    assert BedrockProvider(client=FakeClient(), env=env).region == "eu-west-1"
+    assert BedrockProvider(client=FakeClient(), region="us-east-1", env=env).region == "us-east-1"
+
+
+def test_legacy_aws_region_still_applies(tmp_path, monkeypatch):
+    from nanobot.kernel.legacy import LegacyEnvironment
+
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-south-1")
+    config = Config.model_validate({"agents": {"defaults": {"workspace": str(tmp_path)}}})
+    env = LegacyEnvironment.from_config(config)
+    assert BedrockProvider(client=FakeClient(), env=env).region == "ap-south-1"
+    # Direct construction without an env keeps the pre-kernel fallback.
+    assert BedrockProvider(client=FakeClient()).region == "ap-south-1"

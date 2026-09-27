@@ -6,11 +6,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import re
 from collections.abc import Awaitable, Callable, Iterator
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
+from nanobot.kernel.env import resolve_credential
 from nanobot.providers.base import (
     LLMProvider,
     LLMResponse,
@@ -26,6 +26,29 @@ _TEXT_BLOCK_TYPES = {"text", "input_text", "output_text"}
 _TEMPERATURE_UNSUPPORTED_MODEL_TOKENS = ("claude-opus-4-7",)
 _ADAPTIVE_THINKING_ONLY_MODEL_TOKENS = ("claude-opus-4-7",)
 _NOOP_TOOL_NAME = "nanobot_noop"
+_REGION_REF = "providers/bedrock/region"
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
+
+
+class _ExplicitBearerTokenProvider:
+    """botocore token provider returning the configured Bedrock API key (R5).
+
+    Replaces the old ``os.environ["AWS_BEARER_TOKEN_BEDROCK"]`` write: the key is
+    handed to this one boto session only and never reaches the process env.
+    """
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def load_token(self, **kwargs: Any) -> Any:
+        from botocore.tokens import FrozenAuthToken
+
+        return FrozenAuthToken(self._token)
+
+    def __repr__(self) -> str:
+        return "_ExplicitBearerTokenProvider(token=<redacted>)"
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -62,34 +85,44 @@ class BedrockProvider(LLMProvider):
         extra_body: dict[str, Any] | None = None,
         client: Any | None = None,
         provider_name: str = "bedrock",
+        env: CoreEnvironment | None = None,
     ):
         super().__init__(api_key, api_base, provider_name=provider_name)
         self.default_model = default_model
-        self.region = region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        # Region: explicit, else the host env's providers/bedrock/region (legacy:
+        # AWS_REGION / AWS_DEFAULT_REGION via LEGACY_ENV_REFS).
+        self.region = region or resolve_credential(env, _REGION_REF, "provider:bedrock")
         self.profile = profile
         self._extra_body = extra_body or {}
         self._client = client if client is not None else self._make_client()
 
     def _make_client(self) -> Any:
-        if self.api_key:
-            os.environ["AWS_BEARER_TOKEN_BEDROCK"] = self.api_key
         try:
             import boto3
+            import botocore.session
             from botocore.config import Config
         except ImportError as exc:  # pragma: no cover - exercised only without boto3 installed
             raise RuntimeError(
                 "AWS Bedrock provider requires boto3. Run `nanobot plugins enable bedrock`."
             ) from exc
 
-        session_kwargs: dict[str, Any] = {}
-        if self.profile:
-            session_kwargs["profile_name"] = self.profile
+        botocore_session = botocore.session.Session(profile=self.profile or None)
+        config_kwargs: dict[str, Any] = {}
+        if self.api_key:
+            # R5: an API key is a bearer token handed to this session explicitly,
+            # instead of being written to os.environ for botocore to discover.
+            botocore_session.register_component(
+                "token_provider", _ExplicitBearerTokenProvider(self.api_key)
+            )
+            config_kwargs["signature_version"] = "bearer"
         boto3_module = cast(Any, boto3)
-        session = boto3_module.Session(**session_kwargs)
+        session = boto3_module.Session(botocore_session=botocore_session)
 
         idle_timeout_s = resolve_stream_idle_timeout_s()
         client_kwargs: dict[str, Any] = {
-            "config": Config(connect_timeout=idle_timeout_s, read_timeout=idle_timeout_s),
+            "config": Config(
+                connect_timeout=idle_timeout_s, read_timeout=idle_timeout_s, **config_kwargs
+            ),
         }
         if self.region:
             client_kwargs["region_name"] = self.region

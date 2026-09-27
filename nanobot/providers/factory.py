@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from nanobot.config.schema import Config, InlineFallbackConfig, ModelPresetConfig, ProviderConfig
 from nanobot.providers.base import GenerationSettings, LLMProvider
 from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.providers.registry import ProviderSpec, create_dynamic_spec, find_by_name
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,23 @@ class _ProviderSetup:
     provider_config: ProviderConfig | None
     spec: ProviderSpec | None
     backend: str
+
+
+def _provider_api_key(
+    provider_name: str,
+    provider_config: ProviderConfig | None,
+    env: CoreEnvironment | None,
+) -> str | None:
+    """Configured key, else ``providers/<slot>/api_key`` from the host resolver (I1).
+
+    ``env=None`` keeps the pre-kernel behaviour: the configured key only.
+    """
+    key = provider_config.api_key if provider_config else None
+    if key or env is None:
+        return key
+    return env.credentials.resolve(
+        f"providers/{provider_name}/api_key", scope=f"provider:{provider_name}"
+    ) or None
 
 
 def _resolve_model_preset(
@@ -78,6 +99,7 @@ def _resolve_provider_setup(
     *,
     preset: ModelPresetConfig,
     model: str | None = None,
+    env: CoreEnvironment | None = None,
 ) -> _ProviderSetup:
     """Resolve and validate provider configuration without constructing a client."""
     model = model or preset.model
@@ -117,7 +139,7 @@ def _resolve_provider_setup(
     elif backend in {"anthropic", "openai_compat"} and not (
         backend == "openai_compat" and model.startswith("bedrock/")
     ):
-        needs_key = not (p and p.api_key)
+        needs_key = not _provider_api_key(provider_name, p, env)
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
             raise ValueError(f"No API key configured for provider '{provider_name}'.")
@@ -137,6 +159,7 @@ def validate_provider_setup(
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
     model: str | None = None,
+    env: CoreEnvironment | None = None,
 ) -> None:
     """Validate local provider/model settings without loading a provider client."""
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
@@ -144,6 +167,7 @@ def validate_provider_setup(
         config,
         preset=resolved,
         model=model,
+        env=env,
     )
 
 
@@ -153,18 +177,21 @@ def _make_provider_core(
     preset: ModelPresetConfig,
     model: str | None = None,
     data_dir: Path | None = None,
+    env: CoreEnvironment | None = None,
 ) -> LLMProvider:
     """Create a plain LLM provider without failover wrapping."""
     setup = _resolve_provider_setup(
         config,
         preset=preset,
         model=model,
+        env=env,
     )
     model = setup.model
     provider_name = setup.provider_name
     p = setup.provider_config
     spec = setup.spec
     backend = setup.backend
+    api_key = _provider_api_key(provider_name, p, env)
 
     if backend == "openai_codex":
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
@@ -191,7 +218,7 @@ def _make_provider_core(
         if p is None or p.api_base is None:
             raise RuntimeError("validated Azure provider setup is missing api_base")
         provider = AzureOpenAIProvider(
-            api_key=p.api_key or "",
+            api_key=api_key or "",
             api_base=p.api_base,
             default_model=model,
             provider_name=provider_name,
@@ -199,12 +226,14 @@ def _make_provider_core(
     elif backend == "github_copilot":
         from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
 
-        provider = GitHubCopilotProvider(default_model=model, provider_name=provider_name)
+        provider = GitHubCopilotProvider(
+            default_model=model, provider_name=provider_name, env=env,
+        )
     elif backend == "anthropic":
         from nanobot.providers.anthropic_provider import AnthropicProvider
 
         provider = AnthropicProvider(
-            api_key=p.api_key if p else None,
+            api_key=api_key,
             api_base=config.get_api_base(model, preset=preset),
             default_model=model,
             extra_headers=_provider_extra_headers(spec, p),
@@ -214,19 +243,20 @@ def _make_provider_core(
         from nanobot.providers.bedrock_provider import BedrockProvider
 
         provider = BedrockProvider(
-            api_key=p.api_key if p else None,
+            api_key=api_key,
             api_base=p.api_base if p else None,
             default_model=model,
             region=getattr(p, "region", None) if p else None,
             profile=getattr(p, "profile", None) if p else None,
             extra_body=p.extra_body if p else None,
             provider_name=provider_name,
+            env=env,
         )
     else:
         from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 
         provider = OpenAICompatProvider(
-            api_key=p.api_key if p else None,
+            api_key=api_key,
             api_base=config.get_api_base(model, preset=preset),
             default_model=model,
             extra_headers=_provider_extra_headers(spec, p),
@@ -236,6 +266,7 @@ def _make_provider_core(
             extra_query=p.extra_query if p else None,
             proxy=p.proxy if p else None,
             provider_name=provider_name,
+            env=env,
         )
 
     provider.generation = preset.to_generation_settings()
@@ -279,23 +310,33 @@ def make_provider(
     preset: ModelPresetConfig | None = None,
     model: str | None = None,
     data_dir: Path | None = None,
+    env: CoreEnvironment | None = None,
 ) -> LLMProvider:
     """Create the LLM provider implied by config.
 
     When *model* is given, it overrides the resolved/preset model — used by
     the failover path to create providers for fallback models. *data_dir* is the
-    host's instance data dir (``env.paths.data_dir``) for OAuth token stores;
-    ``None`` keeps the legacy ``get_data_dir()``.
+    host's instance data dir for OAuth token stores; it defaults to
+    ``env.paths.data_dir`` when *env* is given, and ``None`` without either keeps
+    the legacy ``get_data_dir()``. *env* supplies credentials a config slot lacks
+    (``providers/<slot>/api_key`` under scope ``provider:<slot>``); ``None`` keeps
+    today's config-only keys.
     """
+    if data_dir is None and env is not None:
+        data_dir = env.paths.data_dir
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
-    provider = _make_provider_core(config, preset=resolved, model=model, data_dir=data_dir)
+    provider = _make_provider_core(
+        config, preset=resolved, model=model, data_dir=data_dir, env=env,
+    )
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
     if fallback_presets:
         provider = FallbackProvider(
             primary=provider,
             fallback_presets=fallback_presets,
-            provider_factory=lambda fb: _make_provider_core(config, preset=fb, data_dir=data_dir),
+            provider_factory=lambda fb: _make_provider_core(
+                config, preset=fb, data_dir=data_dir, env=env,
+            ),
             primary_context_window_tokens=resolved.context_window_tokens,
         )
 
@@ -380,7 +421,9 @@ def build_provider_snapshot(
     *,
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
+    env: CoreEnvironment | None = None,
 ) -> ProviderSnapshot:
+    """Build a provider snapshot; *env* threads credentials and ``data_dir`` (see make_provider)."""
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     selected_preset = (
         config.agents.defaults.model_preset
@@ -392,7 +435,7 @@ def build_provider_snapshot(
         for fallback in _resolve_fallback_presets(config, resolved)
     ]
     return ProviderSnapshot(
-        provider=make_provider(config, preset=resolved),
+        provider=make_provider(config, preset=resolved, env=env),
         model=resolved.model,
         context_window_tokens=min([resolved.context_window_tokens, *fallback_windows]),
         signature=provider_signature(config, preset=resolved),
@@ -405,6 +448,7 @@ def load_provider_snapshot(
     config_path: Path | None = None,
     *,
     preset_name: str | None = None,
+    env: CoreEnvironment | None = None,
 ) -> ProviderSnapshot:
     from nanobot.config.loader import load_config, resolve_config_env_vars
 
@@ -414,4 +458,5 @@ def load_provider_snapshot(
             config_path=config_path,
         ),
         preset_name=preset_name,
+        env=env,
     )

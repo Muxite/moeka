@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from nanobot.providers.transcription import StepFunTranscriptionProvider
+from tests._kernel_env import credential_env
 
 
 @pytest.fixture
@@ -59,8 +60,9 @@ def test_stepfun_custom_model() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_api_key_short_circuits(audio_file: Path) -> None:
-    with patch.dict("os.environ", {}, clear=True):
-        provider = StepFunTranscriptionProvider(api_key=None)
+    # A host env without the key ignores the process variable (I1).
+    with patch.dict("os.environ", {"STEPFUN_API_KEY": "ambient-must-be-ignored"}):
+        provider = StepFunTranscriptionProvider(api_key=None, env=credential_env())
         stream_mock = MagicMock()
         with patch("httpx.AsyncClient.stream", stream_mock):
             assert await provider.transcribe(audio_file) == ""

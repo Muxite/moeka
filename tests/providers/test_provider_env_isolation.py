@@ -46,3 +46,67 @@ def test_provider_init_preserves_preexisting_env_keys(monkeypatch) -> None:
 
     assert os.environ["OPENAI_API_KEY"] == "preexisting-user-key"
     assert provider._api_key_for_client == "sk-from-config"
+
+
+# --- Provider keys through the host resolver (Task 4, I1) --------------------
+
+
+def _openrouter_config(tmp_path, **provider):
+    from nanobot.config.schema import Config
+
+    data = {
+        "agents": {"defaults": {
+            "workspace": str(tmp_path), "model": "openrouter/auto", "provider": "openrouter",
+        }},
+    }
+    if provider:
+        data["providers"] = {"openrouter": provider}
+    return Config.model_validate(data)
+
+
+def test_factory_takes_api_key_from_resolver_under_provider_scope(tmp_path) -> None:
+    from nanobot.providers.factory import make_provider
+    from tests._kernel_env import credential_env
+
+    env = credential_env(
+        {"providers/openrouter/api_key": "sk-or-RESOLVED"},
+        scopes={"providers/openrouter/api_key": ["provider:openrouter"]},
+    )
+    provider = make_provider(_openrouter_config(tmp_path), env=env)
+    assert provider._api_key_for_client == "sk-or-RESOLVED"
+
+
+def test_factory_config_key_wins_over_resolver(tmp_path) -> None:
+    from nanobot.providers.factory import make_provider
+    from tests._kernel_env import credential_env
+
+    env = credential_env({"providers/openrouter/api_key": "sk-or-RESOLVED"})
+    provider = make_provider(_openrouter_config(tmp_path, apiKey="sk-or-CONFIG"), env=env)
+    assert provider._api_key_for_client == "sk-or-CONFIG"
+
+
+def test_factory_other_scope_ref_is_not_used(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    from nanobot.providers.factory import make_provider
+    from tests._kernel_env import credential_env
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "ambient-must-be-ignored")
+    env = credential_env(
+        {"providers/openrouter/api_key": "sk-or-RESOLVED"},
+        scopes={"providers/openrouter/api_key": ["provider:openai"]},
+    )
+    with pytest.raises(ValueError, match="No API key configured"):
+        make_provider(_openrouter_config(tmp_path), env=env)
+
+
+def test_missing_key_error_names_no_value(tmp_path) -> None:
+    import pytest
+
+    from nanobot.providers.factory import make_provider
+    from tests._kernel_env import credential_env
+
+    with pytest.raises(ValueError) as exc:
+        make_provider(_openrouter_config(tmp_path), env=credential_env())
+    assert "openrouter" in str(exc.value)
+    assert "sk-" not in str(exc.value)

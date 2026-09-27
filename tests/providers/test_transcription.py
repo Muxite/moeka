@@ -19,6 +19,7 @@ from nanobot.providers.transcription import (
     _resolve_chat_completions_url,
     _resolve_transcription_url,
 )
+from tests._kernel_env import credential_env
 
 
 @pytest.fixture
@@ -152,8 +153,9 @@ async def test_groq_does_not_retry_on_auth_error(audio_file: Path) -> None:
 @pytest.mark.asyncio
 async def test_openai_missing_api_key_short_circuits(audio_file: Path) -> None:
     """Missing API key short-circuits before any HTTP call, even when the file exists."""
-    with patch.dict("os.environ", {}, clear=True):
-        provider = OpenAITranscriptionProvider(api_key=None)
+    # A host env without the key ignores the process variable (I1).
+    with patch.dict("os.environ", {"OPENAI_API_KEY": "ambient-must-be-ignored"}):
+        provider = OpenAITranscriptionProvider(api_key=None, env=credential_env())
         post = AsyncMock()
         with patch("httpx.AsyncClient.post", post):
             assert await provider.transcribe(audio_file) == ""
@@ -562,8 +564,9 @@ async def test_assemblyai_returns_empty_on_failed_transcript(audio_file: Path) -
 
 @pytest.mark.asyncio
 async def test_assemblyai_missing_api_key_short_circuits(audio_file: Path) -> None:
-    with patch.dict("os.environ", {}, clear=True):
-        provider = AssemblyAITranscriptionProvider(api_key=None)
+    # A host env without the key ignores the process variable (I1).
+    with patch.dict("os.environ", {"ASSEMBLYAI_API_KEY": "ambient-must-be-ignored"}):
+        provider = AssemblyAITranscriptionProvider(api_key=None, env=credential_env())
         post = AsyncMock()
         with patch("httpx.AsyncClient.post", post):
             assert await provider.transcribe(audio_file) == ""

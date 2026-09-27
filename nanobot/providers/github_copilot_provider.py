@@ -6,17 +6,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import time
 import webbrowser
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from oauth_cli_kit.models import OAuthToken
 from oauth_cli_kit.storage import FileTokenStorage
 
+from nanobot.kernel.env import resolve_credential
 from nanobot.providers.base import LLMResponse, ProviderCallContext
 from nanobot.providers.oauth_model_catalog import (
     OAuthModelCatalog,
@@ -41,9 +41,28 @@ _EXPIRY_SKEW_SECONDS = 60
 _LONG_LIVED_TOKEN_SECONDS = 315360000
 
 
-def _resolve(env_var: str, default: str) -> str:
-    """Allow GitHub Enterprise / Copilot for Business deployments to override defaults via env."""
-    value = os.environ.get(env_var)
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
+
+# Legacy override variable -> host-env ref (GitHub Enterprise / Copilot for Business).
+# The variables themselves are read only by LegacyEnvironment / the env=None
+# fallback (nanobot.kernel.legacy.LEGACY_ENV_REFS), never here.
+_ENDPOINT_REFS = {
+    "NANOBOT_COPILOT_BASE_URL": "providers/github_copilot/api_base",
+    "NANOBOT_COPILOT_TOKEN_URL": "providers/github_copilot/token_url",
+    "NANOBOT_GITHUB_COPILOT_CLIENT_ID": "providers/github_copilot/client_id",
+    "NANOBOT_GITHUB_DEVICE_CODE_URL": "providers/github_copilot/device_code_url",
+    "NANOBOT_GITHUB_ACCESS_TOKEN_URL": "providers/github_copilot/access_token_url",
+    "NANOBOT_GITHUB_USER_URL": "providers/github_copilot/user_url",
+}
+
+
+def _resolve(env_var: str, default: str, env: CoreEnvironment | None = None) -> str:
+    """Endpoint override for ``env_var`` from the host env, else ``default``.
+
+    ``env=None`` keeps the legacy behaviour (the variable in the process env).
+    """
+    value = resolve_credential(env, _ENDPOINT_REFS[env_var], "provider:github_copilot")
     return value.strip() if value and value.strip() else default
 
 
@@ -187,13 +206,20 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         default_model: str = "github-copilot/gpt-4.1",
         *,
         provider_name: str = "github_copilot",
+        api_base: str | None = None,
+        token_url: str | None = None,
+        env: CoreEnvironment | None = None,
     ):
         self._copilot_access_token: str | None = None
         self._copilot_expires_at: float = 0.0
         self._copilot_token_lock: asyncio.Lock = asyncio.Lock()
+        # Endpoints: explicit args, else host-env overrides, else the public defaults.
+        self._token_url = token_url or _resolve(
+            "NANOBOT_COPILOT_TOKEN_URL", DEFAULT_COPILOT_TOKEN_URL, env
+        )
         super().__init__(
             api_key="no-key",
-            api_base=_resolve("NANOBOT_COPILOT_BASE_URL", DEFAULT_COPILOT_BASE_URL),
+            api_base=api_base or _resolve("NANOBOT_COPILOT_BASE_URL", DEFAULT_COPILOT_BASE_URL, env),
             default_model=default_model,
             extra_headers={
                 "Editor-Version": EDITOR_VERSION,
@@ -227,7 +253,7 @@ class GitHubCopilotProvider(OpenAICompatProvider):
                 timeout=timeout, follow_redirects=True, trust_env=True
             ) as client:
                 response = await client.get(
-                    _resolve("NANOBOT_COPILOT_TOKEN_URL", DEFAULT_COPILOT_TOKEN_URL),
+                    self._token_url,
                     headers=_copilot_headers(github_token.access),
                 )
                 response.raise_for_status()

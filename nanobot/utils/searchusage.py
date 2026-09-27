@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+from nanobot.kernel.env import missing_credential, resolve_credential
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
+
+_TAVILY_REF = "searchusage/tavily"
 
 
 @dataclass
@@ -66,13 +72,17 @@ class SearchUsageInfo:
 async def fetch_search_usage(
     provider: str,
     api_key: str | None = None,
+    *,
+    env: CoreEnvironment | None = None,
 ) -> SearchUsageInfo:
     """
     Fetch usage info for the configured web search provider.
 
     Args:
         provider: Provider name (e.g. "tavily", "brave", "duckduckgo").
-        api_key:  API key for the provider (falls back to env vars).
+        api_key:  API key for the provider (falls back to the host env's
+                  ``searchusage/<provider>`` credential; legacy env vars without one).
+        env:      Host environment whose resolver supplies a missing key.
 
     Returns:
         SearchUsageInfo with populated fields where available.
@@ -80,7 +90,7 @@ async def fetch_search_usage(
     p = (provider or "duckduckgo").strip().lower()
 
     if p == "tavily":
-        return await _fetch_tavily_usage(api_key)
+        return await _fetch_tavily_usage(api_key, env)
     else:
         # brave, duckduckgo, searxng, jina, unknown — no usage API
         return SearchUsageInfo(provider=p, supported=False)
@@ -90,17 +100,22 @@ async def fetch_search_usage(
 # Tavily
 # ---------------------------------------------------------------------------
 
-async def _fetch_tavily_usage(api_key: str | None) -> SearchUsageInfo:
+async def _fetch_tavily_usage(
+    api_key: str | None, env: CoreEnvironment | None = None
+) -> SearchUsageInfo:
     """Fetch usage from GET https://api.tavily.com/usage."""
-    import httpx
-
-    key = api_key or os.environ.get("TAVILY_API_KEY", "")
+    key = api_key or resolve_credential(env, _TAVILY_REF, "searchusage")
     if not key:
         return SearchUsageInfo(
             provider="tavily",
             supported=True,
-            error="TAVILY_API_KEY not configured",
+            error=f"Tavily API key not configured ({missing_credential(_TAVILY_REF)})",
         )
+    return await _query_tavily_usage(key)
+
+
+async def _query_tavily_usage(key: str) -> SearchUsageInfo:
+    import httpx
 
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:

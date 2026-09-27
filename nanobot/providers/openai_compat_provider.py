@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from loguru import logger
 from pydantic.alias_generators import to_snake
 
+from nanobot.kernel.env import resolve_credential
 from nanobot.providers.base import (
     LLMProvider,
     LLMResponse,
@@ -51,6 +52,7 @@ from nanobot.providers.openai_responses import (
 if TYPE_CHECKING:
     from openai import AsyncOpenAI as AsyncOpenAIType
 
+    from nanobot.kernel.env import CoreEnvironment
     from nanobot.providers.registry import ProviderSpec
 
 # Module-level placeholder — set lazily by _ensure_client on first real
@@ -528,8 +530,11 @@ class OpenAICompatProvider(LLMProvider):
         extra_query: dict[str, str] | None = None,
         proxy: str | None = None,
         provider_name: str = "openai",
+        env: CoreEnvironment | None = None,
     ):
         super().__init__(api_key, api_base, provider_name=provider_name)
+        # Host env: observability/langfuse_secret gates the langfuse wrapper (I1).
+        self._env = env
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
         self._spec = spec
@@ -621,10 +626,13 @@ class OpenAICompatProvider(LLMProvider):
                 return self._client
             global AsyncOpenAI
             if AsyncOpenAI is None:
-                if os.environ.get("LANGFUSE_SECRET_KEY") and importlib.util.find_spec("langfuse"):
+                langfuse_enabled = bool(
+                    resolve_credential(self._env, "observability/langfuse_secret", "observability")
+                )
+                if langfuse_enabled and importlib.util.find_spec("langfuse"):
                     from langfuse.openai import AsyncOpenAI as _AsyncOpenAI
                 else:
-                    if os.environ.get("LANGFUSE_SECRET_KEY"):
+                    if langfuse_enabled:
                         logger.warning(
                             "LANGFUSE_SECRET_KEY is set but langfuse is not installed; "
                             "run `nanobot plugins enable langfuse` to enable tracing"

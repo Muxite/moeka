@@ -79,3 +79,38 @@ async def test_missing_langfuse_warning_recommends_plugin_command(monkeypatch) -
         "run `nanobot plugins enable langfuse` to enable tracing"
     )
     mock_async_openai.assert_called_once()
+
+
+async def test_langfuse_secret_comes_from_resolver(monkeypatch) -> None:
+    from tests._kernel_env import credential_env
+
+    monkeypatch.setattr(openai_compat_provider, "AsyncOpenAI", None)
+    env = credential_env({"observability/langfuse_secret": "lf-secret"})
+    with (
+        patch("importlib.util.find_spec", return_value=None),
+        patch("openai.AsyncOpenAI"),
+        patch("nanobot.providers.openai_compat_provider.logger.warning") as mock_warning,
+    ):
+        provider = OpenAICompatProvider(
+            api_key="test-key", api_base="https://example.com/v1", env=env
+        )
+        await provider._ensure_client()
+    mock_warning.assert_called_once()
+    assert "lf-secret" not in str(mock_warning.call_args)
+
+
+async def test_langfuse_ambient_secret_ignored_under_host_env(monkeypatch) -> None:
+    from tests._kernel_env import credential_env
+
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "ambient-must-be-ignored")
+    monkeypatch.setattr(openai_compat_provider, "AsyncOpenAI", None)
+    with (
+        patch("importlib.util.find_spec", return_value=None),
+        patch("openai.AsyncOpenAI"),
+        patch("nanobot.providers.openai_compat_provider.logger.warning") as mock_warning,
+    ):
+        provider = OpenAICompatProvider(
+            api_key="test-key", api_base="https://example.com/v1", env=credential_env()
+        )
+        await provider._ensure_client()
+    mock_warning.assert_not_called()

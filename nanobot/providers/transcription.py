@@ -9,13 +9,24 @@ import asyncio
 import base64
 import json
 import mimetypes
-import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from loguru import logger
+
+from nanobot.kernel.env import resolve_credential
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
+
+# Credential scope for transcription refs ``transcription/<provider>[/base_url]`` (I1).
+_SCOPE = "transcription"
+
+
+def _cred(env: "CoreEnvironment | None", ref: str) -> str | None:
+    return resolve_credential(env, ref, _SCOPE)
 
 _CHAT_COMPLETIONS_PATH = "chat/completions"
 _TRANSCRIPTIONS_PATH = "audio/transcriptions"
@@ -533,9 +544,10 @@ class AssemblyAITranscriptionProvider:
         api_base: str | None = None,
         language: str | None = None,
         model: str | None = None,
+        env: "CoreEnvironment | None" = None,
     ):
-        base = api_base or os.environ.get("ASSEMBLYAI_BASE_URL")
-        self.api_key = api_key or os.environ.get("ASSEMBLYAI_API_KEY")
+        base = api_base or _cred(env, "transcription/assemblyai/base_url")
+        self.api_key = api_key or _cred(env, "transcription/assemblyai")
         self.upload_url = _resolve_api_path(base, _ASSEMBLYAI_DEFAULT_API_BASE, "upload")
         self.transcript_url = _resolve_api_path(base, _ASSEMBLYAI_DEFAULT_API_BASE, "transcript")
         self.language = language or None
@@ -630,10 +642,11 @@ class OpenAITranscriptionProvider:
         api_base: str | None = None,
         language: str | None = None,
         model: str | None = None,
+        env: "CoreEnvironment | None" = None,
     ):
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.api_key = api_key or _cred(env, "transcription/openai")
         self.api_url = _resolve_transcription_url(
-            api_base or os.environ.get("OPENAI_TRANSCRIPTION_BASE_URL"),
+            api_base or _cred(env, "transcription/openai/base_url"),
             "https://api.openai.com/v1/audio/transcriptions",
         )
         self.language = language or None
@@ -671,10 +684,11 @@ class GroqTranscriptionProvider:
         api_base: str | None = None,
         language: str | None = None,
         model: str | None = None,
+        env: "CoreEnvironment | None" = None,
     ):
-        self.api_key = api_key or os.environ.get("GROQ_API_KEY")
+        self.api_key = api_key or _cred(env, "transcription/groq")
         self.api_url = _resolve_transcription_url(
-            api_base or os.environ.get("GROQ_BASE_URL"),
+            api_base or _cred(env, "transcription/groq/base_url"),
             "https://api.groq.com/openai/v1/audio/transcriptions",
         )
         self.language = language or None
@@ -719,10 +733,11 @@ class OpenRouterTranscriptionProvider:
         api_base: str | None = None,
         language: str | None = None,
         model: str | None = None,
+        env: "CoreEnvironment | None" = None,
     ):
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        self.api_key = api_key or _cred(env, "transcription/openrouter")
         self.api_url = _resolve_transcription_url(
-            api_base or os.environ.get("OPENROUTER_BASE_URL"),
+            api_base or _cred(env, "transcription/openrouter/base_url"),
             "https://openrouter.ai/api/v1/audio/transcriptions",
         )
         self.language = language or None
@@ -758,10 +773,11 @@ class XiaomiMiMoTranscriptionProvider:
         api_base: str | None = None,
         language: str | None = None,
         model: str | None = None,
+        env: "CoreEnvironment | None" = None,
     ):
-        self.api_key = api_key or os.environ.get("MIMO_API_KEY")
+        self.api_key = api_key or _cred(env, "transcription/mimo")
         self.api_url = _resolve_chat_completions_url(
-            api_base or os.environ.get("MIMO_API_BASE"),
+            api_base or _cred(env, "transcription/mimo/base_url"),
             "https://api.xiaomimimo.com/v1/chat/completions",
         )
         self.language = language or None
@@ -799,8 +815,9 @@ class StepFunTranscriptionProvider:
         api_base: str | None = None,
         language: str | None = None,
         model: str | None = None,
+        env: "CoreEnvironment | None" = None,
     ):
-        self.api_key = api_key or os.environ.get("STEPFUN_API_KEY")
+        self.api_key = api_key or _cred(env, "transcription/stepfun")
         # api_base accepts either a StepFun base URL or the full SSE endpoint.
         self.api_url = _resolve_stepfun_asr_url(api_base)
         self.language = language or None

@@ -141,3 +141,40 @@ async def test_copilot_token_exchange_uses_enterprise_endpoint_override(monkeypa
 
     assert await provider._get_copilot_access_token() == "copilot-token"
     assert calls[0][0] == "https://api.ghe.example/copilot_internal/v2/token"
+
+
+# --- Endpoint overrides through the host env (Task 4) -------------------------
+
+
+def test_provider_api_base_from_resolver_and_ambient_ignored(monkeypatch):
+    from tests._kernel_env import credential_env
+
+    monkeypatch.setenv("NANOBOT_COPILOT_BASE_URL", "https://ambient-must-be-ignored.example")
+    assert gc.GitHubCopilotProvider(env=credential_env()).api_base == gc.DEFAULT_COPILOT_BASE_URL
+    env = credential_env({"providers/github_copilot/api_base": "https://copilot-api.acme.ghe.com"})
+    assert gc.GitHubCopilotProvider(env=env).api_base == "https://copilot-api.acme.ghe.com"
+
+
+def test_provider_explicit_endpoints_win(monkeypatch):
+    from tests._kernel_env import credential_env
+
+    env = credential_env({"providers/github_copilot/api_base": "https://resolver.example"})
+    provider = gc.GitHubCopilotProvider(
+        env=env, api_base="https://explicit.example", token_url="https://explicit.example/token"
+    )
+    assert provider.api_base == "https://explicit.example"
+    assert provider._token_url == "https://explicit.example/token"
+
+
+def test_factory_threads_env_to_copilot(tmp_path, monkeypatch):
+    from nanobot.config.schema import Config
+    from nanobot.kernel.legacy import LegacyEnvironment
+    from nanobot.providers.factory import make_provider
+
+    monkeypatch.setenv("NANOBOT_COPILOT_BASE_URL", "https://legacy-env.example")
+    config = Config.model_validate({"agents": {"defaults": {
+        "workspace": str(tmp_path), "model": "github-copilot/gpt-4.1",
+        "provider": "github_copilot",
+    }}})
+    provider = make_provider(config, env=LegacyEnvironment.from_config(config))
+    assert provider.api_base == "https://legacy-env.example"

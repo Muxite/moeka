@@ -62,3 +62,55 @@ def test_construction_leaves_environment_byte_identical() -> None:
         OpenAICompatProvider(api_key="sk-test-key", spec=_spec(name))
 
     assert dict(os.environ) == before
+
+
+def test_factory_with_host_env_leaves_environment_byte_identical(tmp_path) -> None:
+    from nanobot.config.schema import Config
+    from nanobot.providers.factory import make_provider
+    from tests._kernel_env import credential_env
+
+    config = Config.model_validate({"agents": {"defaults": {
+        "workspace": str(tmp_path), "model": "openrouter/auto", "provider": "openrouter",
+    }}})
+    before = dict(os.environ)
+    make_provider(config, env=credential_env({"providers/openrouter/api_key": "sk-or-RESOLVED"}))
+    assert dict(os.environ) == before
+
+
+def test_bedrock_bearer_token_is_passed_explicitly_not_via_environment(monkeypatch) -> None:
+    """R5: the Bedrock API key reaches boto as an explicit bearer token, never os.environ."""
+    import io
+
+    import pytest
+
+    pytest.importorskip("boto3")
+    from botocore.awsrequest import AWSResponse
+
+    from nanobot.providers.bedrock_provider import BedrockProvider
+
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    before = dict(os.environ)
+    provider = BedrockProvider(api_key="bedrock-TOKEN-explicit", region="us-east-1")
+    assert dict(os.environ) == before
+
+    seen: dict[str, object] = {}
+    body = (
+        b'{"output":{"message":{"role":"assistant","content":[{"text":"hi"}]}},'
+        b'"stopReason":"end_turn","usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2},'
+        b'"metrics":{"latencyMs":1}}'
+    )
+
+    class _Raw:
+        def stream(self, **kwargs):
+            yield io.BytesIO(body).read()
+
+    def before_send(request, **kwargs):
+        seen["auth"] = request.headers.get("Authorization")
+        response = AWSResponse(request.url, 200, {"content-type": "application/json"}, _Raw())
+        response._content = body
+        return response
+
+    provider._client.meta.events.register("before-send", before_send)
+    provider._client.converse(modelId="m", messages=[{"role": "user", "content": [{"text": "x"}]}])
+    assert seen["auth"] in (b"Bearer bedrock-TOKEN-explicit", "Bearer bedrock-TOKEN-explicit")
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in os.environ

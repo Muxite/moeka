@@ -13,6 +13,7 @@ from nanobot.utils.searchusage import (
     _parse_tavily_usage,
     fetch_search_usage,
 )
+from tests._kernel_env import credential_env
 
 # ---------------------------------------------------------------------------
 # SearchUsageInfo.format() tests
@@ -180,15 +181,51 @@ class TestFetchSearchUsageRouting:
 
     @pytest.mark.asyncio
     async def test_tavily_no_api_key_returns_error(self):
-        with patch.dict("os.environ", {}, clear=True):
-            # Ensure TAVILY_API_KEY is not set
-            import os
-            os.environ.pop("TAVILY_API_KEY", None)
-            info = await fetch_search_usage("tavily", api_key=None)
+        # A host env without the key ignores the process variable (I1).
+        with patch.dict("os.environ", {"TAVILY_API_KEY": "ambient-must-be-ignored"}):
+            info = await fetch_search_usage("tavily", api_key=None, env=credential_env())
         assert info.provider == "tavily"
         assert info.supported is True
         assert info.error is not None
         assert "not configured" in info.error
+        assert "searchusage/tavily" in info.error
+        assert "ambient" not in info.error
+
+    @pytest.mark.asyncio
+    async def test_tavily_key_comes_from_resolver(self):
+        env = credential_env(
+            {"searchusage/tavily": "tvly-resolved"},
+            scopes={"searchusage/tavily": ["searchusage"]},
+        )
+        seen = {}
+
+        async def fake_fetch(key):
+            seen["key"] = key
+            return SearchUsageInfo(provider="tavily", supported=True)
+
+        with patch("nanobot.utils.searchusage._query_tavily_usage", fake_fetch):
+            await fetch_search_usage("tavily", env=env)
+        assert seen["key"] == "tvly-resolved"
+
+    @pytest.mark.asyncio
+    async def test_tavily_legacy_env_var_still_used(self, tmp_path, monkeypatch):
+        from nanobot.config.schema import Config
+        from nanobot.kernel.legacy import LegacyEnvironment
+
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-legacy-env")
+        config = Config.model_validate({"agents": {"defaults": {"workspace": str(tmp_path)}}})
+        seen = {}
+
+        async def fake_fetch(key):
+            seen["key"] = key
+            return SearchUsageInfo(provider="tavily", supported=True)
+
+        with patch("nanobot.utils.searchusage._query_tavily_usage", fake_fetch):
+            await fetch_search_usage("tavily", env=LegacyEnvironment.from_config(config))
+            assert seen["key"] == "tvly-legacy-env"
+            seen.clear()
+            await fetch_search_usage("tavily")  # no env: legacy fallback
+            assert seen["key"] == "tvly-legacy-env"
 
     @pytest.mark.asyncio
     async def test_tavily_success(self):
