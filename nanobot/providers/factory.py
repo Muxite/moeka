@@ -14,6 +14,7 @@ from nanobot.providers.registry import ProviderSpec, create_dynamic_spec, find_b
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.ledger import ModelPricing
 
 
 @dataclass(frozen=True)
@@ -404,7 +405,61 @@ def make_provider(
             primary_context_window_tokens=resolved.context_window_tokens,
         )
 
+    if env is not None:
+        _attach_ledger(provider, config, resolved, fallback_presets, env)
     return provider
+
+
+def _ledger_pricing(
+    config: Config,
+    resolved: ModelPresetConfig,
+    fallback_presets: list[ModelPresetConfig],
+) -> dict[str, ModelPricing]:
+    """Model name -> ``ModelPricing`` for every preset that sets a tier or a price.
+
+    The active preset wins over its fallbacks, which win over other named presets.
+    """
+    from nanobot.kernel.ledger import ModelPricing
+
+    pricing: dict[str, ModelPricing] = {}
+    for preset in (resolved, *fallback_presets, *config.model_presets.values()):
+        values = (
+            preset.tier,
+            preset.price_in_per_mtok,
+            preset.price_out_per_mtok,
+            preset.price_cache_read_per_mtok,
+        )
+        if all(value is None for value in values) or preset.model in pricing:
+            continue
+        pricing[preset.model] = ModelPricing(*values)
+    return pricing
+
+
+def _attach_ledger(
+    provider: LLMProvider,
+    config: Config,
+    resolved: ModelPresetConfig,
+    fallback_presets: list[ModelPresetConfig],
+    env: CoreEnvironment,
+) -> None:
+    """The single ledger wiring point: every call through *provider* is measured.
+
+    Emits ``model.call`` to ``env.trace`` and records to the ``LLMUsageStore`` under
+    ``env.paths.data_dir``. Fail-open: wiring problems are logged, never raised.
+    """
+    try:
+        from nanobot.kernel.ledger import LedgerObserver
+        from nanobot.llm_usage import get_llm_usage_store
+
+        provider.set_llm_call_observer(LedgerObserver(
+            sink=env.trace,
+            store=get_llm_usage_store(data_dir=env.paths.data_dir),
+            pricing=_ledger_pricing(config, resolved, fallback_presets),
+        ))
+    except Exception:
+        from loguru import logger
+
+        logger.exception("failed to attach the cost ledger to {}", provider.provider_name)
 
 
 def build_unconfigured_provider_snapshot(config: Config, setup_error: str) -> ProviderSnapshot:

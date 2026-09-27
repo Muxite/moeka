@@ -106,6 +106,13 @@ class ModelPresetConfig(Base):
     context_window_tokens: int = 200_000
     temperature: float = 0.1
     reasoning_effort: str | None = None
+    # Cost ledger (kernel ledger, I6). All optional; absent = unknown, never free.
+    # ``tier="local"`` with no prices is the one convention for cost 0 (self-hosted).
+    # Prices are USD per million tokens; cache writes bill at the input price.
+    tier: Literal["local", "fast", "standard", "frontier"] | None = None
+    price_in_per_mtok: float | None = Field(default=None, ge=0)
+    price_out_per_mtok: float | None = Field(default=None, ge=0)
+    price_cache_read_per_mtok: float | None = Field(default=None, ge=0)
 
     def to_generation_settings(self) -> Any:
         from nanobot.providers.base import GenerationSettings

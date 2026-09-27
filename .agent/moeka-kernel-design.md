@@ -153,7 +153,8 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
 - A task solvable by a compact lower-tier model must never dispatch a frontier model (budget violation).
 - I6 is a target enforced by measurement and routing, not a theorem. Section 6 lists the four enforcement parts.
 - Proven by: the RSI baseline comparator per task family, and a runtime test that an over-tier dispatch is denied.
-- Status: not built (P3). No cost ledger exists.
+- Status: partly built (P3). Task 14 ledger measures every call (`nanobot/kernel/ledger.py`: `model.call`
+  events to the `TraceSink`, tier and cost in `LLMUsageStore`); the solver registry and router are not built.
 
 ## 4. Enforcement layers
 
