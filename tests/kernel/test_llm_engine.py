@@ -565,3 +565,56 @@ async def test_kernel_aclose_closes_pool_providers(tmp_path, monkeypatch) -> Non
     assert not injected.closed  # host-injected providers stay host-owned
     with pytest.raises(RuntimeError, match="bridge stopped"):
         await kernel.llm.complete("x")
+
+
+async def test_fallback_candidates_keep_their_own_settings(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+    from types import MappingProxyType
+
+    from nanobot.providers.fallback_provider import FallbackProvider
+
+    sink = RecordingSink()
+    config = {
+        "agents": {"defaults": {"model_preset": "main", "fallback_models": ["fb"]}},
+        "providers": {"openai": {"api_key": "sk-test"}},
+        "model_presets": {
+            "main": {"model": "gpt-4.1", "provider": "openai", "max_tokens": 1000,
+                     "temperature": 0.2, "reasoning_effort": "high"},
+            "fb": {"model": "gpt-4.1-mini", "provider": "openai", "max_tokens": 50,
+                   "temperature": 0.9},
+        },
+    }
+    env = Environment.from_config(
+        config, state_dir=tmp_path / "s", work_dir=tmp_path / "w", trace=sink,
+    )
+    # A non-core model default too, so a leak would show up as a sampling.dropped.
+    models = dict(env.models)
+    main = models["main"]
+    models["main"] = replace(main, sampling=replace(main.sampling, top_p=0.5))
+    monkeypatch.setattr(env, "_models", MappingProxyType(models))
+
+    core_only = frozenset({"temperature", "max_tokens", "reasoning_effort"})
+    primary = FakeProvider(default=error(503, "primary down"))
+    primary.supported_sampling_fields = core_only
+    candidate = FakeProvider(default="from fallback")
+    candidate.supported_sampling_fields = core_only
+    async with Kernel(env) as kernel:
+        wrapper = kernel.llm._route("main").provider
+        assert isinstance(wrapper, FallbackProvider)
+        wrapper._primary = primary
+        wrapper._provider_factory = lambda preset: candidate
+        completion = await kernel.llm.generate([user("q")], GenerateOptions(attempts=1))
+
+    assert completion.text == "from fallback"
+    # The primary got the main spec's defaults (top_p quietly dropped)...
+    assert primary.calls[0].kwargs["max_tokens"] == 1000
+    assert primary.calls[0].kwargs["temperature"] == 0.2
+    assert primary.calls[0].kwargs["reasoning_effort"] == "high"
+    # ...the candidate kept its own preset: no primary defaults leaked in.
+    sent = candidate.calls[0]
+    assert sent.kwargs["model"] == "gpt-4.1-mini"
+    assert sent.kwargs["max_tokens"] == 50
+    assert sent.kwargs["temperature"] == 0.9
+    assert sent.kwargs.get("reasoning_effort") is None
+    assert sent.provider_context.request.sampling is None
+    assert not [e for e in sink.events if e.get("event") == "sampling.dropped"]

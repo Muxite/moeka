@@ -278,6 +278,9 @@ class RequestExtras:
       applied under ``sampling``. Fields the provider cannot honour are dropped
       quietly (debug log only): ``on_unsupported`` governs only what the caller
       set explicitly. A default that conflicts with an explicit field is dropped.
+      Resolved only in the ``chat_with_retry`` / ``chat_stream_with_retry`` entry
+      points (a direct ``chat()`` ignores it); ``FallbackProvider`` resolves it on
+      the primary only, never on fallback candidates.
     """
 
     response_format: Mapping[str, Any] | None = None

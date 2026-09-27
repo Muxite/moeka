@@ -207,6 +207,29 @@ class FallbackProvider(LLMProvider):
             context_window_tokens = None
         return replace(provider_context, context_window_tokens=context_window_tokens)
 
+    def _apply_request_extras(self, kw: dict[str, Any]) -> None:
+        """Resolve only the caller's explicit extras here; leave model defaults alone.
+
+        ``default_sampling`` stays on the context for the primary to resolve
+        against its own settings (its ``chat_with_retry`` runs this again), and
+        fallback candidates get it stripped, so the primary spec's defaults never
+        look explicit to — or override — a fallback preset.
+        """
+        context = kw.get("provider_context")
+        request = context.request if isinstance(context, ProviderCallContext) else None
+        defaults = request.default_sampling if request is not None else None
+        if defaults is None:
+            super()._apply_request_extras(kw)
+            return
+        kw["provider_context"] = replace(
+            context, request=replace(request, default_sampling=None),
+        )
+        super()._apply_request_extras(kw)
+        narrowed = kw["provider_context"]
+        kw["provider_context"] = replace(
+            narrowed, request=replace(narrowed.request, default_sampling=defaults),
+        )
+
     def _primary_available(self) -> bool:
         """Return True if the primary provider is not currently tripped."""
         if self._primary_tripped_at is None:
@@ -591,10 +614,16 @@ class FallbackProvider(LLMProvider):
                     if fallback_provider.supports_native_compaction(fallback_model)
                     else None
                 )
+                request = provider_context.request
+                if request is not None and request.default_sampling is not None:
+                    # Model defaults belong to the primary's spec; a fallback
+                    # preset keeps its own generation settings.
+                    request = replace(request, default_sampling=None)
                 fallback_kwargs["provider_context"] = replace(
                     provider_context,
                     conversation_state=state,
                     context_window_tokens=context_window_tokens,
+                    request=request,
                 )
             if fallback.reasoning_effort is None:
                 fallback_kwargs.pop("reasoning_effort", None)
