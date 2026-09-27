@@ -106,6 +106,11 @@ def ambient_credential(ref: str) -> str | None:
     return None
 
 
+def process_env_snapshot() -> dict[str, str]:
+    """A copy of the process environment: the legacy exec base env (R3, env=None path)."""
+    return dict(os.environ)
+
+
 def _collect_credentials(config: Any) -> dict[str, str]:
     values: dict[str, str] = {}
     for ref in LEGACY_ENV_REFS:
@@ -192,7 +197,7 @@ class LegacyEnvironment:
         # kernel-private state dir is the workspace itself (overlap allowed).
         paths = _legacy_paths(config)
         trace = LoguruTraceSink()
-        exec_base_env = dict(os.environ)
+        exec_base_env = process_env_snapshot()
         env = CoreEnvironment(
             config=_ConfigSectionSource(config),
             credentials=_LegacyCredentialResolver(
@@ -227,4 +232,5 @@ __all__ = [
     "LegacyEnvironment",
     "ambient_credential",
     "legacy_scope_for_ref",
+    "process_env_snapshot",
 ]

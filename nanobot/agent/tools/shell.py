@@ -11,10 +11,11 @@ import signal
 import subprocess
 import sys
 from collections import deque
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import unquote
 
 from loguru import logger
@@ -43,6 +44,9 @@ from nanobot.config.paths import get_media_dir
 from nanobot.config_base import Base
 from nanobot.security.workspace_access import current_scope_allows_loopback, current_tool_workspace
 from nanobot.security.workspace_policy import is_path_within
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
 
 _IS_WINDOWS = sys.platform == "win32"
 _PROCESS_TREE_OWNER_ATTR = "_nanobot_process_tree_owner"
@@ -275,6 +279,7 @@ class ExecTool(Tool):
             allow_sudo=cfg.allow_sudo,
             session_manager=ctx.exec_session_manager,
             media_dir=ctx.env.paths.media_dir if ctx.env is not None else None,
+            env=ctx.env,
         )
 
     _SUDO_PATTERN = re.compile(r"(?:^|\s|[;&|`(\n])\s*sudo\b", re.MULTILINE)
@@ -318,8 +323,13 @@ class ExecTool(Tool):
         session_manager: ExecSessionManager | None = None,
         max_capture_bytes: int = 4 * 1024 * 1024,
         media_dir: Path | None = None,
+        env: CoreEnvironment | None = None,
     ):
         self.timeout = timeout
+        # Host env (R3): the child env is built from env.exec_base_env and
+        # allowed_env_keys resolve via env.credentials (scope "exec"). ``None``
+        # keeps the legacy behaviour: a copy of the process environment.
+        self._env = env
         # Host media root (env.paths.media_dir); ``None`` = legacy get_media_dir().
         self.media_dir = media_dir
         # Per-stream byte cap for one-shot output capture (see _BoundedCapture);
@@ -946,40 +956,45 @@ class ExecTool(Tool):
         set of system variables (including PATH) is forwarded.  API keys and
         other secrets are still excluded.
         """
+        if self._env is not None:
+            base: Mapping[str, str] = self._env.exec_base_env
+        else:
+            from nanobot.kernel.legacy import process_env_snapshot
+
+            base = process_env_snapshot()
         if _IS_WINDOWS:
-            sr = os.environ.get("SYSTEMROOT", r"C:\Windows")
+            sr = base.get("SYSTEMROOT", r"C:\Windows")
             env = {
                 "SYSTEMROOT": sr,
-                "COMSPEC": os.environ.get("COMSPEC", f"{sr}\\system32\\cmd.exe"),
-                "USERPROFILE": os.environ.get("USERPROFILE", ""),
-                "HOMEDRIVE": os.environ.get("HOMEDRIVE", "C:"),
-                "HOMEPATH": os.environ.get("HOMEPATH", "\\"),
-                "TEMP": os.environ.get("TEMP", f"{sr}\\Temp"),
-                "TMP": os.environ.get("TMP", f"{sr}\\Temp"),
-                "PATHEXT": os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
-                "PATH": os.environ.get("PATH", f"{sr}\\system32;{sr}"),
+                "COMSPEC": base.get("COMSPEC", f"{sr}\\system32\\cmd.exe"),
+                "USERPROFILE": base.get("USERPROFILE", ""),
+                "HOMEDRIVE": base.get("HOMEDRIVE", "C:"),
+                "HOMEPATH": base.get("HOMEPATH", "\\"),
+                "TEMP": base.get("TEMP", f"{sr}\\Temp"),
+                "TMP": base.get("TMP", f"{sr}\\Temp"),
+                "PATHEXT": base.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+                "PATH": base.get("PATH", f"{sr}\\system32;{sr}"),
                 "PYTHONUNBUFFERED": "1",
-                "APPDATA": os.environ.get("APPDATA", ""),
-                "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
-                "ProgramData": os.environ.get("ProgramData", ""),
-                "ProgramFiles": os.environ.get("ProgramFiles", ""),
-                "ProgramFiles(x86)": os.environ.get("ProgramFiles(x86)", ""),
-                "ProgramW6432": os.environ.get("ProgramW6432", ""),
+                "APPDATA": base.get("APPDATA", ""),
+                "LOCALAPPDATA": base.get("LOCALAPPDATA", ""),
+                "ProgramData": base.get("ProgramData", ""),
+                "ProgramFiles": base.get("ProgramFiles", ""),
+                "ProgramFiles(x86)": base.get("ProgramFiles(x86)", ""),
+                "ProgramW6432": base.get("ProgramW6432", ""),
             }
-            for key in self.allowed_env_keys:
-                val = os.environ.get(key)
-                if val is not None:
-                    env[key] = val
-            return env
-        home = os.environ.get("HOME", "/tmp")
-        env = {
-            "HOME": home,
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "TERM": os.environ.get("TERM", "dumb"),
-            "PYTHONUNBUFFERED": "1",
-        }
+        else:
+            env = {
+                "HOME": base.get("HOME", "/tmp"),
+                "LANG": base.get("LANG", "C.UTF-8"),
+                "TERM": base.get("TERM", "dumb"),
+                "PYTHONUNBUFFERED": "1",
+            }
         for key in self.allowed_env_keys:
-            val = os.environ.get(key)
+            val = (
+                self._env.credentials.resolve(key, scope="exec")
+                if self._env is not None
+                else base.get(key)
+            )
             if val is not None:
                 env[key] = val
         return env

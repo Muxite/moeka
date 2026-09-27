@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from nanobot.agent.tools.shell import ExecTool
+from tests._kernel_env import credential_env
 
 _UNIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="Unix shell commands")
 
@@ -69,10 +70,10 @@ async def test_exec_path_prepend_takes_lookup_precedence(tmp_path):
 
 @_UNIX_ONLY
 @pytest.mark.asyncio
-async def test_exec_allowed_env_keys_passthrough(monkeypatch):
-    """Env vars listed in allowed_env_keys should be visible to commands."""
-    monkeypatch.setenv("MY_CUSTOM_VAR", "hello-from-config")
-    tool = ExecTool(allowed_env_keys=["MY_CUSTOM_VAR"])
+async def test_exec_allowed_env_keys_passthrough():
+    """Keys listed in allowed_env_keys come from the host resolver (scope exec)."""
+    env = credential_env({"MY_CUSTOM_VAR": "hello-from-config"}, scopes={"MY_CUSTOM_VAR": ["exec"]})
+    tool = ExecTool(allowed_env_keys=["MY_CUSTOM_VAR"], env=env)
     result = await tool.execute(command="printenv MY_CUSTOM_VAR")
     assert "hello-from-config" in result
 
@@ -80,10 +81,13 @@ async def test_exec_allowed_env_keys_passthrough(monkeypatch):
 @_UNIX_ONLY
 @pytest.mark.asyncio
 async def test_exec_allowed_env_keys_does_not_leak_others(monkeypatch):
-    """Env vars NOT in allowed_env_keys should still be blocked."""
-    monkeypatch.setenv("MY_CUSTOM_VAR", "hello-from-config")
+    """Resolver entries NOT in allowed_env_keys should still be blocked."""
     monkeypatch.setenv("MY_SECRET_VAR", "secret-value")
-    tool = ExecTool(allowed_env_keys=["MY_CUSTOM_VAR"])
+    env = credential_env(
+        {"MY_CUSTOM_VAR": "hello-from-config", "MY_SECRET_VAR": "secret-value"},
+        scopes={"MY_CUSTOM_VAR": ["exec"], "MY_SECRET_VAR": ["exec"]},
+    )
+    tool = ExecTool(allowed_env_keys=["MY_CUSTOM_VAR"], env=env)
     result = await tool.execute(command="printenv MY_SECRET_VAR")
     assert "secret-value" not in result
 
@@ -91,9 +95,9 @@ async def test_exec_allowed_env_keys_does_not_leak_others(monkeypatch):
 @_UNIX_ONLY
 @pytest.mark.asyncio
 async def test_exec_allowed_env_keys_missing_var_ignored(monkeypatch):
-    """If an allowed key is not set in the parent process, it should be silently skipped."""
-    monkeypatch.delenv("NONEXISTENT_VAR_12345", raising=False)
-    tool = ExecTool(allowed_env_keys=["NONEXISTENT_VAR_12345"])
+    """An allowed key the host resolver lacks is skipped, even if the process has it."""
+    monkeypatch.setenv("NONEXISTENT_VAR_12345", "ambient-must-be-ignored")
+    tool = ExecTool(allowed_env_keys=["NONEXISTENT_VAR_12345"], env=credential_env())
     result = await tool.execute(command="printenv NONEXISTENT_VAR_12345")
     assert "Exit code: 1" in result
 
@@ -168,3 +172,58 @@ async def test_exec_path_append_legitimate_path_still_works():
     tool = ExecTool(path_append="/opt/custom/bin")
     result = await tool.execute(command="echo $PATH")
     assert "/opt/custom/bin" in result
+
+
+# --- child env from the host env (R3, Task 4) --------------------------------
+
+
+@_UNIX_ONLY
+@pytest.mark.asyncio
+async def test_exec_base_env_comes_from_host_env(monkeypatch):
+    """HOME/LANG/TERM come from env.exec_base_env, not the kernel process."""
+    monkeypatch.setenv("LANG", "ambient-must-be-ignored")
+    env = credential_env(exec_base_env={"HOME": "/kernel-home", "LANG": "C.UTF-8"})
+    tool = ExecTool(env=env)
+    assert tool._build_env()["HOME"] == "/kernel-home"
+    assert tool._build_env()["LANG"] == "C.UTF-8"
+    result = await tool.execute(command="printenv LANG")
+    assert "ambient-must-be-ignored" not in result
+
+
+def test_exec_allowed_key_outside_exec_scope_is_not_passed():
+    env = credential_env({"MY_CUSTOM_VAR": "v"}, scopes={"MY_CUSTOM_VAR": ["tool:web"]})
+    tool = ExecTool(allowed_env_keys=["MY_CUSTOM_VAR"], env=env)
+    assert "MY_CUSTOM_VAR" not in tool._build_env()
+
+
+def test_exec_empty_host_env_defaults_without_reading_process(monkeypatch):
+    monkeypatch.setenv("HOME", "/ambient-home")
+    monkeypatch.setenv("TERM", "ambient-term")
+    built = ExecTool(env=credential_env())._build_env()
+    assert built["HOME"] == "/tmp"
+    assert built["TERM"] == "dumb"
+
+
+def test_exec_legacy_environment_keeps_process_env_behaviour(tmp_path, monkeypatch):
+    """Legacy hosts: allowed keys and HOME still come from the process env."""
+    from nanobot.agent.tools.context import ToolContext
+    from nanobot.config.schema import Config
+    from nanobot.kernel.legacy import LegacyEnvironment
+
+    monkeypatch.setenv("MY_CUSTOM_VAR", "legacy-value")
+    monkeypatch.setenv("HOME", "/legacy-home")
+    config = Config.model_validate({
+        "tools": {"exec": {"allowedEnvKeys": ["MY_CUSTOM_VAR"]}},
+        "agents": {"defaults": {"workspace": str(tmp_path)}},
+    })
+    env = LegacyEnvironment.from_config(config)
+    tool = ExecTool.create(ToolContext(config=config.tools, workspace=str(tmp_path), env=env))
+    built = tool._build_env()
+    assert built["MY_CUSTOM_VAR"] == "legacy-value"
+    assert built["HOME"] == "/legacy-home"
+
+
+def test_exec_without_env_keeps_direct_process_env_fallback(monkeypatch):
+    monkeypatch.setenv("MY_CUSTOM_VAR", "direct-value")
+    built = ExecTool(allowed_env_keys=["MY_CUSTOM_VAR"])._build_env()
+    assert built["MY_CUSTOM_VAR"] == "direct-value"
