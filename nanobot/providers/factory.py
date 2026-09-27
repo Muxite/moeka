@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,14 +42,38 @@ def _provider_api_key(
 ) -> str | None:
     """Configured key, else ``providers/<slot>/api_key`` from the host resolver (I1).
 
-    ``env=None`` keeps the pre-kernel behaviour: the configured key only.
+    ``env=None`` keeps the pre-kernel behaviour: the configured key only. The
+    config passed in is authoritative for config keys, so a resolver that mirrors
+    config (the legacy adapter) is asked for non-config refs only: a key removed
+    from config on hot reload is not resurrected from the startup copy.
     """
     key = provider_config.api_key if provider_config else None
     if key or env is None:
         return key
-    return env.credentials.resolve(
-        f"providers/{provider_name}/api_key", scope=f"provider:{provider_name}"
-    ) or None
+    from nanobot.kernel.env import resolve_credential
+
+    return resolve_credential(
+        env,
+        f"providers/{provider_name}/api_key",
+        f"provider:{provider_name}",
+        exclude_config=True,
+    )
+
+
+def credential_predicate(env: CoreEnvironment | None) -> Callable[[str], bool] | None:
+    """``has_credential`` for :meth:`Config.match_provider` from the host resolver.
+
+    ``None`` without an env (config-only matching). With the legacy adapter every
+    provider ref is config-backed, so the predicate adds nothing and matching is
+    exactly the config-only rule; a kernel host's resolver-only keys count.
+    """
+    if env is None:
+        return None
+
+    def _has(slot: str) -> bool:
+        return bool(_provider_api_key(slot, None, env))
+
+    return _has
 
 
 def _runtime_settings(env: CoreEnvironment | None) -> dict[str, object]:
@@ -126,8 +151,8 @@ def _resolve_provider_setup(
 ) -> _ProviderSetup:
     """Resolve and validate provider configuration without constructing a client."""
     model = model or preset.model
-    provider_name = config.get_provider_name(model, preset=preset)
-    p = config.get_provider(model, preset=preset)
+    has_credential = credential_predicate(env)
+    p, provider_name = config.match_provider(model, preset=preset, has_credential=has_credential)
     if not provider_name:
         raise ValueError(f"No provider is configured for model '{model}'.")
     spec = _provider_spec_for_config(provider_name, p)
@@ -257,7 +282,9 @@ def _make_provider_core(
 
         provider = AnthropicProvider(
             api_key=api_key,
-            api_base=config.get_api_base(model, preset=preset),
+            api_base=config.get_api_base(
+                model, preset=preset, has_credential=credential_predicate(env)
+            ),
             default_model=model,
             extra_headers=_provider_extra_headers(spec, p),
             provider_name=provider_name,
@@ -280,7 +307,9 @@ def _make_provider_core(
 
         provider = OpenAICompatProvider(
             api_key=api_key,
-            api_base=config.get_api_base(model, preset=preset),
+            api_base=config.get_api_base(
+                model, preset=preset, has_credential=credential_predicate(env)
+            ),
             default_model=model,
             extra_headers=_provider_extra_headers(spec, p),
             spec=spec,
@@ -388,21 +417,28 @@ def provider_signature(
     *,
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
+    env: CoreEnvironment | None = None,
 ) -> tuple[object, ...]:
-    """Return the config fields that affect the active provider chain."""
+    """Return the config fields that affect the active provider chain.
+
+    *env* makes provider matching resolver-aware exactly as :func:`make_provider`
+    does, so the signature names the provider that is actually built.
+    """
+    has = credential_predicate(env)
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
-    p = config.get_provider(resolved.model, preset=resolved)
+    p = config.get_provider(resolved.model, preset=resolved, has_credential=has)
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
     def _fallback_signature(fallback: ModelPresetConfig) -> tuple[object, ...]:
-        fp = config.get_provider(fallback.model, preset=fallback)
-        provider_name = config.get_provider_name(fallback.model, preset=fallback)
+        fp, provider_name = config.match_provider(
+            fallback.model, preset=fallback, has_credential=has
+        )
         return (
             fallback.model,
             fallback.provider,
             provider_name,
-            config.get_api_key(fallback.model, preset=fallback),
-            config.get_api_base(fallback.model, preset=fallback),
+            fp.api_key if fp else None,
+            config.get_api_base(fallback.model, preset=fallback, has_credential=has),
             _provider_extra_headers(find_by_name(provider_name) if provider_name else None, fp),
             fp.extra_body if fp else None,
             fp.api_type if fp else "auto",
@@ -417,13 +453,13 @@ def provider_signature(
             fp.thinking_style if fp else None,
         )
 
-    provider_name = config.get_provider_name(resolved.model, preset=resolved)
+    provider_name = config.get_provider_name(resolved.model, preset=resolved, has_credential=has)
     return (
         resolved.model,
         resolved.provider,
         provider_name,
-        config.get_api_key(resolved.model, preset=resolved),
-        config.get_api_base(resolved.model, preset=resolved),
+        p.api_key if p else None,
+        config.get_api_base(resolved.model, preset=resolved, has_credential=has),
         _provider_extra_headers(find_by_name(provider_name) if provider_name else None, p),
         p.extra_body if p else None,
         p.api_type if p else "auto",
@@ -462,7 +498,7 @@ def build_provider_snapshot(
         provider=make_provider(config, preset=resolved, env=env),
         model=resolved.model,
         context_window_tokens=min([resolved.context_window_tokens, *fallback_windows]),
-        signature=provider_signature(config, preset=resolved),
+        signature=provider_signature(config, preset=resolved, env=env),
         generation=resolved.to_generation_settings(),
         model_preset=selected_preset,
     )

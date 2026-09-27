@@ -1,6 +1,7 @@
 """Configuration schema using Pydantic."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -522,10 +523,27 @@ class Config(BaseSettings):
             return get_state_home()
         return Path(ws).expanduser()
 
+    def match_provider(
+        self,
+        model: str | None = None,
+        *,
+        preset: ModelPresetConfig | None = None,
+        has_credential: Callable[[str], bool] | None = None,
+    ) -> tuple["ProviderConfig | None", str | None]:
+        """Match provider config and its registry name. Returns (config, spec_name).
+
+        A provider slot counts as keyed when its ``api_key`` is set in config or,
+        with *has_credential*, when the host credential resolver has a key for
+        that slot name (kernel hosts that keep keys out of config). ``None``
+        keeps the config-only rule.
+        """
+        return self._match_provider(model, preset=preset, has_credential=has_credential)
+
     def _match_provider(
         self, model: str | None = None,
         *,
         preset: ModelPresetConfig | None = None,
+        has_credential: Callable[[str], bool] | None = None,
     ) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
         from nanobot.providers.registry import (
@@ -535,6 +553,9 @@ class Config(BaseSettings):
 
         resolved = preset or self.resolve_preset()
         forced = resolved.provider
+
+        def _keyed(p: ProviderConfig, name: str) -> bool:
+            return bool(p.api_key) or (has_credential is not None and has_credential(name))
 
         def _custom_provider_by_name(name: str) -> tuple[ProviderConfig, str] | None:
             normalized = name.replace("-", "_").lower()
@@ -571,7 +592,7 @@ class Config(BaseSettings):
                 continue
             p = getattr(self.providers, spec.name, None)
             if p and model_prefix and normalized_prefix == spec.name:
-                if spec.is_oauth or spec.is_local or spec.is_direct or p.api_key:
+                if spec.is_oauth or spec.is_local or spec.is_direct or _keyed(p, spec.name):
                     return p, spec.name
 
         # Check for custom provider by prefix (e.g., "companyProxy/gpt-4").
@@ -605,7 +626,7 @@ class Config(BaseSettings):
                     )
                     if not p.api_base or foreign_prefix:
                         continue
-                if spec.is_oauth or spec.is_local or spec.is_direct or p.api_key:
+                if spec.is_oauth or spec.is_local or spec.is_direct or _keyed(p, spec.name):
                     return p, spec.name
 
         # Fallback: configured local providers can route models without
@@ -633,7 +654,7 @@ class Config(BaseSettings):
             if spec.is_oauth or spec.is_transcription_only:
                 continue
             p = getattr(self.providers, spec.name, None)
-            if p and p.api_key:
+            if p and _keyed(p, spec.name):
                 return p, spec.name
 
         # Final fallback: check for any configured custom provider
@@ -648,9 +669,10 @@ class Config(BaseSettings):
         model: str | None = None,
         *,
         preset: ModelPresetConfig | None = None,
+        has_credential: Callable[[str], bool] | None = None,
     ) -> ProviderConfig | None:
         """Get matched provider config (api_key, api_base, extra_headers). Falls back to first available."""
-        p, _ = self._match_provider(model, preset=preset)
+        p, _ = self._match_provider(model, preset=preset, has_credential=has_credential)
         return p
 
     def get_provider_name(
@@ -658,9 +680,10 @@ class Config(BaseSettings):
         model: str | None = None,
         *,
         preset: ModelPresetConfig | None = None,
+        has_credential: Callable[[str], bool] | None = None,
     ) -> str | None:
         """Get the registry name of the matched provider (e.g. "deepseek", "openrouter")."""
-        _, name = self._match_provider(model, preset=preset)
+        _, name = self._match_provider(model, preset=preset, has_credential=has_credential)
         return name
 
     def get_api_key(
@@ -668,9 +691,10 @@ class Config(BaseSettings):
         model: str | None = None,
         *,
         preset: ModelPresetConfig | None = None,
+        has_credential: Callable[[str], bool] | None = None,
     ) -> str | None:
         """Get API key for the given model. Falls back to first available key."""
-        p = self.get_provider(model, preset=preset)
+        p = self.get_provider(model, preset=preset, has_credential=has_credential)
         return p.api_key if p else None
 
     def get_api_base(
@@ -678,11 +702,12 @@ class Config(BaseSettings):
         model: str | None = None,
         *,
         preset: ModelPresetConfig | None = None,
+        has_credential: Callable[[str], bool] | None = None,
     ) -> str | None:
         """Get API base URL for the given model, falling back to the provider default when present."""
         from nanobot.providers.registry import find_by_name
 
-        p, name = self._match_provider(model, preset=preset)
+        p, name = self._match_provider(model, preset=preset, has_credential=has_credential)
         if p and p.api_base:
             return p.api_base
         if name:
