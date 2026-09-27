@@ -21,10 +21,18 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from nanobot.kernel.artifacts import (
     ARTIFACTS_DB_FILENAME,
@@ -473,6 +481,83 @@ def test_model_instance_value_is_walked_like_a_dict(
     assert store.committed(res.artifact_id) == {"address": {"city": "Oslo"}}
     res2 = store.propose("server", {"address": Address(city="Oslo", zip_code="0150")})
     assert set(res2.provisional) == {"address.city", "address.zip_code"}
+
+
+class ParentChecked(BaseModel):
+    address: Address | None = None
+
+    @field_validator("address")
+    @classmethod
+    def _no_x_city(cls, value: Address | None) -> Address | None:
+        if value is not None and value.city == "X":
+            raise ValueError("parent field_validator on nested field")
+        return value
+
+
+def _not_x(value: Address | None) -> Address | None:
+    if value is not None and value.city == "X":
+        raise ValueError("parent Annotated validator on nested field")
+    return value
+
+
+class ParentAnnotated(BaseModel):
+    address: Annotated[Address | None, AfterValidator(_not_x)] = None
+
+
+class ParentSerialized(BaseModel):
+    address: Address | None = None
+
+    @field_serializer("address")
+    def _ser(self, value: Address | None) -> Any:
+        return value.model_dump() if value is not None else None
+
+
+@pytest.mark.parametrize(
+    ("model", "message"),
+    [(ParentChecked, "parent field_validator"), (ParentAnnotated, "parent Annotated")],
+)
+def test_parent_validator_on_nested_field_runs_as_one_leaf(
+    store: ArtifactStore, facts: FactStore, model: type[BaseModel], message: str,
+) -> None:
+    """A nested-model field the PARENT validates is one whole leaf, not walked into."""
+    store.register_kind("pc", model)
+    tid = _tool_fact(facts, {"city": "X"})
+    with pytest.raises(ArtifactValidationError, match=message):
+        store.propose("pc", {"address": {"city": "X"}}, {"address": tid}, artifact_id="pc1")
+    with pytest.raises(ArtifactNotFoundError):
+        store.committed("pc1")
+    # Per-leaf cites do not apply to a whole-leaf field.
+    with pytest.raises(ArtifactValidationError, match="address.city"):
+        store.propose("pc", {"address": {"city": "Oslo"}}, {"address.city": tid})
+    ok = _tool_fact(facts, {"city": "Oslo"})
+    aid = store.propose("pc", {"address": Address(city="Oslo")}, {"address": ok}).artifact_id
+    assert store.citations(aid) == {"address": ok}
+    committed = store.committed(aid)
+    assert committed == {"address": {"city": "Oslo", "zip_code": None}}
+    # The two views agree.
+    assert store.committed_model(aid).model_dump() == committed
+
+
+def test_parent_serializer_on_nested_field_is_one_leaf(store: ArtifactStore) -> None:
+    store.register_kind("ps", ParentSerialized)
+    res = store.propose("ps", {"address": {"city": "Oslo"}})
+    assert res.provisional == ("address",)
+
+
+def test_unrelated_model_instance_is_not_duck_typed(store: ArtifactStore) -> None:
+    class LookAlike(BaseModel):
+        city: str
+
+    with pytest.raises(ArtifactValidationError, match="address"):
+        store.propose("server", {"address": LookAlike(city="Oslo")})
+
+
+def test_subclass_instance_is_walked(store: ArtifactStore) -> None:
+    class Sub(Address):
+        pass
+
+    res = store.propose("server", {"address": Sub(city="Oslo")})
+    assert res.provisional == ("address.city",)
 
 
 # -- views ----------------------------------------------------------------------------

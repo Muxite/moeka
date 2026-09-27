@@ -466,7 +466,12 @@ Purpose: facts enter the artifact only with provenance, and the user is asked on
     own dump, so `committed()` and `committed_model()` agree;
   - `register_kind` refuses a model with a `@model_validator` on any walked model (cross-field checks cannot
     run per leaf); a model inside a single leaf (`list[M]`) is validated whole and is allowed;
-  - a nested model instance in a delta is walked like a dict of the fields it set;
+  - a nested model instance (of the field's model) in a delta is walked like a dict of the fields it set;
+    an unrelated model instance is rejected, not duck-typed;
+  - a nested-model field the parent hooks (its own `@field_validator`/`@field_serializer` or Annotated
+    validator) is one whole leaf, not walked, so the parent's validator runs on the whole value;
+  - limit: a field validator reading `info.data` sees only defaults for the other fields, never the
+    artifact's other committed or provisional leaves;
   - `committed()` is a partial dict; `committed_model()` requires every required field committed.
 
 ```mermaid

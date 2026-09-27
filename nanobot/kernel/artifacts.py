@@ -12,8 +12,9 @@ Contract:
   to a :class:`~nanobot.kernel.facts.FactStore` trace ID.
 - Leaves: the delta is walked along the registered model. A key naming a nested
   pydantic model field (``Address`` or ``Address | None``) whose value is a dict is
-  descended into; any other field is one leaf, whatever its value (a ``list`` or a
-  ``dict[str, str]`` field is a single leaf). Cites are per leaf: a cite on a parent
+  descended into, unless the parent hooks that field (see below); any other field is
+  one leaf, whatever its value (a ``list`` or a ``dict[str, str]`` field is a single
+  leaf). Cites are per leaf: a cite on a parent
   path does not cover the leaves below it and is rejected.
 - Per leaf:
   - cited, and ``FactStore.resolve(trace_id)`` returns a record: COMMITTED;
@@ -55,9 +56,17 @@ Contract:
   REFUSES a model that defines one, on the root or on any nested model the leaf walk
   descends into (option b for that part). A model inside a single leaf (e.g.
   ``list[Pair]``) is validated whole, so its model validators do run and are allowed.
-- A nested model INSTANCE as a delta value is walked like a dict of the fields it
-  set (``model_dump(exclude_unset=True)``), so it gets per-leaf cites too; defaults it
-  did not set are not leaves.
+- A nested model INSTANCE (of the field's model or a subclass) as a delta value is
+  walked like a dict of the fields it set (``model_dump(exclude_unset=True)``), so it
+  gets per-leaf cites too; defaults it did not set are not leaves. An instance of an
+  unrelated model is not duck-typed: it is validated whole and rejected.
+- A nested-model field that the PARENT hooks (``@field_validator`` or
+  ``@field_serializer`` naming it or ``"*"``, or field metadata such as
+  ``Annotated[M | None, AfterValidator(f)]``) is NOT walked into: it is one whole leaf
+  (cite path ``"address"``, not ``"address.city"``), so the parent's validator runs
+  on the whole nested value and ``committed()`` matches ``committed_model()``. This
+  whole-leaf fallback (chosen over refusing the model) is the same rule as for a
+  model inside ``list[M]``: validators that cannot run per leaf get the whole value.
 - Accumulation: ``propose`` on an existing artifact merges leaf by leaf; it never
   replaces the artifact wholesale. ``artifact_id=None`` creates ``art-<32 hex>``;
   an unknown explicit ID creates that artifact.
@@ -219,6 +228,35 @@ def _nested_model(annotation: Any) -> type[BaseModel] | None:
     return None
 
 
+def _parent_hooks_field(model: type[BaseModel], name: str) -> bool:
+    """True when ``model`` itself attaches validation or serialization to field ``name``.
+
+    ``@field_validator``/``@field_serializer`` naming the field (or ``"*"``), or field
+    metadata (``Annotated[..., AfterValidator(f)]``, constraints) on the parent.
+    """
+    field = model.model_fields[name]
+    if field.metadata:
+        return True
+    decorators = model.__pydantic_decorators__
+    for group in (decorators.field_validators, decorators.field_serializers):
+        for decorator in group.values():
+            if name in decorator.info.fields or "*" in decorator.info.fields:
+                return True
+    return False
+
+
+def _walk_target(model: type[BaseModel], name: str) -> type[BaseModel] | None:
+    """The nested model the leaf walk descends into for field ``name``, else None.
+
+    A nested-model field the PARENT validates or serializes is NOT walked: it is one
+    whole leaf, so the parent's hooks run on the whole value (review round 2).
+    """
+    sub = _nested_model(model.model_fields[name].annotation)
+    if sub is None or _parent_hooks_field(model, name):
+        return None
+    return sub
+
+
 def _walked_models(
     model: type[BaseModel], prefix: str = "", seen: frozenset[type] = frozenset(),
 ) -> list[tuple[str, type[BaseModel]]]:
@@ -226,8 +264,8 @@ def _walked_models(
     out = [(prefix, model)]
     if model in seen:
         return out
-    for name, field in model.model_fields.items():
-        sub = _nested_model(field.annotation)
+    for name in model.model_fields:
+        sub = _walk_target(model, name)
         if sub is not None:
             out.extend(_walked_models(sub, f"{prefix}{name}.", seen | {model}))
     return out
@@ -269,10 +307,12 @@ def _flatten(model: type[BaseModel], delta: Any, prefix: str = "") -> dict[str, 
             errors.append(f"{path}: not a field of {model.__name__}")
             bad.append(path)
             continue
-        sub = _nested_model(field.annotation)
-        if sub is not None and isinstance(value, BaseModel):
-            # A model instance is walked like a dict of the fields it set, so it gets
-            # the same per-leaf cites; defaults it did not set are not leaves.
+        sub = _walk_target(model, key)
+        if sub is not None and isinstance(value, sub):
+            # An instance of the field's model (or a subclass) is walked like a dict of
+            # the fields it set, so it gets the same per-leaf cites; defaults it did not
+            # set are not leaves. Any other model instance is not duck-typed: it goes to
+            # leaf validation whole, where the model rejects it.
             value = value.model_dump(exclude_unset=True)
         if sub is not None and isinstance(value, dict):
             try:
