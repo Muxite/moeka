@@ -251,7 +251,94 @@ async def test_complete_builds_messages_and_sampling(kernel) -> None:
     assert call.messages[1]["content"][1]["type"] == "image_url"
     # The model's core defaults become generation settings; extras ride the request.
     assert call.kwargs["temperature"] == 0.3 and call.kwargs["max_tokens"] == 321
-    assert call.provider_context.request.sampling == Sampling(top_p=0.9, seed=5)
+    assert call.provider_context.request.sampling == Sampling(
+        temperature=0.3, top_p=0.9, seed=5, max_tokens=321,
+    )
+    assert fake.generation.temperature != 0.3  # the provider object is not reconfigured
+
+
+async def test_one_provider_under_two_aliases_keeps_each_specs_defaults_and_price(
+    kernel, sink,
+) -> None:
+    fake = FakeProvider(default="ok")
+    spec_a = ModelSpec(name="a", model="m-a", provider="host", price_in=1.0, price_out=1.0,
+                       max_tokens=100, sampling=Sampling(temperature=0.1))
+    spec_b = ModelSpec(name="b", model="m-b", provider="host", price_in=10.0, price_out=10.0,
+                       sampling=Sampling(temperature=0.9))
+    kernel.llm.register_provider("a", fake, spec_a)
+    kernel.llm.register_provider("b", fake, spec_b)
+    usage = LLMUsage.reported(input_tokens=1000, output_tokens=0)
+    fake.push(reply("x", usage=usage), reply("y", usage=usage))
+    ca = await kernel.llm.generate([user("q")], GenerateOptions(model="a"))
+    cb = await kernel.llm.generate([user("q")], GenerateOptions(model="b"))
+    assert fake.calls[0].kwargs["temperature"] == 0.1
+    assert fake.calls[0].kwargs["max_tokens"] == 100
+    assert fake.calls[0].kwargs["model"] == "m-a"
+    assert fake.calls[1].kwargs["temperature"] == 0.9
+    assert fake.calls[1].kwargs["model"] == "m-b"
+    assert ca.cost_usd == pytest.approx(1000 * 1.0 / 1e6)
+    assert cb.cost_usd == pytest.approx(1000 * 10.0 / 1e6)
+    events = sink.model_calls()
+    assert [(e["alias"], e["cost_usd"]) for e in events] == [
+        ("a", pytest.approx(0.001)), ("b", pytest.approx(0.01)),
+    ]
+
+
+async def test_pool_provider_gets_spec_defaults_like_injected(tmp_path) -> None:
+    from nanobot.providers.base import LLMResponse
+
+    spec = ModelSpec(name="main", model="gpt-4.1", provider="openai", max_tokens=111,
+                     sampling=Sampling(temperature=0.3, top_p=0.8))
+    env = Environment.for_host(
+        state_dir=tmp_path / "s", work_dir=tmp_path / "w", credentials={"oa": "sk"},
+        providers=[ProviderSpec(name="openai", credential="oa")], models=[spec],
+        default_model="main",
+    )
+    async with Kernel(env) as kernel:
+        provider = kernel.llm._route("main").provider
+        # The factory's preset path sets the same core defaults as generation settings.
+        assert provider.generation.temperature == 0.3
+        assert provider.generation.max_tokens == 111
+        seen: list[dict[str, Any]] = []
+
+        async def record(*, provider_context, **kwargs):
+            seen.append({"context": provider_context, **kwargs})
+            return LLMResponse(content="ok", usage=LLMUsage.reported(
+                input_tokens=1, output_tokens=1))
+
+        provider.chat_with_context = record
+        await kernel.llm.generate([user("q")])
+        await kernel.llm.generate([user("q")], GenerateOptions(
+            sampling=Sampling(temperature=0.7, max_tokens=5)))
+    assert seen[0]["temperature"] == 0.3 and seen[0]["max_tokens"] == 111
+    assert seen[0]["context"].request.sampling.top_p == 0.8
+    assert seen[1]["temperature"] == 0.7 and seen[1]["max_tokens"] == 5
+    assert seen[1]["context"].request.sampling.top_p == 0.8
+
+
+@pytest.mark.parametrize("mode", ["drop", "raise"])
+async def test_unsupported_spec_defaults_drop_quietly(kernel, sink, mode) -> None:
+    fake = FakeProvider(default="ok")
+    fake.supported_sampling_fields = frozenset({"temperature", "max_tokens", "reasoning_effort"})
+    spec = ModelSpec(name="main", model="fake-main", provider="openai",
+                     sampling=Sampling(temperature=0.2, top_p=0.9, seed=1))
+    kernel.llm.register_provider("main", fake, spec)
+    await kernel.llm.generate([user("q")], GenerateOptions(on_unsupported=mode))
+    assert not [e for e in sink.events if e.get("event") == "sampling.dropped"]
+    sent = fake.calls[0].provider_context.request.sampling
+    assert sent == Sampling(temperature=0.2)
+    assert fake.calls[0].kwargs["temperature"] == 0.2
+
+    explicit = GenerateOptions(sampling=Sampling(seed=4), on_unsupported=mode)
+    if mode == "raise":
+        with pytest.raises(UnsupportedRequestError) as info:
+            await kernel.llm.generate([user("q")], explicit)
+        assert info.value.fields == ("seed",)
+        assert len(fake.calls) == 1
+    else:
+        await kernel.llm.generate([user("q")], explicit)
+        dropped = [e for e in sink.events if e.get("event") == "sampling.dropped"]
+        assert [e["fields"] for e in dropped] == [["seed"]]
 
 
 def test_generate_options_hashable_and_validated() -> None:
@@ -321,6 +408,24 @@ async def test_complete_json_truncated(kernel) -> None:
     assert info.value.raw == '{"a": '
 
 
+async def test_complete_json_deadline_covers_all_rounds(kernel) -> None:
+    # Each round (0.15s) fits the 0.35s deadline; three rounds together do not.
+    fake = _fake(kernel, default="not json", delay=0.15)
+    started = time.monotonic()
+    with pytest.raises(LLMTimeoutError) as info:
+        await kernel.llm.complete_json(
+            "give a", schema=SCHEMA, retries=2, opts=GenerateOptions(timeout_s=0.35),
+        )
+    assert time.monotonic() - started < 0.6
+    assert info.value.call_id
+    assert len(fake.calls) == 3
+    for _ in range(50):
+        if fake.calls[-1].cancelled:
+            break
+        await asyncio.sleep(0.01)
+    assert fake.calls[-1].cancelled
+
+
 async def test_complete_json_deterministic_solver_makes_no_call(kernel, monkeypatch) -> None:
     registry = solvers_mod.SolverRegistry()
     monkeypatch.setattr(solvers_mod, "_DEFAULT_REGISTRY", registry)
@@ -365,6 +470,25 @@ async def test_stream_early_exit_cancels_the_call(kernel) -> None:
             break
         await asyncio.sleep(0.01)
     assert fake.calls[0].cancelled
+
+
+async def test_abandoned_stream_is_finalised_without_gc(kernel) -> None:
+    import gc
+
+    fake = _fake(kernel, "c" * 400, chunk_size=1, delay=0.02)
+    gc.disable()
+    try:
+        stream = kernel.llm.stream([user("x")])
+        async for _ in stream:
+            break
+        del stream
+        for _ in range(100):
+            if fake.calls[0].cancelled:
+                break
+            await asyncio.sleep(0.01)
+        assert fake.calls[0].cancelled
+    finally:
+        gc.enable()
 
 
 def test_stream_sync_and_early_close(kernel) -> None:

@@ -61,6 +61,7 @@ from nanobot.kernel.sampling import Sampling
 
 if TYPE_CHECKING:
     from nanobot.kernel.kernel import Kernel
+    from nanobot.kernel.ledger import PricingTable
     from nanobot.providers.base import LLMProvider, LLMResponse, LLMUsage
 
 
@@ -303,7 +304,6 @@ async def aclose_provider(provider: Any) -> None:
 
 # -- the engine -----------------------------------------------------------------
 
-_CORE_FIELDS = ("temperature", "max_tokens", "reasoning_effort")
 # Error kinds that mean "the provider rejected the request shape" (e.g. an
 # unsupported ``response_format``): complete_json falls back to prompt mode.
 _REJECTION_KINDS = frozenset({"invalid_request", "unknown", "unsupported"})
@@ -336,40 +336,42 @@ class LLM:
         self._lock = threading.Lock()
         self._pool: dict[str, LLMProvider] = {}
         self._injected: dict[str, tuple[LLMProvider, ModelSpec]] = {}
+        # id(provider) -> (provider, its ledger pricing table): one observer per
+        # injected provider object, priced for every alias registered on it.
+        self._ledgers: dict[int, tuple[LLMProvider, PricingTable]] = {}
 
     # -- provider pool -----------------------------------------------------
 
     def register_provider(self, alias: str, provider: LLMProvider, spec: ModelSpec) -> None:
         """Serve *alias* with a host-built provider (tests, custom endpoints).
 
-        The provider gets the kernel's trace sink, the spec's generation defaults
-        and the cost ledger (priced from the spec), so it is metered like a pool
-        provider. It takes precedence over an ``env.models`` entry of the same
-        name. The host keeps ownership: the kernel does not close it.
+        The provider gets the kernel's trace sink and the cost ledger, priced from
+        every spec registered on that provider object (one pricing table per
+        provider, keyed ``(provider, model)``), so it is metered like a pool
+        provider. The spec's sampling defaults are sent per request, exactly as
+        for pool providers; the provider object itself is not reconfigured, so one
+        provider may serve several aliases. It takes precedence over an
+        ``env.models`` entry of the same name. The host keeps ownership: the
+        kernel does not close it.
         """
-        from nanobot.providers.base import GenerationSettings
+        from nanobot.kernel.ledger import PricingTable
         from nanobot.providers.factory import attach_ledger
 
         if not isinstance(spec, ModelSpec):
             raise TypeError(f"spec must be a ModelSpec, got {type(spec).__name__}")
         env = self._kernel.env
-        provider.trace_sink = env.trace
-        gen = provider.generation
-        sampling = spec.sampling or Sampling()
-        provider.generation = GenerationSettings(
-            temperature=sampling.temperature if sampling.temperature is not None
-            else gen.temperature,
-            max_tokens=spec.max_tokens or sampling.max_tokens or gen.max_tokens,
-            reasoning_effort=sampling.reasoning_effort if sampling.reasoning_effort is not None
-            else gen.reasoning_effort,
-        )
         pricing = _spec_pricing(spec)
-        attach_ledger(
-            provider,
-            env.core,
-            {(provider.provider_name, spec.model): pricing} if pricing is not None else None,
-        )
         with self._lock:
+            entry = self._ledgers.get(id(provider))
+            if entry is None:
+                table = PricingTable()
+                self._ledgers[id(provider)] = (provider, table)
+                provider.trace_sink = env.trace
+                attach_ledger(provider, env.core, table)
+            else:
+                table = entry[1]
+            if pricing is not None:
+                table.add((provider.provider_name, spec.model), pricing)
             self._injected[alias] = (provider, spec)
 
     def _spec_for(self, alias: str) -> ModelSpec | None:
@@ -433,18 +435,19 @@ class LLM:
     # -- request building ----------------------------------------------------------
 
     @staticmethod
-    def _sampling(route: _Route, opts: GenerateOptions) -> Sampling | None:
-        """The model's non-core sampling defaults overlaid by the call's explicit fields.
+    def _default_sampling(route: _Route) -> Sampling | None:
+        """The model's sampling defaults (``ModelSpec.sampling`` plus ``max_tokens``).
 
-        Core fields (temperature / max_tokens / reasoning_effort) of the model are
-        already the provider's generation defaults; only explicit ones are sent.
+        Sent per request under the call's explicit sampling, for pool and
+        injected providers alike; providers drop what they cannot honour quietly.
         """
-        base = route.spec.sampling if route.spec is not None else None
-        merged = replace(base, **{name: None for name in _CORE_FIELDS}) if base else Sampling()
-        explicit = opts.sampling.set_fields()
-        if explicit:
-            merged = replace(merged, **{name: getattr(opts.sampling, name) for name in explicit})
-        return merged if merged.set_fields() else None
+        spec = route.spec
+        if spec is None:
+            return None
+        defaults = spec.sampling or Sampling()
+        if spec.max_tokens is not None:
+            defaults = replace(defaults, max_tokens=spec.max_tokens)
+        return defaults if defaults.set_fields() else None
 
     def _context(
         self, route: _Route, opts: GenerateOptions, response_format: Mapping[str, Any] | None,
@@ -455,7 +458,8 @@ class LLM:
             session_id=opts.affinity_key,
             request=RequestExtras(
                 response_format=thaw(response_format) if response_format else None,
-                sampling=self._sampling(route, opts),
+                sampling=opts.sampling if opts.sampling.set_fields() else None,
+                default_sampling=self._default_sampling(route),
                 extra_body=thaw(opts.extra_body) if opts.extra_body else None,
                 on_unsupported=opts.on_unsupported,
                 max_attempts=opts.attempts,
@@ -625,9 +629,38 @@ class LLM:
         native = opts.response_format
         if native is None and (route.spec is None or route.spec.native_json is not False):
             native = json_response_format(schema)
-        use_native = native is not None
-
         attribution = CallAttribution(call_id=call_id, alias=route.alias, tags=opts.tags)
+        # One deadline for the whole call: every round (and a rejected native one)
+        # shares timeout_s, so rounds themselves run without their own deadline.
+        deadline = asyncio.timeout(opts.timeout_s)
+        try:
+            async with deadline:
+                return await self._json_rounds(
+                    prompt, full_system=full_system, images=images, model_cls=model_cls,
+                    retries=retries, opts=replace(opts, timeout_s=None), route=route,
+                    native=native, attribution=attribution, started=started,
+                )
+        except TimeoutError:
+            if deadline.expired():
+                raise self._timeout_error(opts, route, call_id) from None
+            raise
+
+    async def _json_rounds(
+        self,
+        prompt: str,
+        *,
+        full_system: str,
+        images: tuple[ImageInput, ...],
+        model_cls: type | None,
+        retries: int,
+        opts: GenerateOptions,
+        route: _Route,
+        native: Mapping[str, Any] | None,
+        attribution: CallAttribution,
+        started: float,
+    ) -> Completion:
+        call_id = attribution.call_id
+        use_native = native is not None
         rounds = 0
         parse_rounds = 0
         usage = Usage()
@@ -772,9 +805,14 @@ class LLM:
         return SyncTextStream(TextStream(self, messages, opts or GenerateOptions()))
 
     async def _stream_deltas(
-        self, messages: Sequence[Mapping[str, Any]], opts: GenerateOptions, out: TextStream,
+        self, messages: Sequence[Mapping[str, Any]], opts: GenerateOptions, out: _StreamResult,
     ) -> AsyncIterator[str]:
-        """Runs on the kernel loop: yields deltas, then stores the completion on *out*."""
+        """Runs on the kernel loop: yields deltas, then stores the completion on *out*.
+
+        *out* is a plain holder, not the ``TextStream``: the generator must not
+        reference its owner, or an abandoned stream would sit in a reference
+        cycle (never finalised, provider task still running) until cyclic GC.
+        """
         route = self._route(opts.model)
         attribution = CallAttribution(call_id=_new_call_id(), alias=route.alias, tags=opts.tags)
         context = self._context(route, opts, opts.response_format)
@@ -815,7 +853,7 @@ class LLM:
                     raise self._timeout_error(opts, route, attribution.call_id) from None
                 raise
             self._raise_for(response, route, attribution.call_id)
-            out._completion = self._completion(response, route, attribution, started)
+            out.completion = self._completion(response, route, attribution, started)
         finally:
             if not task.done():
                 task.cancel()
@@ -823,6 +861,15 @@ class LLM:
                     await task
                 except BaseException:  # noqa: BLE001 - cancelled on early exit
                     pass
+
+
+class _StreamResult:
+    """Where a stream's generator leaves its final :class:`Completion`."""
+
+    __slots__ = ("completion",)
+
+    def __init__(self) -> None:
+        self.completion: Completion | None = None
 
 
 class TextStream:
@@ -836,8 +883,8 @@ class TextStream:
         self, llm: LLM, messages: Sequence[Mapping[str, Any]], opts: GenerateOptions,
     ) -> None:
         self._llm = llm
-        self._completion: Completion | None = None
-        self._gen = llm._stream_deltas(messages, opts, self)
+        self._result = _StreamResult()
+        self._gen = llm._stream_deltas(messages, opts, self._result)
         self._finished = False
 
     def __aiter__(self) -> TextStream:
@@ -860,9 +907,9 @@ class TextStream:
     async def completion(self) -> Completion:
         async for _ in self:
             pass
-        if self._completion is None:
+        if self._result.completion is None:
             raise RuntimeError("stream was closed before it completed")
-        return self._completion
+        return self._result.completion
 
     async def aclose(self) -> None:
         """Stop the stream early (cancels the provider call). Idempotent."""
@@ -902,9 +949,9 @@ class SyncTextStream:
     def completion(self) -> Completion:
         for _ in self._iter:
             pass
-        if self._stream._completion is None:
+        if self._stream._result.completion is None:
             raise RuntimeError("stream was closed before it completed")
-        return self._stream._completion
+        return self._stream._result.completion
 
     def close(self) -> None:
         """Stop the stream early (cancels the provider call). Idempotent."""

@@ -7,7 +7,7 @@ import json
 import re
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -274,6 +274,10 @@ class RequestExtras:
     * ``max_attempts``: caps the standard retry loop's physical attempts for this
       request (``1`` = no retry); ``None`` keeps the provider's retry schedule.
       Each fallback candidate gets the same cap. Ignored in persistent mode.
+    * ``default_sampling``: the model's own sampling defaults (a ``ModelSpec``),
+      applied under ``sampling``. Fields the provider cannot honour are dropped
+      quietly (debug log only): ``on_unsupported`` governs only what the caller
+      set explicitly. A default that conflicts with an explicit field is dropped.
     """
 
     response_format: Mapping[str, Any] | None = None
@@ -281,6 +285,7 @@ class RequestExtras:
     extra_body: Mapping[str, Any] | None = None
     on_unsupported: Literal["drop", "raise"] = "drop"
     max_attempts: int | None = None
+    default_sampling: Sampling | None = None
 
 
 def plain_request_body(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -294,6 +299,22 @@ def plain_request_body(value: Mapping[str, Any]) -> dict[str, Any]:
         return item
 
     return cast(dict[str, Any], _thaw(value))
+
+
+def _clear_sampling(sampling: Sampling, names: Iterable[str]) -> Sampling:
+    """*sampling* with the named fields unset (``extra_body`` is not a field)."""
+    return replace(sampling, **{
+        name: (() if name == "stop" else None) for name in names if name != EXTRA_BODY_FIELD
+    })
+
+
+def _overlay_sampling(base: Sampling | None, top: Sampling | None) -> Sampling | None:
+    """*base* with *top*'s set fields written over it."""
+    if base is None:
+        return top
+    if top is None:
+        return base
+    return replace(base, **{name: getattr(top, name) for name in top.set_fields()})
 
 
 # Sampling fields every provider honours through the ``chat()`` arguments.
@@ -1522,30 +1543,41 @@ class LLMProvider(ABC):
     def _apply_request_extras(self, kw: dict[str, Any]) -> None:
         """Resolve ``RequestExtras`` once per call, before any attempt is sent.
 
-        Drops (or raises on) fields the provider cannot honour, then lets the
-        explicit sampling ``temperature`` / ``max_tokens`` / ``reasoning_effort``
-        override the call arguments. The narrowed extras replace the context in
-        ``kw`` with ``on_unsupported="drop"`` so inner fallback candidates drop
-        what they cannot send instead of failing mid-chain.
+        Drops (or raises on) explicit fields the provider cannot honour, then
+        layers the model defaults (``default_sampling``) under the surviving
+        explicit fields, quietly dropping defaults the provider cannot honour or
+        that conflict with an explicit field. The merged ``temperature`` /
+        ``max_tokens`` / ``reasoning_effort`` override the call arguments. The
+        narrowed extras replace the context in ``kw`` with ``on_unsupported="drop"``
+        (and no separate defaults) so inner fallback candidates drop what they
+        cannot send instead of failing mid-chain.
         """
         context = kw.get("provider_context")
         if not isinstance(context, ProviderCallContext) or context.request is None:
             return
         extras = context.request
         sampling = extras.sampling
-        if sampling is not None and sampling.reasoning_effort is not None:
-            effort = sampling.reasoning_effort
-        else:
-            effort = kw.get("reasoning_effort")
-        supported = self._sampling_support(kw.get("model"), effort, sampling)
+        defaults = extras.default_sampling
+        effort = kw.get("reasoning_effort")
+        for source in (defaults, sampling):
+            if source is not None and source.reasoning_effort is not None:
+                effort = source.reasoning_effort
+        model = kw.get("model")
+        supported = self._sampling_support(model, effort, sampling)
         if supported is None:
+            if defaults is not None:
+                sampling = _overlay_sampling(defaults, sampling)
+                self._apply_core_sampling(kw, sampling)
+                kw["provider_context"] = replace(
+                    context, request=replace(extras, sampling=sampling, default_sampling=None),
+                )
             return
 
         requested = list(sampling.set_fields()) if sampling is not None else []
         if extras.extra_body:
             requested.append(EXTRA_BODY_FIELD)
         unsupported = [name for name in requested if name not in supported]
-        model_name = kw.get("model") or self.get_default_model()
+        model_name = model or self.get_default_model()
         if unsupported:
             if extras.on_unsupported == "raise":
                 from nanobot.kernel.llm_errors import UnsupportedRequestError
@@ -1555,25 +1587,71 @@ class LLMProvider(ABC):
                 )
             self._report_dropped_fields(model_name, unsupported)
             if sampling is not None:
-                sampling = replace(sampling, **{
-                    name: (() if name == "stop" else None)
-                    for name in unsupported
-                    if name != EXTRA_BODY_FIELD
-                })
+                sampling = _clear_sampling(sampling, unsupported)
             if EXTRA_BODY_FIELD in unsupported:
                 extras = replace(extras, extra_body=None)
 
-        if sampling is not None:
-            if sampling.temperature is not None:
-                kw["temperature"] = sampling.temperature
-            if sampling.max_tokens is not None:
-                kw["max_tokens"] = sampling.max_tokens
-            if sampling.reasoning_effort is not None:
-                kw["reasoning_effort"] = sampling.reasoning_effort
+        if defaults is not None:
+            sampling = self._merge_default_sampling(model, effort, defaults, sampling, model_name)
+        self._apply_core_sampling(kw, sampling)
         kw["provider_context"] = replace(
             context,
-            request=replace(extras, sampling=sampling, on_unsupported="drop"),
+            request=replace(
+                extras, sampling=sampling, default_sampling=None, on_unsupported="drop",
+            ),
         )
+
+    def _merge_default_sampling(
+        self,
+        model: str | None,
+        effort: str | None,
+        defaults: Sampling,
+        explicit: Sampling | None,
+        model_name: str,
+    ) -> Sampling | None:
+        """Layer *defaults* under *explicit*, quietly dropping what cannot be sent."""
+        explicit_fields = set(explicit.set_fields()) if explicit is not None else set()
+        merged = _overlay_sampling(defaults, explicit)
+        if merged is None:
+            return None
+
+        def _explicit_ok(candidate: Sampling) -> bool:
+            support = self._sampling_support(model, effort, candidate)
+            return support is None or explicit_fields <= support
+
+        if not _explicit_ok(merged):
+            # A default conflicts with an explicit field: drop the (first) default
+            # whose removal resolves it, else every default.
+            default_only = [n for n in merged.set_fields() if n not in explicit_fields]
+            for name in default_only:
+                trial = _clear_sampling(merged, [name])
+                if _explicit_ok(trial):
+                    merged = trial
+                    break
+            else:
+                merged = _clear_sampling(merged, default_only)
+        support = self._sampling_support(model, effort, merged)
+        if support is None:
+            return merged
+        quiet = [n for n in merged.set_fields() if n not in support and n not in explicit_fields]
+        if quiet:
+            logger.debug(
+                "model defaults not supported by {}/{}; dropped: {}",
+                self.provider_name, model_name, quiet,
+            )
+            merged = _clear_sampling(merged, quiet)
+        return merged
+
+    @staticmethod
+    def _apply_core_sampling(kw: dict[str, Any], sampling: Sampling | None) -> None:
+        if sampling is None:
+            return
+        if sampling.temperature is not None:
+            kw["temperature"] = sampling.temperature
+        if sampling.max_tokens is not None:
+            kw["max_tokens"] = sampling.max_tokens
+        if sampling.reasoning_effort is not None:
+            kw["reasoning_effort"] = sampling.reasoning_effort
 
     def _report_dropped_fields(self, model: str, fields: list[str]) -> None:
         event = {
