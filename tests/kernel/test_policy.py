@@ -373,3 +373,29 @@ def test_kernel_policy_modules_import_agent_lazily(module: str) -> None:
         for name in names:
             if name.startswith("nanobot"):
                 assert name in allowed, f"{module}: module-level import of {name}"
+
+
+# --- final review I1: directory (subtree) requests ------------------------------------
+
+
+def test_glob_may_match_under_is_ancestor_aware() -> None:
+    from nanobot.kernel.policy import glob_may_match_under
+
+    assert glob_may_match_under("/etc", "/etc/*")
+    assert glob_may_match_under("/", "/etc/*")
+    assert glob_may_match_under("/etc/ssh", "/etc/*")  # fnmatch * crosses "/"
+    assert glob_may_match_under("/etc", "/etc/shadow")
+    assert not glob_may_match_under("/home/ws", "/etc/*")
+    assert not glob_may_match_under("/etcetera", "/etc/*")
+    assert not glob_may_match_under("/etc/shadow", "/etc/shadow")  # nothing strictly under
+
+
+def test_default_policy_denies_directory_request_over_denied_tree() -> None:
+    policy = DefaultPolicy(deny_rules=(("fs.read", "/etc/*"),))
+    for root in ("/etc", "/"):
+        decision = policy.decide(AGENT, CapabilityRequest("fs.read", root, subtree=True), None)
+        assert isinstance(decision, Deny) and POLICY_MARKER in decision.reason
+    # The same names as plain (non-directory) resources keep the exact-glob behaviour.
+    assert isinstance(policy.decide(AGENT, CapabilityRequest("fs.read", "/etc"), None), Allow)
+    ws = CapabilityRequest("fs.read", "/home/ws", subtree=True)
+    assert isinstance(policy.decide(AGENT, ws, None), Allow)

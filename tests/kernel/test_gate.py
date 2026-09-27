@@ -541,3 +541,114 @@ def test_loop_accepts_custom_policy(tmp_path):
     loop = _loop(tmp_path, policy=policy)
     assert loop.policy is policy
     assert loop.tools.gate_policy is policy
+
+
+# -- final review I1: policy and grants see the resolved path and the subtree -----
+#
+# A deny rule or plugin grant matched only the path the call NAMED. A symlink to a
+# denied file, or a directory-rooted tool (grep, find_files, list_dir) rooted at an
+# ancestor of a denied tree, slipped past it. Rules now check the lexical AND the
+# resolved path (a deny on either denies; a grant must cover both), and a request
+# whose path is a directory is denied when a rule could match anything under it.
+
+
+def _denied_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """``secret/`` (denied by rule) with a file, and a workspace with its own file."""
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "hostname").write_text("TOP-SECRET-HOST\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "ok.txt").write_text("plain workspace file\n")
+    return secret, ws, secret / "hostname"
+
+
+def _fs_registry(ws: Path, policy: DefaultPolicy) -> ToolRegistry:
+    from nanobot.agent.tools.filesystem import ListDirTool, ReadFileTool
+    from nanobot.agent.tools.search import FindFilesTool, GrepTool
+
+    registry = ToolRegistry()
+    for tool in (
+        ReadFileTool(workspace=ws), ListDirTool(workspace=ws),
+        GrepTool(workspace=ws), FindFilesTool(workspace=ws),
+    ):
+        registry.register(tool)
+    registry.configure_gate(policy=policy, workspace=ws)
+    return registry
+
+
+async def test_symlink_to_denied_file_is_denied_by_policy(tmp_path):
+    secret, ws, target = _denied_tree(tmp_path)
+    (ws / "link").symlink_to(target)
+    registry = _fs_registry(ws, DefaultPolicy(deny_rules=(("fs.read", f"{secret}/*"),)))
+
+    direct = await registry.execute("read_file", {"path": str(target)})
+    assert POLICY_MARKER in str(direct)
+    via_link = await registry.execute("read_file", {"path": str(ws / "link")})
+    assert POLICY_MARKER in str(via_link)
+    assert "TOP-SECRET-HOST" not in str(via_link)
+    relative = await registry.execute("read_file", {"path": "link"})
+    assert POLICY_MARKER in str(relative)
+
+
+@pytest.mark.parametrize("tool_name", ["grep", "find_files", "list_dir"])
+async def test_directory_tool_rooted_at_ancestor_of_denied_tree_is_denied(tmp_path, tool_name):
+    secret, ws, _ = _denied_tree(tmp_path)
+    registry = _fs_registry(ws, DefaultPolicy(deny_rules=(("fs.read", f"{secret}/*"),)))
+    params = {"pattern": "SECRET"} if tool_name == "grep" else {}
+    for root in (secret, tmp_path, Path("/")):
+        out = await registry.execute(tool_name, {**params, "path": str(root)})
+        assert POLICY_MARKER in str(out), (tool_name, root, out)
+        assert "TOP-SECRET-HOST" not in str(out)
+
+
+async def test_symlinked_directory_into_denied_tree_is_denied(tmp_path):
+    secret, ws, _ = _denied_tree(tmp_path)
+    (ws / "dirlink").symlink_to(secret, target_is_directory=True)
+    registry = _fs_registry(ws, DefaultPolicy(deny_rules=(("fs.read", f"{secret}/*"),)))
+    out = await registry.execute("grep", {"pattern": "SECRET", "path": "dirlink"})
+    assert POLICY_MARKER in str(out)
+    assert "TOP-SECRET-HOST" not in str(out)
+
+
+async def test_unrelated_paths_stay_allowed_under_a_deny_rule(tmp_path):
+    """No over-broad denial: symlink-free, non-ancestor calls work as before."""
+    secret, ws, _ = _denied_tree(tmp_path)
+    (ws / "inner").symlink_to(ws / "ok.txt")  # a symlink that stays outside the rule
+    registry = _fs_registry(ws, DefaultPolicy(deny_rules=(("fs.read", f"{secret}/*"),)))
+
+    assert "plain workspace file" in str(await registry.execute("read_file", {"path": "ok.txt"}))
+    assert "plain workspace file" in str(await registry.execute("read_file", {"path": "inner"}))
+    grep = await registry.execute("grep", {"pattern": "plain", "path": str(ws)})
+    assert POLICY_MARKER not in str(grep) and "ok.txt" in str(grep)
+    listing = await registry.execute("list_dir", {"path": str(ws)})
+    assert POLICY_MARKER not in str(listing) and "ok.txt" in str(listing)
+    # A sibling directory whose name shares the rule's prefix is not an ancestor.
+    sibling = tmp_path / "secretive"
+    sibling.mkdir()
+    (sibling / "a.txt").write_text("sibling\n")
+    out = await registry.execute("read_file", {"path": str(sibling / "a.txt")})
+    assert "sibling" in str(out) and POLICY_MARKER not in str(out)
+
+
+def test_plugin_grant_does_not_follow_a_symlink_out(tmp_path):
+    secret, ws, target = _denied_tree(tmp_path)
+    (ws / "link").symlink_to(target)
+    tool = WorkspaceCapTool(ws)
+    tool.capability_grant = (f"fs.read:{ws}/*",)
+    assert gate_call(tool, {"path": "ok.txt"}, AGENT_PRINCIPAL, DefaultPolicy(), None).allowed
+    escaped = gate_call(tool, {"path": "link"}, AGENT_PRINCIPAL, DefaultPolicy(), None)
+    assert not escaped.allowed and escaped.layer == "policy"
+    assert "capability grant" in escaped.error_text()
+
+
+def test_plugin_grant_on_a_directory_must_cover_its_whole_subtree(tmp_path):
+    _secret, ws, _ = _denied_tree(tmp_path)
+    (ws / "src").mkdir()
+    (ws / "src.py").mkdir()  # a directory whose NAME matches a file-only grant
+    tool = WorkspaceCapTool(ws)
+    tool.capability_grant = (f"fs.read:{ws}/*",)
+    assert gate_call(tool, {"path": "src"}, AGENT_PRINCIPAL, DefaultPolicy(), None).allowed
+    tool.capability_grant = (f"fs.read:{ws}/*.py",)
+    denied = gate_call(tool, {"path": "src.py"}, AGENT_PRINCIPAL, DefaultPolicy(), None)
+    assert not denied.allowed and "capability grant" in denied.error_text()

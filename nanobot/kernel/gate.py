@@ -14,10 +14,17 @@ Order, per ``CapabilityRequest`` the tool declares (``Tool.capabilities``):
   has every declared request outside that grant denied next, at layer ``"policy"`` with
   ``POLICY_MARKER`` (it is the plugin's attenuated policy, so it counts toward I5). A
   grant rule ``cap`` covers every resource; ``cap:pattern`` covers resources matching
-  ``pattern`` (``fnmatch``, after fs normalisation). Built-ins carry no grant. The gate
+  ``pattern`` (``fnmatch``, after fs normalisation; for an fs request both the named and
+  the symlink-resolved path must match, and a directory request needs the pattern to
+  cover its whole subtree, ``resource_covered``). Built-ins carry no grant. The gate
   is declaration-based: a plugin that under-declares in ``capabilities`` is not
   contained by this (in-process code needs the sandbox).
 - ``PermissionPolicy.decide`` runs only when no floor (or strict refusal) fired.
+- Final review I1: for an ``fs.*`` request the grant and ``decide`` run on every view
+  of the path (``_fs_views``): the lexical path and, when it differs, the
+  symlink-resolved one; a deny on EITHER denies. A path that resolves to an existing
+  directory is flagged ``subtree`` so resource rules consider everything beneath it
+  (``DefaultPolicy`` does; a custom policy must honour ``req.subtree`` itself).
 - A ``policy.decision`` event goes to the trace sink for EVERY evaluated request
   (allow or deny), via ``safe_emit``: a failing sink never changes the verdict.
 - The first ``Deny`` wins; later requests of the same call are not evaluated.
@@ -41,7 +48,6 @@ lazily (Ruling C).
 
 from __future__ import annotations
 
-import fnmatch
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +66,7 @@ from nanobot.kernel.policy import (
     PermissionPolicy,
     Principal,
     policy_deny,
+    resource_covered,
 )
 from nanobot.kernel.strict import strict_sandbox_deny
 from nanobot.kernel.trace import LoguruTraceSink, TraceSink, safe_emit
@@ -137,7 +144,7 @@ def _normalize_fs_resource(resource: str, workspace: Path | None) -> str:
       path), never to the process cwd.
     - The result is absolute and lexically normalised (``os.path.abspath``); symlinks
       are NOT resolved here: ``ProtectedFloor.matches`` checks the path both as given
-      and after ``resolve()``.
+      and after ``resolve()``, and grants and policy get both views via ``_fs_views``.
     """
     text = resource.strip()
     if not text:
@@ -149,6 +156,30 @@ def _normalize_fs_resource(resource: str, workspace: Path | None) -> str:
         return os.path.abspath(candidate)
     except (OSError, RuntimeError, ValueError):
         return text
+
+
+def _fs_views(req: CapabilityRequest) -> tuple[CapabilityRequest, ...]:
+    """The views of a normalised fs request that grants and policy must all accept.
+
+    - The lexical path (what the call names) first, so audit events and deny texts
+      keep today's form; then the symlink-resolved path when it differs (a symlink
+      must neither dodge a deny rule nor widen a grant).
+    - Both carry ``subtree=True`` when the resolved path is an existing directory:
+      a directory-rooted tool may read or write anything beneath it.
+    - Resolution failures fall back to the lexical view alone (the floor still
+      resolves on its own).
+    """
+    if not req.resource:
+        return (req,)
+    try:
+        resolved = os.path.realpath(req.resource)
+        subtree = os.path.isdir(resolved)
+    except (OSError, RuntimeError, ValueError):
+        return (req,)
+    lexical = CapabilityRequest(req.capability, req.resource, subtree)
+    if resolved == req.resource:
+        return (lexical,)
+    return (lexical, CapabilityRequest(req.capability, resolved, subtree))
 
 
 def _tool_workspace(tool: Any) -> Path | None:
@@ -245,7 +276,7 @@ def plugin_grant_deny(tool: Any, principal: Principal, req: CapabilityRequest) -
         return None  # built-ins and legacy tools carry no grant
     for rule in grant:
         cap, sep, pattern = str(rule).partition(":")
-        if cap == req.capability and (not sep or fnmatch.fnmatchcase(req.resource, pattern)):
+        if cap == req.capability and (not sep or resource_covered(req, pattern)):
             return None
     return policy_deny(
         principal, req,
@@ -314,10 +345,13 @@ def gate_call(
         layer: GateLayer | None
         floor_deny = check_floors(principal, req, protected=floor)
         strict_deny = strict_sandbox_deny(env, tool, name, req) if floor_deny is None else None
-        grant_deny = (
-            plugin_grant_deny(tool, principal, req)
-            if floor_deny is None and strict_deny is None else None
-        )
+        views = _fs_views(req) if req.capability in FS_CAPABILITIES else (req,)
+        grant_deny = None
+        if floor_deny is None and strict_deny is None:
+            grant_deny = next(
+                (d for v in views if (d := plugin_grant_deny(tool, principal, v)) is not None),
+                None,
+            )
         if floor_deny is not None:
             decision, layer = floor_deny, "floor"
         elif strict_deny is not None:
@@ -326,11 +360,17 @@ def gate_call(
             decision, layer = grant_deny, "policy"
         else:
             layer = "policy"
-            try:
-                decision = policy.decide(principal, req, ctx)
-            except Exception as exc:  # noqa: BLE001 - a broken policy fails closed
-                logger.warning("policy {} raised {!r}; denying", type(policy).__name__, exc)
-                decision = policy_deny(principal, req, "policy error")
+            decision = Allow()
+            for view in views:
+                try:
+                    decision = policy.decide(principal, view, ctx)
+                except Exception as exc:  # noqa: BLE001 - a broken policy fails closed
+                    logger.warning(
+                        "policy {} raised {!r}; denying", type(policy).__name__, exc,
+                    )
+                    decision = policy_deny(principal, view, "policy error")
+                if isinstance(decision, Deny):
+                    break
         event = _decision_event(principal, name, req, decision, layer)
         events.append(event)
         safe_emit(sink, event)

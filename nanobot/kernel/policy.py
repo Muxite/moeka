@@ -25,10 +25,72 @@ PrincipalKind = Literal["agent", "subagent", "plugin", "host"]
 
 @dataclass(frozen=True)
 class CapabilityRequest:
-    """One capability a tool call needs, e.g. ``("fs.write", "/srv/app/x.conf")``."""
+    """One capability a tool call needs, e.g. ``("fs.write", "/srv/app/x.conf")``.
+
+    ``subtree`` is set by the gate on an ``fs.*`` request whose path is an existing
+    directory: a directory-rooted tool (grep, find_files, list_dir) may touch anything
+    beneath it, so resource rules must consider the whole subtree
+    (``glob_may_match_under`` / ``glob_covers_subtree``), not just the root's name.
+    """
 
     capability: str
     resource: str = ""
+    subtree: bool = False
+
+
+_GLOB_CHARS = "*?["
+
+
+def _glob_literal_prefix(glob: str) -> tuple[str, bool]:
+    """The part of *glob* before its first wildcard, and whether it has one."""
+    cut = min((i for i in (glob.find(c) for c in _GLOB_CHARS) if i >= 0), default=-1)
+    return (glob, False) if cut < 0 else (glob[:cut], True)
+
+
+def _dir_prefix(directory: str) -> str:
+    return directory.rstrip("/") + "/"
+
+
+def glob_may_match_under(directory: str, glob: str) -> bool:
+    """True when some path strictly under *directory* could match *glob* (``fnmatch``).
+
+    Conservative (fail closed): with a wildcard, ``fnmatch``'s ``*`` also crosses
+    ``/``, so any path under *directory* may match once the glob's literal prefix and
+    ``directory/`` agree (one is a prefix of the other). ``/`` and ``/etc`` are both
+    "under" ``/etc/*`` in this sense; ``/home/ws`` is not.
+    """
+    prefix, wild = _glob_literal_prefix(glob)
+    under = _dir_prefix(directory)
+    if not wild:
+        return prefix.startswith(under)
+    return prefix.startswith(under) or under.startswith(prefix)
+
+
+def glob_covers_subtree(directory: str, glob: str) -> bool:
+    """True when EVERY path under *directory* (and *directory* itself) matches *glob*.
+
+    ``directory/`` matching a glob that ends in ``*`` means that final ``*`` absorbs
+    any further suffix, so every descendant matches too.
+    """
+    return (
+        glob.endswith("*")
+        and fnmatch.fnmatchcase(directory, glob)
+        and fnmatch.fnmatchcase(_dir_prefix(directory), glob)
+    )
+
+
+def resource_matches(req: CapabilityRequest, glob: str) -> bool:
+    """Deny-rule match: the resource, or (for a directory request) anything under it."""
+    if fnmatch.fnmatchcase(req.resource, glob):
+        return True
+    return bool(req.subtree and req.resource) and glob_may_match_under(req.resource, glob)
+
+
+def resource_covered(req: CapabilityRequest, glob: str) -> bool:
+    """Allow/grant match: the resource, and (for a directory request) its whole subtree."""
+    if req.subtree and req.resource:
+        return glob_covers_subtree(req.resource, glob)
+    return fnmatch.fnmatchcase(req.resource, glob)
 
 
 @dataclass(frozen=True)
@@ -107,7 +169,9 @@ class DefaultPolicy:
     - ``deny_capabilities``: capabilities denied for every resource (the registry may
       drop such a tool entirely; see ``denies_everywhere``).
     - ``deny_rules``: ``(capability, resource_glob)`` pairs denied per resource
-      (``fnmatch`` syntax).
+      (``fnmatch`` syntax). A directory request (``subtree``) is denied when the glob
+      could match anything beneath it (``resource_matches``). The gate also calls
+      ``decide`` with the symlink-resolved path, so a rule fires on either form.
     - ``allowed``: ``None`` means every capability; otherwise only these (set by
       ``attenuate``).
     """
@@ -147,7 +211,7 @@ class DefaultPolicy:
         if cap in self.deny_capabilities:
             return policy_deny(principal, req, "capability denied for all resources")
         for rule_cap, glob in self.deny_rules:
-            if rule_cap == cap and fnmatch.fnmatchcase(req.resource, glob):
+            if rule_cap == cap and resource_matches(req, glob):
                 return policy_deny(principal, req, f"resource matches deny rule {glob!r}")
         return Allow()
 
