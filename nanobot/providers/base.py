@@ -1505,13 +1505,14 @@ class LLMProvider(ABC):
         self,
         model: str | None,
         reasoning_effort: str | None,
+        sampling: Sampling | None = None,
     ) -> frozenset[str] | None:
         """Request-extras fields this call can honour; ``None`` = pass them through.
 
-        Providers with model-dependent limits override this; routing wrappers
-        return their primary's set.
+        Providers with model- or value-dependent limits (``sampling`` is the
+        requested set) override this; routing wrappers return their primary's.
         """
-        _ = model, reasoning_effort
+        _ = model, reasoning_effort, sampling
         return self.supported_sampling_fields
 
     def _apply_request_extras(self, kw: dict[str, Any]) -> None:
@@ -1532,7 +1533,7 @@ class LLMProvider(ABC):
             effort = sampling.reasoning_effort
         else:
             effort = kw.get("reasoning_effort")
-        supported = self._sampling_support(kw.get("model"), effort)
+        supported = self._sampling_support(kw.get("model"), effort, sampling)
         if supported is None:
             return
 

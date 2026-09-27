@@ -974,6 +974,7 @@ class OpenAICompatProvider(LLMProvider):
         self,
         model: str | None,
         reasoning_effort: str | None,
+        sampling: Any = None,
     ) -> frozenset[str] | None:
         supported = self.supported_sampling_fields
         if self._should_use_responses_api(model, reasoning_effort):

@@ -25,6 +25,7 @@ from nanobot.providers.base import (
 )
 
 if TYPE_CHECKING:
+    from nanobot.kernel.sampling import Sampling
     from nanobot.kernel.trace import TraceSink
 
 # Circuit breaker tuned to match OpenAICompatProvider's Responses API breaker.
@@ -167,10 +168,11 @@ class FallbackProvider(LLMProvider):
         self,
         model: str | None,
         reasoning_effort: str | None,
+        sampling: Sampling | None = None,
     ) -> frozenset[str] | None:
         # Decide drop/raise against the primary before anything is sent;
         # fallback candidates then drop whatever they cannot send themselves.
-        return self._primary._sampling_support(model, reasoning_effort)
+        return self._primary._sampling_support(model, reasoning_effort, sampling)
 
     def set_fallback_model_observer(self, observer: FallbackModelObserver | None) -> None:
         """Attach a process-level observer without changing request call signatures."""

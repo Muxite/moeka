@@ -258,11 +258,11 @@ async def test_anthropic_supported_subset_snapshot() -> None:
         MESSAGES, provider_context=_ctx(sampling, extra_body={"metadata": {"user_id": "u"}}),
     )
 
+    # Claude 4.x rejects temperature together with top_p: temperature wins.
     assert _without_messages(calls[0]) == {
         "model": "claude-sonnet-4-5",
         "max_tokens": 256,
         "temperature": 0.2,
-        "top_p": 0.9,
         "top_k": 40,
         "stop_sequences": ["END", "STOP"],
         "extra_body": {"metadata": {"user_id": "u"}},
@@ -271,26 +271,117 @@ async def test_anthropic_supported_subset_snapshot() -> None:
         "event": "sampling.dropped",
         "provider": "anthropic",
         "model": "claude-sonnet-4-5",
-        "fields": ["presence_penalty", "seed"],
+        "fields": ["top_p", "presence_penalty", "seed"],
     }]
 
 
-async def test_anthropic_every_field_with_thinking_drops_temperature_and_top_k() -> None:
+async def test_anthropic_every_field_with_thinking_snapshot() -> None:
     provider, calls = _anthropic()
     sink = RecordingSink()
     provider.trace_sink = sink
 
     await provider.chat_with_retry(MESSAGES, provider_context=_ctx(EVERY_FIELD))
 
-    sent = calls[0]
-    assert sent["top_p"] == 0.9
-    assert sent["stop_sequences"] == ["END"]
-    assert sent["thinking"] == {"type": "enabled", "budget_tokens": 1024}
-    assert "top_k" not in sent
+    # Thinking pins temperature, rejects top_k and needs top_p >= 0.95 (0.9 here).
+    assert _without_messages(calls[0]) == {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 5120,  # budget (1024) + 4096 headroom
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+        "temperature": 1.0,
+        "stop_sequences": ["END"],
+    }
     assert sink.events[0]["fields"] == [
-        "temperature", "top_k", "min_p", "presence_penalty", "frequency_penalty",
+        "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty",
         "repetition_penalty", "logit_bias", "seed",
     ]
+
+
+async def test_anthropic_top_p_alone_omits_default_temperature() -> None:
+    provider, calls = _anthropic()
+    sink = RecordingSink()
+    provider.trace_sink = sink
+
+    await provider.chat_with_retry(MESSAGES, provider_context=_ctx(Sampling(top_p=0.8)))
+
+    assert calls[0]["top_p"] == 0.8
+    assert "temperature" not in calls[0]
+    assert sink.events == []
+
+
+async def test_anthropic_temperature_and_top_p_raise() -> None:
+    provider, calls = _anthropic()
+    with pytest.raises(UnsupportedRequestError) as info:
+        await provider.chat_with_retry(
+            MESSAGES,
+            provider_context=_ctx(Sampling(temperature=0.3, top_p=0.8), on_unsupported="raise"),
+        )
+    assert info.value.fields == ("top_p",)
+    assert calls == []
+
+
+async def test_anthropic_thinking_accepts_high_top_p_without_temperature() -> None:
+    provider, calls = _anthropic()
+    sink = RecordingSink()
+    provider.trace_sink = sink
+
+    await provider.chat_with_retry(
+        MESSAGES, reasoning_effort="low", provider_context=_ctx(Sampling(top_p=0.97)),
+    )
+
+    sent = calls[0]
+    assert sent["thinking"]["type"] == "enabled"
+    assert sent["top_p"] == 0.97
+    assert "temperature" not in sent
+    assert sink.events == []
+
+
+async def test_anthropic_thinking_low_top_p_dropped_or_raised() -> None:
+    provider, calls = _anthropic()
+    sink = RecordingSink()
+    provider.trace_sink = sink
+
+    await provider.chat_with_retry(
+        MESSAGES, reasoning_effort="low", provider_context=_ctx(Sampling(top_p=0.9)),
+    )
+    assert "top_p" not in calls[0]
+    assert sink.events[0]["fields"] == ["top_p"]
+
+    with pytest.raises(UnsupportedRequestError) as info:
+        await provider.chat_with_retry(
+            MESSAGES, reasoning_effort="low",
+            provider_context=_ctx(Sampling(top_p=0.9), on_unsupported="raise"),
+        )
+    assert info.value.fields == ("top_p",)
+    assert len(calls) == 1
+
+
+async def test_anthropic_thinking_drops_temperature_and_top_k() -> None:
+    provider, calls = _anthropic()
+    sink = RecordingSink()
+    provider.trace_sink = sink
+
+    await provider.chat_with_retry(
+        MESSAGES, reasoning_effort="low",
+        provider_context=_ctx(Sampling(temperature=0.2, top_k=10)),
+    )
+
+    assert "top_k" not in calls[0]
+    assert calls[0]["temperature"] == 1.0  # thinking's own pinned value, not 0.2
+    assert sink.events[0]["fields"] == ["temperature", "top_k"]
+
+
+def test_anthropic_direct_build_kwargs_applies_same_rules() -> None:
+    provider, _ = _anthropic()
+    both = provider._build_kwargs(
+        MESSAGES, None, None, 100, 0.7, None, None,
+        provider_context=_ctx(Sampling(temperature=0.3, top_p=0.8)),
+    )
+    assert both["temperature"] == 0.3 and "top_p" not in both
+    thinking = provider._build_kwargs(
+        MESSAGES, None, None, 100, 0.7, "low", None,
+        provider_context=_ctx(Sampling(top_p=0.5, top_k=3)),
+    )
+    assert "top_p" not in thinking and "top_k" not in thinking
 
 
 async def test_anthropic_raise_sends_nothing() -> None:

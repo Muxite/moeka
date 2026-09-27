@@ -50,6 +50,14 @@ _THINKING_DISABLE_MIN_VERSIONS = {
     "sonnet": (5, 0),
 }
 _SAMPLING_DEPRECATED_MODELS = {"claude-mythos-preview"}
+# With extended thinking the Messages API only accepts top_p in [0.95, 1].
+_THINKING_MIN_TOP_P = 0.95
+
+
+def _thinking_on(reasoning_effort: str | None) -> bool:
+    return (reasoning_effort or "").lower() not in ("", "none")
+
+
 # RequestExtras sampling the Messages API accepts (stop -> stop_sequences).
 _ANTHROPIC_SAMPLING_FIELDS = frozenset({
     *CORE_SAMPLING_FIELDS, "top_p", "top_k", "stop", EXTRA_BODY_FIELD,
@@ -594,15 +602,22 @@ class AnthropicProvider(LLMProvider):
         self,
         model: str | None,
         reasoning_effort: str | None,
+        sampling: Any = None,
     ) -> frozenset[str] | None:
         supported = self.supported_sampling_fields
         model_name = self._strip_prefix(model or self.default_model)
         if self._omits_sampling(model_name):
-            supported = supported - {"temperature", "top_p", "top_k"}
-        effort = (reasoning_effort or "").lower()
-        if effort not in ("", "none"):
-            # Extended thinking pins temperature and rejects top_k.
+            return supported - {"temperature", "top_p", "top_k"}
+        top_p = getattr(sampling, "top_p", None)
+        if _thinking_on(reasoning_effort):
+            # Extended thinking pins temperature, rejects top_k and only
+            # accepts top_p in [0.95, 1].
             supported = supported - {"temperature", "top_k"}
+            if top_p is not None and top_p < _THINKING_MIN_TOP_P:
+                supported = supported - {"top_p"}
+        elif top_p is not None and getattr(sampling, "temperature", None) is not None:
+            # Claude 4.x rejects temperature together with top_p: keep temperature.
+            supported = supported - {"top_p"}
         return supported
 
     def _build_kwargs(
@@ -687,13 +702,22 @@ class AnthropicProvider(LLMProvider):
             if tc:
                 kwargs["tool_choice"] = tc
 
-        if sampling is not None:
-            if sampling.top_p is not None and not omit_temperature:
-                kwargs["top_p"] = sampling.top_p
-            if sampling.top_k is not None and not omit_temperature and not thinking_enabled:
+        if sampling is not None and not omit_temperature:
+            # Same rules as _sampling_support, re-applied for direct chat() calls.
+            top_p = sampling.top_p
+            if top_p is not None and (
+                (thinking_enabled and top_p < _THINKING_MIN_TOP_P)
+                or (not thinking_enabled and sampling.temperature is not None)
+            ):
+                top_p = None
+            if top_p is not None:
+                # temperature and top_p are mutually exclusive on Claude 4.x.
+                kwargs.pop("temperature", None)
+                kwargs["top_p"] = top_p
+            if sampling.top_k is not None and not thinking_enabled:
                 kwargs["top_k"] = sampling.top_k
-            if sampling.stop:
-                kwargs["stop_sequences"] = list(sampling.stop)
+        if sampling is not None and sampling.stop:
+            kwargs["stop_sequences"] = list(sampling.stop)
         if request is not None and request.extra_body:
             kwargs["extra_body"] = plain_request_body(request.extra_body)
 
