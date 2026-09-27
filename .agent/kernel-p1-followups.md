@@ -86,6 +86,14 @@ flowchart LR
 - Env-less fallbacks still read ambient state through `kernel.legacy` helpers whenever a caller passes no host
   path. The AST guard cannot see through the helpers; `tests/kernel/test_fake_home.py` covers the strict-env
   runtime path for one turn with `exec`. Open: extend the runtime proof to Dream, MCP and image generation.
-- The exec guard expands `$VAR` against `env.exec_base_env`, but the child sees only
-  `HOME`/`LANG`/`TERM` plus `allowedEnvKeys`, so the guard over-approximates. This matches the pre-kernel
-  behaviour. Open (tighten to `_build_env()` if it matters).
+- Exec guard `$VAR` handling (security-relevant). Fixed in Task 6 fix round 1:
+  - The bug: under a strict env the guard expanded `$VAR` against `exec_base_env` alone. `allowedEnvKeys`
+    resolved through `env.credentials` were missing from that mapping.
+  - A word starting with a variable (`$KEY/x`) was never extracted as a path. This was true in legacy mode too:
+    `cat $HOME/.ssh/x` passed `restrictToWorkspace`.
+  - The fix: the guard now expands against `_build_env()`, the exact child env. It also scans the command once
+    with every reference expanded (unset variables become empty, as in the shell).
+  - Pinned by `test_exec_guard_expands_allowed_env_keys_from_resolver` and
+    `test_exec_guard_blocks_leading_variable_path_outside_workspace`.
+  - Remaining limits: variables the command sets itself (`D=/x; cat $D/y`), and a login shell's profile, are
+    not modelled. Open.

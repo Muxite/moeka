@@ -100,7 +100,9 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   `work_dir`; sessions, traces and policy stay in `state_dir`.
 - Enforced by: a construction check, the file-tool floor, and the sandbox for shell (section 4).
 - Proven by: a test that constructing the kernel with overlapping dirs raises; a test that fs tools deny `state_dir`.
-- Status: partial. Strict `Paths` exist: a strict `CoreEnvironment` rejects overlapping dirs, and sessions,
+- Status: partial. `Paths` rejects overlap unless `overlap_ok=True` (legacy flat layout only), and
+  `CoreEnvironment(strict=True)` raises `PathsOverlapError` on overlapping paths even with `overlap_ok=True`
+  (`tests/kernel/test_env.py`). Sessions,
   auth stores, `llm_usage`, plugin state and logs live under `state_dir`, while media lives under `work_dir`.
   The file-tool floor denies `state_dir` (`tests/kernel/test_paths_wiring.py`).
 - Not met: shell isolation. `exec` can still reach `state_dir` by absolute path unless the workspace guard is on

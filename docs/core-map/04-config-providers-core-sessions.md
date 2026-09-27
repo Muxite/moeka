@@ -268,9 +268,12 @@ flowchart LR
   `legacy_runtime_subdir`, `legacy_sessions_dir`, `process_env_snapshot`, `ambient_credential`), and only
   when a caller passed no host path. The AST guard `tests/kernel/test_no_ambient_reads.py` enforces this, and
   `tests/kernel/test_fake_home.py` proves it at runtime (poisoned env, fake `HOME`).
-- Exec: the child env is built from `env.exec_base_env` (`HOME`/`LANG`/`TERM` plus `allowedEnvKeys` resolved
-  with scope `exec`). `$VAR` in guarded command paths and sandbox bind paths expands against that same base env
-  (`agent/tools/sandbox.py` `expand_vars`), not the process env.
+- Exec: the child env (`ExecTool._build_env`) is `HOME`/`LANG`/`TERM` from `env.exec_base_env` plus
+  `allowedEnvKeys`, resolved through `env.credentials` with scope `exec`.
+- The workspace guard expands `$VAR` in command paths against that exact child env, including a word that
+  starts with a variable (`$KEY/x`). Unset variables expand to empty, as in the shell.
+- Sandbox bind paths expand against `env.exec_base_env` (`agent/tools/sandbox.py` `expand_vars`).
+- Neither ever uses the process env.
 
 ## 5. Sessions and crash behaviour
 
