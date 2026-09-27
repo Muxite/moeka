@@ -766,3 +766,69 @@ def test_result_error_is_not_classified_as_a_violation():
         workspace_violation_counts=counts,
     )
     assert handled is None and counts == {}
+
+
+# -- review fix round 2 ------------------------------------------------------------------
+
+
+class _Count(BaseModel):
+    n: int
+
+
+@pytest.mark.parametrize("make", [
+    lambda: _Count.model_construct(n="not-int"),
+    lambda: _mutated(),
+])
+async def test_function_tool_unvalidated_instance_is_rejected(make):
+    """pydantic returns an instance as is; FunctionTool re-validates its fields."""
+    tool = FunctionTool(make, name="cnt", output_model=_Count)
+    tools = ToolRegistry()
+    tools.register(tool)
+    out = await tools.execute("cnt", {})
+    assert is_tool_error_result(out)
+    assert RESULT_SCHEMA_MARKER in out and "n:" in out
+
+
+def _mutated() -> _Count:
+    inst = _Count(n=1)
+    inst.n = "not-int"  # no validate_assignment: pydantic does not check this
+    return inst
+
+
+async def test_function_tool_valid_instance_still_passes():
+    tool = FunctionTool(lambda: _Count(n=2), name="cnt", output_model=_Count)
+    out = await tool.execute()
+    assert not is_tool_error_result(out) and out.structured == _Count(n=2)
+
+
+def test_only_function_tool_may_skip_the_recheck():
+    """A tool mimicking FunctionTool's shape cannot opt out of its output_schema."""
+
+    class Mimic(ReturnTool):
+        output_model = _Count
+
+    bad = ToolResult('{"n": "x"}', structured=_Count.model_construct(n="x"))
+    tool = Mimic(bad, {"type": "object", "properties": {"n": {"type": "integer"}}})
+    out = validate_result(tool, bad)
+    assert is_tool_error_result(out) and "n: expected integer, got string" in out
+
+
+def test_nullable_union_accepts_none_for_arguments_and_results():
+    from nanobot.agent.tools.base import Schema
+
+    schema = {"type": ["string", "integer"], "nullable": True}
+    assert Schema.validate_json_schema_value(None, schema, "v") == []
+    wrapped = {"type": "object", "properties": {"v": schema}}
+    assert Schema.validate_json_schema_value({"v": None}, wrapped) == []
+    value = {"v": None}
+    assert validate_result(ReturnTool(None, wrapped), value) is value
+    # Not nullable: None is still rejected.
+    strict = {"type": "object", "properties": {"v": {"type": ["string", "integer"]}}}
+    assert RESULT_SCHEMA_MARKER in validate_result(ReturnTool(None, strict), {"v": None})
+
+
+def test_union_types_apply_to_arguments_too():
+    """Deliberate: a type list is a union for arguments as well (JSON Schema semantics)."""
+    from nanobot.agent.tools.base import Schema
+
+    assert Schema.validate_json_schema_value("abc", {"type": ["integer", "string"]}) == []

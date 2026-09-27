@@ -101,6 +101,17 @@ flowchart LR
   - Deeply nested JSON text fails with the marker instead of a bare `RecursionError`.
   - `FunctionTool` results are trusted as the pydantic `output_model` instance instead of being re-checked in
     their dumped form, which a `field_serializer` can change.
+- Fixed in review round 2:
+  - `FunctionTool` re-validates a returned model instance from its dumped fields. pydantic returns an existing
+    instance as is, so a `model_construct()`-ed or mutated instance used to pass.
+  - The kernel's trust skip applies only to exactly `FunctionTool`, so no other tool can opt out.
+  - A nullable union (`"type": [...]` with `nullable: true`) accepts `None` again.
+- A `type` list is a union for arguments as well as results. This is deliberate: the old first-type-only
+  check was a bug, since the model sees the whole union. Integral floats stay results-only.
+- Open (round 2, deferred):
+  - `FunctionTool`'s own `json.loads` does not catch `RecursionError`.
+  - The union branch takes the first matching member without backtracking, so a value that matches an earlier
+    member's type but fails its keywords is not tried against later members.
 - The SDK's `Invalid schema for tool ...` `RuntimeError` is not mapped, so it stays a generic MCP failure
   without the marker. Open.
 - `tool.result_invalid` fires only for `validate_result`'s own rejections, not for `FunctionTool` or

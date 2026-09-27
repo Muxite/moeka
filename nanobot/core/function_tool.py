@@ -121,8 +121,10 @@ class FunctionTool(Tool):
     uses) and returned as ``ToolResult(<model JSON>, structured=<model instance>)``;
     a mismatch returns ``ToolResult.error`` with ``RESULT_SCHEMA_MARKER`` and the field
     paths, never raises. ``output_schema`` is then the model's JSON Schema (it declares
-    the tool as typed); the kernel's ``validate_result`` trusts the pydantic instance
-    rather than re-checking its dumped form, which a ``field_serializer`` may change.
+    the tool as typed). A returned model instance is re-validated from its dumped fields
+    (pydantic would otherwise return it unchecked), so the instance attached is always
+    freshly validated; the kernel's ``validate_result`` trusts it (for this exact class
+    only) rather than re-checking its dumped form, which a ``field_serializer`` may change.
     Without it the return value passes exactly as before.
     """
 
@@ -194,6 +196,15 @@ class FunctionTool(Tool):
                     "(value): not valid JSON, expected a value matching the declared "
                     "output schema",
                 ])
+        # pydantic returns an existing instance as is (revalidate_instances="never"), so
+        # a model_construct()-ed or mutated instance would pass unchecked: validate its
+        # dumped fields instead.
+        dump = getattr(result, "model_dump", None)
+        if callable(dump) and not isinstance(result, type):
+            try:
+                result = dump(warnings=False)
+            except Exception as exc:  # noqa: BLE001 - an undumpable instance is a bad result
+                return result_schema_error(self._name, [f"(value): {type(exc).__name__}"])
         try:
             model = _coerce_json(result, self._output_model)
         except Exception as exc:  # noqa: BLE001 - a bad return value is a tool error

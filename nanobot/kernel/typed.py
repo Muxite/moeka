@@ -7,8 +7,9 @@
   ``nanobot.kernel.gate``, the module that owns the other per-call checks.
 - No ``output_schema``, or an empty one (``{}``, which accepts any value): the result
   passes unchanged (the same object). Error results (``ToolResult.error``) are never
-  validated. A ``ToolResult`` whose ``structured`` is an instance of the tool's own
-  pydantic ``output_model`` (``FunctionTool``) is trusted: pydantic already checked it.
+  validated. A ``ToolResult`` from exactly ``FunctionTool`` whose ``structured`` is an
+  instance of its ``output_model`` is trusted: ``FunctionTool`` built it by validating
+  the dumped fields (a returned instance is never trusted as is).
 - JSON semantics: a ``type`` list is a union, and an integral float (``4.0``) satisfies
   ``integer``, as ``jsonschema`` and the MCP SDK agree.
 - The value checked is, in order: a ``ToolResult``'s ``structured`` payload when it has
@@ -113,7 +114,7 @@ def _structured_value(result: Any) -> tuple[bool, Any]:
         value = result
     dump = getattr(value, "model_dump", None)
     if callable(dump) and not isinstance(value, type):
-        value = dump(mode="json")
+        value = dump(mode="json", warnings=False)
     return True, value
 
 
@@ -128,10 +129,14 @@ def _validated_by_output_model(tool: Any, result: Any) -> bool:
 
     if not (isinstance(result, ToolResult) and result.has_structured):
         return False
-    try:
-        model_cls = getattr(tool, "output_model", None)
-    except Exception:  # noqa: BLE001 - no trusted model: validate normally
+    from nanobot.core.function_tool import FunctionTool  # lazy: core imports agent
+
+    # Exactly FunctionTool: its ``_typed_result`` builds the instance by validating a
+    # dict, never trusting a returned instance. Any other tool (a subclass, a plugin
+    # exposing ``output_model``) cannot opt out of its ``output_schema`` this way.
+    if type(tool) is not FunctionTool:
         return False
+    model_cls = tool.output_model
     return isinstance(model_cls, type) and isinstance(result.structured, model_cls)
 
 

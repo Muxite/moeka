@@ -270,7 +270,7 @@ class Schema(ABC):
         if isinstance(raw_type, list):
             members = [x for x in raw_type if isinstance(x, str) and x != "null"]
             if len(members) > 1:
-                if "null" in raw_type and val is None:
+                if val is None and ("null" in raw_type or schema.get("nullable", False)):
                     return []
                 for member in members:
                     if Schema._matches_type(val, member, integral_floats):
