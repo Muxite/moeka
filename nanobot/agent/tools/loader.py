@@ -496,8 +496,15 @@ class _KernelPluginTool(_LegacyErrorPrefixTool):
     """A kernel-mode plugin tool with its load-time grant (``policy ∩ requested``).
 
     ``capability_grant`` is read by the gate (``nanobot.kernel.gate``): a declared
-    request outside it is denied. ``capability_surface`` is narrowed to the granted
-    capability names (strict-mode dropping and sub-agent attenuation see the narrow set).
+    request outside it is denied.
+
+    ``capability_surface`` is deliberately NOT narrowed to the grant: it stays the
+    wrapped tool's true static surface, as for every other tool. Strict mode's drop
+    (``ToolRegistry._strict_drop`` -> ``fully_denied``) must see the capabilities the
+    tool can ask for; a narrowed surface is empty exactly when the policy denies all of
+    them everywhere, and ``fully_denied`` keeps an empty surface, so narrowing hid such a
+    plugin from the drop. Sub-agent attenuation may therefore see a wider set than the
+    grant, which widens nothing: the gate checks the grant on every call.
     """
 
     _plugin_discoverable = False
@@ -514,9 +521,3 @@ class _KernelPluginTool(_LegacyErrorPrefixTool):
     @property
     def capability_grant(self) -> tuple[str, ...]:
         return self._grant
-
-    def capability_surface(self) -> frozenset[str] | None:
-        surface = self._wrapped.capability_surface()
-        if surface is None:
-            return None
-        return frozenset(surface) & frozenset(rule.split(":", 1)[0] for rule in self._grant)

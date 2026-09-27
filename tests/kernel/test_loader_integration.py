@@ -374,8 +374,8 @@ async def test_kernel_mode_grant_is_policy_intersect_requested(
     tool = registry.get("kplug")
     # fs.write requested but denied everywhere by policy: not granted.
     assert tool.capability_grant == ("net.fetch:api.example.com", "fs.read")
-    # Surface is narrowed to the granted names.
-    assert tool.capability_surface() == frozenset({"net.fetch"})
+    # The surface stays the tool's true static surface; the grant is enforced separately.
+    assert tool.capability_surface() == frozenset({"net.fetch", "fs.write"})
 
     ok = registry.gate(tool, {"cap": "net.fetch", "resource": "api.example.com"})
     assert ok.allowed
@@ -403,6 +403,70 @@ async def test_kernel_mode_plugin_requesting_nothing_gets_nothing(
     # A call that declares nothing still runs (the gate is declaration-based).
     assert registry.gate(tool, {}).allowed
     assert await registry.execute("kplug", {}) == "plugin ran"
+
+
+def _strict_env(tmp_path: Path, sink: _Sink) -> CoreEnvironment:
+    work = tmp_path / "work"
+    state = tmp_path / "state"
+    work.mkdir(exist_ok=True)
+    state.mkdir(exist_ok=True)
+    return CoreEnvironment(
+        config=_Config(), credentials=StaticCredentialResolver({}),
+        paths=Paths(work_dir=work, state_dir=state), trace=sink, strict=True,
+    )
+
+
+def _strict_registry(env: CoreEnvironment) -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.configure_gate(
+        policy=DefaultPolicy(deny_capabilities=frozenset({"net.fetch", "fs.write"})), env=env,
+    )
+    return registry
+
+
+def test_strict_mode_drops_kernel_plugin_whose_surface_is_denied_everywhere(
+    tmp_path, plugin_base, sink, plugin_registry,
+):
+    """Review fix: an empty grant (every requested capability denied everywhere) must
+    not hide the tool from Task 13's strict drop. Parity with legacy mode."""
+    env = _strict_env(tmp_path, sink)
+    legacy_plugin = _Plugin(plugin_base, name="kplug-legacy", caps=("net.fetch", "fs.write"))
+    _r, legacy = _load(
+        ToolLoader(test_classes=[]), _ctx(tmp_path, env), [legacy_plugin], _strict_registry(env),
+    )
+    assert legacy == []
+
+    plugin = _Plugin(plugin_base, caps=("net.fetch", "fs.write"))
+    plugin.activate(plugin_registry)
+    registry, names = _load(
+        ToolLoader(test_classes=[], plugin_registry=plugin_registry),
+        _ctx(tmp_path, env), [plugin], _strict_registry(env),
+    )
+
+    assert names == []
+    assert not registry.has("kplug")
+    dropped = [e for e in sink.events if e.get("event") == "tool.dropped"]
+    assert [e["tool"] for e in dropped] == ["kplug-legacy", "kplug"]
+
+
+def test_strict_mode_keeps_kernel_plugin_with_a_usable_grant(
+    tmp_path, plugin_base, sink, plugin_registry,
+):
+    env = _strict_env(tmp_path, sink)
+    registry = ToolRegistry()
+    registry.configure_gate(
+        policy=DefaultPolicy(deny_capabilities=frozenset({"fs.write"})), env=env,
+    )
+    plugin = _Plugin(plugin_base, caps=("net.fetch", "fs.write"))
+    plugin.activate(plugin_registry)
+
+    registry, names = _load(
+        ToolLoader(test_classes=[], plugin_registry=plugin_registry),
+        _ctx(tmp_path, env), [plugin], registry,
+    )
+
+    assert names == ["kplug"]
+    assert registry.get("kplug").capability_grant == ("net.fetch",)
 
 
 # -- collisions ---------------------------------------------------------------------
