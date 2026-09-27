@@ -153,10 +153,23 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
 - A task solvable by a compact lower-tier model must never dispatch a frontier model (budget violation).
 - I6 is a target enforced by measurement and routing, not a theorem. Section 6 lists the four enforcement parts.
 - Proven by: the RSI baseline comparator per task family, and a runtime test that an over-tier dispatch is denied.
-- Status: partly built (P3). Task 14 ledger measures every call (`nanobot/kernel/ledger.py`: `model.call`
-  events to the `TraceSink`, tier and cost in `LLMUsageStore`). Task 15 solver registry
-  (`nanobot/kernel/solvers.py`) is checked first by `acomplete_json` / `think_structured` when a caller passes
-  `task_type=`; a solved task makes no provider call. The router is not built.
+- Status: measured, routed and gate-enforced (P3, Checkpoint 3). What is built:
+  - Ledger (`nanobot/kernel/ledger.py`): every call from an env-built provider is a `model.call` event with
+    tokens, tier, latency, cost and `usage_source`. Pricing is keyed by `(provider, model)` (Ruling J), and an
+    estimated cost is flagged (`cost_is_billed` is False), never ground truth.
+  - Solvers (`nanobot/kernel/solvers.py`): `acomplete_json`, `think_structured` and the router try them first;
+    a solved task makes no provider call.
+  - Router (`nanobot/kernel/router.py`): solver, then the slot's start tier, then `verify`, then one tier up on
+    a recorded verification failure. Over-ceiling dispatch without a recorded failure is a `model.dispatch`
+    request through `gate_call` (`tests/kernel/test_router.py`).
+  - Baselines (`nanobot/kernel/baselines.py`): a declared alternative per task family and `cost_ratio`.
+- Still aspirational:
+  - Nothing routes yet. The runner's turn loop, sub-agents and memory still call their provider directly; only
+    a caller of `route` or `think_structured(slot=...)` is routed.
+  - No slot has a ceiling unless the host configures `router.slots`.
+  - "Adequate" is whatever `verify` says; no confidence or grounding verifier ships (P5).
+  - The `E[Cost]` inequality is scored only by the RSI harness, which does not exist yet.
+  - Cache-write premiums and hidden reasoning tokens are not priced (`.agent/kernel-p3-followups.md`).
 
 ## 4. Enforcement layers
 
@@ -273,7 +286,7 @@ sequenceDiagram
 | `mcp.call` | MCP wrappers |
 | `plugin.load` | loader (host principal only) |
 | `session.read`, `session.send` | session tools |
-| `model.dispatch` (new, P3) | router: resource is the model tier |
+| `model.dispatch` (P3) | router (`nanobot/kernel/router.py`): resource is the model tier |
 | `budget.iterations`, `budget.tokens`, `budget.cost_usd`, `budget.subagents`, `budget.exec_sessions`, `budget.output_bytes`, `budget.policy_denials` | runner, subagent and exec-session managers |
 
 ## 5a. Scratchpad and deferred-action log
@@ -344,11 +357,48 @@ flowchart TD
 
 **How I6 is measured:**
 - A deterministic-solver registry per task type; the router must check it first.
-- A per-call cost ledger through the `TraceSink`: tokens, model tier, latency, cost.
+- A per-call cost ledger through the `TraceSink`: tokens, model tier, latency, cost, and whether the usage was
+  billed or estimated.
 - A baseline comparator in the RSI evaluation harness: each eval task family declares its minimal adequate
   alternative (one zero-shot call, a regex/AST parser), and moeka is scored against it.
 - A runtime rule: dispatching a tier above the slot's ceiling without a recorded verification failure is denied
   (`model.dispatch`) and audited.
+
+**The router as built (P3):**
+- `route(slot, task_type, payload, verify=...)` in `nanobot/kernel/router.py`. `MoekaKernel.think_structured`
+  routes when it gets `slot=`, `verify=` or `tier=`, and is unchanged without them.
+- Tier ladder: the model presets that declare a `tier`, cheapest first (`local < fast < standard < frontier`),
+  with the first preset per tier. A config with no tiered preset dispatches the active preset untiered.
+- Ceilings: `router.slots.<slot>.ceiling` in the host config. No entry means no ceiling and no
+  `model.dispatch` check, which is the default for every slot.
+- The start tier is the slot's `start` or an explicit `tier=`. Otherwise it is `fast`, clamped to the ceiling.
+- `verify` returning False (or raising) is a recorded failure. It escalates exactly one configured tier up, at
+  most `max_escalations` times (default 1). A justified escalation may pass the ceiling: it is audited
+  (`check="justified"`) but the policy is not asked.
+- An over-ceiling dispatch without a recorded failure calls `gate_call` with capability `model.dispatch` and
+  the tier as resource. That means floors, `policy.decide`, a `policy.decision` event, and a deferred-log entry
+  on a Deny.
+- `policy=None` enforces the ceiling (deny). A host policy decides otherwise, and the permissive
+  `DefaultPolicy()` allows. The deny is at layer `policy`. The router runs outside a turn, so it charges no I5
+  budget.
+- Every decision emits one `model.route` event (`reason`, `check`, `verdict`, `from_tier`). Model calls run
+  under `llm_usage_slot(slot)`, so each `model.call` ledger event carries the slot.
+
+```mermaid
+flowchart TD
+    Start["route(slot, task_type, payload, verify)"] --> Solver{"solver matches?"}
+    Solver -- "yes" --> Done["return (0 model calls)"]
+    Solver -- "no" --> Tier["start tier (default fast, clamped to ceiling)"]
+    Tier --> Over{"above ceiling?"}
+    Over -- "no" --> Call["dispatch preset for tier"]
+    Over -- "yes, no recorded failure" --> Gate["gate_call model.dispatch"]
+    Gate -- "Deny" --> Denied["RouteResult.denial (audited, deferred entry)"]
+    Gate -- "Allow" --> Call
+    Call --> Verify{"verify(value)"}
+    Verify -- "None or True" --> Done
+    Verify -- "False: recorded failure" --> Up["one tier up (justified, audited)"]
+    Up --> Call
+```
 
 ## 7. Epistemic grounding and clarification
 
@@ -491,6 +541,16 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Per-call ledger events (tokens, tier, latency, cost) through the `TraceSink`.
 - Deterministic-solver registry checked before any model call; tier ceilings per slot via `model.dispatch`.
 - Proof: a registered deterministic task makes zero model calls; an over-tier dispatch without a recorded failure is denied and audited.
+- Proof status (Checkpoint 3, 2026-09-27): all green.
+  - `tests/kernel/test_solvers.py` and `test_router.py` show that a solved task builds no provider and makes
+    no dispatch.
+  - `test_router.py` shows an over-ceiling dispatch without a recorded failure is denied at the policy layer
+    with `POLICY_MARKER`. It emits `policy.decision` and `model.route` events and leaves a deferred entry. A
+    justified escalation never asks the policy, and no ceiling means no check.
+  - `test_router.py` has a regression test for the Ruling J shared-model misattribution, including a real
+    failover.
+  - The full suite passes, and the awork suite keeps the same 8 pre-existing failures.
+  - Deferred minors: `.agent/kernel-p3-followups.md`.
 
 **P4 plugin manifests.** Goal: host-activated, hash-pinned plugins.
 - Manifests, per-plugin config validation, host plugin list plus entry points, quarantine on hash mismatch.
