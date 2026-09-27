@@ -73,7 +73,6 @@ from nanobot.utils.runtime import (
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
-    from nanobot.kernel.gate import GateResult
     from nanobot.kernel.policy import PermissionPolicy, Principal
 
 ContinuationCallback = Callable[[], str | None]
@@ -133,6 +132,14 @@ class RunnerLimits(BaseModel):
 # Invariant I5: a turn ends once this many tool calls were denied by the permission
 # policy (``PermissionPolicy.decide``). Floor denials never count.
 DEFAULT_MAX_POLICY_DENIALS = 6
+
+# ExecTool's own configurable guard classes (``tools.exec.allowPatterns`` /
+# ``denyPatterns``) are a misconfigurable permission wall too, so they share the I5
+# ceiling. ``violation:exec-floor`` (fork bomb, internal-state writes) never counts.
+BUDGETED_EXEC_GUARD_SIGNATURES = frozenset({
+    "violation:exec-allowlist",
+    "violation:exec-denyguard",
+})
 
 # Stop reasons that end the turn through the budget-exhausted finalization path.
 BUDGET_STOP_REASONS = frozenset({"max_iterations", "policy_denials"})
@@ -1717,7 +1724,12 @@ class AgentRunner:
                     "detail": denial.split(": ", 1)[-1][:120],
                 }
                 if gate.policy_capability is not None and policy_denials is not None:
-                    self._record_policy_denial(spec, tool_call, gate, policy_denials)
+                    self._record_policy_denial(
+                        spec,
+                        tool_call,
+                        policy_violation_signature(gate.policy_capability),
+                        policy_denials,
+                    )
                 handled = self._classify_violation(
                     raw_text=denial,
                     soft_payload=denial + hint,
@@ -1759,6 +1771,8 @@ class AgentRunner:
                 event=event,
                 tool_call=tool_call,
                 workspace_violation_counts=workspace_violation_counts,
+                spec=spec,
+                policy_denials=policy_denials,
             )
             if handled is not None:
                 return handled
@@ -1777,6 +1791,8 @@ class AgentRunner:
                 event=event,
                 tool_call=tool_call,
                 workspace_violation_counts=workspace_violation_counts,
+                spec=spec,
+                policy_denials=policy_denials,
             )
             if handled is not None:
                 return handled
@@ -1845,12 +1861,18 @@ class AgentRunner:
         tool_call: ToolCallRequest,
         workspace_violation_counts: dict[str, int],
         policy_capability: str | None = None,
+        spec: AgentRunSpec | None = None,
+        policy_denials: PolicyDenialBudget | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None] | None:
         """Classify safety-boundary failures, or return ``None`` to pass through.
 
         *policy_capability* is set only by the gate for a ``PermissionPolicy.decide``
         denial (``violation:policy:<capability>``); floor denials leave it ``None`` and
         keep their exec-floor / workspace classes.
+
+        *policy_denials*, when given, is charged for an ``ExecTool`` allowlist /
+        deny-pattern denial (``BUDGETED_EXEC_GUARD_SIGNATURES``); the exec floor is
+        never charged. Gate policy denials are charged by the caller, not here.
         """
         if policy_capability is not None:
             # Checked first: the deny reason quotes the resource, which could carry
@@ -1877,10 +1899,13 @@ class AgentRunner:
             event["detail"] = self._event_detail("ssrf_violation: ", raw_text)
             return self._ssrf_soft_payload(raw_text), event, None
 
-        if exec_guard_violation_signature(raw_text) is not None:
+        exec_signature = exec_guard_violation_signature(raw_text)
+        if exec_signature is not None:
             # Allowlist / deny-pattern denials: the model retries different
             # commands, so throttle on the denial class to avoid burning the
             # whole iteration budget against a config-level block.
+            if policy_denials is not None and exec_signature in BUDGETED_EXEC_GUARD_SIGNATURES:
+                self._record_policy_denial(spec, tool_call, exec_signature, policy_denials)
             escalation = repeated_exec_guard_error(raw_text, workspace_violation_counts)
             event["detail"] = self._event_detail("exec_guard_denial: ", raw_text)
             if escalation is not None:
@@ -1922,26 +1947,28 @@ class AgentRunner:
 
     @staticmethod
     def _record_policy_denial(
-        spec: AgentRunSpec,
+        spec: AgentRunSpec | None,
         tool_call: ToolCallRequest,
-        gate: GateResult,
+        signature: str,
         policy_denials: PolicyDenialBudget,
     ) -> None:
-        """Account one ``PermissionPolicy.decide`` denial against the I5 ceiling.
+        """Account one permission-wall denial against the I5 ceiling.
 
-        The single place a policy Deny becomes a runner event: every gate verdict with
-        ``layer == "policy"`` passes through here exactly once (floor and gate-layer
-        denials never do). Must stay synchronous (see ``PolicyDenialBudget``).
+        The single place such a denial becomes a runner event. *signature* is
+        ``violation:policy:<capability>`` (gate verdict with ``layer == "policy"``) or
+        one of ``BUDGETED_EXEC_GUARD_SIGNATURES`` (``ExecTool`` allowPatterns /
+        denyPatterns). Floor and gate-layer denials never reach here. Each denial
+        passes through exactly once. Must stay synchronous (see ``PolicyDenialBudget``).
         """
         policy_denials.record()
         if policy_denials.exhausted:
             logger.warning(
                 "Permission-policy denial ceiling reached for {} ({} of {}; last: {} {})",
-                spec.session_key or "default",
+                (spec.session_key if spec is not None else None) or "default",
                 policy_denials.count,
                 policy_denials.limit,
                 tool_call.name,
-                gate.policy_capability,
+                signature,
             )
 
     @classmethod

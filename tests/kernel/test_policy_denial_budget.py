@@ -359,12 +359,124 @@ async def test_finalize_disabled_skips_the_call_for_both():
         assert result.final_content == "fallback"
 
 
-def test_policy_denial_stop_never_auto_continues_a_goal():
-    """Only ``max_iterations`` may hand off to sustained-goal continuation."""
+def _goal_turn_ctx(stop_reason: str):
+    from types import SimpleNamespace
+
+    from nanobot.bus.events import InboundMessage
+    from nanobot.session.goal_state import GOAL_STATE_KEY
+
+    meta = {GOAL_STATE_KEY: {"status": "active", "objective": "Finish the migration.",
+                             "ui_summary": "migration"}}
+    pending: asyncio.Queue[InboundMessage] = asyncio.Queue()
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(metadata=meta),
+        msg=InboundMessage(
+            channel="feishu", sender_id="u1", chat_id="c1", content="start",
+            metadata={"message_id": "msg-1", "original_command": "/goal",
+                      "goal_requested": True},
+        ),
+        session_key="feishu:c1",
+        pending_queue=pending,
+        stop_reason=stop_reason,
+        final_content="final",
+        all_messages=[{"role": "user", "content": "start"},
+                      {"role": "assistant", "content": "final"}],
+        suppress_response=False,
+        visible_run_started_at=1.0,
+    )
+    return ctx, pending
+
+
+async def test_policy_denial_stop_never_auto_continues_a_goal():
+    """Inside an active sustained goal only ``max_iterations`` hands off to an
+    internal continuation; a ``policy_denials`` stop ends there and is shown."""
+    control, control_queue = _goal_turn_ctx("max_iterations")
+    assert await turn_continuation.maybe_continue_turn(control) is True
+    assert control_queue.qsize() == 1
+
+    ctx, pending = _goal_turn_ctx("policy_denials")
+    assert await turn_continuation.maybe_continue_turn(ctx) is False
+    assert pending.empty()
+    assert ctx.final_content == "final" and ctx.suppress_response is False
+    assert turn_continuation.INTERNAL_CONTINUATION_PENDING_META not in ctx.msg.metadata
     assert turn_continuation.should_stream_budget_response(
         stop_reason="policy_denials", pending_queue_available=True,
-        session_metadata={}, message_metadata={},
+        session_metadata=ctx.session.metadata, message_metadata=ctx.msg.metadata,
     ) is True
+
+
+# -- ExecTool's configurable guard (allowPatterns / denyPatterns) shares the ceiling --
+
+
+def _configured_exec(tmp_path: Path, exec_cfg: dict[str, Any]) -> ExecTool:
+    from nanobot.agent.tools.context import ToolContext
+    from nanobot.config.schema import Config
+
+    tools_config = Config.model_validate({"tools": {"exec": exec_cfg}}).tools
+    return ExecTool.create(ToolContext(config=tools_config, workspace=str(tmp_path)))
+
+
+def _guard_denials(result: AgentRunResult, prefix: str = "exec_guard_denial") -> int:
+    return sum(1 for e in result.tool_events if e["detail"].startswith(prefix))
+
+
+async def test_exec_deny_patterns_count_toward_the_ceiling(tmp_path):
+    exec_tool = _configured_exec(tmp_path, {"denyPatterns": [r"\bsystemctl\b"]})
+    model = ScriptedModel(lambda i: [_exec(i, f"systemctl restart unit-{i}")])
+    result = await _run(model, _registry(exec_tool))
+    assert result.stop_reason == "policy_denials"
+    assert model.tool_rounds == 6 and _guard_denials(result) == 6
+
+
+async def test_floor_and_allowlist_mix_counts_only_the_allowlist(tmp_path):
+    """Exec floor hits between allowlist denials never count toward the six."""
+    exec_tool = _configured_exec(tmp_path, {"allowPatterns": [r"uptime"]})
+
+    def plan(i: int) -> list[ToolCallRequest]:
+        return [_exec(i, _FORK_BOMB if i % 2 == 0 else f"ls /srv/{i}")]
+
+    model = ScriptedModel(plan)
+    result = await _run(model, _registry(exec_tool))
+    assert result.stop_reason == "policy_denials"
+    assert model.tool_rounds == 12
+    # Event details quote the raw denial (before any escalation rewrite).
+    details = [e["detail"].lower() for e in result.tool_events]
+    assert len(details) == 12
+    assert all("allowlist filter" in d for d in details[1::2])
+    assert all("allowlist" not in d for d in details[0::2])
+
+
+async def test_allowlist_denials_in_one_response_never_overshoot(tmp_path):
+    """exec is exclusive, so even with concurrent_tools its calls run one by one and
+    the seventh call onward is skipped, not executed."""
+    exec_tool = _configured_exec(tmp_path, {"allowPatterns": [r"uptime"]})
+    model = ScriptedModel(
+        lambda i: [_exec(n, f"ls /srv/{n}") for n in range(10)] if i == 0 else [],
+    )
+    result = await _run(model, _registry(exec_tool), concurrent_tools=True)
+    assert result.stop_reason == "policy_denials" and model.tool_rounds == 1
+    assert _guard_denials(result) == 6
+    assert _guard_denials(result, "policy_denial_budget_exhausted") == 4
+
+
+async def test_exec_guard_without_budget_keeps_legacy_classification():
+    """``_classify_violation`` without a budget (older callers) behaves as before."""
+    runner = AgentRunner()
+    counts: dict[str, int] = {}
+    text = "Error: Command blocked by allowlist filter. exec is in whitelist-only mode"
+    handled = runner._classify_violation(
+        raw_text=text, soft_payload=text, event={},
+        tool_call=ToolCallRequest(id="c", name="exec", arguments={}),
+        workspace_violation_counts=counts,
+    )
+    assert handled is not None and counts == {"violation:exec-allowlist": 1}
+    budget = PolicyDenialBudget()
+    runner._classify_violation(
+        raw_text=text, soft_payload=text, event={},
+        tool_call=ToolCallRequest(id="c", name="exec", arguments={}),
+        workspace_violation_counts=counts, policy_denials=budget,
+    )
+    assert budget.count == 1
 
 
 # -- independence: each run (parent, sub-agent) has its own budget -----------------

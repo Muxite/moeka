@@ -3,12 +3,14 @@
 - June 2026: a non-empty ``tools.exec.allowPatterns`` turned exec into whitelist-only
   mode. The model kept trying one distinct command after another; nothing stopped the
   turn short of ``max_tool_iterations``, so each turn burned ~200 iterations.
-- Replay: a whitelist-only ``PermissionPolicy`` denies every command the model tries,
-  the fake model requests a new distinct command each iteration (50 queued), and
-  ``max_iterations`` is 200, so the old runner would run until the iteration cap.
-- Required: the turn stops at exactly 6 policy denials with ``stop_reason ==
-  "policy_denials"``, well short of 200 iterations, and the model gets its one
-  no-tools finalization call.
+- Headline replay (the real mechanism): ``ExecTool`` built by ``ExecTool.create`` from a
+  camelCase config with ``tools.exec.allowPatterns`` set; the gate allows ``exec.run``
+  and ``ExecTool``'s own allowlist guard refuses every command (``violation:exec-allowlist``).
+  The fake model requests a new distinct command each iteration (60 queued) and
+  ``max_iterations`` is 200, so the old runner ran until the iteration cap.
+- Second replay: the same wall expressed as a ``PermissionPolicy`` (policy layer).
+- Required for both: the turn stops at exactly 6 denials with ``stop_reason ==
+  "policy_denials"`` and the model gets its one no-tools finalization call.
 """
 
 from __future__ import annotations
@@ -17,9 +19,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from nanobot.agent.runner import AgentRunner
+from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.config.schema import AgentDefaults
+from nanobot.config.schema import AgentDefaults, Config
 from nanobot.kernel.policy import (
     POLICY_MARKER,
     Allow,
@@ -34,7 +37,7 @@ from nanobot.utils.runtime import BUDGET_EXHAUSTED_FINALIZATION_PROMPT
 from tests.agent.runner_helpers import make_run_spec
 
 _MAX_CHARS = AgentDefaults().max_tool_result_chars
-_COMMANDS = [f"systemctl status unit-{i}.service" for i in range(50)]
+_COMMANDS = [f"systemctl status unit-{i}.service" for i in range(60)]
 
 
 class WhitelistOnlyPolicy(DefaultPolicy):
@@ -96,7 +99,6 @@ async def test_whitelist_only_turn_stops_at_six_policy_denials(tmp_path):
     # Exactly six distinct commands were tried and denied; the old bug ran 200.
     assert policy.denied == _COMMANDS[:6]
     assert model.tool_calls == 6
-    assert model.tool_calls < 10
     denials = [
         e for e in result.tool_events
         if e["detail"].startswith(("policy_denial: ", "policy_denial_escalated: "))
@@ -109,6 +111,42 @@ async def test_whitelist_only_turn_stops_at_six_policy_denials(tmp_path):
     assert all(POLICY_MARKER in text for text in tool_texts[:2])
     assert all("not configurable by the agent" in text for text in tool_texts[2:])
     # Same finalization as max_iterations: one no-tools call with the budget prompt.
+    assert len(model.finalization_calls) == 1
+    assert model.finalization_calls[0][-1]["content"] == BUDGET_EXHAUSTED_FINALIZATION_PROMPT
+    assert result.final_content == "The exec allowlist blocks what I need."
+
+
+async def test_exec_allow_patterns_turn_stops_at_six_denials(tmp_path):
+    """The June-2026 configuration itself: ``tools.exec.allowPatterns`` = ["uptime"]."""
+    tools_config = Config.model_validate(
+        {"tools": {"exec": {"allowPatterns": [r"uptime"]}}},
+    ).tools
+    exec_tool = ExecTool.create(ToolContext(config=tools_config, workspace=str(tmp_path)))
+    assert exec_tool.allow_patterns == ["uptime"]
+    tools = ToolRegistry()
+    tools.register(exec_tool)
+    model = RunawayModel()
+    provider = MagicMock()
+    provider.chat_stream_with_retry = model
+
+    result = await AgentRunner().run(make_run_spec(
+        provider,
+        initial_messages=[{"role": "user", "content": "check every service"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=200,
+        max_tool_result_chars=_MAX_CHARS,
+    ))
+
+    assert result.stop_reason == "policy_denials"
+    assert model.tool_calls == 6
+    details = [e["detail"] for e in result.tool_events]
+    assert len(details) == 6
+    # The existing exec-guard classification/escalation is unchanged; only the
+    # ceiling is new.
+    assert all(d.startswith("exec_guard_denial") for d in details)
+    tool_texts = [m["content"] for m in result.messages if m.get("role") == "tool"]
+    assert "blocked by allowlist filter" in tool_texts[0]
     assert len(model.finalization_calls) == 1
     assert model.finalization_calls[0][-1]["content"] == BUDGET_EXHAUSTED_FINALIZATION_PROMPT
     assert result.final_content == "The exec allowlist blocks what I need."
