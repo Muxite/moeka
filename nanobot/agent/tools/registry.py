@@ -72,9 +72,12 @@ class ToolRegistry:
         emit_tool_invalid(self.gate_env, name, self.gate_principal, error)
 
     def register(self, tool: Tool) -> None:
-        """Register a tool."""
+        """Register a tool (a tool with ``bind_registry`` is handed this registry)."""
         self._tools[tool.name] = tool
         self._cached_definitions = None
+        binder = getattr(tool, "bind_registry", None)
+        if callable(binder):
+            binder(self)
 
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""

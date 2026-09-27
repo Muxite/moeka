@@ -48,6 +48,7 @@ EXPECTED_SURFACE: dict[str, frozenset[str]] = {
     "apply_patch": frozenset({"fs.read", "fs.write"}),
     "ask_user": frozenset(),
     "create_goal": frozenset(),
+    "defer_action": frozenset(),
     "edit_file": frozenset({"fs.write"}),
     "exec": frozenset({"exec.run"}),
     "exec_session": frozenset({"exec.session_input"}),

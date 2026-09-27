@@ -50,6 +50,9 @@ EXPECTED: dict[str, list[tuple[dict[str, Any], list[CapabilityRequest]]]] = {
     ],
     "ask_user": [({"question": "ok?"}, [])],
     "create_goal": [({"objective": "ship it"}, [])],
+    "defer_action": [
+        ({"tool": "exec", "arguments": {"command": "reboot"}, "reason": "r"}, []),
+    ],
     "edit_file": [
         ({"path": "src/x.py", "old_text": "a", "new_text": "b"}, [_req("fs.write", "src/x.py")]),
     ],
