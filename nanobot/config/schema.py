@@ -97,6 +97,10 @@ class InlineFallbackConfig(Base):
 FallbackCandidate = str | InlineFallbackConfig
 
 
+ModelTier = Literal["local", "fast", "standard", "frontier"]
+"""Model tiers, cheapest first (the router's escalation ladder, I6)."""
+
+
 class ModelPresetConfig(Base):
     """A named set of model + generation parameters for quick switching."""
 
@@ -109,7 +113,7 @@ class ModelPresetConfig(Base):
     # Cost ledger (kernel ledger, I6). All optional; absent = unknown, never free.
     # ``tier="local"`` with no prices is the one convention for cost 0 (self-hosted).
     # Prices are USD per million tokens; cache writes bill at the input price.
-    tier: Literal["local", "fast", "standard", "frontier"] | None = None
+    tier: ModelTier | None = None
     price_in_per_mtok: float | None = Field(default=None, ge=0)
     price_out_per_mtok: float | None = Field(default=None, ge=0)
     price_cache_read_per_mtok: float | None = Field(default=None, ge=0)
@@ -432,6 +436,28 @@ class ToolsConfig(Base):
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 
 
+class SlotRouteConfig(Base):
+    """Routing limits for one schema slot (kernel router, I6).
+
+    - ``ceiling``: the highest tier the slot may dispatch to without a recorded
+      verification failure. Above it, the dispatch is a ``model.dispatch``
+      capability request the host policy decides. ``None`` = no ceiling: any tier,
+      no ``model.dispatch`` check.
+    - ``start``: the tier the cascade tries first (after the solvers). ``None`` =
+      ``"fast"`` clamped to the ceiling. An explicit ``start`` above the ceiling is
+      checked like any other over-ceiling dispatch.
+    """
+
+    ceiling: ModelTier | None = None
+    start: ModelTier | None = None
+
+
+class RouterConfig(Base):
+    """Per-slot routing limits. Empty (the default) = no ceilings anywhere."""
+
+    slots: dict[str, SlotRouteConfig] = Field(default_factory=dict)
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -447,6 +473,7 @@ class Config(BaseSettings):
         serialization_alias="modelPresets",
     )
     profiles: dict[str, AgentProfileConfig] = Field(default_factory=dict)
+    router: RouterConfig = Field(default_factory=RouterConfig)
 
     def __init__(self, **values: Any) -> None:
         if not type(self).__pydantic_complete__:

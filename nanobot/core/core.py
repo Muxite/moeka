@@ -25,6 +25,7 @@ Usage::
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -713,6 +714,9 @@ class MoekaCore:
         model_cls: type | None = None,
         retries: int = 2,
         task_type: str | None = None,
+        slot: str | None = None,
+        verify: Callable[[Any], Any] | None = None,
+        tier: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """One-shot structured thinking: a completion constrained to JSON.
@@ -724,14 +728,46 @@ class MoekaCore:
         / ``max_tokens`` / ``system`` / ``images`` forward to the provider.
         ``task_type`` (and ``task_payload``) select a registered deterministic
         solver first; a solved task makes no LLM call (I6).
-        """
-        from nanobot.api.complete import acomplete_json
 
-        if task_type is not None:
-            kwargs["task_type"] = task_type
-        return await acomplete_json(
-            prompt, schema=schema, model_cls=model_cls, retries=retries, **kwargs
+        Routing (I6, :func:`nanobot.kernel.router.route`): with ``slot``,
+        ``verify`` or ``tier`` the call goes through the cost-aware router
+        (solver -> fast tier -> ``verify`` -> one tier up on a failure; tier
+        ceilings from ``config.router.slots``). ``policy`` / ``principal`` /
+        ``env`` / ``max_escalations`` then pass to the router. Raises
+        :class:`~nanobot.kernel.router.ModelDispatchDeniedError` when the router's
+        ``model.dispatch`` request is denied and
+        :class:`~nanobot.kernel.router.RouteVerificationError` when no tier
+        passes ``verify``. Without them the behaviour is unchanged.
+        """
+        complete_api = importlib.import_module("nanobot.api.complete")
+
+        if slot is None and verify is None and tier is None:
+            if task_type is not None:
+                kwargs["task_type"] = task_type
+            return await complete_api.acomplete_json(
+                prompt, schema=schema, model_cls=model_cls, retries=retries, **kwargs
+            )
+
+        from nanobot.kernel import router
+
+        payload = kwargs.pop("task_payload", None)
+        result = await router.route(
+            slot or "default",
+            task_type,
+            payload,
+            prompt=prompt,
+            verify=verify,
+            tier=tier,
+            model_cls=model_cls,
+            schema=schema,
+            retries=retries,
+            **kwargs,
         )
+        if result.denied:
+            raise router.ModelDispatchDeniedError(result)
+        if result.verified is False:
+            raise router.RouteVerificationError(result)
+        return result.value
 
 
 MoekaKernel = MoekaCore

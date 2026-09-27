@@ -14,14 +14,32 @@ Sections:
 
 from __future__ import annotations
 
+import importlib
+import json
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, get_args
 
 import pytest
 
-from nanobot.config.schema import Config
+from nanobot.config.schema import Config, ModelTier
+from nanobot.core import MoekaCore
+from nanobot.kernel import router as router_mod
+from nanobot.kernel import solvers as solvers_mod
+from nanobot.kernel.deferred import deferred_log_path
 from nanobot.kernel.env import CoreEnvironment, Paths, StaticCredentialResolver
 from nanobot.kernel.ledger import LedgerObserver, ModelPricing, PricingTable
+from nanobot.kernel.policy import POLICY_MARKER, Allow, DefaultPolicy
+from nanobot.kernel.router import (
+    MODEL_DISPATCH,
+    TIER_ORDER,
+    ModelDispatchDeniedError,
+    RouteVerificationError,
+    TierLadder,
+    route,
+)
+from nanobot.kernel.solvers import Solved, SolverRegistry
+from nanobot.llm_usage.context import current_llm_usage_slot
 from nanobot.llm_usage.models import LLMCallRecord
 from nanobot.providers.base import LLMResponse, LLMUsage
 from nanobot.providers.factory import _ledger_pricing, make_provider
@@ -261,3 +279,469 @@ async def test_provider_without_usage_is_flagged_estimated_end_to_end(tmp_path: 
     assert len(ledger) == 1
     assert ledger[0]["usage_source"] == "estimated"
     assert ledger[0]["tokens_in"] > 0
+
+
+# ================================================================================
+# The router cascade
+# ================================================================================
+
+complete_mod = importlib.import_module("nanobot.api.complete")
+
+
+@pytest.fixture(autouse=True)
+def fresh_registry(monkeypatch):
+    registry = SolverRegistry()
+    monkeypatch.setattr(solvers_mod, "_DEFAULT_REGISTRY", registry)
+    return registry
+
+
+def _ladder_config(*, ceiling: str | None = None, start: str | None = None,
+                   slot: str = "extract.title") -> Config:
+    slots = {}
+    if ceiling is not None or start is not None:
+        slots[slot] = {k: v for k, v in (("ceiling", ceiling), ("start", start)) if v}
+    return Config.model_validate({
+        "providers": {"openai": {"apiKey": "sk-router-test"}},
+        "modelPresets": {
+            "tiny": {"provider": "openai", "model": "m-local", "tier": "local"},
+            "quick": {"provider": "openai", "model": "m-fast", "tier": "fast"},
+            "solid": {"provider": "openai", "model": "m-standard", "tier": "standard"},
+            "big": {"provider": "openai", "model": "m-frontier", "tier": "frontier"},
+        },
+        "router": {"slots": slots},
+    })
+
+
+class _Dispatcher:
+    """A fake dispatch: records each (tier, preset) and returns a canned value."""
+
+    def __init__(self, value: Any = "answer") -> None:
+        self.calls: list[tuple[str | None, str | None]] = []
+        self.slots: list[str | None] = []
+        self.value = value
+
+    async def __call__(self, target: Any) -> Any:
+        self.calls.append((target.tier, target.preset))
+        self.slots.append(current_llm_usage_slot())
+        return {"tier": target.tier, "value": self.value}
+
+
+class _Exploding:
+    async def __call__(self, target: Any) -> Any:
+        raise AssertionError("dispatch must not be called")
+
+
+class _SpyPolicy:
+    """Denies model.dispatch; records every decide call."""
+
+    def __init__(self, deny: bool = True) -> None:
+        self.seen: list[tuple[str, str]] = []
+        self._deny = deny
+        self._base = DefaultPolicy(deny_capabilities=frozenset({MODEL_DISPATCH}))
+
+    def decide(self, principal: Any, req: Any, ctx: Any) -> Any:
+        self.seen.append((req.capability, req.resource))
+        return self._base.decide(principal, req, ctx) if self._deny else Allow()
+
+    def attenuate(self, requested: Any, narrower: Any = None) -> Any:
+        return self
+
+
+def _events(sink: _RecordingSink, name: str) -> list[dict[str, Any]]:
+    return [e for e in sink.events if e.get("event") == name]
+
+
+def test_tier_order_matches_the_config_literal() -> None:
+    assert TIER_ORDER == get_args(ModelTier)
+
+
+def test_ladder_is_first_preset_per_tier_in_order() -> None:
+    ladder = TierLadder.from_config(_ladder_config())
+    assert ladder.tiers == ("local", "fast", "standard", "frontier")
+    assert ladder.preset_for("standard") == "solid"
+    assert ladder.next_above("fast") == "standard"
+    assert ladder.next_above("frontier") is None
+
+
+@pytest.mark.asyncio
+async def test_solver_match_short_circuits_with_zero_dispatches(fresh_registry) -> None:
+    fresh_registry.register("title", lambda p: Solved(p["text"].upper(), "upper"))
+    sink = _RecordingSink()
+    result = await route(
+        "extract.title", "title", {"text": "hi"},
+        config=_ladder_config(), dispatch=_Exploding(),
+        env=_env(Path("/nonexistent-never-written"), sink),
+    )
+    assert result.value == "HI"
+    assert result.solved_by == "upper"
+    assert result.calls == 0
+    assert result.tier is None
+    (event,) = _events(sink, "model.route")
+    assert event["check"] == "solver"
+
+
+@pytest.mark.asyncio
+async def test_solver_path_through_acomplete_json_makes_zero_provider_calls(
+    fresh_registry, monkeypatch,
+) -> None:
+    import nanobot.providers.factory as factory
+
+    def _make(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("no provider may be built on the solver path")
+
+    monkeypatch.setattr(factory, "make_provider", _make)
+    fresh_registry.register("title", lambda p: Solved({"t": 1}, "fixed"))
+    import nanobot.config.loader as loader
+
+    def _no_config(**_k: Any) -> Any:
+        raise AssertionError("a solved task must not load config")
+
+    monkeypatch.setattr(loader, "config_from_sources", _no_config)
+    result = await route("extract.title", "title", {"prompt": "x"})
+    assert result.value == {"t": 1}
+    assert result.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_no_solver_and_no_verify_dispatches_once_at_fast(tmp_path: Path) -> None:
+    dispatch = _Dispatcher()
+    sink = _RecordingSink()
+    result = await route(
+        "extract.title", "title", {"prompt": "x"},
+        config=_ladder_config(), dispatch=dispatch, env=_env(tmp_path, sink),
+    )
+    assert dispatch.calls == [("fast", "quick")]
+    assert result.tier == "fast"
+    assert result.preset == "quick"
+    assert result.verified is None
+    assert result.escalations == ()
+    assert dispatch.slots == ["extract.title"]  # ledger events are attributed to the slot
+    (event,) = _events(sink, "model.route")
+    assert event["reason"] == "initial"
+    assert event["check"] == "no_ceiling"
+
+
+@pytest.mark.asyncio
+async def test_verify_true_does_not_escalate() -> None:
+    dispatch = _Dispatcher()
+    result = await route(
+        "extract.title", None, {"prompt": "x"},
+        config=_ladder_config(), dispatch=dispatch, verify=lambda v: True,
+    )
+    assert dispatch.calls == [("fast", "quick")]
+    assert result.verified is True
+    assert result.escalations == ()
+
+
+@pytest.mark.asyncio
+async def test_verify_false_escalates_exactly_one_tier_and_records_why(tmp_path: Path) -> None:
+    dispatch = _Dispatcher()
+    sink = _RecordingSink()
+    seen: list[Any] = []
+
+    def _verify(value: Any) -> bool:
+        seen.append(value["tier"])
+        return value["tier"] != "fast"
+
+    result = await route(
+        "extract.title", None, {"prompt": "x"},
+        config=_ladder_config(), dispatch=dispatch, verify=_verify, env=_env(tmp_path, sink),
+    )
+    # fast -> standard, never straight to frontier
+    assert dispatch.calls == [("fast", "quick"), ("standard", "solid")]
+    assert seen == ["fast", "standard"]
+    assert result.tier == "standard"
+    assert result.verified is True
+    (esc,) = result.escalations
+    assert (esc.from_tier, esc.to_tier) == ("fast", "standard")
+    assert esc.reason == "verification_failed"
+    assert esc.justified is True
+    routed = _events(sink, "model.route")
+    assert [e["reason"] for e in routed] == ["initial", "verification_failed"]
+    assert routed[1]["from_tier"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_escalation_is_bounded_by_max_escalations() -> None:
+    dispatch = _Dispatcher()
+    result = await route(
+        "extract.title", None, {"prompt": "x"},
+        config=_ladder_config(), dispatch=dispatch, verify=lambda v: False,
+    )
+    assert dispatch.calls == [("fast", "quick"), ("standard", "solid")]
+    assert result.verified is False
+    assert len(result.escalations) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_verify_and_raising_verify_count_as_failure() -> None:
+    async def _averify(value: Any) -> bool:
+        return value["tier"] == "standard"
+
+    result = await route(
+        "s", None, {}, config=_ladder_config(), dispatch=_Dispatcher(), verify=_averify,
+    )
+    assert result.tier == "standard" and result.verified is True
+
+    def _boom(value: Any) -> bool:
+        raise RuntimeError("checker broke")
+
+    result = await route(
+        "s", None, {}, config=_ladder_config(), dispatch=_Dispatcher(), verify=_boom,
+        max_escalations=0,
+    )
+    assert result.verified is False
+    assert result.attempts[0].verified is False
+
+
+@pytest.mark.asyncio
+async def test_top_tier_failure_has_nowhere_to_go() -> None:
+    dispatch = _Dispatcher()
+    result = await route(
+        "s", None, {}, config=_ladder_config(), dispatch=dispatch, tier="frontier",
+        verify=lambda v: False,
+    )
+    assert dispatch.calls == [("frontier", "big")]
+    assert result.verified is False
+    assert result.escalations == ()
+
+
+@pytest.mark.asyncio
+async def test_untiered_config_dispatches_the_active_preset() -> None:
+    dispatch = _Dispatcher()
+    config = Config.model_validate({"providers": {"openai": {"apiKey": "sk-x"}}})
+    result = await route("s", None, {}, config=config, dispatch=dispatch)
+    assert dispatch.calls == [(None, None)]
+    assert result.tier is None
+
+
+# -- model.dispatch --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_over_ceiling_dispatch_without_failure_is_denied_by_policy(tmp_path: Path) -> None:
+    sink = _RecordingSink()
+    env = _env(tmp_path, sink)
+    policy = _SpyPolicy(deny=True)
+    result = await route(
+        "extract.title", None, {"prompt": "x"},
+        config=_ladder_config(ceiling="fast"), dispatch=_Exploding(), tier="frontier",
+        policy=policy, env=env,
+    )
+    assert result.denied
+    assert result.calls == 0
+    assert policy.seen == [(MODEL_DISPATCH, "frontier")]
+    deny = result.denial.deny
+    assert deny.marker == POLICY_MARKER
+    assert deny.capability == MODEL_DISPATCH
+    assert POLICY_MARKER in result.error_text()
+    # A genuine policy-layer deny, classified like any other (violation:policy:*).
+    assert result.denial.layer == "policy"
+    assert result.denial.policy_capability == MODEL_DISPATCH
+    # Audited: the gate's policy.decision event and the router's own event.
+    (decision,) = _events(sink, "policy.decision")
+    assert decision["capability"] == MODEL_DISPATCH
+    assert decision["resource"] == "frontier"
+    assert decision["verdict"] == "deny"
+    (routed,) = _events(sink, "model.route")
+    assert (routed["check"], routed["verdict"]) == ("policy", "deny")
+    # And logged as a deferred action (design 5a), like every gate denial.
+    assert result.denial.deferred is True
+    lines = deferred_log_path(env.paths.work_dir).read_text().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["tool"] == MODEL_DISPATCH
+    assert entry["capability"] == MODEL_DISPATCH
+
+
+@pytest.mark.asyncio
+async def test_over_ceiling_dispatch_without_a_policy_is_denied() -> None:
+    """A configured ceiling is enforced unless the host hands in a policy that grants it."""
+    result = await route(
+        "extract.title", None, {}, config=_ladder_config(ceiling="fast"),
+        dispatch=_Exploding(), tier="frontier",
+    )
+    assert result.denied
+    assert result.denial.deny.capability == MODEL_DISPATCH
+
+
+@pytest.mark.asyncio
+async def test_over_ceiling_dispatch_granted_by_policy_proceeds_audited(tmp_path: Path) -> None:
+    sink = _RecordingSink()
+    dispatch = _Dispatcher()
+    result = await route(
+        "extract.title", None, {}, config=_ladder_config(ceiling="fast"),
+        dispatch=dispatch, tier="frontier", policy=DefaultPolicy(), env=_env(tmp_path, sink),
+    )
+    assert not result.denied
+    assert dispatch.calls == [("frontier", "big")]
+    (decision,) = _events(sink, "policy.decision")
+    assert decision["verdict"] == "allow"
+    (routed,) = _events(sink, "model.route")
+    assert (routed["check"], routed["verdict"]) == ("policy", "allow")
+
+
+@pytest.mark.asyncio
+async def test_justified_escalation_above_ceiling_skips_policy_but_is_audited(
+    tmp_path: Path,
+) -> None:
+    sink = _RecordingSink()
+    policy = _SpyPolicy(deny=True)
+    dispatch = _Dispatcher()
+    result = await route(
+        "extract.title", None, {}, config=_ladder_config(ceiling="fast"),
+        dispatch=dispatch, verify=lambda v: v["tier"] == "standard",
+        policy=policy, env=_env(tmp_path, sink),
+    )
+    assert dispatch.calls == [("fast", "quick"), ("standard", "solid")]
+    assert policy.seen == []  # never asked: a recorded failure justifies it
+    assert result.verified is True
+    assert _events(sink, "policy.decision") == []
+    routed = _events(sink, "model.route")
+    assert [(e["check"], e["verdict"]) for e in routed] == [
+        ("within_ceiling", "allow"), ("justified", "allow"),
+    ]
+    assert routed[1]["ceiling"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_no_ceiling_means_no_model_dispatch_check(tmp_path: Path) -> None:
+    sink = _RecordingSink()
+    policy = _SpyPolicy(deny=True)
+    dispatch = _Dispatcher()
+    result = await route(
+        "extract.title", None, {}, config=_ladder_config(), dispatch=dispatch,
+        tier="frontier", policy=policy, env=_env(tmp_path, sink),
+    )
+    assert dispatch.calls == [("frontier", "big")]
+    assert not result.denied
+    assert policy.seen == []
+    assert _events(sink, "policy.decision") == []
+
+
+@pytest.mark.asyncio
+async def test_default_start_is_clamped_to_the_ceiling() -> None:
+    policy = _SpyPolicy(deny=True)
+    dispatch = _Dispatcher()
+    await route(
+        "extract.title", None, {}, config=_ladder_config(ceiling="local"),
+        dispatch=dispatch, policy=policy,
+    )
+    assert dispatch.calls == [("local", "tiny")]
+    assert policy.seen == []
+
+
+@pytest.mark.asyncio
+async def test_configured_start_above_ceiling_is_checked() -> None:
+    policy = _SpyPolicy(deny=True)
+    result = await route(
+        "extract.title", None, {}, config=_ladder_config(ceiling="fast", start="standard"),
+        dispatch=_Exploding(), policy=policy,
+    )
+    assert result.denied
+    assert policy.seen == [(MODEL_DISPATCH, "standard")]
+
+
+@pytest.mark.asyncio
+async def test_unknown_explicit_tier_is_an_error() -> None:
+    config = Config.model_validate({
+        "providers": {"openai": {"apiKey": "sk-x"}},
+        "modelPresets": {"quick": {"provider": "openai", "model": "m", "tier": "fast"}},
+    })
+    with pytest.raises(ValueError, match="frontier"):
+        await route("s", None, {}, config=config, dispatch=_Dispatcher(), tier="frontier")
+
+
+# -- composition with acomplete_json / think_structured ------------------------------
+
+
+class _StubProvider:
+    def __init__(self, replies: list[str]) -> None:
+        self._replies = list(replies)
+
+    async def chat_with_retry(self, *, messages, max_tokens=None, temperature=None):
+        return SimpleNamespace(content=self._replies.pop(0), finish_reason="stop", error_type=None)
+
+
+def _install(monkeypatch, replies: list[str]) -> list[dict[str, Any]]:
+    import nanobot.providers.factory as factory
+
+    made: list[dict[str, Any]] = []
+    provider = _StubProvider(replies)
+
+    def _make(config, *, preset_name=None, preset=None, model=None, **kw):
+        made.append({"preset_name": preset_name, **kw})
+        return provider
+
+    monkeypatch.setattr(factory, "make_provider", _make)
+    return made
+
+
+@pytest.mark.asyncio
+async def test_default_dispatch_goes_through_acomplete_json_with_the_tier_preset(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    made = _install(monkeypatch, ['{"ok": false}', '{"ok": true}'])
+    env = _env(tmp_path, _RecordingSink())
+    result = await route(
+        "extract.title", "title", {"prompt": "x"}, prompt="x",
+        config=_ladder_config(), verify=lambda v: v["ok"], env=env,
+    )
+    assert result.value == {"ok": True}
+    assert [m["preset_name"] for m in made] == ["quick", "solid"]
+    assert all(m["env"] is env for m in made)  # the ledger is wired for routed calls
+
+
+@pytest.mark.asyncio
+async def test_think_structured_routes_when_slot_given(monkeypatch) -> None:
+    made = _install(monkeypatch, ['{"a": 1}'])
+    out = await MoekaCore.think_structured(
+        "x", slot="extract.title", config=_ladder_config(), verify=lambda v: True,
+    )
+    assert out == {"a": 1}
+    assert [m["preset_name"] for m in made] == ["quick"]
+
+
+@pytest.mark.asyncio
+async def test_think_structured_raises_on_model_dispatch_denial(monkeypatch) -> None:
+    _install(monkeypatch, [])
+    with pytest.raises(ModelDispatchDeniedError) as info:
+        await MoekaCore.think_structured(
+            "x", slot="extract.title", config=_ladder_config(ceiling="fast"), tier="frontier",
+        )
+    assert POLICY_MARKER in str(info.value)
+    assert info.value.result.denied
+
+
+@pytest.mark.asyncio
+async def test_think_structured_raises_when_verification_never_passes(monkeypatch) -> None:
+    _install(monkeypatch, ['{"a": 1}', '{"a": 2}'])
+    with pytest.raises(RouteVerificationError) as info:
+        await MoekaCore.think_structured(
+            "x", slot="s", config=_ladder_config(), verify=lambda v: False,
+        )
+    assert info.value.result.value == {"a": 2}
+
+
+@pytest.mark.asyncio
+async def test_think_structured_without_slot_is_unchanged(monkeypatch) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake(prompt, **kw):
+        seen.update(kw)
+        return "plain"
+
+    monkeypatch.setattr(complete_mod, "acomplete_json", fake)
+
+    def _no_route(*a: Any, **k: Any) -> Any:
+        raise AssertionError("route must not run without slot/verify/tier")
+
+    monkeypatch.setattr(router_mod, "route", _no_route)
+    assert await MoekaCore.think_structured("x", schema={"type": "object"}) == "plain"
+    assert set(seen) == {"schema", "model_cls", "retries"}
+
+
+@pytest.mark.asyncio
+async def test_acomplete_without_env_keeps_the_old_make_provider_call(monkeypatch) -> None:
+    made = _install(monkeypatch, ["hi"])
+    await complete_mod.acomplete("x", config=_ladder_config())
+    assert made == [{"preset_name": None}]

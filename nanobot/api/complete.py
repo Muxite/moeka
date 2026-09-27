@@ -67,6 +67,7 @@ async def acomplete(
     preset: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    env: Any | None = None,
 ) -> str:
     """Run a single chat completion through moeka's provider layer.
 
@@ -83,6 +84,9 @@ async def acomplete(
         preset: Named model preset to use instead of the active default.
         max_tokens / temperature: Generation overrides; ``None`` uses the
             provider's configured generation defaults.
+        env: Optional ``CoreEnvironment``. Given, the provider is built with it
+            (host credentials, and the cost ledger measures the call). ``None``
+            keeps the pre-kernel call exactly.
 
     Returns:
         The assistant's text content.
@@ -93,7 +97,8 @@ async def acomplete(
     resolved_config, _ = config_from_sources(
         config=config, config_dict=config_dict, config_path=config_path,
     )
-    provider = make_provider(resolved_config, preset_name=preset, model=model)
+    extra: dict[str, Any] = {"env": env} if env is not None else {}
+    provider = make_provider(resolved_config, preset_name=preset, model=model, **extra)
 
     messages: list[dict[str, Any]] = []
     if system:
@@ -257,13 +262,13 @@ def _coerce_json(parsed: Any, model_cls: type | None) -> Any:
     return parsed
 
 
-def _try_deterministic(
+def _solve_deterministic(
     task_type: str,
     task_payload: dict[str, Any] | None,
     prompt: str,
     model_cls: type | None,
-) -> Any:
-    """Solver fast path: the coerced value, or ``_UNSOLVED`` to fall through to the LLM."""
+) -> tuple[Any, str | None]:
+    """Solver fast path: ``(coerced value, solver name)``, or ``(_UNSOLVED, None)``."""
     from loguru import logger
 
     from nanobot.kernel import solvers
@@ -271,15 +276,25 @@ def _try_deterministic(
     payload = task_payload if task_payload is not None else {"prompt": prompt}
     solved = solvers.try_solve(task_type, payload)
     if solved is None:
-        return _UNSOLVED
+        return _UNSOLVED, None
     try:
-        return _coerce_json(solved.value, model_cls)
+        return _coerce_json(solved.value, model_cls), solved.solver_name
     except Exception as exc:
         logger.warning(
             "solver {} ({}) value failed validation: {}; falling through to the LLM",
             solved.solver_name, task_type, exc,
         )
-        return _UNSOLVED
+        return _UNSOLVED, None
+
+
+def _try_deterministic(
+    task_type: str,
+    task_payload: dict[str, Any] | None,
+    prompt: str,
+    model_cls: type | None,
+) -> Any:
+    """Solver fast path: the coerced value, or ``_UNSOLVED`` to fall through to the LLM."""
+    return _solve_deterministic(task_type, task_payload, prompt, model_cls)[0]
 
 
 async def acomplete_json(
