@@ -1,0 +1,298 @@
+"""The capability gate (P2): every tool call passes here before it executes.
+
+Order, per ``CapabilityRequest`` the tool declares (``Tool.capabilities``):
+- fs resources are normalised first (``_normalize_fs_resource``, Ruling H): the raw
+  param is stripped and resolved against the workspace the tool itself resolves
+  against, so floors and policy see the path the tool will really touch.
+- ``check_floors`` runs FIRST with the host's ``ProtectedFloor``; a floor ``Deny``
+  short-circuits and the policy is never consulted.
+- ``PermissionPolicy.decide`` runs only when no floor fired.
+- A ``policy.decision`` event goes to the trace sink for EVERY evaluated request
+  (allow or deny), via ``safe_emit``: a failing sink never changes the verdict.
+- The first ``Deny`` wins; later requests of the same call are not evaluated.
+
+Call sites: ``AgentRunner._run_tool`` (between prepare_call and the first hook),
+``ToolRegistry.execute`` and ``nanobot.agent.tools.execution``. A denied call never
+reaches a hook and never executes.
+
+Module-level imports are stdlib + kernel only; agent/security modules are imported
+lazily (Ruling C).
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from loguru import logger
+
+from nanobot.kernel.floors import FS_CAPABILITIES, check_floors
+from nanobot.kernel.policy import (
+    POLICY_MARKER,
+    Allow,
+    CapabilityRequest,
+    DefaultPolicy,
+    Deny,
+    PermissionPolicy,
+    Principal,
+    policy_deny,
+)
+from nanobot.kernel.trace import LoguruTraceSink, TraceSink, safe_emit
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
+    from nanobot.security.protected_paths import ProtectedFloor
+
+AGENT_PRINCIPAL = Principal(name="agent", kind="agent")
+
+GateLayer = str  # "floor" | "policy" | "gate"
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """Outcome of ``gate_call``: ``Allow`` (audited) or the first ``Deny``.
+
+    ``layer`` says who denied: ``"floor"`` (``check_floors``), ``"policy"``
+    (``PermissionPolicy.decide``) or ``"gate"`` (the declaration itself failed).
+    ``events`` are the ``policy.decision`` records emitted for this call.
+    """
+
+    decision: Allow | Deny
+    layer: GateLayer | None = None
+    events: tuple[dict[str, Any], ...] = field(default=(), repr=False)
+
+    @property
+    def allowed(self) -> bool:
+        return isinstance(self.decision, Allow)
+
+    @property
+    def deny(self) -> Deny | None:
+        return self.decision if isinstance(self.decision, Deny) else None
+
+    @property
+    def policy_capability(self) -> str | None:
+        """The denied capability when ``PermissionPolicy.decide`` (not a floor) denied."""
+        deny = self.deny
+        if deny is None or self.layer == "floor":
+            return None
+        return deny.capability
+
+    def error_text(self) -> str:
+        """Tool-facing error text (``""`` when allowed); always starts with ``Error``."""
+        deny = self.deny
+        if deny is None:
+            return ""
+        reason = deny.reason.strip()
+        return reason if reason.startswith("Error") else f"Error: {reason}"
+
+
+def _normalize_fs_resource(resource: str, workspace: Path | None) -> str:
+    """Resolve an ``fs.*`` resource the way the file tools do before touching it.
+
+    - Surrounding whitespace is stripped (``apply_patch`` does this in execute; for
+      other tools it only makes the gate stricter, never looser).
+    - ``~`` is expanded; a relative path is joined to *workspace* (the tool's project
+      path), never to the process cwd.
+    - The result is absolute and lexically normalised (``os.path.abspath``); symlinks
+      are NOT resolved here: ``ProtectedFloor.matches`` checks the path both as given
+      and after ``resolve()``.
+    """
+    text = resource.strip()
+    if not text:
+        return ""
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute() and workspace is not None:
+            candidate = Path(workspace).expanduser() / candidate
+        return os.path.abspath(candidate)
+    except (OSError, RuntimeError, ValueError):
+        return text
+
+
+def _tool_workspace(tool: Any) -> Path | None:
+    """The workspace a tool resolves relative paths against, when it has one."""
+    for obj in (tool, getattr(tool, "_wrapped", None)):
+        if obj is None:
+            continue
+        for attr in ("_workspace", "workspace"):
+            value = getattr(obj, attr, None)
+            if isinstance(value, (str, Path)) and str(value):
+                return Path(value)
+    return None
+
+
+def _call_workspace(
+    tool: Any, env: CoreEnvironment | None, workspace: Path | None,
+) -> Path | None:
+    """Project path for this call: the bound scope, else the tool's own, else the host's."""
+    from nanobot.security.workspace_access import current_tool_workspace
+
+    default = _tool_workspace(tool) or workspace
+    if default is None and env is not None:
+        default = env.paths.work_dir
+    return current_tool_workspace(default).project_path
+
+
+def protected_floor(env: CoreEnvironment | None, workspace: Path | None) -> ProtectedFloor:
+    """The same ``ProtectedFloor`` the file tools build for this host.
+
+    With an env: ``ProtectedFloor.from_paths(env.paths, ...)`` plus, for a
+    non-strict (legacy) env, the ambient data dirs and config files. Without one:
+    the legacy default roots for *workspace*.
+    """
+    from nanobot.security.protected_paths import (
+        ProtectedFloor,
+        default_config_files,
+        default_data_dirs,
+    )
+
+    if env is None:
+        return ProtectedFloor(
+            data_dir=default_data_dirs(), workspace=workspace, config_files=default_config_files(),
+        )
+    extra_dirs: list[Path] = []
+    config_files: list[Path] = []
+    if not env.strict:
+        from nanobot.kernel.legacy import legacy_floor_extras
+
+        extra_dirs, config_files = legacy_floor_extras()
+    return ProtectedFloor.from_paths(
+        env.paths, extra_data_dirs=extra_dirs, config_files=config_files,
+    )
+
+
+def _sink(env: CoreEnvironment | None) -> TraceSink:
+    return env.trace if env is not None else LoguruTraceSink()
+
+
+def _tool_name(tool: Any) -> str:
+    try:
+        return str(tool.name)
+    except Exception:  # noqa: BLE001 - a broken name property must not break the gate
+        return type(tool).__name__
+
+
+def _decision_event(
+    principal: Principal,
+    tool_name: str,
+    req: CapabilityRequest,
+    decision: Allow | Deny,
+    layer: GateLayer | None,
+) -> dict[str, Any]:
+    deny = decision if isinstance(decision, Deny) else None
+    return {
+        "event": "policy.decision",
+        "actor": principal.name,
+        "principal_kind": principal.kind,
+        "tool": tool_name,
+        "capability": req.capability,
+        "resource": req.resource,
+        "verdict": "deny" if deny is not None else "allow",
+        "layer": layer if deny is not None else None,
+        "marker": deny.marker if deny is not None else None,
+    }
+
+
+def gate_call(
+    tool: Any,
+    params: Any,
+    principal: Principal | None,
+    policy: PermissionPolicy | None,
+    env: CoreEnvironment | None,
+    ctx: Any = None,
+    *,
+    workspace: Path | None = None,
+) -> GateResult:
+    """Run floors then policy for every capability *tool* declares for *params*.
+
+    ``principal``/``policy`` default to the top-level agent and ``DefaultPolicy()``.
+    ``env`` supplies the trace sink and the protected floor; ``None`` means the legacy
+    defaults (loguru sink, ambient floor roots). *workspace* is the fallback project
+    path for relative fs resources when the tool has none of its own.
+    """
+    principal = principal or AGENT_PRINCIPAL
+    policy = policy if policy is not None else DefaultPolicy()
+    sink = _sink(env)
+    name = _tool_name(tool)
+    declare = getattr(tool, "capabilities", None)
+    try:
+        # A duck-typed tool without ``capabilities`` declares nothing (the ``Tool``
+        # default); one whose declaration raises is denied (fail closed).
+        requests = (
+            list(declare(params if isinstance(params, dict) else {}))
+            if declare is not None else []
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed on a broken declaration
+        logger.warning("tool {} capabilities() raised {!r}; denying the call", name, exc)
+        req = CapabilityRequest("tool.capabilities", name)
+        deny = Deny(
+            reason=(
+                f"Error: {name} call {POLICY_MARKER} for {principal.kind} "
+                f"{principal.name!r} (its capability declaration failed)."
+            ),
+            marker=POLICY_MARKER,
+            capability=req.capability,
+        )
+        event = _decision_event(principal, name, req, deny, "gate")
+        safe_emit(sink, event)
+        return GateResult(deny, "gate", (event,))
+
+    events: list[dict[str, Any]] = []
+    floor: ProtectedFloor | None = None
+    call_ws: Path | None = None
+    ws_known = False
+    for raw in requests:
+        req = raw
+        if req.capability in FS_CAPABILITIES:
+            if not ws_known:
+                call_ws = _call_workspace(tool, env, workspace)
+                ws_known = True
+            req = CapabilityRequest(req.capability, _normalize_fs_resource(req.resource, call_ws))
+            if floor is None:
+                floor = protected_floor(env, call_ws)
+        decision: Allow | Deny
+        layer: GateLayer | None
+        floor_deny = check_floors(principal, req, protected=floor)
+        if floor_deny is not None:
+            decision, layer = floor_deny, "floor"
+        else:
+            layer = "policy"
+            try:
+                decision = policy.decide(principal, req, ctx)
+            except Exception as exc:  # noqa: BLE001 - a broken policy fails closed
+                logger.warning("policy {} raised {!r}; denying", type(policy).__name__, exc)
+                decision = policy_deny(principal, req, "policy error")
+        event = _decision_event(principal, name, req, decision, layer)
+        events.append(event)
+        safe_emit(sink, event)
+        if isinstance(decision, Deny):
+            return GateResult(decision, layer, tuple(events))
+    return GateResult(Allow(), None, tuple(events))
+
+
+def emit_tool_invalid(
+    env: CoreEnvironment | None,
+    tool_name: str,
+    principal: Principal | None,
+    error: str,
+) -> None:
+    """Record a call that failed preparation (unknown tool, bad params)."""
+    principal = principal or AGENT_PRINCIPAL
+    safe_emit(_sink(env), {
+        "event": "tool.invalid",
+        "actor": principal.name,
+        "principal_kind": principal.kind,
+        "tool": tool_name,
+        "error": str(error)[:500],
+    })
+
+
+__all__ = [
+    "AGENT_PRINCIPAL",
+    "GateResult",
+    "emit_tool_invalid",
+    "gate_call",
+    "protected_floor",
+]

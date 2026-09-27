@@ -252,7 +252,13 @@ class Tool(ABC):
 
         - Default: none. Built-in tools that touch the filesystem, network, processes,
           sessions or budgets override this.
-        - Must not raise on malformed *params* (the gate runs before validation).
+        - Must not raise on malformed *params* (the gate fails closed and denies the
+          call if it does).
+        - Resources are the RAW params: ``fs.read``/``fs.write`` paths may be relative or
+          padded. The gate (``nanobot.kernel.gate._normalize_fs_resource``) strips them
+          and resolves relative paths against the bound workspace scope, else the tool's
+          own ``_workspace``/``workspace``, else the host's work dir, before any floor or
+          policy sees them. Declare the path the tool resolves, not a pre-resolved one.
         - Existing inline guards inside ``execute`` stay; the gate is additive.
         """
         return []
