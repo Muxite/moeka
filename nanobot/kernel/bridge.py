@@ -199,6 +199,10 @@ class LoopThread:
 
             def _on_task_done(t: asyncio.Task[Any]) -> None:
                 if fut.done():
+                    # Settled from outside (e.g. the caller cancelled it):
+                    # still drop the bookkeeping entry so it doesn't leak.
+                    with self._lock:
+                        self._pending.pop(fut, None)
                     return
                 if t.cancelled():
                     self._settle(fut, cancelled=True)

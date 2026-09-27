@@ -472,3 +472,27 @@ def test_schedule_atomic_with_stop_never_leaks_or_crashes():
 
 async def _noop_coro() -> None:
     return None
+
+
+def test_cancelled_submits_do_not_leak_pending_entries(bridge):
+    """Cancelling submit() futures after their tasks started must not leave
+    ``_pending`` entries behind once those tasks finish."""
+    started = threading.Semaphore(0)
+
+    async def body():
+        started.release()
+        await asyncio.sleep(0.05)
+
+    futs = [bridge.submit(body()) for _ in range(20)]
+    for _ in futs:
+        assert started.acquire(timeout=2.0)
+    for fut in futs:
+        fut.cancel()
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        with bridge._lock:
+            if not bridge._pending:
+                break
+        time.sleep(0.01)
+    assert len(bridge._pending) == 0
