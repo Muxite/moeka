@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
@@ -64,10 +64,16 @@ from nanobot.utils.runtime import (
     build_tool_failure_reflection_message,
     exec_guard_violation_signature,
     is_blank_text,
+    policy_violation_signature,
     repeated_exec_guard_error,
     repeated_external_lookup_error,
+    repeated_policy_error,
     repeated_workspace_violation_error,
 )
+
+if TYPE_CHECKING:
+    from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.policy import PermissionPolicy, Principal
 
 ContinuationCallback = Callable[[], str | None]
 CheckpointCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -152,6 +158,11 @@ class AgentRunSpec:
     provider_state: ProviderConversationState | None = None
     llm_usage_source: LLMUsageSource | None = None
     events: EventSink = NO_EVENTS
+    # Capability gate (kernel P2). ``None`` policy/principal mean ``DefaultPolicy()``
+    # and the top-level agent; ``env`` supplies the trace sink and protected floor.
+    policy: PermissionPolicy | None = None
+    principal: Principal | None = None
+    env: CoreEnvironment | None = None
 
 
 @dataclass(slots=True)
@@ -1564,6 +1575,9 @@ class AgentRunner:
                 if len(prepared_tuple) == 3:
                     tool, params, prep_error = cast(tuple[Any, Any, str | None], prepared_tuple)
         if prep_error:
+            from nanobot.kernel.gate import emit_tool_invalid
+
+            emit_tool_invalid(spec.env, tool_call.name, spec.principal, prep_error)
             event = {
                 "name": tool_call.name,
                 "status": "error",
@@ -1579,6 +1593,32 @@ class AgentRunner:
             if handled is not None:
                 return handled
             return prep_error + hint, event, None
+        if tool is not None:
+            # The gate: floors then policy, before any hook sees the call. A denied
+            # call never reaches before/after_execute_tool or on_execute_tool_error.
+            from nanobot.kernel.gate import gate_call
+
+            gate = gate_call(
+                tool, params, spec.principal, spec.policy, spec.env, workspace=spec.workspace,
+            )
+            if not gate.allowed:
+                denial = gate.error_text()
+                event = {
+                    "name": tool_call.name,
+                    "status": "error",
+                    "detail": denial.split(": ", 1)[-1][:120],
+                }
+                handled = self._classify_violation(
+                    raw_text=denial,
+                    soft_payload=denial + hint,
+                    event=event,
+                    tool_call=tool_call,
+                    workspace_violation_counts=workspace_violation_counts,
+                    policy_capability=gate.policy_capability,
+                )
+                if handled is not None:
+                    return handled
+                return denial + hint, event, None
         await hook.before_execute_tool(context, tool_call, tool, params)
         try:
             with (
@@ -1694,8 +1734,30 @@ class AgentRunner:
         event: dict[str, str],
         tool_call: ToolCallRequest,
         workspace_violation_counts: dict[str, int],
+        policy_capability: str | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None] | None:
-        """Classify safety-boundary failures, or return ``None`` to pass through."""
+        """Classify safety-boundary failures, or return ``None`` to pass through.
+
+        *policy_capability* is set only by the gate for a ``PermissionPolicy.decide``
+        denial (``violation:policy:<capability>``); floor denials leave it ``None`` and
+        keep their exec-floor / workspace classes.
+        """
+        if policy_capability is not None:
+            # Checked first: the deny reason quotes the resource, which could carry
+            # another class's marker text (a command, a URL, a path).
+            escalation = repeated_policy_error(policy_capability, workspace_violation_counts)
+            event["detail"] = self._event_detail("policy_denial: ", raw_text)
+            if escalation is not None:
+                logger.warning(
+                    "Tool {} blocked repeatedly by permission policy ({}); escalating hint",
+                    tool_call.name,
+                    policy_violation_signature(policy_capability),
+                )
+                event["detail"] = self._event_detail("policy_denial_escalated: ", raw_text)
+                return escalation, event, None
+            # Verbatim: the generic retry hint would invite the model to probe the policy.
+            return raw_text, event, None
+
         if self._is_ssrf_violation(raw_text):
             logger.warning(
                 "Tool {} blocked by SSRF guard; returning non-retryable tool error: {}",

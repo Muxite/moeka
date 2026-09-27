@@ -264,6 +264,36 @@ def exec_guard_violation_signature(raw_text: str) -> str | None:
     return None
 
 
+def policy_violation_signature(capability: str) -> str:
+    """Stable signature for a permission-policy denial of *capability*.
+
+    Only the gate's own ``PermissionPolicy.decide`` denials use this class (the
+    runner passes the denied capability explicitly); floor denials keep their
+    exec-floor / workspace classes.
+    """
+    return f"violation:policy:{capability or 'unknown'}"
+
+
+def repeated_policy_error(
+    capability: str,
+    seen_counts: dict[str, int],
+) -> str | None:
+    """Return an escalated error after repeated policy denials of one capability."""
+    signature = policy_violation_signature(capability)
+    count = seen_counts.get(signature, 0) + 1
+    seen_counts[signature] = count
+    if count <= _MAX_REPEAT_WORKSPACE_VIOLATIONS:
+        return None
+    logger.warning("Escalating repeated permission-policy denial {} (attempt {})", signature, count)
+    return (
+        "Error: refusing repeated calls blocked by the permission policy.\n"
+        f"{count} calls needing '{capability}' have been blocked by the host's "
+        "permission policy this turn. The policy is not configurable by the agent, "
+        "stop retrying: different arguments, tools, or tricks will NOT change the "
+        "answer. Tell the user which capability you need and continue without it."
+    )
+
+
 def repeated_exec_guard_error(
     raw_text: str,
     seen_counts: dict[str, int],
