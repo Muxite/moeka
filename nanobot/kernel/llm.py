@@ -1,4 +1,4 @@
-"""Kernel LLM layer: ``generate`` / ``complete`` / ``complete_json`` / ``stream``.
+"""Kernel LLM layer: ``generate`` / ``complete`` / ``complete_json`` / ``stream`` / ``batch``.
 
 One :class:`LLM` per :class:`~nanobot.kernel.kernel.Kernel` (``kernel.llm``). It
 keeps a provider pool keyed by model alias (a ``ModelSpec`` name): each alias gets
@@ -20,25 +20,49 @@ Rules every entry point follows:
 Each logical call gets a ``call_id``; the ledger's ``model.call`` events for all of
 its physical attempts carry that id, the alias, the attempt number and the host's
 tags (bound through :func:`nanobot.kernel.ledger.call_attribution`).
+
+With a kernel ``cache`` (and ``opts.cache``), a logical call is first looked up by
+:meth:`LLM.request_key`; a hit makes no provider call and no budget admission.
+With a kernel ``budget``, a miss is then admitted once against its worst-case
+:class:`~nanobot.kernel.budget.CallEstimate` before anything is sent, settled per
+physical attempt, and released when it ends (see :mod:`nanobot.kernel.budget`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import inspect
 import json
 import re
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
+from nanobot.kernel.budget import (
+    BudgetedProvider,
+    CallEstimate,
+    Estimator,
+    Metering,
+    build_estimate,
+    prompt_tokens_of,
+)
 from nanobot.kernel.frozen import FrozenMap, thaw
 from nanobot.kernel.hostenv import ModelSpec
 from nanobot.kernel.ledger import (
@@ -49,15 +73,20 @@ from nanobot.kernel.ledger import (
     compute_cost,
 )
 from nanobot.kernel.llm_errors import (
+    AuthError,
+    BudgetExceeded,
     LLMError,
     LLMTimeoutError,
     ModelNotFound,
     ParseError,
+    QuotaError,
+    RateLimitError,
     TruncatedError,
     classify,
 )
 from nanobot.kernel.messages import ImageInput, user_content
 from nanobot.kernel.sampling import Sampling
+from nanobot.kernel.trace import safe_emit
 
 if TYPE_CHECKING:
     from nanobot.kernel.kernel import Kernel
@@ -182,6 +211,53 @@ class Completion:
     @property
     def truncated(self) -> bool:
         return self.finish_reason == "length"
+
+
+@dataclass(frozen=True)
+class Request:
+    """One logical call for :meth:`LLM.batch` / :meth:`LLM.estimate` / :meth:`LLM.request_key`.
+
+    A request with a ``schema`` or ``model_cls`` is a JSON request (run like
+    ``complete_json`` over *messages*, re-prompted up to ``retries`` times);
+    otherwise it is a plain ``generate``. ``messages`` is stored as a tuple.
+    """
+
+    messages: Sequence[Mapping[str, Any]]
+    opts: GenerateOptions | None = None
+    schema: Mapping[str, Any] | None = None
+    model_cls: type | None = None
+    retries: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.messages, tuple):
+            object.__setattr__(self, "messages", tuple(self.messages))
+        if self.retries < 0:
+            raise ValueError(f"retries must be >= 0, got {self.retries!r}")
+
+    @property
+    def is_json(self) -> bool:
+        return self.schema is not None or self.model_cls is not None
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """The outcome of :meth:`LLM.batch`.
+
+    ``outcomes`` is in input order: a :class:`Completion` or the item's
+    :class:`LLMError`. ``systemic`` is the error that aborted the batch (auth,
+    quota or budget), in which case every unfinished item's outcome is that error.
+    """
+
+    outcomes: list[Completion | LLMError]
+    systemic: LLMError | None = None
+
+    @property
+    def completions(self) -> list[Completion]:
+        return [o for o in self.outcomes if isinstance(o, Completion)]
+
+    @property
+    def errors(self) -> list[LLMError]:
+        return [o for o in self.outcomes if isinstance(o, LLMError)]
 
 
 # -- shared JSON / provider helpers (also used by nanobot.api.complete) --------
@@ -317,8 +393,81 @@ class _Route:
     model: str
 
 
+@dataclass(frozen=True)
+class _Plan:
+    """A logical call resolved against the kernel: route, first-round messages, rounds."""
+
+    kind: Literal["generate", "json"]
+    route: _Route
+    opts: GenerateOptions
+    source: tuple[Mapping[str, Any], ...]  # the caller's messages, as given
+    messages: list[dict[str, Any]]  # the first round as sent (JSON: system suffix added)
+    native: Mapping[str, Any] | None  # the response_format of the first round
+    schema: Mapping[str, Any] | None = None
+    model_cls: type | None = None
+    retries: int = 0
+
+    @property
+    def rounds(self) -> int:
+        if self.kind != "json":
+            return 1
+        # Every parse retry, plus a native round the provider may reject.
+        return 1 + self.retries + (1 if self.native is not None else 0)
+
+
 def _new_call_id() -> str:
     return uuid.uuid4().hex
+
+
+def _with_json_system(
+    messages: Sequence[Mapping[str, Any]], suffix: str,
+) -> list[dict[str, Any]]:
+    """*messages* with the JSON instructions appended to (or added as) the system prompt."""
+    out = [dict(message) for message in messages]
+    if out and out[0].get("role") == "system" and isinstance(out[0].get("content"), str):
+        content = out[0]["content"]
+        out[0]["content"] = f"{content}\n\n{suffix}" if content else suffix
+        return out
+    return [{"role": "system", "content": suffix}, *out]
+
+
+def _canonical_default(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=repr)
+    if isinstance(value, (bytes, bytearray)):
+        return hashlib.sha256(bytes(value)).hexdigest()
+    return repr(value)
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        default=_canonical_default,
+    )
+
+
+class _RateGate:
+    """Holds new batch dispatches until a shared resume time (rate-limit pauses)."""
+
+    def __init__(self) -> None:
+        self._resume_at = 0.0
+
+    def pause(self, seconds: float) -> None:
+        loop = asyncio.get_running_loop()
+        self._resume_at = max(self._resume_at, loop.time() + max(0.0, seconds))
+
+    async def wait(self) -> None:
+        loop = asyncio.get_running_loop()
+        while (remaining := self._resume_at - loop.time()) > 0:
+            await asyncio.sleep(remaining)
+
+
+# Systemic errors abort a whole batch: retrying other items cannot succeed.
+_SYSTEMIC_ERRORS: tuple[type[LLMError], ...] = (AuthError, QuotaError, BudgetExceeded)
+_BATCH_RATE_LIMIT_RETRIES = 3
+_DEFAULT_RETRY_AFTER_S = 1.0
 
 
 def _spec_pricing(spec: ModelSpec) -> ModelPricing | None:
@@ -339,6 +488,12 @@ class LLM:
         # id(provider) -> (provider, its ledger pricing table): one observer per
         # injected provider object, priced for every alias registered on it.
         self._ledgers: dict[int, tuple[LLMProvider, PricingTable]] = {}
+        budget = kernel.budget
+        self._metering: Metering | None = (
+            Metering(budget, kernel.env.trace) if budget is not None else None
+        )
+        # alias -> the BudgetedProvider around that alias's provider (with a budget).
+        self._wrapped: dict[str, BudgetedProvider] = {}
 
     # -- provider pool -----------------------------------------------------
 
@@ -381,6 +536,21 @@ class LLM:
         return self._kernel.env.models.get(alias)
 
     def _provider_for(self, alias: str) -> LLMProvider:
+        """The provider serving *alias*; wrapped in a ``BudgetedProvider`` under a budget."""
+        raw = self._raw_provider_for(alias)
+        metering = self._metering
+        if metering is None:
+            return raw
+        with self._lock:
+            wrapped = self._wrapped.get(alias)
+            if wrapped is None or wrapped.inner is not raw:
+                wrapped = BudgetedProvider(
+                    raw, metering, self._direct_estimator(alias, raw), alias=alias,
+                )
+                self._wrapped[alias] = wrapped
+            return wrapped
+
+    def _raw_provider_for(self, alias: str) -> LLMProvider:
         with self._lock:
             injected = self._injected.get(alias)
             if injected is not None:
@@ -512,6 +682,233 @@ class LLM:
             provider=route.provider.provider_name,
         )
 
+    # -- plans, estimates and request keys -----------------------------------------------
+
+    def _plan(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        opts: GenerateOptions,
+        *,
+        kind: Literal["generate", "json"] = "generate",
+        schema: Mapping[str, Any] | None = None,
+        model_cls: type | None = None,
+        retries: int = 0,
+    ) -> _Plan:
+        route = self._route(opts.model)
+        source = tuple(messages)
+        if kind == "generate":
+            return _Plan(
+                kind, route, opts, source, [dict(m) for m in source], opts.response_format,
+                retries=retries,
+            )
+        if model_cls is not None:
+            schema = model_cls.model_json_schema()  # type: ignore[attr-defined]
+        native = opts.response_format
+        if native is None and (route.spec is None or route.spec.native_json is not False):
+            native = json_response_format(schema)
+        return _Plan(
+            kind, route, opts, source, _with_json_system(source, json_system_suffix(schema)),
+            native, schema=schema, model_cls=model_cls, retries=max(retries, 0),
+        )
+
+    def _plan_request(self, request: Request) -> _Plan:
+        if not isinstance(request, Request):
+            raise TypeError(f"expected a Request, got {type(request).__name__}")
+        return self._plan(
+            request.messages, request.opts or GenerateOptions(),
+            kind="json" if request.is_json else "generate",
+            schema=request.schema, model_cls=request.model_cls, retries=request.retries,
+        )
+
+    def _merged_sampling(self, route: _Route, opts: GenerateOptions) -> Sampling:
+        """The model's sampling defaults with the call's explicit fields written over them."""
+        base = self._default_sampling(route) or Sampling()
+        explicit = opts.sampling
+        return replace(base, **{name: getattr(explicit, name) for name in explicit.set_fields()})
+
+    def _pricing_for(
+        self, spec: ModelSpec | None, provider: LLMProvider, model: str,
+    ) -> ModelPricing | None:
+        """The spec's pricing for its own model, else the provider ledger's table."""
+        if spec is not None and spec.model == model:
+            pricing = _spec_pricing(spec)
+            if pricing is not None:
+                return pricing
+        lookup = getattr(getattr(provider, "_llm_call_observer", None), "pricing_for", None)
+        if callable(lookup):
+            try:
+                return lookup(provider.provider_name, model)
+            except Exception:  # noqa: BLE001 - an unpriced estimate, never a failed call
+                logger.exception("pricing lookup failed for {}", model)
+        return None
+
+    def _estimate_plan(self, plan: _Plan, call_id: str) -> CallEstimate:
+        route = plan.route
+        max_tokens = self._merged_sampling(route, plan.opts).max_tokens
+        if max_tokens is None:
+            max_tokens = route.provider.generation.max_tokens
+        return build_estimate(
+            call_id=call_id,
+            alias=route.alias,
+            model=route.model,
+            provider=route.provider.provider_name,
+            prompt_tokens=prompt_tokens_of(plan.messages),
+            max_output_tokens=max_tokens,
+            rounds=plan.rounds,
+            reprompts=plan.retries if plan.kind == "json" else 0,
+            pricing=self._pricing_for(route.spec, route.provider, route.model),
+            tags=plan.opts.tags,
+        )
+
+    def _direct_estimator(self, alias: str, provider: LLMProvider) -> Estimator:
+        """Estimates for provider calls made outside the LLM layer (``BudgetedProvider``)."""
+
+        def estimate(kwargs: dict[str, Any]) -> CallEstimate:
+            spec = self._spec_for(alias)
+            model = kwargs.get("model") or (spec.model if spec else provider.get_default_model())
+            max_tokens = kwargs.get("max_tokens")
+            if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+                max_tokens = (spec.max_tokens if spec else None) or provider.generation.max_tokens
+            messages = kwargs.get("messages") or []
+            tools = kwargs.get("tools")
+            return build_estimate(
+                call_id=_new_call_id(),
+                alias=alias,
+                model=model,
+                provider=provider.provider_name,
+                prompt_tokens=prompt_tokens_of(messages, tools if isinstance(tools, list) else None),
+                max_output_tokens=max_tokens,
+                pricing=self._pricing_for(spec, provider, model),
+            )
+
+        return estimate
+
+    def _key_for(self, plan: _Plan) -> str:
+        route = plan.route
+        sampling = self._merged_sampling(route, plan.opts)
+        cls = plan.model_cls
+        payload = {
+            "v": 1,
+            "kind": plan.kind,
+            "messages": [thaw(m) for m in plan.source],
+            "alias": route.alias,
+            "model": route.model,
+            "provider": route.provider.provider_name,
+            "sampling": {name: thaw(getattr(sampling, name)) for name in sampling.set_fields()},
+            "response_format": thaw(plan.native) if plan.native is not None else None,
+            "extra_body": thaw(plan.opts.extra_body) if plan.opts.extra_body else None,
+            "schema": thaw(plan.schema) if plan.schema is not None else None,
+            "model_cls": f"{cls.__module__}.{cls.__qualname__}" if cls is not None else None,
+            "retries": plan.retries,
+        }
+        return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+    def estimate(self, request: Request) -> CallEstimate:
+        """The worst case *request* can cost (what a budget would be asked to admit).
+
+        Input tokens come from ``estimate_prompt_tokens`` (images at
+        ``budget.IMAGE_TOKENS`` each, a JSON schema counted once); output is the
+        resolved ``max_tokens`` (call, then model defaults, then the provider's).
+        A JSON request may take ``1 + retries`` rounds, plus a native
+        ``response_format`` round the provider may reject. ``worst_case_usd`` is
+        ``None`` when the model has no price. Sends nothing.
+        """
+        return self._estimate_plan(self._plan_request(request), _new_call_id())
+
+    def request_key(self, request: Request) -> str:
+        """Stable sha256 cache key for *request*.
+
+        Covers the kind, the messages, the resolved alias/model/provider, the
+        sampling merged with the model's defaults, the response format, extra body,
+        schema, ``model_cls`` and retries. Equal requests get equal keys.
+        """
+        return self._key_for(self._plan_request(request))
+
+    # -- cache and budget ------------------------------------------------------------------
+
+    def _cache_lookup(
+        self, plan: _Plan, call_id: str, started: float,
+    ) -> tuple[str | None, Completion | None]:
+        """``(key, hit)``: the cache key (``None`` = not cacheable) and a cached completion."""
+        cache = self._kernel.cache
+        if cache is None or not plan.opts.cache:
+            return None, None
+        key = self._key_for(plan)
+        try:
+            hit = cache.get(key)
+        except Exception:  # noqa: BLE001 - a broken cache is a miss, never a failed call
+            logger.exception("response cache get failed")
+            return key, None
+        if hit is None:
+            return key, None
+        if not isinstance(hit, Completion):
+            logger.warning("response cache returned {} (not a Completion); ignored", type(hit))
+            return key, None
+        safe_emit(self._kernel.env.trace, {
+            "event": "cache.hit",
+            "call_id": call_id,
+            "key": key[:16],
+            "alias": plan.route.alias,
+            "model": hit.model,
+            "tags": thaw(plan.opts.tags),
+        })
+        return key, replace(
+            hit,
+            call_id=call_id,
+            cached=True,
+            attempts=0,
+            cost_usd=0.0,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+        )
+
+    def _cache_store(self, key: str | None, completion: Completion | None) -> None:
+        cache = self._kernel.cache
+        if key is None or cache is None or completion is None:
+            return
+        if completion.truncated or completion.cached or completion.finish_reason == "error":
+            return
+        try:
+            cache.put(key, completion)
+        except Exception:  # noqa: BLE001
+            logger.exception("response cache put failed")
+
+    @contextmanager
+    def _admitted(
+        self, estimate: CallEstimate,
+    ) -> Generator[Callable[[Any], None] | None]:
+        """Admit *estimate* against the budget (raises ``BudgetExceeded``); yield the
+        settlement hook for the call's attribution; release the rest on exit."""
+        metering = self._metering
+        if metering is None:
+            yield None
+            return
+        admission = metering.admit(estimate)
+        try:
+            yield admission.settle
+        finally:
+            admission.release()
+
+    async def _run_plan(self, plan: _Plan) -> Completion:
+        """One logical call: cache lookup, admission, the provider call(s), cache store."""
+        started = time.monotonic()
+        call_id = _new_call_id()
+        key, hit = self._cache_lookup(plan, call_id, started)
+        if hit is not None:
+            return hit
+        estimate = self._estimate_plan(plan, call_id)
+        with self._admitted(estimate) as settle:
+            attribution = CallAttribution(
+                call_id=call_id, alias=plan.route.alias, tags=plan.opts.tags, on_event=settle,
+            )
+            if plan.kind == "json":
+                completion = await self._json_call(plan, attribution, started)
+            else:
+                completion = await self._generate(
+                    plan.messages, plan.opts, attribution=attribution, route=plan.route,
+                )
+        self._cache_store(key, completion)
+        return completion
+
     # -- generate ------------------------------------------------------------------------
 
     async def _generate(
@@ -520,8 +917,11 @@ class LLM:
         opts: GenerateOptions,
         *,
         attribution: CallAttribution | None = None,
+        route: _Route | None = None,
     ) -> Completion:
-        route = self._route(opts.model)
+        """One provider call (with its retry policy); no cache and no admission."""
+        if route is None:
+            route = self._route(opts.model)
         if attribution is None:
             attribution = CallAttribution(
                 call_id=_new_call_id(), alias=route.alias, tags=opts.tags,
@@ -557,12 +957,17 @@ class LLM:
         Raises a typed ``LLMError`` on failure. A reply cut at the token limit
         is returned with ``truncated=True``, not raised.
         """
-        return await self._on_loop(self._generate(messages, opts or GenerateOptions()))
+        return await self._on_loop(self._generate_call(messages, opts or GenerateOptions()))
 
     def generate_sync(
         self, messages: Sequence[Mapping[str, Any]], opts: GenerateOptions | None = None,
     ) -> Completion:
-        return self._run_sync(self._generate(messages, opts or GenerateOptions()))
+        return self._run_sync(self._generate_call(messages, opts or GenerateOptions()))
+
+    async def _generate_call(
+        self, messages: Sequence[Mapping[str, Any]], opts: GenerateOptions,
+    ) -> Completion:
+        return await self._run_plan(self._plan(messages, opts))
 
     # -- complete --------------------------------------------------------------------------
 
@@ -612,68 +1017,59 @@ class LLM:
         task_type: str | None,
         task_payload: dict[str, Any] | None,
     ) -> Completion:
-        started = time.monotonic()
-        call_id = _new_call_id()
         if task_type is not None:
+            started = time.monotonic()
             value, solver = solve_deterministic(task_type, task_payload, prompt, model_cls)
-            if solver is not None:
-                return self._solved(value, solver, opts, call_id, started)
+            if solver is not None:  # the solver path is never cached nor admitted
+                return self._solved(value, solver, opts, _new_call_id(), started)
+        plan = self._plan(
+            self._prompt_messages(prompt, system, images), opts,
+            kind="json", schema=schema, model_cls=model_cls, retries=retries,
+        )
+        return await self._run_plan(plan)
 
-        if model_cls is not None:
-            schema = model_cls.model_json_schema()  # type: ignore[attr-defined]
-        suffix = json_system_suffix(schema)
-        full_system = f"{system}\n\n{suffix}" if system else suffix
-        images = tuple(images)
-
-        route = self._route(opts.model)
-        native = opts.response_format
-        if native is None and (route.spec is None or route.spec.native_json is not False):
-            native = json_response_format(schema)
-        attribution = CallAttribution(call_id=call_id, alias=route.alias, tags=opts.tags)
+    async def _json_call(
+        self, plan: _Plan, attribution: CallAttribution, started: float,
+    ) -> Completion:
+        opts = plan.opts
         # One deadline for the whole call: every round (and a rejected native one)
         # shares timeout_s, so rounds themselves run without their own deadline.
         deadline = asyncio.timeout(opts.timeout_s)
         try:
             async with deadline:
                 return await self._json_rounds(
-                    prompt, full_system=full_system, images=images, model_cls=model_cls,
-                    retries=retries, opts=replace(opts, timeout_s=None), route=route,
-                    native=native, attribution=attribution, started=started,
+                    plan, replace(opts, timeout_s=None), attribution, started,
                 )
         except TimeoutError:
             if deadline.expired():
-                raise self._timeout_error(opts, route, call_id) from None
+                raise self._timeout_error(opts, plan.route, attribution.call_id) from None
             raise
 
     async def _json_rounds(
         self,
-        prompt: str,
-        *,
-        full_system: str,
-        images: tuple[ImageInput, ...],
-        model_cls: type | None,
-        retries: int,
+        plan: _Plan,
         opts: GenerateOptions,
-        route: _Route,
-        native: Mapping[str, Any] | None,
         attribution: CallAttribution,
         started: float,
     ) -> Completion:
         call_id = attribution.call_id
+        route = plan.route
+        native = plan.native
         use_native = native is not None
         rounds = 0
         parse_rounds = 0
         usage = Usage()
         costs: list[float | None] = []
-        attempt_prompt = prompt
+        messages = plan.messages
         last_error = ""
         last: Completion | None = None
-        while parse_rounds <= max(retries, 0):
+        while parse_rounds <= plan.retries:
             rounds += 1
-            messages = self._prompt_messages(attempt_prompt, full_system, images)
             round_opts = replace(opts, response_format=native if use_native else None)
             try:
-                reply = await self._generate(messages, round_opts, attribution=attribution)
+                reply = await self._generate(
+                    messages, round_opts, attribution=attribution, route=route,
+                )
             except LLMError as exc:
                 if use_native and exc.kind in _REJECTION_KINDS:
                     # The provider rejected native structured output: prompt mode.
@@ -686,7 +1082,7 @@ class LLM:
             usage = usage + reply.usage
             costs.append(reply.cost_usd)
             try:
-                parsed = coerce_json(json.loads(extract_json_text(reply.text)), model_cls)
+                parsed = coerce_json(json.loads(extract_json_text(reply.text)), plan.model_cls)
             except Exception as exc:  # json decode or pydantic validation
                 if reply.truncated:
                     raise TruncatedError(
@@ -696,12 +1092,16 @@ class LLM:
                     ) from exc
                 last_error = str(exc)
                 use_native = False  # native didn't help; reprompt in plain text mode
-                attempt_prompt = (
-                    f"{prompt}\n\n"
-                    f"Your previous reply was not valid:\n{reply.text}\n\n"
-                    f"Error: {last_error}\n"
-                    "Reply again with ONLY corrected valid JSON."
-                )
+                # Only the latest bad reply is shown, so every re-prompt round
+                # stays within one reply of the first round's size.
+                messages = [
+                    *plan.messages,
+                    {"role": "assistant", "content": reply.text},
+                    {"role": "user", "content": (
+                        f"Your previous reply was not valid.\nError: {last_error}\n"
+                        "Reply again with ONLY corrected valid JSON."
+                    )},
+                ]
                 continue
             return replace(
                 reply,
@@ -759,6 +1159,7 @@ class LLM:
         *retries* times (a rejected native round does not use one), then
         ``ParseError``; a truncated reply that fails to parse is ``TruncatedError``.
         ``Completion.attempts`` is the number of rounds; usage and cost are summed.
+        The whole call is one cache lookup and one budget admission.
         """
         return await self._on_loop(self._complete_json(
             prompt, schema=schema, model_cls=model_cls, retries=retries, system=system,
@@ -813,54 +1214,166 @@ class LLM:
         reference its owner, or an abandoned stream would sit in a reference
         cycle (never finalised, provider task still running) until cyclic GC.
         """
-        route = self._route(opts.model)
-        attribution = CallAttribution(call_id=_new_call_id(), alias=route.alias, tags=opts.tags)
-        context = self._context(route, opts, opts.response_format)
+        plan = self._plan(messages, opts)
+        route = plan.route
         started = time.monotonic()
-        queue: asyncio.Queue[Any] = asyncio.Queue()
-        done = object()
-        deadline = asyncio.timeout(opts.timeout_s)
+        call_id = _new_call_id()
+        key, hit = self._cache_lookup(plan, call_id, started)
+        if hit is not None:
+            if hit.text:
+                yield hit.text
+            out.completion = hit
+            return
+        estimate = self._estimate_plan(plan, call_id)
+        with self._admitted(estimate) as settle:
+            attribution = CallAttribution(
+                call_id=call_id, alias=route.alias, tags=opts.tags, on_event=settle,
+            )
+            context = self._context(route, opts, opts.response_format)
+            queue: asyncio.Queue[Any] = asyncio.Queue()
+            done = object()
+            deadline = asyncio.timeout(opts.timeout_s)
 
-        async def on_delta(text: str) -> None:
-            if text:
-                queue.put_nowait(text)
+            async def on_delta(text: str) -> None:
+                if text:
+                    queue.put_nowait(text)
 
-        async def call() -> LLMResponse:
-            try:
-                async with deadline:
-                    return await route.provider.chat_stream_with_retry(
-                        messages=copy.deepcopy(list(messages)),
-                        model=route.model,
-                        provider_context=context,
-                        on_content_delta=on_delta,
-                    )
-            finally:
-                queue.put_nowait(done)
-
-        # The task copies the context now, so the ledger sees the attribution.
-        with call_attribution(attribution):
-            task = asyncio.create_task(call())
-        try:
-            while True:
-                item = await queue.get()
-                if item is done:
-                    break
-                yield item
-            try:
-                response = await task
-            except TimeoutError:
-                if deadline.expired():
-                    raise self._timeout_error(opts, route, attribution.call_id) from None
-                raise
-            self._raise_for(response, route, attribution.call_id)
-            out.completion = self._completion(response, route, attribution, started)
-        finally:
-            if not task.done():
-                task.cancel()
+            async def call() -> LLMResponse:
                 try:
-                    await task
-                except BaseException:  # noqa: BLE001 - cancelled on early exit
-                    pass
+                    async with deadline:
+                        return await route.provider.chat_stream_with_retry(
+                            messages=copy.deepcopy(plan.messages),
+                            model=route.model,
+                            provider_context=context,
+                            on_content_delta=on_delta,
+                        )
+                finally:
+                    queue.put_nowait(done)
+
+            # The task copies the context now, so the ledger sees the attribution.
+            with call_attribution(attribution):
+                task = asyncio.create_task(call())
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is done:
+                        break
+                    yield item
+                try:
+                    response = await task
+                except TimeoutError:
+                    if deadline.expired():
+                        raise self._timeout_error(opts, route, attribution.call_id) from None
+                    raise
+                self._raise_for(response, route, attribution.call_id)
+                out.completion = self._completion(response, route, attribution, started)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:  # noqa: BLE001 - cancelled on early exit
+                        pass
+        self._cache_store(key, out.completion)
+
+    # -- batch ---------------------------------------------------------------------------------
+
+    async def batch(
+        self, requests: Iterable[Request], *, concurrency: int | None = None,
+    ) -> BatchResult:
+        """Run *requests* concurrently; outcomes come back in input order.
+
+        At most *concurrency* (default: the kernel's ``max_concurrency``) calls
+        are in flight. Each item is a full logical call (cache, budget, retries).
+
+        - ``AuthError`` / ``QuotaError`` / ``BudgetExceeded`` are systemic: the
+          remaining items are cancelled, every unfinished item's outcome is that
+          error, and ``BatchResult.systemic`` is set.
+        - ``RateLimitError`` pauses new dispatches for ``retry_after`` (1s when
+          unknown) and retries that item, up to 3 times; after that the error is
+          the item's outcome.
+        - Any other ``LLMError`` is that item's outcome.
+        """
+        requests = list(requests)
+        return await self._on_loop(self._batch(requests, concurrency))
+
+    def batch_sync(
+        self, requests: Iterable[Request], *, concurrency: int | None = None,
+    ) -> BatchResult:
+        return self._run_sync(self._batch(list(requests), concurrency))
+
+    async def _run_request(self, request: Request) -> Completion:
+        return await self._run_plan(self._plan_request(request))
+
+    async def _batch(self, requests: list[Request], concurrency: int | None) -> BatchResult:
+        for request in requests:
+            if not isinstance(request, Request):
+                raise TypeError(f"batch items must be Request, got {type(request).__name__}")
+        limit = self._kernel.max_concurrency if concurrency is None else concurrency
+        if limit < 1:
+            raise ValueError(f"concurrency must be at least 1, got {limit!r}")
+        semaphore = asyncio.Semaphore(limit)
+        gate = _RateGate()
+        outcomes: list[Completion | LLMError | None] = [None] * len(requests)
+        systemic: list[LLMError] = []
+        tasks: list[asyncio.Task[None]] = []
+
+        def abort(error: LLMError, index: int) -> None:
+            if systemic:
+                return
+            systemic.append(error)
+            for other, task in enumerate(tasks):
+                if other != index and not task.done():
+                    task.cancel()
+
+        async def run(index: int, request: Request) -> None:
+            rate_limited = 0
+            while True:
+                async with semaphore:
+                    await gate.wait()
+                    if systemic:
+                        return
+                    try:
+                        outcomes[index] = await self._run_request(request)
+                        return
+                    except RateLimitError as exc:
+                        if rate_limited >= _BATCH_RATE_LIMIT_RETRIES:
+                            outcomes[index] = exc
+                            return
+                        rate_limited += 1
+                        wait = exc.retry_after
+                        gate.pause(_DEFAULT_RETRY_AFTER_S if wait is None else wait)
+                    except _SYSTEMIC_ERRORS as exc:
+                        outcomes[index] = exc
+                        abort(exc, index)
+                        return
+                    except LLMError as exc:
+                        outcomes[index] = exc
+                        return
+
+        tasks.extend(asyncio.create_task(run(i, r)) for i, r in enumerate(requests))
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError,
+            ):
+                raise result  # a bug, not a model error: fail loudly
+        error = systemic[0] if systemic else None
+        final: list[Completion | LLMError] = []
+        for outcome in outcomes:
+            if outcome is None:
+                if error is None:  # unreachable: every item ends with an outcome
+                    raise RuntimeError("batch item finished without an outcome")
+                outcome = error
+            final.append(outcome)
+        return BatchResult(outcomes=final, systemic=error)
 
 
 class _StreamResult:
@@ -973,8 +1486,10 @@ class SyncTextStream:
 
 __all__ = [
     "LLM",
+    "BatchResult",
     "Completion",
     "GenerateOptions",
+    "Request",
     "SyncTextStream",
     "TextStream",
     "Usage",

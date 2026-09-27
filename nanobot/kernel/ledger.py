@@ -38,7 +38,7 @@ layer (the agent loop) have no attribution and leave those fields empty.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -77,6 +77,8 @@ class CallAttribution:
 
     Mutable on purpose: the observer counts physical attempts into it and leaves
     the last attempt's cost, so the caller can read them back after the call.
+    ``on_event`` (budget settlement) receives every physical attempt's
+    :class:`LedgerEvent`; it is called fail-open.
     """
 
     call_id: str
@@ -85,6 +87,7 @@ class CallAttribution:
     cached: bool = False
     attempts: int = 0
     cost_usd: float | None = None
+    on_event: Callable[[LedgerEvent], None] | None = None
 
 
 _CURRENT_CALL: ContextVar[CallAttribution | None] = ContextVar(
@@ -276,6 +279,10 @@ class LedgerObserver:
                 logger.exception("ledger pricing table could not be built; pricing nothing")
                 self._pricing = PricingTable()
 
+    def pricing_for(self, provider: str, model: str) -> ModelPricing | None:
+        """The pricing this observer applies to ``(provider, model)`` (``None`` = unpriced)."""
+        return self._pricing_for(provider, model)
+
     def _pricing_for(self, provider: str, model: str) -> ModelPricing | None:
         try:
             return self._pricing.lookup(provider, model)
@@ -340,11 +347,20 @@ class LedgerObserver:
             call.attempts += 1
             call.cost_usd = enriched.cost_usd
             attempt = call.attempts
-        if self._sink is not None:
+        on_event = call.on_event if call is not None else None
+        if self._sink is not None or on_event is not None:
             try:
-                safe_emit(self._sink, self._event(enriched, attempt=attempt).to_trace())
+                event = self._event(enriched, attempt=attempt)
             except Exception:  # noqa: BLE001
                 logger.exception("ledger event build failed for {}", record.model)
+            else:
+                if self._sink is not None:
+                    safe_emit(self._sink, event.to_trace())
+                if on_event is not None:
+                    try:
+                        on_event(event)
+                    except Exception:  # noqa: BLE001 - settlement must not fail the call
+                        logger.exception("ledger on_event hook failed for {}", record.model)
         if self._store is not None:
             try:
                 self._store.record(enriched)

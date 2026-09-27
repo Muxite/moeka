@@ -17,6 +17,7 @@ SURFACE: dict[str, list[str]] = {
         "Sampling",
         "StaticCredentialResolver",
     ],
+    "moeka.budget": ["Budget", "CallEstimate", "CapBudget", "ResponseCache"],
     "moeka.errors": [
         "AuthError",
         "BudgetExceeded",
@@ -32,9 +33,11 @@ SURFACE: dict[str, list[str]] = {
         "UnsupportedRequestError",
     ],
     "moeka.llm": [
+        "BatchResult",
         "Completion",
         "GenerateOptions",
         "LLM",
+        "Request",
         "Sampling",
         "TextStream",
         "Usage",

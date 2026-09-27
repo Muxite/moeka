@@ -3,6 +3,11 @@
 It owns the environment, the trace sink, a private loop thread (the sync-twin
 bridge) and the LLM layer (``kernel.llm``), and has an idempotent close in both
 sync and async form. Agents, sessions and memory attach here.
+
+The host may pass a :class:`~nanobot.kernel.budget.Budget` (every model call is
+admitted against it, see :mod:`nanobot.kernel.budget`), a
+:class:`~nanobot.kernel.budget.ResponseCache`, and ``max_concurrency`` (the
+default concurrency of ``kernel.llm.batch``).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from nanobot.kernel.hostenv import Environment
 from nanobot.kernel.trace import TraceSink
 
 if TYPE_CHECKING:
+    from nanobot.kernel.budget import Budget, ResponseCache
     from nanobot.kernel.llm import LLM
 
 
@@ -26,13 +32,34 @@ class Kernel:
     """One kernel per host environment. Use as a (sync or async) context manager,
     or call :meth:`close` / :meth:`aclose` when done; both are idempotent."""
 
-    def __init__(self, env: Environment) -> None:
+    def __init__(
+        self,
+        env: Environment,
+        *,
+        budget: Budget | None = None,
+        cache: ResponseCache | None = None,
+        max_concurrency: int = 16,
+    ) -> None:
         if not isinstance(env, Environment):
             raise TypeError(
                 f"Kernel(env) needs a moeka Environment, got {type(env).__name__}; "
                 "build one with Environment.for_host(...) or Environment.from_config(...)"
             )
+        from nanobot.kernel.budget import Budget, ResponseCache
+
+        if budget is not None and not isinstance(budget, Budget):
+            raise TypeError(
+                f"budget must implement admit/settle/release, got {type(budget).__name__}"
+            )
+        if cache is not None and not isinstance(cache, ResponseCache):
+            raise TypeError(f"cache must implement get/put, got {type(cache).__name__}")
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) \
+                or max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be a positive int, got {max_concurrency!r}")
         self._env = env
+        self._budget = budget
+        self._cache = cache
+        self._max_concurrency = max_concurrency
         self._closed = False
         self._close_lock = threading.Lock()
         # Internal: the loop that ``*_sync`` twins run on. Starts lazily on first use.
@@ -46,6 +73,18 @@ class Kernel:
     @property
     def trace(self) -> TraceSink:
         return self._env.trace
+
+    @property
+    def budget(self) -> Budget | None:
+        return self._budget
+
+    @property
+    def cache(self) -> ResponseCache | None:
+        return self._cache
+
+    @property
+    def max_concurrency(self) -> int:
+        return self._max_concurrency
 
     @property
     def llm(self) -> LLM:
