@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from nanobot.llm_usage.context import LLMUsageSource
 from nanobot.providers.base import LLMUsage
@@ -29,6 +30,17 @@ class LLMCallRecord:
     # Ledger enrichment (Task 14): set by the kernel ledger, never by providers.
     tier: str | None = None
     cost_usd: float | None = None
+
+    @property
+    def usage_source(self) -> Literal["reported", "estimated", "mixed", "none"]:
+        """Whether ``usage`` was billed by the provider or estimated locally (Ruling J).
+
+        ``"none"`` when the call carried no usage at all. Derived, not stored: the
+        store keeps ``reported_tokens`` / ``estimated_tokens``, which encode the same.
+        """
+        if self.usage is None:
+            return "none"
+        return self.usage.source
 
     def __post_init__(self) -> None:
         if self.started_at_ms < 0 or self.duration_ms < 0:

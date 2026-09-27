@@ -12,6 +12,19 @@ Cost convention:
 - A missing price means the cost is unknown (``None``), never free.
 - The one zero-cost convention: ``tier="local"`` with no prices set costs ``0.0``.
 
+Pricing key (Ruling J): a price belongs to a ``(provider, model)`` pair, never to a
+model string alone. Two presets that share a model string under different providers
+(e.g. a direct key and an aggregator) keep their own tier and price. A model-only
+key is a wildcard for a pricing whose provider could not be resolved; conflicting
+wildcards for one model are ambiguous and price nothing (``None``) rather than guess.
+Collisions are logged and kept on :attr:`PricingTable.collisions`.
+
+Usage source (Ruling J): every event carries ``usage_source``: ``"reported"`` (the
+provider billed these tokens), ``"estimated"`` (the provider reported none and the
+base class counted locally), ``"mixed"`` or ``"none"`` (no usage at all). A cost is
+ground truth only when :attr:`LedgerEvent.cost_is_billed` is True; an estimated cost
+is a hint, never a budget or routing fact.
+
 Fail-open discipline: :class:`LedgerObserver` never raises into the provider call
 (the same contract as :func:`nanobot.kernel.trace.safe_emit`); a broken sink, a
 failing SQLite write or a bad pricing table is logged and swallowed.
@@ -22,7 +35,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from loguru import logger
 
@@ -39,6 +52,15 @@ if TYPE_CHECKING:
 
 LEDGER_EVENT = "model.call"
 _PER_MTOK = 1_000_000
+
+UsageSource = Literal["reported", "estimated", "mixed", "none"]
+
+
+def usage_source_of(usage: LLMUsage | None) -> UsageSource:
+    """``"none"`` without usage, else the usage's own reported/estimated/mixed split."""
+    if usage is None:
+        return "none"
+    return usage.source
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +88,82 @@ class LedgerEvent:
     latency_ms: float | None
     cost_usd: float | None
     source: LLMUsageSource
+    usage_source: UsageSource = "none"
+
+    @property
+    def cost_is_billed(self) -> bool:
+        """True when ``cost_usd`` is ground truth: provider-reported usage at a known price.
+
+        The ``tier="local"`` zero-cost convention does not depend on tokens, so a
+        local ``0.0`` counts as billed whatever the usage source.
+        """
+        if self.cost_usd is None:
+            return False
+        if self.tier == "local" and self.cost_usd == 0.0:
+            return True
+        return self.usage_source == "reported"
 
     def to_trace(self) -> dict[str, Any]:
         return {"event": LEDGER_EVENT, **dataclasses.asdict(self)}
+
+
+PricingKey = str | tuple[str, str]
+
+
+class PricingTable:
+    """``(provider, model)`` -> :class:`ModelPricing`, with collision detection.
+
+    - A ``(provider, model)`` key prices only that provider's calls.
+    - A bare ``model`` key is a wildcard (provider unknown when the table was built).
+    - ``add`` keeps the first pricing for a key; a later, different pricing for the
+      same key is a collision: logged, recorded on :attr:`collisions`, and for a
+      wildcard it makes the model ambiguous (lookups return ``None``).
+    - ``lookup`` tries the exact pair, then an unambiguous wildcard. A pair priced
+      under a different provider is never borrowed.
+    """
+
+    def __init__(self, entries: Mapping[PricingKey, ModelPricing] | None = None) -> None:
+        self._exact: dict[tuple[str, str], ModelPricing] = {}
+        self._wild: dict[str, ModelPricing] = {}
+        self._ambiguous: set[str] = set()
+        self.collisions: list[tuple[PricingKey, ModelPricing, ModelPricing]] = []
+        for key, pricing in (entries or {}).items():
+            self.add(key, pricing)
+
+    def add(self, key: PricingKey, pricing: ModelPricing) -> None:
+        if isinstance(key, tuple):
+            provider, model = key
+            current = self._exact.get((provider, model))
+            if current is None:
+                self._exact[(provider, model)] = pricing
+            elif current != pricing:
+                self._collide(key, current, pricing)
+            return
+        current = self._wild.get(key)
+        if current is None:
+            self._wild[key] = pricing
+        elif current != pricing:
+            self._ambiguous.add(key)
+            self._collide(key, current, pricing)
+
+    def _collide(self, key: PricingKey, kept: ModelPricing, other: ModelPricing) -> None:
+        self.collisions.append((key, kept, other))
+        logger.warning(
+            "ledger pricing collision for {!r}: kept {} and ignored {}{}",
+            key, kept, other,
+            "" if isinstance(key, tuple) else "; the model is ambiguous and priced as unknown",
+        )
+
+    def lookup(self, provider: str, model: str) -> ModelPricing | None:
+        exact = self._exact.get((provider, model))
+        if exact is not None:
+            return exact
+        if model in self._ambiguous:
+            return None
+        return self._wild.get(model)
+
+    def __len__(self) -> int:
+        return len(self._exact) + len(self._wild)
 
 
 class _UsageRecorder(Protocol):
@@ -105,9 +200,10 @@ def compute_cost(
 class LedgerObserver:
     """An ``LLMCallObserver`` that turns each call record into a ledger entry.
 
-    *pricing* maps a model name to its :class:`ModelPricing`; an unknown model
-    gets ``tier=None`` and ``cost_usd=None``. *store* is anything with
-    ``record(LLMCallRecord)`` (normally :class:`LLMUsageStore`).
+    *pricing* is a :class:`PricingTable` or a mapping it is built from
+    (``(provider, model)`` or bare-model keys); an unpriced call gets ``tier=None``
+    and ``cost_usd=None``. *store* is anything with ``record(LLMCallRecord)``
+    (normally :class:`LLMUsageStore`).
     """
 
     def __init__(
@@ -115,22 +211,29 @@ class LedgerObserver:
         *,
         sink: TraceSink | None = None,
         store: _UsageRecorder | None = None,
-        pricing: Mapping[str, ModelPricing] | None = None,
+        pricing: PricingTable | Mapping[PricingKey, ModelPricing] | None = None,
     ) -> None:
         self._sink = sink
         self._store = store
-        self._pricing: Mapping[str, ModelPricing] = pricing or {}
+        if isinstance(pricing, PricingTable):
+            self._pricing = pricing
+        else:
+            try:
+                self._pricing = PricingTable(pricing)
+            except Exception:  # noqa: BLE001 - a bad pricing table must not break calls
+                logger.exception("ledger pricing table could not be built; pricing nothing")
+                self._pricing = PricingTable()
 
-    def _pricing_for(self, model: str) -> ModelPricing | None:
+    def _pricing_for(self, provider: str, model: str) -> ModelPricing | None:
         try:
-            return self._pricing.get(model)
+            return self._pricing.lookup(provider, model)
         except Exception:  # noqa: BLE001 - a bad pricing table must not break the call
             logger.exception("ledger pricing lookup failed for {}", model)
             return None
 
     def enrich(self, record: LLMCallRecord) -> LLMCallRecord:
         """Return *record* with ``tier`` and ``cost_usd`` filled from the pricing."""
-        pricing = self._pricing_for(record.model)
+        pricing = self._pricing_for(record.provider, record.model)
         if pricing is None:
             return record
         cost = compute_cost(
@@ -157,6 +260,7 @@ class LedgerObserver:
             latency_ms=float(record.duration_ms),
             cost_usd=record.cost_usd,
             source=record.source,
+            usage_source=usage_source_of(usage),
         )
 
     def event_for(self, record: LLMCallRecord) -> LedgerEvent:
@@ -186,5 +290,9 @@ __all__ = [
     "LedgerEvent",
     "LedgerObserver",
     "ModelPricing",
+    "PricingKey",
+    "PricingTable",
+    "UsageSource",
     "compute_cost",
+    "usage_source_of",
 ]

@@ -14,7 +14,7 @@ from nanobot.providers.registry import ProviderSpec, create_dynamic_spec, find_b
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
-    from nanobot.kernel.ledger import ModelPricing
+    from nanobot.kernel.ledger import PricingTable
 
 
 @dataclass(frozen=True)
@@ -414,25 +414,43 @@ def _ledger_pricing(
     config: Config,
     resolved: ModelPresetConfig,
     fallback_presets: list[ModelPresetConfig],
-) -> dict[str, ModelPricing]:
-    """Model name -> ``ModelPricing`` for every preset that sets a tier or a price.
+    env: CoreEnvironment | None = None,
+) -> PricingTable:
+    """``(provider, model)`` -> ``ModelPricing`` for every preset that sets a tier or a price.
 
-    The active preset wins over its fallbacks, which win over other named presets.
+    Ruling J: each preset is keyed by the provider name ``Config.match_provider``
+    resolves for it (the same name the built provider reports on its call records),
+    so two presets sharing a model string under different providers never swap tier
+    or price. A preset whose provider cannot be resolved falls back to a bare-model
+    wildcard key. The active preset wins over its fallbacks, which win over other
+    named presets; a conflicting duplicate is logged as a collision.
     """
-    from nanobot.kernel.ledger import ModelPricing
+    from nanobot.kernel.ledger import ModelPricing, PricingTable
 
-    pricing: dict[str, ModelPricing] = {}
+    has_credential = credential_predicate(env)
+    table = PricingTable()
+    seen: set[int] = set()
     for preset in (resolved, *fallback_presets, *config.model_presets.values()):
+        if id(preset) in seen:
+            continue
+        seen.add(id(preset))
         values = (
             preset.tier,
             preset.price_in_per_mtok,
             preset.price_out_per_mtok,
             preset.price_cache_read_per_mtok,
         )
-        if all(value is None for value in values) or preset.model in pricing:
+        if all(value is None for value in values):
             continue
-        pricing[preset.model] = ModelPricing(*values)
-    return pricing
+        try:
+            _, provider_name = config.match_provider(
+                preset.model, preset=preset, has_credential=has_credential,
+            )
+        except Exception:  # noqa: BLE001 - an unresolvable preset still gets a wildcard
+            provider_name = None
+        key = (provider_name, preset.model) if provider_name else preset.model
+        table.add(key, ModelPricing(*values))
+    return table
 
 
 def _attach_ledger(
@@ -454,7 +472,7 @@ def _attach_ledger(
         provider.set_llm_call_observer(LedgerObserver(
             sink=env.trace,
             store=get_llm_usage_store(data_dir=env.paths.data_dir),
-            pricing=_ledger_pricing(config, resolved, fallback_presets),
+            pricing=_ledger_pricing(config, resolved, fallback_presets, env),
         ))
     except Exception:
         from loguru import logger
