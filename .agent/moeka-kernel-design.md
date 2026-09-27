@@ -105,8 +105,12 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   (`tests/kernel/test_env.py`). Sessions,
   auth stores, `llm_usage`, plugin state and logs live under `state_dir`, while media lives under `work_dir`.
   The file-tool floor denies `state_dir` (`tests/kernel/test_paths_wiring.py`).
-- Not met: shell isolation. `exec` can still reach `state_dir` by absolute path unless the workspace guard is on
-  or a sandbox backend runs; strict mode refusing shell without a sandbox is P2.
+- Not met in legacy (non-strict) mode: shell isolation. `exec` can still reach `state_dir` by absolute path unless
+  the workspace guard is on or a sandbox backend runs.
+- Strict mode (P2, Checkpoint 2): a strict env refuses `exec.run` unless `tools.exec.sandbox` names an active
+  backend (`bwrap`/`seatbelt`, never on Windows), so a strict kernel never runs shell without a sandbox
+  (`tests/kernel/test_strict_mode.py`). The sandbox itself is the boundary; its bind-mount guarantees are the
+  backend's, not re-proven here.
 - The legacy adapter keeps the flat layout (workspace == state home, R1 `overlap_ok=True`).
 
 **I3 Unearned knowledge is forbidden**
@@ -121,14 +125,20 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   Privileges never broaden downstream.
 - Enforced by: `PermissionPolicy.attenuate` and `policy ∩ capabilities_requested` at load.
 - Proven by: a property test that every child policy is a subset of its parent's.
-- Status: not built (P2, P4). Today `SubagentManager` passes config flags only.
+- Status: met for sub-agents (P2, Checkpoint 2). Each child's policy is the parent's attenuated to its tools'
+  static capability surface minus `session.send`, intersected with any narrower set; a foreign parent policy is
+  never trusted to attenuate itself (`tests/kernel/test_subagent_attenuation.py`, including the child and
+  grandchild subset property test). Plugins (manifest intersection) remain P4.
 
 **I5 Hard failure limits**
 - A turn must terminate as soon as it exceeds its step budget or 6 policy denials.
 - Enforced by: `budget.iterations` and `budget.policy_denials` in the runner, with the existing
   budget-exhausted finalisation.
 - Proven by: the incident replay test (a whitelist-only policy, 50 distinct commands, turn ends at 6 denials).
-- Status: the step budget exists (`max_tool_iterations`, default 200); the denial ceiling does not exist yet (P2).
+- Status: met (P2, Checkpoint 2). The 6-denial ceiling counts permission-policy denials and the configurable
+  exec-guard layer (`allowPatterns` / `denyPatterns`), not the exec floor, and ends the turn through the
+  budget-exhausted finalisation (`tests/kernel/test_incident_replay.py`, including the real
+  `tools.exec.allowPatterns` incident configuration).
 
 **I6 Pareto simplicity and cost ceiling**
 - For a sub-task T with target quality tau, moeka's expected cost must not exceed the cheapest adequate
@@ -158,6 +168,13 @@ Purpose: say which layer can guarantee what, so no check is trusted beyond its r
 - The kernel must refuse to start when `work_dir` and `state_dir` overlap.
 - File tools must enforce the floor by resolved path (shipped in phase 0).
 - In strict mode the kernel must refuse shell execution when no sandbox plugin is declared (fail closed).
+  Implemented (P2): the gate denies `exec.run` from a tool without `sandbox_active` at layer `gate`, after the
+  floors and before the policy, with the marker "strict mode requires a declared sandbox"; `ExecTool.execute`
+  repeats the check before its own guard for callers that bypass the gate (`nanobot/kernel/strict.py`).
+- In strict mode with an explicit policy, a tool whose whole capability surface the policy denies for every
+  resource is dropped at registration (and pruned when the gate is configured later), so the model never sees
+  it. Implemented (P2). A mixed, empty or undeclared surface is kept; the gate still decides per call. The
+  permissive `DefaultPolicy` denies nothing everywhere, so this drops nothing by default.
 - Phase 0's documented limits stand until the sandbox layer exists: exec reaches protected paths, hard links
   evade the path floor, and a symlink swap between resolve and open (TOCTOU) is open.
 
@@ -234,7 +251,8 @@ sequenceDiagram
 - Every denial carries a marker the runner already classifies; a new "blocked by permission policy" marker joins in P2.
 - Repeated denials escalate on the third hit with "not configurable by the agent, stop retrying".
 - The 6-denial ceiling (I5) ends the turn; the 200-iteration loop cannot recur.
-- A capability denied for every resource is dropped at registration, so the model never sees the tool.
+- A capability denied for every resource is dropped at registration, so the model never sees the tool
+  (strict mode with an explicit policy; section 4).
 
 **Sub-agent attenuation:**
 - A child's rules are the parent's rules intersected with an optional narrower set.
@@ -459,6 +477,12 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Sub-agent attenuation (I4); strict mode refuses shell without a sandbox plugin.
 - Scratchpad and deferred-action log (section 5a); every denial appends a deferred entry.
 - Proof: incident replay ends within 6 denials; a denied call never reaches a hook (spy); child policy subset property test; a denied call leaves one deferred entry and no denial is counted for log writes.
+- Proof status (Checkpoint 2, 2026-09-27): all green. `tests/kernel/test_incident_replay.py` (both the
+  whitelist-only policy and the real `allowPatterns` configuration stop at 6), `test_gate.py`
+  (`test_runner_denied_call_never_reaches_hooks_or_tool`), `test_subagent_attenuation.py` (subset property),
+  `test_deferred_log.py`, and `test_strict_mode.py` (strict exec refusal, fully-denied tools dropped, no change
+  under the permissive default). The full suite passes; the awork suite keeps the same 8 pre-existing failures.
+  Deferred minors: `.agent/kernel-p2-followups.md`.
 
 **P3 cost ledger and router.** Goal: I6 is measured and enforced.
 - Per-call ledger events (tokens, tier, latency, cost) through the `TraceSink`.
