@@ -98,6 +98,10 @@ class _SubagentHook(AgentHook):
             self._status.error = str(context.error)
 
 
+# Capabilities a sub-agent never gets unless a future manifest grants them (I4).
+SUBAGENT_DENIED_BY_DEFAULT: frozenset[str] = frozenset({"session.send"})
+
+
 def _subagent_principal(task_id: str) -> Any:
     """The gate principal for one sub-agent run (kind ``subagent``)."""
     from nanobot.kernel.policy import Principal
@@ -126,11 +130,14 @@ class SubagentManager:
         env: "CoreEnvironment | None" = None,
         policy: "PermissionPolicy | None" = None,
         max_policy_denials: int = DEFAULT_MAX_POLICY_DENIALS,
+        child_policy: "PermissionPolicy | None" = None,
     ):
         self.env = env
-        # The parent loop's gate policy, applied unattenuated for now (per-subagent
-        # attenuation is a later task); None means DefaultPolicy().
+        # The parent loop's gate policy; None means DefaultPolicy(). Each run gets
+        # ``policy.attenuate(requested, narrower=child_policy)`` (I4, ``_child_policy``).
         self.policy = policy
+        # Optional narrower set every child is intersected with (a future manifest).
+        self.child_policy = child_policy
         # I5 denial ceiling for each sub-agent run; counted per run, never shared
         # with the parent turn's counter.
         self.max_policy_denials = max_policy_denials
@@ -180,7 +187,10 @@ class SubagentManager:
         )
         self._run_slots = asyncio.Semaphore(self.max_concurrent_subagents)
         self.runner = AgentRunner()
+        # Fallback for direct ``_build_tools`` callers; each run gets its own manager
+        # (its own exec-session quota), kept here while it still has live sessions.
         self._exec_session_manager = ExecSessionManager()
+        self._child_exec_managers: dict[str, ExecSessionManager] = {}
         self._running_tasks: dict[str, asyncio.Task[str]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -237,6 +247,7 @@ class SubagentManager:
         self,
         workspace: Path | None = None,
         tools_config: ToolsConfig | None = None,
+        exec_session_manager: ExecSessionManager | None = None,
     ) -> ToolRegistry:
         """Build an isolated subagent tool registry via ToolLoader."""
         root = self.workspace if workspace is None else workspace
@@ -245,7 +256,11 @@ class SubagentManager:
         ctx = ToolContext(
             config=cfg,
             workspace=str(root.resolve()),
-            exec_session_manager=self._exec_session_manager,
+            exec_session_manager=(
+                exec_session_manager
+                if exec_session_manager is not None
+                else self._exec_session_manager
+            ),
             file_state_store=FileStates(),
             workspace_sandbox=workspace_sandbox_status(
                 restrict_to_workspace=cfg.restrict_to_workspace,
@@ -261,6 +276,58 @@ class SubagentManager:
             allow=self.tools_allow, deny=self.tools_deny,
         )
         return registry
+
+    def _requested_capabilities(self, tools: ToolRegistry) -> frozenset[str]:
+        """The static capability surface of every tool in *tools* (union of names).
+
+        - Uses ``Tool.capability_surface`` (``_capability_names`` on each tool class).
+        - An undeclared tool is probed with ``capabilities({})``; that may miss
+          param-dependent names, which the child is then denied (fail closed).
+        """
+        names: set[str] = set()
+        for name in tools.tool_names:
+            tool = tools.get(name)
+            surface_fn = getattr(tool, "capability_surface", None)
+            try:
+                surface = surface_fn() if callable(surface_fn) else None
+            except Exception:  # noqa: BLE001 - treat a broken declaration as undeclared
+                surface = None
+            if surface is None:
+                logger.warning(
+                    "Tool {} declares no static capability surface; probing it for the "
+                    "sub-agent policy", name,
+                )
+                try:
+                    surface = frozenset(r.capability for r in tool.capabilities({}))
+                except Exception:  # noqa: BLE001 - no probe result means no grant
+                    surface = frozenset()
+            names |= surface
+        return frozenset(names)
+
+    def _child_policy(self, tools: ToolRegistry) -> "PermissionPolicy":
+        """The attenuated policy for one child run over *tools* (I4).
+
+        ``parent.attenuate(surface - SUBAGENT_DENIED_BY_DEFAULT, narrower=child_policy)``:
+        never broader than the parent, the child's own tool surface or the narrower set.
+        """
+        from nanobot.kernel.policy import DefaultPolicy
+
+        parent = self.policy if self.policy is not None else DefaultPolicy()
+        requested = self._requested_capabilities(tools) - SUBAGENT_DENIED_BY_DEFAULT
+        return parent.attenuate(requested, narrower=self.child_policy)
+
+    async def _release_exec_manager(self, task_id: str) -> None:
+        """Drop a finished run's exec-session manager once it has no live sessions."""
+        manager = self._child_exec_managers.get(task_id)
+        if manager is None:
+            return
+        try:
+            live = await manager.list()
+        except Exception:  # noqa: BLE001 - keep it so close() still reaches it
+            logger.exception("Subagent [{}] exec sessions could not be listed", task_id)
+            return
+        if not live:
+            self._child_exec_managers.pop(task_id, None)
 
     async def spawn(
         self,
@@ -445,7 +512,14 @@ class SubagentManager:
                 cfg = self._subagent_tools_config()
                 cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
             # Construct from the agent workspace; the bound scope below supplies the project cwd.
-            tools = self._build_tools(tools_config=cfg)
+            exec_manager = ExecSessionManager()
+            self._child_exec_managers[task_id] = exec_manager
+            tools = self._build_tools(tools_config=cfg, exec_session_manager=exec_manager)
+            principal = _subagent_principal(task_id)
+            policy = self._child_policy(tools)
+            tools.configure_gate(
+                policy=policy, principal=principal, env=self.env, workspace=root,
+            )
             system_prompt = self._build_subagent_prompt(workspace=root)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
@@ -479,8 +553,8 @@ class SubagentManager:
                         "llm_usage_source",
                         current_llm_usage_source(),
                     ),
-                    policy=self.policy,
-                    principal=_subagent_principal(task_id),
+                    policy=policy,
+                    principal=principal,
                     env=self.env,
                     max_policy_denials=self.max_policy_denials,
                 ))
@@ -526,6 +600,8 @@ class SubagentManager:
                     origin_message_id,
                 )
             return final_result
+        finally:
+            await self._release_exec_manager(task_id)
 
     async def _announce_result(
         self,
@@ -606,16 +682,23 @@ class SubagentManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._exec_session_manager.terminate_by_owner(session_key)
+        for task_id, manager in list(self._child_exec_managers.items()):
+            await manager.terminate_by_owner(session_key)
+            await self._release_exec_manager(task_id)
         return len(tasks)
 
     async def close(self) -> None:
-        """Cancel running subagents and close their shared exec sessions."""
+        """Cancel running subagents and close every exec session they left open."""
         tasks = [task for task in self._running_tasks.values() if not task.done()]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._exec_session_manager.close_all()
+        managers = list(self._child_exec_managers.values())
+        self._child_exec_managers.clear()
+        for manager in managers:
+            await manager.close_all()
 
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""
