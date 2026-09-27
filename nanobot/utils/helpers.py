@@ -922,6 +922,8 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     _write(tpl / "prompts" / "README.md", workspace / "prompts" / "README.md")
     _write(None, workspace / "memory" / "history.jsonl")
     (workspace / "skills").mkdir(exist_ok=True)
+    # Agent scratchpad + deferred-action log (design 5a); never touches existing files.
+    (workspace / "scratchpad").mkdir(exist_ok=True)
 
     if added and not silent:
         from rich.console import Console

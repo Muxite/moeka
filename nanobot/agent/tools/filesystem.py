@@ -26,6 +26,7 @@ from nanobot.security.protected_paths import (
     default_config_files,
     default_data_dirs,
 )
+from nanobot.security.untrusted import mark_untrusted
 from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.utils.file_edit_events import FileDiff, FileEditResult, display_file_edit_path
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
@@ -373,6 +374,13 @@ class ReadFileTool(_FsTool):
     def capabilities(self, params: dict[str, Any]) -> "list[CapabilityRequest]":
         return [capability_request("fs.read", params.get("path"))]
 
+    def _is_scratchpad(self, fp: Path) -> bool:
+        """True for a file under ``<work_dir>/scratchpad`` (untrusted on read-back)."""
+        from nanobot.kernel.deferred import is_scratchpad_path
+
+        work_dir = self._paths.work_dir if self._paths is not None else self._workspace
+        return is_scratchpad_path(fp, work_dir)
+
     async def execute(
         self,
         path: str | None = None,
@@ -487,6 +495,9 @@ class ReadFileTool(_FsTool):
                 result += f"\n\n(Showing lines {offset}-{end} of {total}. Use offset={end + 1} to continue.)"
             else:
                 result += f"\n\n(End of file — {total} lines total)"
+            if self._is_scratchpad(fp):
+                # Scratchpad / deferred log: agent-written text read back (design 5a).
+                result = mark_untrusted(result)
             self._file_states.record_read(
                 fp, offset=offset, limit=limit, content_hash=content_hash, result=result,
             )
