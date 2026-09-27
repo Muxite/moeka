@@ -2001,28 +2001,38 @@ class AgentRunner:
         raw_text: str,
         handled: tuple[Any, dict[str, str], BaseException | None],
     ) -> tuple[Any, dict[str, str], BaseException | None]:
-        """Log an ``ExecTool`` guard denial (allowlist, deny pattern, floor) as deferred.
+        """Log an exec-tool guard denial as deferred.
 
-        These denials come back as tool results, so the gate never saw them; the
-        ``exec_guard_denial`` event prefix set by ``_classify_violation`` identifies
-        them. The entry is a direct write: it changes neither the classification nor
-        the I5 count (already charged in ``_classify_violation``).
+        These denials come back as tool results, so the gate never saw them. The event
+        prefix ``_classify_violation`` set identifies the class:
+        - ``exec_guard_denial``: allowlist, deny pattern, exec floor.
+        - ``ssrf_violation`` / ``workspace_violation``: the exec guard's internal/private
+          URL, path-outside-working-dir and path-traversal denials. Logged only when
+          the tool declares an exec capability for *params* (so a file tool's own
+          workspace error is not treated as an exec-guard denial).
+        The entry is a direct write: it changes neither the classification nor the I5
+        count (already charged in ``_classify_violation``).
         """
-        if not handled[1].get("detail", "").startswith("exec_guard_denial"):
+        detail = handled[1].get("detail", "")
+        exec_guard = detail.startswith("exec_guard_denial")
+        if not exec_guard and not detail.startswith(("ssrf_violation", "workspace_violation")):
             return handled
         from nanobot.kernel.deferred import deferred_work_dir, record_gate_denial
         from nanobot.kernel.floors import EXEC_CAPABILITIES
 
-        capability = "exec.run"
+        declared: str | None = None
         declare = getattr(tool, "capabilities", None)
         if declare is not None and isinstance(params, dict):
             try:
-                capability = next(
+                declared = next(
                     (r.capability for r in declare(params) if r.capability in EXEC_CAPABILITIES),
-                    capability,
+                    None,
                 )
             except Exception:  # noqa: BLE001 - only the entry's capability field is at stake
-                pass
+                declared = None
+        if not exec_guard and declared is None:
+            return handled
+        capability = declared or "exec.run"
         logged = record_gate_denial(
             deferred_work_dir(spec.env, spec.workspace),
             tool=tool_call.name,

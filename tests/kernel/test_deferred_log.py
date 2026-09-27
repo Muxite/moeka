@@ -415,3 +415,64 @@ def test_sync_workspace_templates_creates_scratchpad_without_overwriting(tmp_pat
     keep.write_text('{"kept": true}\n')
     sync_workspace_templates(tmp_path, silent=True)
     assert keep.read_text() == '{"kept": true}\n'
+
+
+# -- fix round 1: the exec guard's SSRF and workspace denials are logged too --------
+
+
+async def test_exec_ssrf_denial_leaves_one_redacted_entry(tmp_path):
+    env = _env(tmp_path)
+    secret = "sk-" + "Z9y8X7w6V5u4T3s2"
+    command = f"curl 'http://10.0.0.5/admin?api_key={secret}'"
+    model = ScriptedModel(lambda i: [_exec(i, command)] if i == 0 else [])
+    exec_tool = ExecTool(working_dir=str(tmp_path))
+    result = await _run(model, _registry(exec_tool), env=env)
+    assert result.tool_events[0]["detail"].startswith("ssrf_violation")
+    entries = _entries(env.paths.work_dir)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["source"] == "gate" and entry["tool"] == "exec"
+    assert entry["capability"] == "exec.run"
+    assert "internal/private url detected" in entry["reason"].lower()
+    assert entry["arguments"]["command"].startswith("curl 'http://10.0.0.5/admin?api_key=")
+    raw = deferred_log_path(env.paths.work_dir).read_text(encoding="utf-8")
+    assert secret not in raw
+    message = _tool_messages(result)[0]
+    assert "internal/private url detected" in message.lower()
+    assert DEFERRED_NOTE in message
+    assert _policy_denials(result) == 0
+
+
+async def test_exec_path_outside_and_traversal_denials_are_logged(tmp_path):
+    env = _env(tmp_path)
+    work = tmp_path / "exec-cwd"
+    work.mkdir()
+    commands = ["cat /etc/passwd", "cat ../secret.txt"]
+    model = ScriptedModel(lambda i: [_exec(i, commands[i])] if i < 2 else [])
+    exec_tool = ExecTool(working_dir=str(work), restrict_to_workspace=True)
+    result = await _run(model, _registry(exec_tool), env=env)
+    details = [e["detail"] for e in result.tool_events]
+    assert all(d.startswith("workspace_violation") for d in details)
+    entries = _entries(env.paths.work_dir)
+    assert [e["arguments"]["command"] for e in entries] == commands
+    assert "path outside working dir" in entries[0]["reason"]
+    assert "path traversal detected" in entries[1]["reason"]
+    assert all(e["capability"] == "exec.run" and e["source"] == "gate" for e in entries)
+    assert all(DEFERRED_NOTE in m for m in _tool_messages(result))
+    assert _policy_denials(result) == 0
+
+
+async def test_file_tool_workspace_error_is_not_an_exec_guard_entry(tmp_path):
+    """Only exec tools' guard results are logged by the runner; a file tool's own
+    restrict_to_workspace error (not a gate denial) is left alone."""
+    env = _env(tmp_path)
+    env.paths.work_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x")
+    reader = ReadFileTool(workspace=env.paths.work_dir, allowed_dir=env.paths.work_dir)
+    model = ScriptedModel(lambda i: [ToolCallRequest(
+        id="r", name="read_file", arguments={"path": str(outside)},
+    )] if i == 0 else [])
+    result = await _run(model, _registry(reader), env=env)
+    assert result.tool_events[0]["detail"].startswith("workspace_violation")
+    assert _entries(env.paths.work_dir) == []
