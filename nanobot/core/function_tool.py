@@ -13,7 +13,10 @@ import typing
 from collections.abc import Callable
 from typing import Any, get_args, get_origin, get_type_hints
 
-from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.base import Tool, ToolResult
+
+if typing.TYPE_CHECKING:
+    from pydantic import BaseModel
 
 # Python annotation -> JSON Schema "type" string.
 _PY_TO_JSON: dict[type, str] = {
@@ -111,6 +114,15 @@ class FunctionTool(Tool):
     ``_plugin_discoverable`` is False. The callable is invoked with validated,
     cast keyword arguments and its return value is passed straight back to the
     agent loop (string or content blocks).
+
+    ``output_model`` (optional, typed calls, design 5b): a pydantic model the return
+    value must validate against. A dict, a model instance or JSON text is validated
+    through ``nanobot.api.complete._coerce_json`` (the same path ``acomplete_json``
+    uses) and returned as ``ToolResult(<model JSON>, structured=<model instance>)``;
+    a mismatch returns ``ToolResult.error`` with ``RESULT_SCHEMA_MARKER`` and the field
+    paths, never raises. ``output_schema`` is then the model's JSON Schema, so the
+    kernel's ``validate_result`` re-checks the dumped payload on every call path.
+    Without it the return value passes exactly as before.
     """
 
     _plugin_discoverable = False
@@ -123,6 +135,7 @@ class FunctionTool(Tool):
         description: str | None = None,
         parameters: dict[str, Any] | None = None,
         read_only: bool = False,
+        output_model: type[BaseModel] | None = None,
     ) -> None:
         if not callable(fn):
             raise TypeError(f"FunctionTool expects a callable, got {type(fn).__name__}")
@@ -132,6 +145,9 @@ class FunctionTool(Tool):
         self._description = description or doc.split("\n\n")[0].strip() or self._name
         self._parameters = parameters if parameters is not None else _schema_from_signature(fn)
         self._read_only = read_only
+        self._output_model = output_model
+        if output_model is not None:
+            self.output_schema = output_model.model_json_schema()
 
     @property
     def name(self) -> str:
@@ -153,4 +169,27 @@ class FunctionTool(Tool):
         result = self._fn(**kwargs)
         if inspect.isawaitable(result):
             result = await result
+        if self._output_model is not None:
+            return self._typed_result(result)
         return result if isinstance(result, (str, list)) else str(result)
+
+    def _typed_result(self, result: Any) -> ToolResult:
+        """Validate *result* against ``output_model`` (see the class docstring)."""
+        import json
+
+        from nanobot.api.complete import _coerce_json  # lazy: api imports core
+        from nanobot.kernel.typed import pydantic_problems, result_schema_error
+
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except ValueError:
+                return result_schema_error(self._name, [
+                    "(value): not valid JSON, expected a value matching the declared "
+                    "output schema",
+                ])
+        try:
+            model = _coerce_json(result, self._output_model)
+        except Exception as exc:  # noqa: BLE001 - a bad return value is a tool error
+            return result_schema_error(self._name, pydantic_problems(exc))
+        return ToolResult(model.model_dump_json(), structured=model)

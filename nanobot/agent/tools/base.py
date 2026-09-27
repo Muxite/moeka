@@ -161,6 +161,44 @@ _JSON_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
 }
 
 
+def json_type_name(value: Any) -> str:
+    """The JSON type name of a Python value (``bool`` is ``boolean``, not ``integer``)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+class SchemaViolation(typing.NamedTuple):
+    """One value that fails its JSON Schema (arguments or a typed result, design 5b).
+
+    - ``path``: the field path, ``a.b[0].c``; ``""`` for the value itself.
+    - ``detail``: what was expected, ``expected integer, got string``. It names the
+      offending value's JSON type, never the value (a rejected result is not echoed).
+    - ``message``: the legacy text (``a.b should be integer``) kept byte-identical for
+      :meth:`Schema.validate_json_schema_value` and the tests that pin it.
+    """
+
+    path: str
+    detail: str
+    message: str
+
+    def describe(self) -> str:
+        """``<path>: <detail>``, e.g. ``a.b.c: expected integer, got string``."""
+        return f"{self.path or '(value)'}: {self.detail}"
+
+
 class Schema(ABC):
     """Abstract base for JSON Schema fragments describing tool parameters.
 
@@ -185,72 +223,117 @@ class Schema(ABC):
     def validate_json_schema_value(val: Any, schema: dict[str, Any], path: str = "") -> list[str]:
         """Validate ``val`` against a JSON Schema fragment; returns error messages (empty means valid).
 
-        Used by :class:`Tool` and each concrete Schema's :meth:`validate_value`.
+        Used by :class:`Tool` and each concrete Schema's :meth:`validate_value`. The
+        messages are :meth:`schema_violations`' ``message`` fields, unchanged.
+        """
+        return [v.message for v in Schema.schema_violations(val, schema, path)]
+
+    @staticmethod
+    def schema_violations(
+        val: Any, schema: dict[str, Any], path: str = "",
+    ) -> list[SchemaViolation]:
+        """Validate ``val`` against a JSON Schema fragment; one structured record per problem.
+
+        Each :class:`SchemaViolation` carries the field ``path`` (``a.b[0].c``), a
+        ``detail`` naming what was expected (``expected integer, got string``) and the
+        legacy ``message`` that :meth:`validate_json_schema_value` returns. The subset
+        understood: ``type`` (with ``null`` unions / ``nullable``), ``enum``,
+        ``minimum``/``maximum``, ``minLength``/``maxLength``, ``properties``,
+        ``required``, ``additionalProperties``, ``items``, ``minItems``/``maxItems``.
+        Any other keyword is ignored (accepted).
         """
         raw_type = schema.get("type")
         nullable = (isinstance(raw_type, list) and "null" in raw_type) or schema.get("nullable", False)
         t = Schema.resolve_json_schema_type(raw_type)
         label = path or "parameter"
 
+        def bad(detail: str, message: str) -> SchemaViolation:
+            return SchemaViolation(path, detail, message)
+
+        def mismatch(expected: str) -> list[SchemaViolation]:
+            return [bad(
+                f"expected {expected}, got {json_type_name(val)}", f"{label} should be {expected}",
+            )]
+
         if nullable and val is None:
             return []
         if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
-            return [f"{label} should be integer"]
+            return mismatch("integer")
         if t == "number" and (
             not isinstance(val, _JSON_TYPE_MAP["number"]) or isinstance(val, bool)
         ):
-            return [f"{label} should be number"]
+            return mismatch("number")
         if t in _JSON_TYPE_MAP and t not in ("integer", "number") and not isinstance(val, _JSON_TYPE_MAP[t]):
-            return [f"{label} should be {t}"]
+            return mismatch(t)
         if t == "number" and isinstance(val, float) and not math.isfinite(val):
-            return [f"{label} must be finite"]
+            return [bad("expected a finite number", f"{label} must be finite")]
 
-        errors: list[str] = []
+        errors: list[SchemaViolation] = []
         if "enum" in schema and val not in schema["enum"]:
-            errors.append(f"{label} must be one of {schema['enum']}")
+            errors.append(bad(
+                f"expected one of {schema['enum']}", f"{label} must be one of {schema['enum']}",
+            ))
         if t in ("integer", "number"):
             if "minimum" in schema and val < schema["minimum"]:
-                errors.append(f"{label} must be >= {schema['minimum']}")
+                errors.append(bad(
+                    f"expected >= {schema['minimum']}", f"{label} must be >= {schema['minimum']}",
+                ))
             if "maximum" in schema and val > schema["maximum"]:
-                errors.append(f"{label} must be <= {schema['maximum']}")
+                errors.append(bad(
+                    f"expected <= {schema['maximum']}", f"{label} must be <= {schema['maximum']}",
+                ))
         if t == "string":
             string_value = cast(str, val)
             if "minLength" in schema and len(string_value) < schema["minLength"]:
-                errors.append(f"{label} must be at least {schema['minLength']} chars")
+                errors.append(bad(
+                    f"expected at least {schema['minLength']} chars",
+                    f"{label} must be at least {schema['minLength']} chars",
+                ))
             if "maxLength" in schema and len(string_value) > schema["maxLength"]:
-                errors.append(f"{label} must be at most {schema['maxLength']} chars")
+                errors.append(bad(
+                    f"expected at most {schema['maxLength']} chars",
+                    f"{label} must be at most {schema['maxLength']} chars",
+                ))
         if t == "object":
             object_value = cast(dict[str, Any], val)
             props = cast(dict[str, Any], schema.get("properties", {}))
             required = cast(list[Any], schema.get("required", []))
             for k in required:
                 if k not in object_value:
-                    errors.append(f"missing required {Schema.subpath(path, k)}")
+                    sub = Schema.subpath(path, k)
+                    errors.append(SchemaViolation(
+                        sub, "required field missing", f"missing required {sub}",
+                    ))
             additional = schema.get("additionalProperties", True)
             for k, v in object_value.items():
+                sub = Schema.subpath(path, k)
                 if k in props:
-                    errors.extend(Schema.validate_json_schema_value(v, props[k], Schema.subpath(path, k)))
+                    errors.extend(Schema.schema_violations(v, props[k], sub))
                 elif additional is False:
-                    errors.append(f"unexpected parameter {Schema.subpath(path, k)}")
+                    errors.append(SchemaViolation(
+                        sub, "unexpected field (not in the schema)", f"unexpected parameter {sub}",
+                    ))
                 elif isinstance(additional, dict):
                     errors.extend(
-                        Schema.validate_json_schema_value(
-                            v,
-                            cast(dict[str, Any], additional),
-                            Schema.subpath(path, k),
-                        )
+                        Schema.schema_violations(v, cast(dict[str, Any], additional), sub)
                     )
         if t == "array":
             array_value = cast(list[Any], val)
             if "minItems" in schema and len(array_value) < schema["minItems"]:
-                errors.append(f"{label} must have at least {schema['minItems']} items")
+                errors.append(bad(
+                    f"expected at least {schema['minItems']} items",
+                    f"{label} must have at least {schema['minItems']} items",
+                ))
             if "maxItems" in schema and len(array_value) > schema["maxItems"]:
-                errors.append(f"{label} must be at most {schema['maxItems']} items")
+                errors.append(bad(
+                    f"expected at most {schema['maxItems']} items",
+                    f"{label} must be at most {schema['maxItems']} items",
+                ))
             if "items" in schema:
                 prefix = f"{path}[{{}}]" if path else "[{}]"
                 for i, item in enumerate(array_value):
                     errors.extend(
-                        Schema.validate_json_schema_value(item, schema["items"], prefix.format(i))
+                        Schema.schema_violations(item, schema["items"], prefix.format(i))
                     )
         return errors
 
@@ -275,14 +358,29 @@ class Schema(ABC):
         return Schema.validate_json_schema_value(value, self.to_json_schema(), path)
 
 
+_NO_STRUCTURED: Any = object()
+
+
 class ToolResult(str):
-    """String-compatible tool output with structured status."""
+    """String-compatible tool output with structured status.
+
+    ``structured`` (optional, Task 21) is the typed payload behind the text: the value a
+    tool's ``output_schema`` is checked against (``nanobot.kernel.typed.validate_result``)
+    when present, instead of parsing the text. The text is still what the model sees.
+    String operations (``result + hint``) return a plain ``str`` and drop it.
+    """
 
     is_error: bool
+    structured: Any
+    has_structured: bool
 
-    def __new__(cls, content: str, *, is_error: bool = False) -> ToolResult:
+    def __new__(
+        cls, content: str, *, is_error: bool = False, structured: Any = _NO_STRUCTURED,
+    ) -> ToolResult:
         obj = str.__new__(cls, content)
         obj.is_error = is_error
+        obj.structured = None if structured is _NO_STRUCTURED else structured
+        obj.has_structured = structured is not _NO_STRUCTURED
         return obj
 
     @classmethod
@@ -344,6 +442,13 @@ class Tool(ABC):
     # surface a sub-agent requests when its policy is attenuated (I4). Declared on the
     # same class that overrides ``capabilities``; ``None`` means undeclared.
     _capability_names: frozenset[str] | None = None
+    # Typed calls (design 5b, Task 21): a JSON Schema the RESULT must match, checked by
+    # ``nanobot.kernel.typed.validate_result`` after ``execute`` on every call path.
+    # ``None`` (the default, every built-in) means no check: the result passes exactly
+    # as returned. A tool that opts in returns JSON text, a JSON value, or a
+    # ``ToolResult`` with ``structured``; anything else fails with
+    # ``RESULT_SCHEMA_MARKER``. Class- or instance-level, like ``_capability_names``.
+    output_schema: dict[str, Any] | None = None
 
     @classmethod
     def config_cls(cls) -> type[BaseModel] | None:
@@ -479,6 +584,20 @@ class Tool(ABC):
         if schema.get("type", "object") != "object":
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")
         return Schema.validate_json_schema_value(params, {**schema, "type": "object"}, "")
+
+    def parameter_violations(self, params: dict[str, Any]) -> list[SchemaViolation]:
+        """Structured form of :meth:`validate_params`' schema check (path + expected type).
+
+        Used for the ``Fields to fix`` line of an invalid-parameters error; the legacy
+        ``validate_params`` strings are unchanged.
+        """
+        if not isinstance(cast(object, params), dict):
+            return [SchemaViolation(
+                "", f"expected object, got {json_type_name(params)}",
+                f"parameters must be an object, got {type(params).__name__}",
+            )]
+        schema = self.parameters or {}
+        return Schema.schema_violations(params, {**schema, "type": "object"}, "")
 
     def to_schema(self) -> dict[str, Any]:
         """OpenAI function schema."""

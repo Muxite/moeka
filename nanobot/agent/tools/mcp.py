@@ -630,6 +630,31 @@ def _mcp_image_tool_result(text_parts: list[str], artifacts: list[dict[str, Any]
     return json.dumps(payload, ensure_ascii=False)
 
 
+# The MCP SDK validates structuredContent against outputSchema inside ``call_tool`` and
+# raises RuntimeError; these map that to the kernel's result-schema class (Task 21).
+_SDK_RESULT_SCHEMA_ERRORS: tuple[tuple[str, str], ...] = (
+    (
+        "has an output schema but did not return structured content",
+        "(value): the server declared an outputSchema but returned no structuredContent",
+    ),
+    (
+        "invalid structured content returned by tool",
+        "(value): structuredContent does not match the declared outputSchema",
+    ),
+)
+
+
+def _sdk_result_schema_error(exc: BaseException) -> str | None:
+    """The problem text when *exc* is the SDK's own result-schema failure, else None."""
+    if not isinstance(exc, RuntimeError):
+        return None
+    text = str(exc).lower()
+    for needle, problem in _SDK_RESULT_SCHEMA_ERRORS:
+        if needle in text:
+            return problem
+    return None
+
+
 class MCPToolWrapper(_MCPWrapperBase):
     """Wraps a single MCP server tool as a nanobot Tool."""
 
@@ -654,6 +679,11 @@ class MCPToolWrapper(_MCPWrapperBase):
         raw_schema = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._parameters = sanitize_schema_descriptions(_normalize_schema_for_openai(raw_schema))
         self._tool_timeout = tool_timeout
+        # Typed calls (design 5b): the server's declared result schema, when it has one.
+        # See ``_typed_result`` for how structuredContent is checked against it.
+        raw_output = getattr(tool_def, "outputSchema", None)
+        if isinstance(raw_output, dict):
+            self.output_schema = _normalize_schema_for_openai(raw_output)
 
     @property
     def name(self) -> str:
@@ -691,6 +721,12 @@ class MCPToolWrapper(_MCPWrapperBase):
                 logger.warning("MCP tool '{}' was cancelled by server/SDK", self._name)
                 return ToolResult.error("(MCP tool call was cancelled)")
             except Exception as exc:
+                sdk_schema_error = _sdk_result_schema_error(exc)
+                if sdk_schema_error is not None:
+                    from nanobot.kernel.typed import result_schema_error
+
+                    logger.warning("MCP tool '{}' result failed its schema: {}", self._name, exc)
+                    return result_schema_error(self._name, [sdk_schema_error])
                 if await self._refresh_session_after_termination(
                     exc,
                     refreshed_session,
@@ -732,7 +768,7 @@ class MCPToolWrapper(_MCPWrapperBase):
                     rendered = self._render_call_result(result.content, kwargs)
                     if getattr(result, "isError", False):
                         return ToolResult.error(rendered)
-                    return rendered
+                    return self._typed_result(rendered, result)
                 except Exception as exc:
                     logger.exception(
                         "MCP tool '{}' failed while rendering result: {}: {}",
@@ -743,6 +779,29 @@ class MCPToolWrapper(_MCPWrapperBase):
                     return ToolResult.error(
                         f"(MCP tool returned malformed content: {type(exc).__name__})"
                     )
+
+    def _typed_result(self, rendered: str, result: Any) -> str:
+        """Attach ``structuredContent`` for the kernel's result check (design 5b).
+
+        - No ``outputSchema``: *rendered* text exactly as before, whether or not the
+          server sent ``structuredContent`` (there is nothing to check it against).
+        - ``outputSchema`` and ``structuredContent``: ``ToolResult(rendered,
+          structured=structuredContent)``; ``validate_result`` then checks the payload
+          (not the bannered text) on every call path.
+        - ``outputSchema`` without ``structuredContent``: a ``RESULT_SCHEMA_MARKER``
+          error. The MCP spec says such a server MUST return structured content (the
+          SDK's own ``call_tool`` raises too), so the text is not parsed instead.
+        """
+        if self.output_schema is None:
+            return rendered
+        structured = getattr(result, "structuredContent", None)
+        if structured is None:
+            from nanobot.kernel.typed import result_schema_error
+
+            return result_schema_error(self._name, [
+                "(value): the server declared an outputSchema but returned no structuredContent",
+            ])
+        return ToolResult(rendered, structured=structured)
 
     def _render_call_result(self, content: Any, arguments: Mapping[str, Any]) -> str:
         """Turn MCP content blocks into a tool result string.

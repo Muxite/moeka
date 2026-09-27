@@ -239,10 +239,26 @@ class ToolRegistry:
         cast_params = tool.cast_params(cast(dict[str, Any], params))
         errors = tool.validate_params(cast_params)
         if errors:
-            return tool, cast_params, (
-                ToolResult.error(f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors))
-            )
+            text = f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors)
+            fixes = self._field_fixes(tool, cast_params)
+            if fixes:
+                text += "\nFields to fix: " + "; ".join(fixes)
+            return tool, cast_params, ToolResult.error(text)
         return tool, cast_params, None
+
+    @staticmethod
+    def _field_fixes(tool: Tool, params: dict[str, Any]) -> list[str]:
+        """Each bad argument as ``<path>: <expected>`` (design 5b: repair in one step).
+
+        From ``Tool.parameter_violations`` (the same schema ``validate_params`` checks).
+        The legacy messages stay first and unchanged; this is an extra line. A tool whose
+        own ``validate_params`` adds rules beyond its schema only gets the schema's part.
+        """
+        try:
+            violations = tool.parameter_violations(params)
+        except Exception:  # noqa: BLE001 - the legacy error text is still returned
+            return []
+        return [v.describe() for v in violations]
 
     @classmethod
     def _coerce_argument_value(cls, value: Any) -> Any:
@@ -296,6 +312,12 @@ class ToolRegistry:
 
         try:
             result = await tool.execute(**params)
+            # Typed calls (design 5b): check the result against the tool's output_schema.
+            from nanobot.kernel.gate import validate_result
+
+            result = validate_result(
+                tool, result, env=self.gate_env, principal=self.gate_principal,
+            )
             if is_tool_error_result(result):
                 return ToolResult.error(str(result) + hint)
             return result

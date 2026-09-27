@@ -207,6 +207,16 @@ async def _execute_tool_call(
                 result = await tool.execute(**params)
             else:
                 result = await tools.execute(tool_call.name, params)
+        if tool is not None:
+            # Typed calls (design 5b), as in AgentRunner._run_tool.
+            from nanobot.kernel.gate import validate_result
+
+            if isinstance(tools, ToolRegistry):
+                result = validate_result(
+                    tool, result, env=tools.gate_env, principal=tools.gate_principal,
+                )
+            else:
+                result = validate_result(tool, result)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

@@ -1754,6 +1754,13 @@ class AgentRunner:
                     result = await tool.execute(**params)
                 else:
                     result = await spec.tools.execute(tool_call.name, params)
+            if tool is not None:
+                # Typed calls (design 5b): a result that fails the tool's output_schema
+                # becomes a marked tool error here, before any hook or the model sees
+                # it. (Without a prepared tool, ToolRegistry.execute already checked.)
+                from nanobot.kernel.gate import validate_result
+
+                result = validate_result(tool, result, env=spec.env, principal=spec.principal)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

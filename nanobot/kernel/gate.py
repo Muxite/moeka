@@ -29,6 +29,12 @@ Call sites: ``AgentRunner._run_tool`` (between prepare_call and the first hook),
 ``ToolRegistry.execute`` and ``nanobot.agent.tools.execution``. A denied call never
 reaches a hook and never executes.
 
+After ``execute``, the same three call sites run ``validate_result`` (typed calls,
+design 5b; defined in ``nanobot.kernel.typed`` and re-exported here): a result that
+fails the tool's ``output_schema`` becomes a ``RESULT_SCHEMA_MARKER`` tool error before
+any success hook or the model sees it. That is a tool error, not a gate denial: no
+deferred entry, no I5 count.
+
 Module-level imports are stdlib + kernel only; agent/security modules are imported
 lazily (Ruling C).
 """
@@ -57,6 +63,7 @@ from nanobot.kernel.policy import (
 )
 from nanobot.kernel.strict import strict_sandbox_deny
 from nanobot.kernel.trace import LoguruTraceSink, TraceSink, safe_emit
+from nanobot.kernel.typed import RESULT_SCHEMA_MARKER, validate_result
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
@@ -376,9 +383,11 @@ def emit_tool_invalid(
 
 __all__ = [
     "AGENT_PRINCIPAL",
+    "RESULT_SCHEMA_MARKER",
     "GateResult",
     "emit_tool_invalid",
     "gate_call",
     "plugin_grant_deny",
     "protected_floor",
+    "validate_result",
 ]

@@ -21,6 +21,12 @@ Two plugin modes (built-in tools load the same way in both):
   4. its tool name is not already registered (a built-in or another plugin): a hard
      :class:`LoadError`, since the host activated a plugin that cannot load as approved.
 
+  A manifest ``operations`` entry named like the registered tool binds to it (Task 21,
+  typed calls): its ``output_schema`` becomes the tool's ``output_schema`` (checked on
+  every result by ``nanobot.kernel.typed.validate_result``) and its ``input_schema`` is
+  checked on top of the tool's own ``parameters``. The model still sees the tool's own
+  ``parameters``. An operation that names no registered tool binds to nothing.
+
   A manifest ``descriptions`` entry for the registered tool's name replaces the tool's
   own ``description`` (Task 20, descriptions as data). The file is read before plugin
   code is imported, and its bytes are part of the hash step 2 checked. A file that is
@@ -57,8 +63,9 @@ from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
+    from nanobot.agent.tools.base import SchemaViolation
     from nanobot.agent.tools.context import RequestContext, ToolContext
-    from nanobot.kernel.manifest import PluginManifest
+    from nanobot.kernel.manifest import Operation, PluginManifest
     from nanobot.kernel.policy import CapabilityRequest, PermissionPolicy
     from nanobot.kernel.registry import PluginRegistry
 
@@ -256,8 +263,10 @@ class ToolLoader:
                     "built-in or another plugin"
                 )
             grant = _capability_grant(manifest, registry.gate_policy)
+            operation = next((op for op in manifest.operations if op.name == name), None)
             wrapped = _KernelPluginTool(
                 tool, plugin=manifest.name, grant=grant, description=descriptions.get(name),
+                operation=operation,
             )
             if registry.register(wrapped):
                 registered.append(name)
@@ -509,6 +518,14 @@ class _LegacyErrorPrefixTool(Tool):
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         return self._wrapped.validate_params(params)
 
+    def parameter_violations(self, params: dict[str, Any]) -> list[SchemaViolation]:
+        return self._wrapped.parameter_violations(params)
+
+    @property
+    def output_schema(self) -> dict[str, Any] | None:  # type: ignore[override]
+        # ``Tool.output_schema`` is a class attribute, so ``__getattr__`` never sees it.
+        return getattr(self._wrapped, "output_schema", None)
+
     def to_schema(self) -> dict[str, Any]:
         return self._wrapped.to_schema()
 
@@ -545,13 +562,51 @@ class _KernelPluginTool(_LegacyErrorPrefixTool):
 
     def __init__(
         self, wrapped: Tool, *, plugin: str, grant: tuple[str, ...],
-        description: str | None = None,
+        description: str | None = None, operation: Operation | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._plugin = plugin
         self._grant = tuple(grant)
         # The manifest's description file text, when it names this tool (Task 20).
         self._description = description
+        # The manifest operation named like this tool (Task 21, typed calls): its
+        # schemas are the host-approved, hash-pinned contract.
+        self._operation = operation
+
+    @property
+    def operation(self) -> Operation | None:
+        return self._operation
+
+    @property
+    def output_schema(self) -> dict[str, Any] | None:  # type: ignore[override]
+        """The operation's ``output_schema`` when one is bound, else the tool's own."""
+        if self._operation is not None:
+            return self._operation.output_schema
+        return super().output_schema
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        """The tool's own check, plus the bound operation's ``input_schema``."""
+        errors = list(self._wrapped.validate_params(params))
+        if self._operation is not None and isinstance(params, dict):
+            from nanobot.agent.tools.base import Schema
+
+            errors.extend(
+                e for e in Schema.validate_json_schema_value(params, self._operation.input_schema)
+                if e not in errors
+            )
+        return errors
+
+    def parameter_violations(self, params: dict[str, Any]) -> list[SchemaViolation]:
+        violations = list(self._wrapped.parameter_violations(params))
+        if self._operation is not None and isinstance(params, dict):
+            from nanobot.agent.tools.base import Schema
+
+            seen = {v.message for v in violations}
+            violations.extend(
+                v for v in Schema.schema_violations(params, self._operation.input_schema)
+                if v.message not in seen
+            )
+        return violations
 
     @property
     def description(self) -> str:
