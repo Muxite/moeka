@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
-from nanobot.agent.runner import AgentRunner, AgentRunSpec
+from nanobot.agent.runner import DEFAULT_MAX_POLICY_DENIALS, AgentRunner, AgentRunSpec
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.context import (
     RequestContext,
@@ -125,11 +125,15 @@ class SubagentManager:
         inline_skills: list | None = None,
         env: "CoreEnvironment | None" = None,
         policy: "PermissionPolicy | None" = None,
+        max_policy_denials: int = DEFAULT_MAX_POLICY_DENIALS,
     ):
         self.env = env
         # The parent loop's gate policy, applied unattenuated for now (per-subagent
         # attenuation is a later task); None means DefaultPolicy().
         self.policy = policy
+        # I5 denial ceiling for each sub-agent run; counted per run, never shared
+        # with the parent turn's counter.
+        self.max_policy_denials = max_policy_denials
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
         if bus is None:
@@ -478,6 +482,7 @@ class SubagentManager:
                     policy=self.policy,
                     principal=_subagent_principal(task_id),
                     env=self.env,
+                    max_policy_denials=self.max_policy_denials,
                 ))
             finally:
                 if token is not None:

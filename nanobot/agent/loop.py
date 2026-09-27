@@ -29,6 +29,7 @@ from nanobot.agent.memory import Consolidator
 from nanobot.agent.model_runtime import ModelRuntimeResolver
 from nanobot.agent.runner import (
     _MAX_INJECTIONS_PER_TURN,
+    BUDGET_STOP_REASONS,
     AgentRunner,
     AgentRunResult,
     AgentRunSpec,
@@ -1346,8 +1347,11 @@ class AgentLoop:
             reset_file_states(file_state_token)
         if session is not None and not ephemeral:
             session.provider_state = result.provider_state
-        if result.stop_reason == "max_iterations":
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
+        if result.stop_reason in BUDGET_STOP_REASONS:
+            if result.stop_reason == "policy_denials":
+                logger.warning("Turn stopped: permission-policy denial ceiling reached")
+            else:
+                logger.warning("Max iterations ({}) reached", self.max_iterations)
             should_stream = turn_continuation.should_stream_budget_response(
                 stop_reason=result.stop_reason,
                 pending_queue_available=pending_queue is not None and session is not None,

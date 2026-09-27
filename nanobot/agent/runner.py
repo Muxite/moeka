@@ -73,6 +73,7 @@ from nanobot.utils.runtime import (
 
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.gate import GateResult
     from nanobot.kernel.policy import PermissionPolicy, Principal
 
 ContinuationCallback = Callable[[], str | None]
@@ -129,6 +130,36 @@ class RunnerLimits(BaseModel):
     tool_failure_reflection_threshold: int = 3
 
 
+# Invariant I5: a turn ends once this many tool calls were denied by the permission
+# policy (``PermissionPolicy.decide``). Floor denials never count.
+DEFAULT_MAX_POLICY_DENIALS = 6
+
+# Stop reasons that end the turn through the budget-exhausted finalization path.
+BUDGET_STOP_REASONS = frozenset({"max_iterations", "policy_denials"})
+
+
+@dataclass(slots=True)
+class PolicyDenialBudget:
+    """Per-turn count of permission-policy denials against the I5 ceiling.
+
+    - One instance per ``AgentRunner.run`` call, so a sub-agent's run never shares
+      the parent's count.
+    - ``record`` is synchronous and called from the synchronous stretch of
+      ``_run_tool`` (no ``await`` between the ``exhausted`` check and the increment),
+      so concurrent ``asyncio.gather`` batches can never overshoot the limit.
+    """
+
+    limit: int = DEFAULT_MAX_POLICY_DENIALS
+    count: int = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.count >= self.limit
+
+    def record(self) -> None:
+        self.count += 1
+
+
 @dataclass(slots=True)
 class AgentRunSpec:
     """Configuration for a single agent execution."""
@@ -163,6 +194,9 @@ class AgentRunSpec:
     policy: PermissionPolicy | None = None
     principal: Principal | None = None
     env: CoreEnvironment | None = None
+    # I5 ceiling: the turn ends (stop_reason "policy_denials") once this many calls
+    # were denied by ``policy``. Values below 1 are treated as 1.
+    max_policy_denials: int = DEFAULT_MAX_POLICY_DENIALS
 
 
 @dataclass(slots=True)
@@ -453,6 +487,8 @@ class AgentRunner:
         external_lookup_counts: dict[str, int] = {}
         # Per-turn throttle for repeated attempts against the same outside target.
         workspace_violation_counts: dict[str, int] = {}
+        # I5 hard ceiling on permission-policy denials; separate from the throttle above.
+        policy_denials = PolicyDenialBudget(limit=max(1, spec.max_policy_denials))
         empty_content_retries = 0
         # Segments from one uninterrupted length-recovery chain. Tool work or
         # injected user input starts a new logical answer and clears the chain.
@@ -587,6 +623,7 @@ class AgentRunner:
                     context,
                     model_messages=messages_for_model,
                     compacted_tool_results=request_state.compacted_tool_results,
+                    policy_denials=policy_denials,
                 )
                 tool_events.extend(new_events)
                 tools_used.extend(
@@ -697,6 +734,20 @@ class AgentRunner:
                 )
                 if _drained:
                     had_injections = True
+                if policy_denials.exhausted:
+                    # I5: the permission policy keeps saying no; retrying cannot help.
+                    # Ends the turn through the same finalization as max_iterations.
+                    stop_reason = "policy_denials"
+                    context.stop_reason = stop_reason
+                    logger.warning(
+                        "Stopping turn for {}: {} tool calls denied by the permission "
+                        "policy (limit {})",
+                        spec.session_key or "default",
+                        policy_denials.count,
+                        policy_denials.limit,
+                    )
+                    await hook.after_iteration(context)
+                    break
                 await hook.after_iteration(context)
                 continue
 
@@ -911,38 +962,27 @@ class AgentRunner:
             break
         else:
             stop_reason = "max_iterations"
-            # Drain any remaining injections so they are appended to the
-            # conversation history instead of being re-published as
-            # independent inbound messages by _dispatch's finally block.
-            # We include them before the no-tools finalization pass so the
-            # final response can account for every known follow-up.
-            drained_after_max_iterations, injection_cycles = await self._try_drain_injections(
-                spec, messages, None, injection_cycles,
-                phase="after max_iterations",
+
+        if stop_reason in BUDGET_STOP_REASONS:
+            (
+                final_content,
+                pending_stream_content,
+                usage,
+                drained_at_budget,
+                injection_cycles,
+            ) = await self._finish_budget_exhausted(
+                spec,
+                hook,
+                messages,
+                usage,
+                stop_reason=stop_reason,
+                request_state=request_state,
+                round_usages=round_usages,
+                length_recovery_parts=length_recovery_parts,
+                injection_cycles=injection_cycles,
             )
-            if drained_after_max_iterations:
+            if drained_at_budget:
                 had_injections = True
-            terminal_content = None
-            if spec.finalize_on_max_iterations:
-                terminal_content, usage = await self._try_finalize_after_max_iterations(
-                    spec,
-                    hook,
-                    messages,
-                    usage,
-                    request_state=request_state,
-                    round_usages=round_usages,
-                )
-            if terminal_content is None:
-                terminal_content = self._max_iterations_fallback(spec)
-            if length_recovery_parts:
-                terminal_tail = f"\n\n{terminal_content.lstrip()}"
-                final_content = (
-                    "".join(length_recovery_parts).rstrip() + terminal_tail
-                ).strip()
-                pending_stream_content = terminal_tail
-            else:
-                final_content = terminal_content
-            self._append_final_message(messages, terminal_content)
 
         return AgentRunResult(
             final_content=final_content,
@@ -1283,6 +1323,63 @@ class AgentRunner:
         retry_messages.append(build_finalization_retry_message())
         return retry_messages
 
+    async def _finish_budget_exhausted(
+        self,
+        spec: AgentRunSpec,
+        hook: AgentHook,
+        messages: list[dict[str, Any]],
+        usage: LLMUsage | None,
+        *,
+        stop_reason: str,
+        request_state: ModelRequestState,
+        round_usages: list[LLMUsage],
+        length_recovery_parts: list[str],
+        injection_cycles: int,
+    ) -> tuple[str, str | None, LLMUsage | None, bool, int]:
+        """End a turn whose budget ran out (``stop_reason`` in ``BUDGET_STOP_REASONS``).
+
+        - ``"max_iterations"``: the loop used every iteration.
+        - ``"policy_denials"``: the I5 permission-policy denial ceiling was reached.
+        - Both get identical user-facing behaviour: drain pending injections, one
+          no-tools finalization call with the budget-exhausted prompt (when
+          ``spec.finalize_on_max_iterations``), else ``_max_iterations_fallback``.
+
+        Returns ``(final_content, pending_stream_content, usage, drained,
+        injection_cycles)``.
+        """
+        # Drain any remaining injections so they are appended to the
+        # conversation history instead of being re-published as
+        # independent inbound messages by _dispatch's finally block.
+        # We include them before the no-tools finalization pass so the
+        # final response can account for every known follow-up.
+        drained, injection_cycles = await self._try_drain_injections(
+            spec, messages, None, injection_cycles,
+            phase=f"after {stop_reason}",
+        )
+        terminal_content = None
+        if spec.finalize_on_max_iterations:
+            terminal_content, usage = await self._try_finalize_after_max_iterations(
+                spec,
+                hook,
+                messages,
+                usage,
+                request_state=request_state,
+                round_usages=round_usages,
+            )
+        if terminal_content is None:
+            terminal_content = self._max_iterations_fallback(spec)
+        pending_stream_content: str | None = None
+        if length_recovery_parts:
+            terminal_tail = f"\n\n{terminal_content.lstrip()}"
+            final_content = (
+                "".join(length_recovery_parts).rstrip() + terminal_tail
+            ).strip()
+            pending_stream_content = terminal_tail
+        else:
+            final_content = terminal_content
+        self._append_final_message(messages, terminal_content)
+        return final_content, pending_stream_content, usage, drained, injection_cycles
+
     async def _try_finalize_after_max_iterations(
         self,
         spec: AgentRunSpec,
@@ -1476,6 +1573,8 @@ class AgentRunner:
         context: AgentHookContext | None = None,
         model_messages: list[dict[str, Any]] | None = None,
         compacted_tool_results: set[str] | None = None,
+        *,
+        policy_denials: PolicyDenialBudget | None = None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
@@ -1505,6 +1604,7 @@ class AgentRunner:
                         hook,
                         context,
                         read_results,
+                        policy_denials=policy_denials,
                     )
                     for tool_call in batch
                 ))
@@ -1520,6 +1620,7 @@ class AgentRunner:
                         hook,
                         context,
                         read_results,
+                        policy_denials=policy_denials,
                     )
                     tool_results.append(result)
                     batch_results.append(result)
@@ -1547,9 +1648,16 @@ class AgentRunner:
         hook: AgentHook | None = None,
         context: AgentHookContext | None = None,
         read_results: Callable[[], dict[str, str]] | None = None,
+        *,
+        policy_denials: PolicyDenialBudget | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
+        # Everything up to the gate verdict (and its policy_denials.record()) is
+        # synchronous: no await may be added before the gate, or concurrent batches
+        # could overshoot the I5 ceiling.
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
+        if policy_denials is not None and policy_denials.exhausted:
+            return self._skip_after_policy_ceiling(tool_call, policy_denials)
         hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
             tool_call.name,
@@ -1608,6 +1716,8 @@ class AgentRunner:
                     "status": "error",
                     "detail": denial.split(": ", 1)[-1][:120],
                 }
+                if gate.policy_capability is not None and policy_denials is not None:
+                    self._record_policy_denial(spec, tool_call, gate, policy_denials)
                 handled = self._classify_violation(
                     raw_text=denial,
                     soft_payload=denial + hint,
@@ -1809,6 +1919,49 @@ class AgentRunner:
             return soft_payload, event, None
 
         return None
+
+    @staticmethod
+    def _record_policy_denial(
+        spec: AgentRunSpec,
+        tool_call: ToolCallRequest,
+        gate: GateResult,
+        policy_denials: PolicyDenialBudget,
+    ) -> None:
+        """Account one ``PermissionPolicy.decide`` denial against the I5 ceiling.
+
+        The single place a policy Deny becomes a runner event: every gate verdict with
+        ``layer == "policy"`` passes through here exactly once (floor and gate-layer
+        denials never do). Must stay synchronous (see ``PolicyDenialBudget``).
+        """
+        policy_denials.record()
+        if policy_denials.exhausted:
+            logger.warning(
+                "Permission-policy denial ceiling reached for {} ({} of {}; last: {} {})",
+                spec.session_key or "default",
+                policy_denials.count,
+                policy_denials.limit,
+                tool_call.name,
+                gate.policy_capability,
+            )
+
+    @classmethod
+    def _skip_after_policy_ceiling(
+        cls,
+        tool_call: ToolCallRequest,
+        policy_denials: PolicyDenialBudget,
+    ) -> tuple[Any, dict[str, str], BaseException | None]:
+        """Result for a call not run because this turn hit the denial ceiling."""
+        text = (
+            f"Error: {tool_call.name} was not run: {policy_denials.count} tool calls were "
+            "blocked by the permission policy this turn, so the turn is ending. Do not "
+            "retry; tell the user which capability you need."
+        )
+        event = {
+            "name": tool_call.name,
+            "status": "error",
+            "detail": cls._event_detail("policy_denial_budget_exhausted: ", text),
+        }
+        return text, event, None
 
     @classmethod
     def _ssrf_soft_payload(cls, raw_text: str) -> str:
