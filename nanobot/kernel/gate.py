@@ -73,9 +73,15 @@ class GateResult:
 
     @property
     def policy_capability(self) -> str | None:
-        """The denied capability when ``PermissionPolicy.decide`` (not a floor) denied."""
+        """The denied capability, only when ``PermissionPolicy.decide`` denied.
+
+        ``None`` for an allow, a floor deny and a ``"gate"`` deny (the tool's own
+        declaration failed: a tool bug, not the host's policy saying no). Only these
+        policy denials are ``violation:policy:*`` and count toward the per-turn
+        denial ceiling (I5).
+        """
         deny = self.deny
-        if deny is None or self.layer == "floor":
+        if deny is None or self.layer != "policy":
             return None
         return deny.capability
 
