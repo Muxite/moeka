@@ -11,6 +11,7 @@ with `tests/`, `docs/` or `.agent/`. Anything not confirmed by reading code is m
 | [02-tools.md](02-tools.md) | Tool discovery/registration/scoping, execution and error shaping, the per-tool table (where each description and schema lives), description-writing conventions, tool-call validation |
 | [03-prompts-skills-memory.md](03-prompts-skills-memory.md) | Template inventory, SKILL.md format and validation, skill discovery, memory files, Dream (`run_dream`), consolidation, test pins on prompt text |
 | [04-config-providers-core-sessions.md](04-config-providers-core-sessions.md) | Config loading and knobs, provider selection/retry/fallback, a local vLLM preset example, `MoekaCore`, the SQLite session store and crash behaviour |
+| [05-kernel.md](05-kernel.md) | The `nanobot/kernel/` modules mapped to invariants I1-I6: host env, gate and floors, router and ledger, plugins and typed calls, fact/artifact stores and clarification (`kernel.facts`, `.artifacts`, `.propose`, `.answer`) |
 
 ## Architecture in six lines
 

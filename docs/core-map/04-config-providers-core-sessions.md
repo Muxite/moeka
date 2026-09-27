@@ -274,6 +274,9 @@ flowchart LR
   starts with a variable (`$KEY/x`). Unset variables expand to empty, as in the shell.
 - Sandbox bind paths expand against `env.exec_base_env` (`agent/tools/sandbox.py` `expand_vars`).
 - Neither ever uses the process env.
+- Fact and artifact stores (kernel P5): `core.facts` and `core.artifacts` live at `env.paths.state_dir/facts.db`
+  and `artifacts.db`, built on first access; `core.propose` and `core.answer` pass through to them. In the legacy
+  flat layout `state_dir` is the workspace. Details: doc 05 section 6.
 
 ## 5. Sessions and crash behaviour
 

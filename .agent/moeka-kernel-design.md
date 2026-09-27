@@ -2,8 +2,9 @@
 
 Naming: `MoekaKernel` is the public name; `MoekaCore` remains the real class and an alias (`nanobot.kernel` re-exports both).
 
-Status: design plan, 2026-09-26, branch `core-slim` at `4d2a2d8a`. Nothing new here is implemented; phase 0
-shipped earlier. The detailed findings, threat model and phase-0 log live in the appendix spec,
+Status: P1-P5 built on branch `core-slim` (2026-09-27, kernel plan Tasks 0-25; section 10 has each phase's
+proof). P6-P8 remain design only. This document began as a design plan (2026-09-26, `4d2a2d8a`); phase 0
+shipped before it. The detailed findings, threat model and phase-0 log live in the appendix spec,
 `.agent/host-plugin-permissions-design.md` ("the earlier spec"). Code facts marked (unverified) were not read.
 
 ## 1. Mission
@@ -118,20 +119,30 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   Unsupported inferences stay provisional flags, never committed facts.
 - Enforced by: the artifact store refuses a commit whose value lacks an epistemic trace ID.
 - Proven by: a test that an uncited delta is stored as provisional and never reaches the committed artifact.
-- Status: built as a library, not wired (P5, Tasks 22-23).
+- Status: built and reachable from `MoekaKernel` (P5, Tasks 22-25, Checkpoint 5). Enforced for every write
+  through `ArtifactStore`; nothing in the runtime writes on its own.
   - `nanobot/kernel/facts.py` `FactStore`: append-only facts with provenance (`document`/`tool`/`user`),
     opaque `fact-<uuid4>` trace IDs; `resolve()` returns `None` for an ID that points to nothing.
   - `nanobot/kernel/artifacts.py` `ArtifactStore`: a host or plugin registers a pydantic model per kind;
     `propose(kind, delta, cites)` commits a leaf only when its cite resolves in the `FactStore`; an uncited
     leaf is stored provisional; a cite that resolves to nothing rejects the whole propose (nothing stored).
   - User confirmation is a `FactStore.record("user", ...)` trace ID, never a sentinel.
+  - `nanobot/kernel/clarify.py`: the epistemic audit's decision (minor commits the known value, semantic or
+    unsupported asks one question) and `record_answer` (user fact, then commit).
+  - Facade (Task 25, `nanobot/core/core.py`): `kernel.facts` and `kernel.artifacts` are built lazily from
+    `kernel.env` under `env.paths.state_dir` and share one fact store; `kernel.propose` and `kernel.answer`
+    pass through. No env: both are `None` and the methods raise `RuntimeError`.
   - Proof: `tests/kernel/test_artifact_store.py` (an uncited delta never reaches `committed()`; every
     committed leaf's trace ID resolves; a missing-fact cite is rejected; accumulation, validation,
-    persistence, concurrent threads and processes on a fresh file).
+    persistence, concurrent threads and processes on a fresh file) and `tests/kernel/test_p5_integration.py`
+    (end to end through `MoekaKernel` with a strict env and a fake provider).
   - Limit: "committed" means the cite resolved, not that the fact supports the value (the epistemic audit
     is the caller's), and it is not proof against an exec-capable agent: `exec` bypasses the file floor
-    and can forge `facts.db` or `artifacts.db`. Real containment needs a sandboxed exec backend.
-  - Not wired: no gateway, `AgentLoop` or tool path records facts or proposes artifacts yet.
+    and can forge `facts.db` or `artifacts.db`. Real containment needs a sandboxed exec backend (strict mode
+    refuses exec without one).
+  - Not automatic: no gateway, `AgentLoop` or built-in tool path records facts or proposes artifacts. A host
+    does, or a host action the agent calls (as in the P5 integration test). Typed tool results are not bound
+    into artifacts automatically either.
 
 **I4 Strict capability attenuation**
 - A child sub-agent or plugin must get only the intersection of its parent's grants and its declared manifest.
@@ -180,7 +191,8 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   - Nothing routes yet. The runner's turn loop, sub-agents and memory still call their provider directly; only
     a caller of `route` or `think_structured(slot=...)` is routed.
   - No slot has a ceiling unless the host configures `router.slots`.
-  - "Adequate" is whatever `verify` says; no confidence or grounding verifier ships (P5).
+  - "Adequate" is whatever `verify` says; no confidence or grounding verifier ships. P5 built the fact and
+    artifact stores and a clarification classifier, but no router `verify` built on them.
   - The `E[Cost]` inequality is scored only by the RSI harness, which does not exist yet.
   - Cache-write premiums and hidden reasoning tokens are not priced (`.agent/kernel-p3-followups.md`).
 
@@ -367,8 +379,8 @@ Purpose: the kernel must work as a chatbot and make effective, typed calls to ou
     `additionalProperties`, `items`). `$ref`, `anyOf`/`oneOf`/`allOf` and `pattern` are accepted unchecked.
   - Kernel mode itself is opt-in (`ToolLoader(plugin_registry=...)`); no production caller passes a
     registry, so manifest operations are enforced only where a host enables kernel mode.
-  - The artifact store (P5) does not exist. The contract it can rely on: a non-error result of a tool with
-    an `output_schema` has passed this check.
+  - The artifact store exists (P5), but no path binds a typed result into it automatically. The contract a
+    host binding one can rely on: a non-error result of a tool with an `output_schema` has passed this check.
   - Outside services are not yet forced through a typed tool: an untyped tool may still return free text.
 
 ## 6. Cost-aware routing
@@ -453,10 +465,13 @@ Purpose: facts enter the artifact only with provenance, and the user is asked on
 - A semantic divergence must produce exactly one targeted question about a single ambiguity.
 - The user's answer is recorded with user provenance before the commit.
 - Unanswered or unsupported values stay provisional flags (I3).
-- Built mechanics (Tasks 22-23, library only): the "Record ... with user provenance" step is
+- Built mechanics (Tasks 22-23): the "Record ... with user provenance" step is
   `FactStore.record("user", <turn ref>, answer)`; the "Commit" step is `ArtifactStore.propose` with that trace
-  ID as the leaf's cite. The epistemic audit and the question loop are not built (Tasks 24-25).
-- Built mechanics (Task 24, library only, `nanobot/kernel/clarify.py`):
+  ID as the leaf's cite.
+- Built facade (Task 25): `kernel.propose(kind, delta, cites, artifact_id=)` and
+  `kernel.answer(question, answer, turn_ref)` over `kernel.facts`/`kernel.artifacts`. The live question loop
+  (ask the user, wait for the turn, call `kernel.answer`) is the host's; the kernel ships no turn loop for it.
+- Built mechanics (Task 24, `nanobot/kernel/clarify.py`):
   - `resolve_divergence(Divergence, classify=)` is a pure decision: `CommitReady` (minor) or one
     `Question` (semantic); it writes no store and asks no user;
   - the default classifier is deterministic and LLM-free (I6): equal after whitespace collapse and
@@ -465,7 +480,7 @@ Purpose: facts enter the artifact only with provenance, and the user is asked on
   - a minor result commits the KNOWN value with its fact's cite, never the reformatted draft;
   - the classifier is pluggable (`ClassifierFn`); a label other than `minor`/`semantic` raises;
   - one divergence in, at most one question out; there is no batch or merge function, so two
-    ambiguities are two questions; asking them one at a time is the (unbuilt) turn loop's job;
+    ambiguities are two questions; asking them one at a time is the host's turn loop's job;
   - `record_answer` records `FactStore.record("user", turn_ref, answer)`, then `propose`s it citing
     that trace ID.
 - `propose` semantics:
@@ -527,6 +542,13 @@ and when it may accept a change.
 - Latency: stream read-only planning speculatively while gate checks run in parallel (minimise).
 - Ambient leakage stays a hard zero: no credential in the agent's child environment; keys come just in time.
 
+**Signals available after P5** (the RSI harness that scores them does not exist yet):
+- Provenance rate: `artifact.proposed` trace events list committed paths with trace IDs and provisional paths;
+  `artifact.rejected` names the reason. Values never appear on the trace.
+- Clarification yield: no signal yet. `clarify.resolve_divergence` returns a `Question` but emits no trace
+  event, so questions asked are not counted.
+- Cost: `model.call` ledger events (P3). Denial rate: `policy.decision` events and the deferred log (P2).
+
 **Acceptance rule:**
 - A candidate is accepted only if it passes every hard constraint, is not Pareto-dominated by its parent, and is
   strictly better on at least one objective.
@@ -573,6 +595,8 @@ bound; the grant is `policy ∩ requested`), `config_schema`, `entry`, `descript
 
 - Every lifecycle transition is a host action with an audit event.
 - A name collision between plugins is a load error.
+- Status: built (P4, Checkpoint 4); section 10 has the proof. P5 adds no plugin surface: artifact kinds are
+  registered in memory on `kernel.artifacts` by the host or a plugin's code, not declared in the manifest.
 
 ## 10. Phases
 
@@ -653,7 +677,8 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
     `FunctionTool`, or a kernel plugin's manifest operation) becomes a `result failed schema` tool error on
     every call path before any success hook sees it. A tool without a schema is unchanged. There is no
     artifact store yet (P5), so "never reaches the artifact store" holds because nothing downstream receives
-    a failed result as a success.
+    a failed result as a success. (After P5: the store exists, but nothing binds tool results into it
+    automatically, so the same reasoning still holds.)
   - The full suite passes (5647), and the awork suite keeps the same 8 pre-existing failures.
   - Deferred minors: `.agent/kernel-p4-followups.md`.
 
@@ -661,8 +686,27 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Generic fact records with provenance (trace ID, source kind, span).
 - Artifact store accepts typed deltas; uncited values stay provisional.
 - Proof: an uncited delta never reaches the committed artifact; every committed value resolves to a trace ID.
-- Status: Tasks 22-23 done as a library (`nanobot/kernel/facts.py`, `nanobot/kernel/artifacts.py`); see I3.
-  `facts.db` and `artifacts.db` (with SQLite sidecars) are behind the file floor in both layouts.
+- Status: done (Tasks 22-25); see I3. `facts.db` and `artifacts.db` (with SQLite sidecars) are behind the file
+  floor in both layouts.
+- Proof status (Checkpoint 5, 2026-09-27): all green.
+  - `tests/kernel/test_artifact_store.py` shows an uncited delta never reaches `committed()`, every committed
+    leaf's trace ID resolves, and a cite to a missing fact rejects the whole propose.
+  - `tests/kernel/test_facts.py` and `test_clarify.py` cover provenance, trace IDs, concurrency, the
+    deterministic classifier and `record_answer`.
+  - `tests/kernel/test_p5_integration.py` shows the pieces compose through `MoekaKernel`: strict env, fake
+    provider, a real agent turn that drafts via `kernel.propose` (cited leaf commits, uncited stays
+    provisional, forged cite refused), a minor divergence committing without a question, a semantic and an
+    unsupported one each asking one question, and `kernel.answer` committing both with `user` provenance that
+    resolves through `kernel.facts`. `tests/core/test_kernel_facade.py` covers the facade itself.
+  - The full suite passes (5823), and the awork suite keeps the same 8 pre-existing failures.
+  - Deferred minors: `.agent/kernel-p5-followups.md`.
+
+**Plan status (kernel plan, Tasks 0-25, closed 2026-09-27):**
+- P1-P5 done, each with its checkpoint proof above.
+- P6, P7 and P8 are out of that plan's scope and not started.
+- Main gaps carried forward: nothing routes the runner's own turn loop (I6), kernel mode is opt-in with no
+  production caller (P4), and no runtime path records facts or proposes artifacts on its own (I3). Deferred
+  minors per phase: `.agent/kernel-p1-followups.md` to `.agent/kernel-p5-followups.md`.
 
 **P6 task DAG engine.** Goal: decomposition only when needed.
 - Decompose on executor failure, not up front; independent nodes run in parallel.
