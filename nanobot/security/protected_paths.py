@@ -109,16 +109,20 @@ def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
 def _kernel_state_filenames() -> tuple[str, ...]:
     """Host-owned kernel state files kept directly in ``state_dir``.
 
-    The kernel plugin registry, and the fact store database with its SQLite
-    sidecars (``-wal``/``-shm``/``-journal``).
+    The kernel plugin registry, and the fact store and artifact store databases
+    with their SQLite sidecars (``-wal``/``-shm``/``-journal``).
     """
+    from nanobot.kernel.artifacts import ARTIFACTS_DB_FILENAME
     from nanobot.kernel.facts import FACTS_DB_FILENAME
     from nanobot.kernel.registry import REGISTRY_FILENAME
 
     return (
         REGISTRY_FILENAME,
-        FACTS_DB_FILENAME,
-        *(FACTS_DB_FILENAME + suffix for suffix in ("-wal", "-shm", "-journal")),
+        *(
+            db + suffix
+            for db in (FACTS_DB_FILENAME, ARTIFACTS_DB_FILENAME)
+            for suffix in ("", "-wal", "-shm", "-journal")
+        ),
     )
 
 

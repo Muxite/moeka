@@ -118,7 +118,20 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   Unsupported inferences stay provisional flags, never committed facts.
 - Enforced by: the artifact store refuses a commit whose value lacks an epistemic trace ID.
 - Proven by: a test that an uncited delta is stored as provisional and never reaches the committed artifact.
-- Status: not built (P5).
+- Status: built as a library, not wired (P5, Tasks 22-23).
+  - `nanobot/kernel/facts.py` `FactStore`: append-only facts with provenance (`document`/`tool`/`user`),
+    opaque `fact-<uuid4>` trace IDs; `resolve()` returns `None` for an ID that points to nothing.
+  - `nanobot/kernel/artifacts.py` `ArtifactStore`: a host or plugin registers a pydantic model per kind;
+    `propose(kind, delta, cites)` commits a leaf only when its cite resolves in the `FactStore`; an uncited
+    leaf is stored provisional; a cite that resolves to nothing rejects the whole propose (nothing stored).
+  - User confirmation is a `FactStore.record("user", ...)` trace ID, never a sentinel.
+  - Proof: `tests/kernel/test_artifact_store.py` (an uncited delta never reaches `committed()`; every
+    committed leaf's trace ID resolves; a missing-fact cite is rejected; accumulation, validation,
+    persistence, concurrent threads and processes on a fresh file).
+  - Limit: "committed" means the cite resolved, not that the fact supports the value (the epistemic audit
+    is the caller's), and it is not proof against an exec-capable agent: `exec` bypasses the file floor
+    and can forge `facts.db` or `artifacts.db`. Real containment needs a sandboxed exec backend.
+  - Not wired: no gateway, `AgentLoop` or tool path records facts or proposes artifacts yet.
 
 **I4 Strict capability attenuation**
 - A child sub-agent or plugin must get only the intersection of its parent's grants and its declared manifest.
@@ -440,6 +453,25 @@ Purpose: facts enter the artifact only with provenance, and the user is asked on
 - A semantic divergence must produce exactly one targeted question about a single ambiguity.
 - The user's answer is recorded with user provenance before the commit.
 - Unanswered or unsupported values stay provisional flags (I3).
+- Built mechanics (Tasks 22-23, library only): the "Record ... with user provenance" step is
+  `FactStore.record("user", <turn ref>, answer)`; the "Commit" step is `ArtifactStore.propose` with that trace
+  ID as the leaf's cite. The epistemic audit and the question loop are not built (Tasks 24-25).
+- `propose` semantics:
+  - merges leaf by leaf into the artifact; never replaces it wholesale;
+  - a commit replaces the committed value and cite at that leaf and clears its provisional value;
+  - an uncited change to a committed leaf stays a provisional pending edit; the committed value is kept;
+  - every leaf, cited or not, must fit the kind's model (unknown fields and type errors are rejected);
+  - `committed()` is a partial dict; `committed_model()` requires every required field committed.
+
+```mermaid
+flowchart TD
+    P["propose(kind, delta, cites)"] --> V{"kind registered and delta fits model?"}
+    V -- "No" --> R["Reject (ArtifactValidationError / UnknownKindError), nothing stored"]
+    V -- "Yes" --> C{"every cite resolves in FactStore?"}
+    C -- "No" --> RC["Reject (CitationError), nothing stored"]
+    C -- "Yes" --> L["Per leaf: cited -> committed, uncited -> provisional"]
+    L --> T["artifact.proposed trace event (paths and trace IDs, no values)"]
+```
 
 ```mermaid
 flowchart TD
@@ -606,6 +638,8 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Generic fact records with provenance (trace ID, source kind, span).
 - Artifact store accepts typed deltas; uncited values stay provisional.
 - Proof: an uncited delta never reaches the committed artifact; every committed value resolves to a trace ID.
+- Status: Tasks 22-23 done as a library (`nanobot/kernel/facts.py`, `nanobot/kernel/artifacts.py`); see I3.
+  `facts.db` and `artifacts.db` (with SQLite sidecars) are behind the file floor in both layouts.
 
 **P6 task DAG engine.** Goal: decomposition only when needed.
 - Decompose on executor failure, not up front; independent nodes run in parallel.
