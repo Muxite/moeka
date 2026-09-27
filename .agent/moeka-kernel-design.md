@@ -154,7 +154,9 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
 - I6 is a target enforced by measurement and routing, not a theorem. Section 6 lists the four enforcement parts.
 - Proven by: the RSI baseline comparator per task family, and a runtime test that an over-tier dispatch is denied.
 - Status: partly built (P3). Task 14 ledger measures every call (`nanobot/kernel/ledger.py`: `model.call`
-  events to the `TraceSink`, tier and cost in `LLMUsageStore`); the solver registry and router are not built.
+  events to the `TraceSink`, tier and cost in `LLMUsageStore`). Task 15 solver registry
+  (`nanobot/kernel/solvers.py`) is checked first by `acomplete_json` / `think_structured` when a caller passes
+  `task_type=`; a solved task makes no provider call. The router is not built.
 
 ## 4. Enforcement layers
 
