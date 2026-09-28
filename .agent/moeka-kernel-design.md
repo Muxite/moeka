@@ -1,9 +1,13 @@
 # moeka kernel: design
 
-Naming: `MoekaKernel` is the public name; `MoekaCore` remains the real class and an alias (`nanobot.kernel` re-exports both).
+Naming: the host-facing API is the `moeka` package (`moeka.Kernel`, section 3a). `MoekaKernel` / `MoekaCore`
+(`nanobot.core`, re-exported by `nanobot.kernel`) is the earlier facade, deprecated and kept only until awork
+migrates.
 
 Status: P1-P5 built on branch `core-slim` (2026-09-27, kernel plan Tasks 0-25; section 10 has each phase's
-proof). P6-P8 remain design only. This document began as a design plan (2026-09-26, `4d2a2d8a`); phase 0
+proof). The public API (`moeka` package, section 3a) built on branch `kernel-api` (2026-09-28, public-API
+plan Tasks 1-13); awork's migration and the removal of the deprecated shims are that plan's Tasks 14-15.
+P6-P8 remain design only. This document began as a design plan (2026-09-26, `4d2a2d8a`); phase 0
 shipped before it. The detailed findings, threat model and phase-0 log live in the appendix spec,
 `.agent/host-plugin-permissions-design.md` ("the earlier spec"). Code facts marked (unverified) were not read.
 
@@ -175,12 +179,11 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   only when host-activated at its on-disk hash, and its tools carry the grant `policy ∩
   capabilities_requested`, enforced per declared request by the gate (`tests/kernel/test_loader_integration.py`).
   The grant binds declared requests only; plugin code itself runs in-process and unsandboxed (section 2).
-- Gap: kernel mode has no production caller. `AgentLoop` (`agent/loop.py:746`) and
-  `SubagentManager._build_tools` (`agent/subagent.py:274`) both build a bare `ToolLoader()` with no
-  `plugin_registry`. So sub-agents always run legacy plugin loading: a plugin that kernel mode would
-  quarantine or refuse to activate is still importable and usable inside every sub-agent, with no manifest,
-  hash or grant check. Wire sub-agents first when kernel mode reaches the runtime
-  (`.agent/kernel-p4-followups.md`, Task 19).
+- Gap: kernel mode has no production caller. Since the public API (section 3a), `AgentLoop` and
+  `SubagentManager._build_tools` pass their `plugin_registry` to `ToolLoader`, and `Kernel(plugins=...)`
+  supplies it to every agent and sub-agent. The gateway and legacy `MoekaCore` pass none, so they still run
+  legacy plugin loading: a plugin that kernel mode would quarantine is importable there, with no manifest,
+  hash or grant check (`.agent/kernel-p4-followups.md`, Task 19).
 
 **I5 Hard failure limits**
 - A turn must terminate as soon as it exceeds its step budget or 6 policy denials.
@@ -239,6 +242,80 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
     artifact stores and a clarification classifier, but no router `verify` built on them.
   - The `E[Cost]` inequality is scored only by the RSI harness, which does not exist yet.
   - Cache-write premiums and hidden reasoning tokens are not priced (`.agent/kernel-p3-followups.md`).
+
+## 3a. Public API
+
+Purpose: show where each invariant surfaces in the `moeka` package, the only surface hosts use. Usage is in
+`docs/python-sdk.md`; the layering diagram is in `docs/core-architecture.md`; old-to-new mapping in
+`docs/migration-moeka-api.md`.
+
+- Shape: `moeka/` only re-exports (`moeka`, `moeka.llm`, `.agents`, `.sessions`, `.memory`, `.epistemics`,
+  `.trace`, `.budget`, `.errors`, `.variants`, `.tools`, `.testing`); every class lives in `nanobot/kernel/`.
+  `Kernel(env, budget, cache, variant, policy, plugins, max_concurrency, solvers, baselines)` owns one loop
+  thread; async methods hop onto it and `*_sync` twins block on it from any thread.
+- Kept private: `AgentLoop`, the runner, `ContextBuilder`, `SessionManager`, the providers and factory, the
+  `Config` schema (reachable only through `Environment.from_config`), `LegacyEnvironment`, the router, and
+  `AgentHook` (hosts observe through `StreamEvent`s and `kernel.trace`).
+
+**I1 -> `Environment.for_host`.**
+- The host passes `state_dir`, `work_dir`, `credentials` (a mapping or `CredentialResolver`), `ProviderSpec`s,
+  `ModelSpec`s, the trace sink, the `tools` section and `exec_base_env`. The `Config` is built in memory with
+  `model_construct` per section, so pydantic-settings never scans `NANOBOT_*` variables.
+- API keys never enter the `Config`: providers resolve `providers/<name>/api_key` through the resolver, scoped
+  to `provider:<name>` when the host passes a mapping.
+- Child processes see only `exec_base_env`: the `exec` tool builds its env from it, and stdio MCP servers get
+  the SDK's inherited variables from it (plus the server's own `env`) through an explicit-env shim over the MCP SDK's `get_default_environment` (`_explicit_stdio_env` in
+  `nanobot/agent/tools/mcp.py`), so no host variable leaks into a server the agent starts.
+- `Environment.from_config` is the migration escape hatch: it copies a legacy `Config` and does no ambient read,
+  but leaves `${VAR}` placeholders unexpanded.
+
+**I2 -> `Paths` and `state_dir` scopes.**
+- `for_host(strict=True)` (the default) raises `PathsOverlapError` when `work_dir` and `state_dir` overlap.
+- Everything the kernel keeps lives under `state_dir`: sessions (`sessions/`), the cost ledger (`data/`),
+  logs, `facts.db` / `artifacts.db`, and document memory (`memory/<scope>.db`, scope names percent-encoded,
+  long ones hashed, so scopes never share a file). Agents' file tools see `work_dir` and are denied `state_dir`
+  by the file floor.
+- `kernel.memory(path=...)` is the one host-chosen location; the host owns that path.
+
+**I3 -> `kernel.epistemics`.**
+- `record_fact` (source `user` / `tool` / `document`), `register_kind` + `propose(kind, delta, cites=)`, and
+  `reconcile(Divergence) -> CommitReady | Question` + `answer(question, value, turn_ref=)`.
+- A leaf commits only with a resolving cite; an uncited leaf stays provisional; `reconcile` asks exactly one
+  question per unsupported or semantically divergent leaf and commits only the grounded value on a minor
+  divergence. The subject of a fact is a `ref` prefix (`person:alice/...`); no subject column exists.
+- Still not automatic: no agent or tool path records facts on its own. The host (or a host action) does.
+
+**I4 -> policies, offline mode and plugins.**
+- An agent's policy is `Kernel(policy=)` ∩ `AgentSpec.policy` (∩ `OfflinePolicy` when offline);
+  sub-agents attenuate from it as before.
+- `Agent.add_action` refuses (raises) an action the tool scope excludes, whose declared capabilities the
+  policy denies everywhere, or that declares a network capability offline; nothing is dropped silently.
+- Offline (`AgentSpec.offline` / `Environment.for_host(offline=True)`): no web tools, no tool declaring a
+  network capability, no MCP servers. Limits: it binds declared capabilities only (an undeclared plugin or
+  host action is not contained, nor is `exec`), and a bare-name capability (`"fs.write"`) has an empty
+  resource, so resource-scoped `deny_rules` never match it.
+- `Kernel(plugins=PluginRegistry(...))` switches every agent's and sub-agent's tool loading to kernel mode
+  (only registry-active plugins, with `policy ∩ declared` grants), sub-agents included. It is the public
+  way into kernel mode, though no production host passes a registry yet; `None` keeps legacy loading.
+
+**I5 -> `RunLimits` and stop reasons.**
+- `RunLimits(max_iterations, max_policy_denials=6, max_tool_errors, deadline_s)` per spec, with a per-run
+  `deadline_s`. `max_tool_errors` raises `NotImplementedError` until the runner has that ceiling.
+- Every run returns a `RunResult` whose `stop_reason` names the limit that ended it: `max_iterations`,
+  `policy_denials`, `deadline`, `budget`, plus `completed`, `ask_user`, `empty_final_response`,
+  `tool_error`, `error` (typed `LLMError`) and `cancelled`. `run.completed` in the trace carries the same value.
+
+**I6 -> solvers, budget and cache.**
+- `kernel.llm.complete_json(..., task_type=)` tries the kernel's `SolverRegistry` first; a solved call makes no
+  provider call (`Completion.provider == "solver"`). `Kernel(solvers=, baselines=)` isolates registries per
+  kernel (an RSI rollout never sees another's solvers).
+- `Budget` (`admit` / `settle` / `release`) sees a worst-case `CallEstimate` before any call, once per
+  logical call, including every agent-loop call through `BudgetedProvider`; `CapBudget` is the reference.
+  Every physical attempt is a priced `model.call` ledger event. `ResponseCache` answers repeated calls for free.
+- The router stays internal and opt-in: nothing in the public API routes by tier yet, so "cheapest adequate
+  model" is still the host's choice of `ModelSpec`.
+- Variants and fingerprints (`Variant`, `Agent.fingerprint()`) are the RSI hooks: what the model sees is
+  swappable per kernel and identified by one digest.
 
 ## 4. Enforcement layers
 

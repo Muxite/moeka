@@ -2415,9 +2415,10 @@ for details.
 `profiles` is a top-level config object mapping a name to an
 `AgentProfileConfig` — a scoping bundle of model preset, persona, tool
 allow/deny list, skill allow/deny list, memory toggle, planning, and runner
-limits. Profiles are resolved by embedding hosts via
-`MoekaCore.create(profile="research")` or `MoekaCore.scoped(profile="research")`
-(see [`docs/python-sdk.md`](python-sdk.md#scoped-agent-profiles)); they are not
+limits. Profiles are resolved by embedding hosts via the deprecated
+`MoekaCore.create(profile="research")` / `MoekaCore.scoped(profile="research")`,
+or converted for the `moeka` API with `AgentSpec.from_profile(profile)`
+(see [`docs/migration-moeka-api.md`](migration-moeka-api.md)); they are not
 applied to the chat-bot gateway's own agent, which always uses
 `agents.defaults` directly.
 

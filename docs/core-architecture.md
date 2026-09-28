@@ -1,17 +1,82 @@
-# Architecture: `nanobot/core/`
+# Architecture: the `moeka` API and `nanobot/core/`
 
-`nanobot/core/` is the embeddable, channel-free surface of moeka: the same
-agent loop, tool calling, and RAG engine that powers the chat-bot gateway, but
-packaged as a plain Python library (`MoekaCore`) with no channels, gateway, or
-WebUI dependency. It was built in the 2026-06 overhaul (see `git log --oneline
--- nanobot/core/` for the commit sequence) primarily to unblock a separate
-synchronous content-pipeline project (awork) that needed to call moeka's LLM
-layer without running the full bot.
+`moeka` is the embeddable, channel-free surface of the moeka kernel: one-shot
+model calls, tool-using agents, branching sessions, document memory and
+grounded facts, without the chat-bot gateway, channels or WebUI. The `moeka`
+package only re-exports; the implementation lives in `nanobot/kernel/`, with
+the agent loop in `nanobot/agent/` and the document store in `nanobot/core/`.
 
-This doc covers the four files in the package plus how they compose. For
-usage examples, see [`docs/python-sdk.md`](python-sdk.md#moekacore--the-embeddable-agentrag-core)
-and the README's ["Embedding the core"](../README.md#embedding-the-core-moeka-core)
-section. For config knobs, see [`docs/configuration.md`](configuration.md).
+- Usage: [`docs/python-sdk.md`](python-sdk.md). Moving off the older surfaces:
+  [`docs/migration-moeka-api.md`](migration-moeka-api.md).
+- Design, invariants and the public-API mapping:
+  [`.agent/moeka-kernel-design.md`](../.agent/moeka-kernel-design.md).
+- `MoekaCore` (below) was the first embeddable facade, built in the 2026-06
+  overhaul for awork. It and `nanobot.api.complete` / `open_vec_store` are now
+  deprecated shims kept until awork migrates; new hosts use `moeka.Kernel`.
+
+## Layering
+
+```mermaid
+flowchart TD
+  Host["Host: awork / coach app / RSI harness"] --> F["moeka facade: re-exports and __all__ only"]
+  F --> Env["Environment.for_host: in-memory Config + CoreEnvironment(credentials, Paths, trace, exec_base_env)"]
+  F --> K["Kernel (nanobot/kernel/kernel.py)"]
+  Env --> K
+  K --> Bridge["LoopThread: the kernel event loop, which sync twins block on"]
+  K --> LLM["LLM: generate / complete / complete_json / stream / batch"]
+  K --> Agents["Agent per AgentSpec: a lazily built AgentLoop"]
+  K --> Sess["Sessions: one shared SessionManager, fork / rewind / checkpoint"]
+  K --> Mem["DocStore per scope: VecStore files, one shared embedder"]
+  K --> Epi["Epistemics: FactStore + ArtifactStore + clarify"]
+  LLM --> Pool["ProviderPool: one provider per model alias"]
+  Agents --> Pool
+  Pool --> BP["BudgetedProvider: admit / settle / release against the host Budget"]
+  BP --> Ledger["Cost ledger: one model.call per physical attempt"]
+  LLM --> Cache["ResponseCache (host-owned)"]
+  Ledger --> Tracer["Tracer: span / subscribe; forwards to the host TraceSink"]
+  Agents --> Tracer
+  Epi --> Tracer
+```
+
+- **Environment** (`nanobot/kernel/hostenv.py`): `for_host` builds the in-memory
+  `Config` and the `CoreEnvironment` from explicit host inputs only; nothing is
+  read from the process environment, `$HOME`, the working directory or
+  `config.json` (I1). `from_config` wraps a legacy `Config` for migration.
+- **Kernel** (`kernel.py`): owns the loop thread, the `Tracer`, and builds every
+  member lazily. `kernel.core_env` is `env.core` with the `Tracer` as its trace,
+  so every internal event reaches subscribers. `close()` shuts down agents, then
+  stores, then providers, then the loop thread.
+- **LLM** (`llm.py`): one provider per alias, built by the provider factory with
+  the kernel's environment; host providers via `register_provider`. Every call
+  gets a `call_id`, typed errors (`llm_errors.py`), a cache lookup and one budget
+  admission before anything is sent.
+- **Budget** (`budget.py`): `Metering` admits LLM-layer calls; `BudgetedProvider`
+  wraps every pool provider and admits only calls that did not come through the
+  LLM layer (the agent loop), so nothing is admitted twice. `CapBudget` is the
+  reference budget.
+- **Ledger** (`ledger.py`): prices each physical call from the `ModelSpec` and
+  emits `model.call` with the call's attribution (alias, attempt, span tags).
+- **Agents** (`agent.py`): an `AgentSpec` compiles into a scoped config and an
+  `AgentLoop` on the kernel loop, with the kernel's session store, variant,
+  policy (kernel ∩ spec ∩ offline) and plugin registry. Each run is an
+  `agent.run` span with a `TraceHook` (`trace_hook.py`) and its own capture hook.
+- **Sessions** (`sessions.py`): handles over the shared `SessionManager`; runs,
+  appends, rewinds and forks on one key share one kernel-wide lock.
+- **Memory** (`memory.py`): `DocStore` over `nanobot/core/vec_store.py`, one file
+  per scope under `state_dir/memory/`, LRU-bounded, one embedder per kernel.
+- **Epistemics** (`epistemics.py`, `facts.py`, `artifacts.py`, `clarify.py`):
+  facts with provenance, artifacts whose committed leaves cite facts, and the
+  minor-vs-semantic divergence decision.
+- **Variants** (`variants.py`): per-kernel tool descriptions, templates, skills
+  and bootstrap text, and the `Fingerprint` of what an agent's model sees.
+- **Trace** (`trace.py`): span context variables, stamping, sinks, `EVENTS`.
+
+## `nanobot/core/`: the legacy facade and the document store
+
+`nanobot/core/` holds `VecStore` (used by `DocStore` and the agent loop's
+memory), `FunctionTool` (used for host actions) and the deprecated `MoekaCore`
+facade. The rest of this document describes those files; the `MoekaCore`
+sections describe a surface that is kept only until awork migrates.
 
 ## Files
 
@@ -34,7 +99,12 @@ fresh interpreter and asserts none of the forbidden package prefixes appear in
 `sys.modules`. Any new top-level import added to `core/` that reaches into the
 runtime will fail this test — keep such imports lazy (inside functions/methods).
 
-## `core.py` — the `MoekaCore` facade
+## `core.py` — the `MoekaCore` facade (deprecated)
+
+`MoekaCore.create`, `scoped`, `scoped_async` and `from_config` emit a
+`DeprecationWarning`; the replacement is `moeka.Kernel` with
+`kernel.agent(AgentSpec(...))`. The description below is kept for maintaining
+the shim.
 
 `MoekaCore` wraps `nanobot.agent.loop.AgentLoop` (memory, sessions, semantic
 retrieval batteries-included) and adds two host-facing capabilities the
@@ -91,7 +161,10 @@ context) through the wrapped `AgentLoop.process_direct()`, using an internal
 `core.think(message, **kwargs)` is a convenience wrapper returning just
 `result.content`.
 
-### One-shot completion (no loop)
+### One-shot completion (no loop, deprecated)
+
+Replaced by `kernel.llm` (`complete`, `complete_json`, `stream`, `batch`);
+`nanobot.api.complete` emits a `DeprecationWarning` on every call.
 
 `MoekaCore.complete()` / `complete_sync()` / `think_structured()` are static
 methods that thinly delegate to `nanobot.api.complete` (`acomplete`,
@@ -167,7 +240,10 @@ overflows — no host document content is silently dropped.
 - `recent_retrievals(limit=20)` reads back the optional `retrieval_log` table
   (populated only when `log_retrievals=True`) for observability/debugging.
 
-## `vec.py` — loop-less embeddings library
+## `vec.py` — loop-less embeddings library (deprecated)
+
+`open_vec_store` emits a `DeprecationWarning`; the replacement is
+`kernel.memory(path=db_path)`, a `DocStore` over the same file format.
 
 `open_vec_store(db_path, model=None, log_retrievals=False)` returns a bare
 `VecStore` with no `AgentLoop`, provider, or config involved — usable as a
@@ -196,9 +272,12 @@ Schema `parameters` are derived from the callable's type hints via
   `*args`/`**kwargs` are skipped.
 
 `FunctionTool._plugin_discoverable = False` — unlike moeka's built-in tools,
-instances are created dynamically by a host at runtime (via `core.action` /
-`register_action`), not auto-discovered by the `pkgutil` tool-registry scan.
-`execute()` calls the wrapped function (awaiting it if it returns an
+instances are created dynamically by a host at runtime (agent actions, or the
+legacy `core.action` / `register_action`), not auto-discovered by the `pkgutil` tool-registry scan.
+The kernel wraps every callable host action (`AgentSpec.actions`,
+`Agent.add_action`) in a `FunctionTool`, adding declared `capabilities` (checked
+against the agent's policy) and an optional `output_model` that validates the
+result. `execute()` calls the wrapped function (awaiting it if it returns an
 awaitable) and coerces the result to `str` unless it's already a `str` or
 `list` (content blocks).
 
@@ -208,3 +287,10 @@ awaitable) and coerces the result to `str` unless it's already a `str` or
 guard above), `test_moeka_core.py`, `test_agent_profiles.py`,
 `test_function_tool.py`, `test_vec.py`, `test_vec_store.py`,
 `test_vec_store_hybrid.py`, and `test_integration_real.py`.
+
+The kernel and the `moeka` facade are tested in `tests/kernel/` (one module per
+member: `test_llm_engine.py`, `test_batch.py`, `test_budget.py`, `test_cache.py`,
+`test_trace_spans.py`, `test_agent.py`, `test_agent_tools.py`, `test_sessions.py`,
+`test_memory.py`, `test_epistemics.py`, `test_variants.py`, ...), and
+`tests/examples/test_examples.py` runs `examples/*.py` and the quick start in
+`docs/python-sdk.md` offline.

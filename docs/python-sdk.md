@@ -1,469 +1,779 @@
-# Nanobot Python SDK: Run an AI Agent from Python
+# moeka Python API
 
-Use nanobot as a Python library. The SDK gives you the same agent runtime used
-by the CLI, but from code: model routing, tools, workspace access, conversation
-history, memory, streaming events, and runtime helpers.
+`moeka` is the stable Python surface of the moeka kernel: one-shot model calls,
+tool-using agents, branching sessions, document memory and grounded facts, all
+metered, capped and traced. Build it into another application (a job pipeline,
+a coaching app, an evaluation harness); it runs no gateway and no chat channels.
 
-If you have used the OpenAI SDK before, the most important difference is this:
+- `moeka` only re-exports. The implementation lives in `nanobot.kernel`; import
+  from `moeka.*` so internal moves never break you.
+- The host hands the kernel everything: paths, credentials, provider endpoints,
+  model prices, the trace sink. The kernel reads no environment variable, no
+  `~/.nanobot`, no `config.json` and no current directory (invariant I1).
+- Async first. Every async method has a `*_sync` twin that is safe from any
+  thread, including from inside a running event loop (see
+  [Sync and async](#sync-and-async)).
+- Failures are typed exceptions. No error text ever comes back as content.
+- The old entry points (`nanobot.api.complete`, `MoekaCore`, `open_vec_store`)
+  still work but warn; [`migration-moeka-api.md`](migration-moeka-api.md) maps
+  each one to its replacement. The chat-bot `Nanobot` SDK is documented under
+  [Legacy](#legacy-nanobot-sdk-and-moekacore) at the end of this page.
 
-- OpenAI SDK calls a model.
-- nanobot SDK runs an agent around a model.
-
-That means one SDK call can read files, call tools, keep session history, use
-memory, stream progress, and return structured runtime information.
-
-```text
-your Python code
-  -> Nanobot SDK
-    -> agent runtime
-      -> configured model provider
-      -> tools
-      -> workspace
-      -> session history
-      -> memory
+```mermaid
+flowchart LR
+  Host["your application"] --> Env["Environment.for_host(...)"]
+  Env --> K["Kernel(env, budget=, cache=, variant=, ...)"]
+  K --> LLM["kernel.llm: generate / complete / complete_json / stream / batch"]
+  K --> Ag["kernel.agent(AgentSpec): run / stream"]
+  K --> S["kernel.sessions: append / checkpoint / fork / rewind"]
+  K --> M["kernel.memory(scope): DocStore"]
+  K --> E["kernel.epistemics: facts, artifacts, clarify"]
+  K --> T["kernel.trace: span / subscribe"]
 ```
 
-## Before You Start
+The layers under the facade are described in
+[`core-architecture.md`](core-architecture.md).
 
-Install and configure nanobot first. If you have not done that yet, follow the
-[Quick Start](quick-start.md) and complete the setup wizard. For SDK-only Python
-environments, install the package with:
+## Install
 
 ```bash
-python -m pip install nanobot-ai
+python -m pip install -e /path/to/moeka          # the moeka distribution ships both packages
+python -m pip install -e "/path/to/moeka[vec]"   # optional: embeddings for semantic search
 ```
 
-`Nanobot.from_config()` reuses your normal `~/.nanobot/config.json` and
-`~/.nanobot/workspace/`. Provider, model, tools, memory, and session behavior
-match the CLI unless you override them. For the difference between config and
-workspace, see [Concepts: Config vs Workspace](concepts.md#config-vs-workspace).
+Without the `vec` extra, document memory still works in keyword mode (SQLite FTS5).
 
-Before writing SDK code, run the same first-run checks from the main
-[Install and Quick Start](quick-start.md):
+## Quick start
 
-```bash
-nanobot status
-```
+One typed call against a hosted model. Paths are yours; the kernel creates what
+it needs under them on first use and nothing anywhere else.
 
-`nanobot status` should show the config path, workspace path, active model or
-preset, and provider summary. Then send one real message:
-
-```bash
-nanobot agent -m "Hello!"
-```
-
-A normal assistant reply means install, config, provider/model selection, and
-workspace access are all usable. Once that works, the SDK should see the same
-runtime.
-
-## 5-Minute Quick Start
-
-### Ask One Question
-
+<!-- quickstart:begin (exercised by tests/examples/test_examples.py) -->
 ```python
-import asyncio
+from pydantic import BaseModel
 
-from nanobot import Nanobot
+from moeka import Environment, Kernel, ModelSpec, ProviderSpec
 
 
-async def main() -> None:
-    async with Nanobot.from_config() as bot:
-        result = await bot.run("What time is it in Tokyo?")
-    print(result.content)
+class Verdict(BaseModel):
+    label: str
+    confidence: float
 
 
-asyncio.run(main())
-```
-
-Use `async with` when possible so tool connections and background cleanup are
-closed before the event loop exits. If you manage the instance manually, call
-`await bot.aclose()` in a `finally` block.
-
-The SDK is async-first because agent runs may stream tokens, execute tools, and
-wait on external services. In a normal Python script, wrap your async function
-with `asyncio.run(...)` as shown above. In a notebook or another async app, call
-`await bot.run(...)` directly from your existing event loop.
-
-### Inspect What Happened
-
-`bot.run(...)` returns a `RunResult`, not just a string:
-
-```python
-result = await bot.run("Review this repository")
-
-print(result.content)     # final answer
-print(result.tools_used)  # tools the agent used
-print(result.usage)       # token usage when available
-print(result.stop_reason) # why the run stopped
-```
-
-### Continue A Conversation
-
-Use a `session_key` when you want history to carry across turns. Different
-session keys are isolated from each other:
-
-```python
-await bot.run("My name is Alice.", session_key="user:alice")
-result = await bot.run("What is my name?", session_key="user:alice")
-
-print(result.content)
-```
-
-This is the SDK equivalent of giving each user, task, eval case, or workflow
-its own conversation thread.
-
-### Stream A Long Answer
-
-For live output, use `bot.stream(...)`:
-
-```python
-from nanobot import STREAM_EVENT_TEXT_DELTA
-
-async for event in bot.stream("Write a migration plan"):
-    if event.type == STREAM_EVENT_TEXT_DELTA:
-        print(event.delta, end="", flush=True)
-```
-
-Streaming returns structured events, so you can also observe tool calls,
-reasoning chunks, completion, and failures.
-
-## Complete Starter Script
-
-Save this as `sdk_demo.py` after `nanobot agent -m "Hello!"` works:
-
-```python
-import asyncio
-import sys
-
-from nanobot import (
-    STREAM_EVENT_RUN_COMPLETED,
-    STREAM_EVENT_RUN_FAILED,
-    STREAM_EVENT_TEXT_DELTA,
-    STREAM_EVENT_TOOL_STARTED,
-    Nanobot,
-)
-
-
-async def main() -> None:
-    prompt = " ".join(sys.argv[1:]) or "Explain what nanobot is in one paragraph."
-    session_key = "sdk:demo"
-
-    async with Nanobot.from_config() as bot:
-        print(f"model: {bot.runtime.model}")
-        print(f"workspace: {bot.runtime.workspace}")
-        print()
-
-        final_result = None
-        async for event in bot.stream(prompt, session_key=session_key):
-            if event.type == STREAM_EVENT_TEXT_DELTA:
-                print(event.delta, end="", flush=True)
-            elif event.type == STREAM_EVENT_TOOL_STARTED:
-                print(f"\n[tool] {event.name}", flush=True)
-            elif event.type == STREAM_EVENT_RUN_COMPLETED:
-                final_result = event.result
-            elif event.type == STREAM_EVENT_RUN_FAILED:
-                raise RuntimeError(event.error or "nanobot run failed")
-
-        print()
-        if final_result is not None:
-            print(f"\nstop_reason: {final_result.stop_reason}")
-            print(f"tools_used: {final_result.tools_used}")
-            print(f"usage: {final_result.usage}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Run it:
-
-```bash
-python sdk_demo.py "List the top-level files in the current workspace."
-```
-
-You should see the configured model, workspace path, streamed assistant text,
-and final run metadata. The exact answer depends on your config and workspace,
-but a file-listing prompt may look like this:
-
-```text
-model: openai/gpt-4.1-mini
-workspace: /Users/alice/.nanobot/workspace
-
-[tool] list_dir
-Here are the top-level files I found...
-
-stop_reason: completed
-tools_used: ['list_dir']
-usage: {'prompt_tokens': ..., 'completion_tokens': ..., 'total_tokens': ...}
-```
-
-This script shows the usual production shape: create one `Nanobot`, choose a
-stable `session_key`, stream events, keep the final `RunResult`, and let
-`async with` close runtime resources.
-
-## Core Concepts
-
-| Concept | Meaning |
-|---------|---------|
-| `Nanobot` | The SDK object that owns one configured agent runtime. |
-| Run | One call to `bot.run(...)`, `bot.run_streamed(...)`, or `bot.stream(...)`. |
-| `session_key` | The conversation history key. Reuse it to continue a thread; change it to isolate a thread. |
-| Workspace | The local directory where file tools and shell tools operate. |
-| Tools | Capabilities the agent may call, such as file access, shell, web, or custom tools from your config. |
-| Memory | Long-term memory files managed by nanobot. |
-| Stream event | A typed event such as `text.delta`, `tool.started`, or `run.completed`. |
-| Model override | A temporary model or model preset used for one SDK instance or one run. |
-
-For most users, the mental model is:
-
-1. Create a `Nanobot` from config.
-2. Pick a `session_key`.
-3. Call `run` or `stream`.
-4. Read `RunResult` or stream events.
-5. Use session/memory/runtime helpers only when you need more control.
-
-## SDK Or OpenAI-Compatible API?
-
-nanobot has two programming surfaces:
-
-| Use | Choose | Why |
-|-----|--------|-----|
-| Python code running in the same process as nanobot | Python SDK | Direct access to `RunResult`, sessions, memory, runtime helpers, hooks, and stream events. |
-| Existing OpenAI-compatible clients, another language, or a separate process | [OpenAI-Compatible API](openai-api.md) | HTTP `/v1/chat/completions` compatibility with familiar client libraries. |
-
-The Python SDK is best when you are writing evals, notebooks, benchmark
-runners, product backends, local scripts, or integrations that should control
-nanobot directly.
-
-The OpenAI-compatible API is best when you already have an HTTP client, want
-process isolation, or need to call nanobot from a non-Python service.
-
-## Common Patterns
-
-### Use a specific config or workspace
-
-Set the workspace when your agent should work inside a specific project:
-
-```python
-from nanobot import Nanobot
-
-async with Nanobot.from_config(workspace="/my/project") as bot:
-    result = await bot.run("Explain the project structure")
-```
-
-Use a custom config when you run multiple nanobot instances or test an isolated
-setup:
-
-```python
-async with Nanobot.from_config(
-    config_path="./bot-a/config.json",
-    workspace="./bot-a/workspace",
-) as bot:
-    result = await bot.run("Hello from bot A")
-```
-
-The config controls what nanobot may use. The workspace is where nanobot keeps
-state for that instance. See [multiple-instances.md](multiple-instances.md) for
-multi-instance CLI and gateway examples.
-
-### Choose a default or per-run model
-
-Set the SDK instance default model when you create the bot:
-
-```python
-bot = Nanobot.from_config(model="openai/gpt-4.1")
-```
-
-Override the model for one run without changing the instance default:
-
-```python
-result = await bot.run("Summarize this file", model="openai/gpt-4.1-mini")
-```
-
-Model presets from `config.json` work the same way:
-
-```python
-bot = Nanobot.from_config(model_preset="fast")
-
-result = await bot.run("Think deeply about this bug", model_preset="reasoning")
-```
-
-`model` and `model_preset` are mutually exclusive.
-
-For first setup, prefer named presets in `config.json`. Mixing an API key from
-one provider with a model ID from another is the most common first-run failure.
-For the exact difference between `provider`, `model`, `apiKey`, and `apiBase`,
-see [Providers: Provider, Model, API Key, and Base URL](providers.md#provider-model-api-key-and-base-url).
-If a run fails before the SDK does anything interesting, confirm the same
-provider and model work with `nanobot agent -m "Hello!"` first.
-
-### Isolate conversations with `session_key`
-
-Different session keys keep independent conversation history:
-
-```python
-await bot.run("hi", session_key="user-alice")
-await bot.run("hi", session_key="task-42")
-```
-
-Use stable keys in product code:
-
-```python
-session_key = f"user:{user_id}"
-result = await bot.run(user_message, session_key=session_key)
-```
-
-Avoid using the default `"sdk:default"` for multiple users or unrelated
-workflows. It is convenient for local experiments, but stable product code
-should choose explicit keys such as `user:<id>`, `project:<id>`, or
-`eval:<case-id>`.
-
-### Handle failures
-
-For a normal non-streamed run, catch exceptions around `bot.run(...)` and inspect
-`RunResult.error` when the runtime returns a structured failure:
-
-```python
-try:
-    result = await bot.run("Review this repo", session_key="project:demo")
-except Exception as exc:
-    print(f"SDK call failed before a result was returned: {exc}")
-else:
-    if result.error:
-        print(f"Agent run failed: {result.error}")
-    else:
-        print(result.content)
-```
-
-For streamed runs, either consume the stream to completion or close it:
-
-```python
-run = await bot.run_streamed("Write a long answer", session_key="task:123")
-try:
-    async for event in run.stream_events():
-        ...
-finally:
-    if not run.done:
-        await run.aclose()
-```
-
-Use `await run.cancel()` when the user presses a stop button or leaves the page
-before the stream finishes.
-
-### Stream long-running output
-
-Use `bot.stream()` when you want Cursor/OpenAI-style live events instead of
-waiting for the final `RunResult`:
-
-```python
-from nanobot import (
-    STREAM_EVENT_RUN_COMPLETED,
-    STREAM_EVENT_TEXT_DELTA,
-    STREAM_EVENT_TOOL_STARTED,
-)
-
-async for event in bot.stream("Review this repository"):
-    if event.type == STREAM_EVENT_TEXT_DELTA:
-        print(event.delta, end="", flush=True)
-    elif event.type == STREAM_EVENT_TOOL_STARTED:
-        print(f"\nusing {event.name}")
-    elif event.type == STREAM_EVENT_RUN_COMPLETED:
-        print("\nfinal:", event.result.content)
-```
-
-Use `run_streamed()` when you also want a handle you can wait on:
-
-```python
-from nanobot import STREAM_EVENT_TEXT_DELTA
-
-run = await bot.run_streamed("Write a detailed migration plan")
-
-async for event in run.stream_events():
-    if event.type == STREAM_EVENT_TEXT_DELTA:
-        print(event.delta, end="", flush=True)
-
-result = await run.wait()
-```
-
-Always either consume the stream, call `await run.wait()` / `await run.text()`,
-or close it with `await run.cancel()` / `await run.aclose()`. Exiting
-`stream_events()` or `bot.stream()` early cancels the underlying run so a
-half-consumed stream cannot leave a background task stuck behind backpressure.
-
-### Import an existing transcript
-
-This is useful for evals, benchmark runners, migrations, and tests.
-
-Use `bot.sessions.ingest()` when you already have a transcript and want it to
-become nanobot session history. Ingesting a transcript does not call the model,
-execute tools, update memory, or compact automatically.
-
-```python
-await bot.sessions.ingest(
-    "eval:case-1",
-    [
-        {
-            "role": "user",
-            "content": "I graduated with a degree in Business Administration.",
-            "timestamp": "2023/05/30 (Tue) 17:27",
-            "source_session_id": "answer_280352e9",
-        },
-        {
-            "role": "assistant",
-            "content": "Congratulations on your degree.",
-            "timestamp": "2023/05/30 (Tue) 17:27",
-        },
+env = Environment.for_host(
+    state_dir="./moeka-state",  # kernel-private: sessions, ledger, facts, memory
+    work_dir="./moeka-work",    # the only tree agents' file tools may touch
+    credentials={"openrouter-key": "sk-or-..."},
+    providers=[ProviderSpec(name="openrouter", credential="openrouter-key")],
+    models=[
+        ModelSpec(name="fast", model="google/gemini-3-flash-preview", provider="openrouter",
+                  tier="fast", price_in=0.30, price_out=2.50),
     ],
-    source="longmemeval",
+    default_model="fast",
 )
 
-await bot.runtime.compact_session("eval:case-1")
-
-result = await bot.run(
-    "Current Date: 2023/05/30 (Tue) 23:40\n"
-    "Question: What degree did I graduate with?",
-    session_key="eval:case-1",
-)
-print(result.content)
+with Kernel(env) as kernel:
+    reply = kernel.llm.complete_json_sync(
+        "Classify this ticket: 'the nightly build is red again'",
+        model_cls=Verdict,
+    )
+    print(reply.parsed, reply.cost_usd)
 ```
+<!-- quickstart:end -->
 
-### Attach hooks for observability
+- `reply` is a `Completion`: `parsed` is a `Verdict`, `cost_usd` is priced from
+  the `ModelSpec` (USD per million tokens), `usage` holds the token counts.
+- Inside `async` code, use `await kernel.llm.complete_json(...)` and
+  `async with Kernel(env) as kernel:`.
+- Two runnable, offline examples live in `examples/`: `batch_json.py` (fan-out
+  JSON calls under a spend cap with a JSONL trace) and `coach_sim.py` (a coach
+  agent, forked sessions, simulated counterparts, grounded facts and one
+  clarifying question). Both run on `FakeProvider`, so no key or network is
+  needed.
 
-Hooks are an advanced escape hatch. Use them when you want custom logging,
-metrics, tracing, or output post-processing without modifying nanobot internals:
+## Environment
+
+`Environment.for_host(...)` turns explicit host inputs into everything the kernel
+needs. It performs no filesystem writes and no ambient reads.
 
 ```python
-from nanobot.agent import AgentHook, AgentHookContext
-
-
-class AuditHook(AgentHook):
-    async def before_execute_tools(self, context: AgentHookContext) -> None:
-        for tc in context.tool_calls:
-            print(f"[tool] {tc.name}")
-
-
-result = await bot.run("Review this change", hooks=[AuditHook()])
+Environment.for_host(
+    *, state_dir, work_dir, credentials, providers, models, default_model,
+    trace=None, tools=None, exec_base_env=None, strict=True, offline=False,
+)
 ```
 
-## Where To Go Next
+- `state_dir` holds kernel state: sessions (`state_dir/sessions`), the cost
+  ledger (`state_dir/data`), facts and artifacts, document memory
+  (`state_dir/memory/<scope>.db`), logs. `work_dir` is what agents' file and shell
+  tools work in. With `strict=True` (the default) the two must not overlap
+  (`PathsOverlapError`, a `ValueError`); agents' file tools are denied `state_dir`.
+- `credentials` is a `Mapping[str, str]` or a `CredentialResolver`
+  (`resolve(ref, scope) -> str | None`). A provider asks for its key only when it
+  is first built. With a mapping, a key a `ProviderSpec` names is readable only
+  by that provider's scope; keys no `ProviderSpec` names get no scope restriction.
+- `providers`: one `ProviderSpec` per endpoint.
+  - `ProviderSpec(name, api_base=None, credential=None, extra_headers={}, extra_body={})`.
+  - `name` is a registry provider (`openai`, `anthropic`, `openrouter`, `vllm`,
+    `ollama`, ...) or any other name for a custom OpenAI-compatible endpoint
+    (then `api_base` is required).
+  - `credential` names the ref in `credentials` that holds the key; `None` means
+    the resolver is asked for `providers/<name>/api_key`. A local endpoint with no
+    key needs neither.
+- `models`: one `ModelSpec` per model alias; calls and agents name aliases.
+  - `ModelSpec(name, model, provider, tier=None, context_window=None, max_tokens=None,
+    sampling=None, price_in=None, price_out=None, price_cache_read=None, native_json=None)`.
+  - `tier` is one of `local`, `fast`, `standard`, `frontier`.
+  - Prices are USD per million tokens. No price means unknown cost (never free),
+    except `tier="local"` with no prices, which costs 0.
+  - `sampling` holds the model's default `Sampling`; set fields of a call's own
+    sampling win.
+  - `native_json=False` skips the native `response_format` round in `complete_json`.
+  - The name `default` is reserved.
+- `trace`: the host's `TraceSink` (see [Tracing](#tracing)); default discards.
+- `tools`: the `tools` config section as a dict (web search keys, exec settings).
+- `exec_base_env`: the base environment of every child process the kernel
+  starts; nothing is inherited from the host process. The `exec` tool builds its
+  child environment from it. A stdio MCP server gets the MCP SDK's usual
+  inherited variables (`PATH`, `HOME`, ...) taken from `exec_base_env` only, plus
+  the server's own `env`. Include at least `PATH` (and `HOME` for tools that need
+  it): stdio servers launched through `npx` or `uvx` fail without `PATH`, and
+  Windows programs also need `SYSTEMROOT` and `TEMP`. Key lookup is
+  case-sensitive, including on Windows.
+- `offline=True` makes every agent of the kernel offline (see
+  [Offline agents](#offline-agents)).
+- `Environment.from_config(config, *, state_dir, work_dir, trace=None, strict=False,
+  credentials=None)` wraps a legacy `Config` (or its dict form) without reading
+  anything ambient. `${VAR}` placeholders are left as they are; expand them first.
+  Its `models` are the config's presets plus `default`. It exists for migration.
 
-The SDK page is the programming entry point. The fuller conceptual and
-configuration docs remain the source of truth for the runtime around it:
+## LLM calls
 
-| Need | Read |
-|------|------|
-| First working install and config | [Install and Quick Start](quick-start.md) |
-| Mental model for config, workspace, sessions, tools, and memory | [Concepts](concepts.md) |
-| Provider/model/API key/base URL matching | [Providers and Models](providers.md) |
-| Pasteable provider recipes | [Provider Cookbook](provider-cookbook.md) |
-| Complete configuration reference | [Configuration](configuration.md) |
-| Long-term memory design | [Memory](memory.md) |
-| HTTP API instead of Python SDK | [OpenAI-Compatible API](openai-api.md) |
-| Debugging install, config, provider, or runtime failures | [Troubleshooting](troubleshooting.md) |
+`kernel.llm` is the model-call layer: one provider per model alias, built on
+first use, every call metered by the cost ledger.
 
-## API Reference
+```python
+from moeka.llm import GenerateOptions, Request, assistant, image_part, system, user
+from moeka import Sampling
 
-### `Nanobot.from_config(config_path=None, *, workspace=None, model=None, model_preset=None)`
+msgs = [system("You are terse."), user("Name three Linux init systems.")]
+done = await kernel.llm.generate(msgs, GenerateOptions(model="fast"))
+text = done.text
+
+done = await kernel.llm.complete("Describe this chart", system="Be terse.",
+                                 images=["chart.png"])
+
+async with kernel.llm.stream(msgs) as stream:
+    async for delta in stream:
+        print(delta, end="")
+    done = await stream.completion()
+```
+
+- `generate(messages, opts=None) -> Completion` sends the messages byte for byte
+  (OpenAI-shaped dicts; `system`/`user`/`assistant`/`image_part` only save
+  typing). Keeping the prefix identical across calls keeps provider prefix caches
+  warm; `GenerateOptions.affinity_key` pins related calls to one provider session.
+- `complete(prompt, *, system=None, images=(), opts=None)` is one user turn.
+  Images are paths, http(s)/data URLs or raw bytes.
+- `complete_json(prompt, *, schema=None, model_cls=None, retries=2, system=None,
+  images=(), opts=None, task_type=None, task_payload=None)` returns a
+  `Completion` whose `parsed` is the JSON value (a `model_cls` instance when given):
+  - A deterministic solver registered for `task_type` answers first with no
+    provider call (`Kernel(solvers=...)`; `Completion.provider == "solver"`,
+    `attempts == 0`).
+  - Otherwise native `response_format` is tried first (unless the model's
+    `native_json` is False). A provider that rejects it (error kinds
+    `invalid_request`, `unsupported`, `unknown`) falls back to a schema prompt
+    suffix, without using up a retry.
+  - A reply that does not parse or validate is re-prompted up to `retries`
+    times: the bad reply is appended as an assistant turn, followed by a user
+    turn quoting the error. Then `ParseError` (with `raw`, the last reply). A
+    truncated reply that does not parse raises `TruncatedError`.
+  - `attempts` counts rounds; `usage` and `cost_usd` are summed over them. The
+    whole call is one cache lookup and one budget admission.
+- `stream(messages, opts=None) -> TextStream`: an async iterator of text deltas;
+  `await stream.completion()` returns the final `Completion`. Use `async with`
+  (or `aclose()`) so leaving early cancels the provider call. `stream_sync`
+  returns a `SyncTextStream` to use with `with`/`for`.
+- `batch(requests, *, concurrency=None) -> BatchResult` runs `Request`s
+  concurrently (default concurrency: `Kernel(max_concurrency=16)`), outcomes in
+  input order:
+  - `Request(messages, opts=None, schema=None, model_cls=None, retries=0)`; a
+    request with `schema` or `model_cls` runs like `complete_json` over its
+    messages, otherwise like `generate`.
+  - `BatchResult.outcomes` holds a `Completion` or the item's `LLMError`;
+    `.completions` and `.errors` filter them.
+  - `AuthError`, `QuotaError` and `BudgetExceeded` are systemic: the remaining
+    items are cancelled, every unfinished outcome is that error, and
+    `BatchResult.systemic` is set. A per-tag `BudgetExceeded` (one stage's cap)
+    is systemic too, so one exhausted tag stops the whole batch; split a batch
+    per tag when that matters.
+  - `RateLimitError` pauses new dispatches for its `retry_after` (1 s when
+    unknown) and retries that item up to 3 times. Any other error is that item's
+    outcome.
+- `estimate(request) -> CallEstimate` is the worst case a request can cost (what
+  a budget would be asked to admit); `request_key(request) -> str` is its stable
+  cache key. Neither sends anything.
+- `register_provider(alias, provider, spec)` serves an alias with a host-built
+  provider (a test double, a custom endpoint). It is metered like a pool
+  provider and wins over an `env.models` entry of the same name; the host keeps
+  ownership (the kernel does not close it).
+
+`GenerateOptions` (frozen, hashable):
+
+- `model`: an alias (`ModelSpec.name`), or a raw model id sent to the default
+  model's provider; `None` is the default model.
+- `sampling`: a `Sampling`; its set fields win over the model's defaults.
+- `response_format`, `extra_body`: native structured output and extra request
+  body fields.
+- `timeout_s`: one deadline for the whole logical call, retries and JSON rounds
+  included; on expiry the provider call is cancelled and `LLMTimeoutError` raised.
+- `attempts`: cap on physical attempts for transient failures (`1` = no retry).
+- `cache`: whether a kernel `ResponseCache` may serve this call (default True).
+- `affinity_key`: a stable routing key that keeps a provider-side prefix cache warm.
+- `tags`: labels copied onto the call's `model.call`, `budget.*` and `cache.hit`
+  events and its budget estimate, merged over the active span's tags (these win).
+- `on_unsupported`: `"drop"` (default: omit fields the provider cannot honour
+  and emit `sampling.dropped`) or `"raise"` (`UnsupportedRequestError` before
+  anything is sent). Rollouts that must be reproducible use `"raise"`.
+
+`Sampling(temperature, top_p, top_k, min_p, presence_penalty, frequency_penalty,
+repetition_penalty, logit_bias, seed, stop, max_tokens, reasoning_effort)`: every
+field defaults to `None` (provider default); `stop` is a tuple.
+
+`Completion`: `text`, `parsed`, `finish_reason`, `usage` (`Usage(input_tokens,
+output_tokens, cache_read_tokens, cache_write_tokens, source)`), `model`,
+`provider`, `alias`, `call_id`, `attempts`, `cached`, `cost_usd` (`None` when the
+price is unknown), `latency_ms`, `reasoning`, and `truncated` (True when
+`finish_reason == "length"`). `generate` returns a truncated reply rather than
+raising; only `complete_json` treats truncation as an error.
+
+### Errors
+
+Every failed call raises a subclass of `moeka.errors.LLMError`. Its `kind` is the
+stable category; `call_id`, `model`, `provider`, `status`, `retry_after`,
+`retryable` and `raw` (the provider text, diagnostic only) describe the failure.
+
+- `AuthError` (`auth`): credentials rejected. A credential the resolver does
+  not have currently surfaces as `ModelNotFound` when the provider is built.
+- `QuotaError` (`quota`): out of credits or quota, including the empty-body
+  credit errors some gateways send. Not retryable.
+- `RateLimitError` (`rate_limit`): retryable, honour `retry_after`.
+- `TransientError` (`transient`): 5xx, 408/409, connection resets. Retryable.
+- `ContentFilterError` (`content_filter`).
+- `LLMTimeoutError` (`timeout`): also a builtin `TimeoutError`.
+- `ParseError` (`parse`): no valid JSON after the retries; `attempts`, `raw`.
+- `TruncatedError` (`truncated`): a required whole answer hit the token limit.
+- `BudgetExceeded` (`budget`): the budget refused the call; nothing was sent.
+- `ModelNotFound` (`model_not_found`): the provider does not know the model, or
+  the provider for an alias could not be built. A name that is not an alias is
+  not an error by itself: it is sent as a raw model id to the default model's
+  provider.
+- `UnsupportedRequestError` (`unsupported`): `on_unsupported="raise"` and a
+  field the provider cannot honour; `fields` lists them.
+- A plain `LLMError` with `kind="invalid_request"` for other rejected requests.
+
+## Budgets and cache
+
+The host owns prices and dollar policy; the kernel only asks. Pass
+`Kernel(env, budget=..., cache=...)`.
+
+```python
+from moeka.budget import CapBudget
+
+budget = CapBudget(limit_usd=5.0, per_tag={"stage": 0.50})
+with Kernel(env, budget=budget) as kernel:
+    with kernel.trace.span("screen", stage="screen"):
+        kernel.llm.batch_sync(requests)          # every call capped under stage=screen
+    print(budget.spent_usd, budget.exposure("stage", "screen"))
+```
+
+- The `Budget` protocol has three hooks, called on the kernel loop thread:
+  - `admit(estimate: CallEstimate)` returns an opaque reservation or raises
+    `BudgetExceeded` to refuse (nothing is sent).
+  - `settle(reservation, event)` runs once per physical attempt's `model.call`
+    ledger event (`event.cost_usd` may be `None`).
+  - `release(reservation)` runs once when the logical call ends, to free what
+    was reserved and not settled.
+- Admission happens once per logical call. A `complete_json` call admits its
+  worst case over every round (`1 + retries`, plus a native round the provider
+  may reject). Agent runs go through the same wrapper, so every agent model call
+  is admitted and settled too.
+- `CallEstimate`: `call_id`, `alias`, `model`, `provider`, `prompt_tokens`,
+  `max_output_tokens`, `rounds`, `worst_case_tokens`, `worst_case_usd` (`None`
+  when unpriced), `tags`.
+- `CapBudget(limit_usd=None, limit_tokens=None, per_tag=None, allow_unpriced=False)`
+  is the reference budget:
+  - A call is admitted only if spent plus reserved plus its worst case stays
+    within every applicable cap.
+  - `per_tag={"stage": 0.5}` caps each distinct value of the `stage` tag
+    separately; calls without the tag are not counted under it.
+  - Under a USD cap an unpriced estimate is refused unless `allow_unpriced`.
+    Tokens billed at an unknown price keep their reservation as spend.
+  - Thread-safe; one instance may be shared by several kernels. Read
+    `spent_usd`, `spent_tokens`, `reserved_usd`, `reserved_tokens`,
+    `exposure(tag=None, value=None)`.
+  - Caveat: the worst case is priced on the primary route only. A provider
+    configured with fallback models that fails over to a pricier model can
+    spend past a "hard" cap by the price difference.
+- `ResponseCache` is `get(key) -> Completion | None` and `put(key, completion)`,
+  keyed by `kernel.llm.request_key`. It is consulted before admission (a hit
+  makes no provider call and no admission, and emits `cache.hit`) for calls
+  whose `GenerateOptions.cache` is True. Only successful, non-truncated
+  completions are stored. A hit comes back with `cached=True`, `attempts=0`,
+  `cost_usd=0.0` and a fresh `call_id`.
+
+## Tracing
+
+`kernel.trace` is a `Tracer`: it stamps every kernel event, forwards it to the
+host's sink (`Environment.for_host(trace=...)`) and fans it out to subscribers.
+
+```python
+from moeka.trace import EVENTS, JsonlTraceSink, MemoryTraceSink, FanoutSink
+
+sink = JsonlTraceSink("runs/rollout-17.jsonl")        # one JSON line per event
+env = Environment.for_host(..., trace=sink)
+
+with Kernel(env) as kernel:
+    unsubscribe = kernel.trace.subscribe("model.call", lambda e: print(e["cost_usd"]))
+    with kernel.trace.span("rollout", rollout=17, seed=3):
+        ...
+    unsubscribe()
+sink.close()
+```
+
+- Events are dicts with an `event` key. Every event also carries `trace_id`,
+  `span` (the span path, e.g. `"rollout/select"`), `tags` and `ts` (epoch
+  seconds). `EVENTS` maps every event name the kernel emits to its payload keys.
+- Main events: `model.call` (one per physical provider call: tokens, cost,
+  latency, `call_id`, `alias`, `attempt`, `cached`), `budget.admit` /
+  `budget.refuse`, `cache.hit`, `sampling.dropped`, `run.started` /
+  `iteration` / `tool.call` / `run.completed` for agents, `skill.listed` /
+  `skill.read`, `policy.decision`, `tool.invalid`, `mcp.error`, `fact.recorded`,
+  `artifact.proposed` / `artifact.rejected`.
+- `span(name, **tags)` is a sync and async context manager. A root span mints a
+  fresh `trace_id`; a nested span keeps it, extends the path and merges its tags
+  over the outer ones. Events outside any span have `trace_id` `None`.
+- Span tags reach budgets: a call's effective tags are the span's tags with
+  `GenerateOptions.tags` merged over them, so `span("x", stage="select")` is how a
+  stage gets its own `per_tag` cap.
+- Spans are context variables. They follow `await`, asyncio tasks and the
+  kernel's own loop thread (every call copies the caller's context), but not a
+  plain `threading.Thread` or executor the host starts itself. Run such work
+  under `contextvars.copy_context().run(fn)` to keep the span.
+- Sinks: `JsonlTraceSink(path)` (append, flushed per line, `close()`),
+  `MemoryTraceSink` (`events`, `of(name)`), `FanoutSink(*sinks)`,
+  `LoguruTraceSink`, `NullTraceSink`. A sink or subscriber that raises is logged
+  and isolated from the others.
+- `subscribe(event_or_None, fn)` returns an idempotent unsubscribe function.
+  Delivery is synchronous on the emitting thread, usually the kernel loop
+  thread: a slow subscriber stalls every call in the kernel. Hand heavy work to
+  a queue.
+- One JSONL file per rollout: give each rollout its own kernel and sink, or
+  keep one kernel and route events by `trace_id` from a subscriber.
+
+## Agents
+
+An agent is a tool-using loop on the kernel. Its model calls go through the
+kernel's pool, budget and ledger; its events through `kernel.trace` (one
+`agent.run` span per run); its sessions through the kernel's shared store.
+
+```python
+from moeka.agents import AgentSpec, RunLimits
+
+spec = AgentSpec(
+    name="research",
+    system_prompt="You research companies for a job application.",
+    model="fast",
+    tools_allow=("web_search", "web_fetch", "lookup_company"),
+    actions=(lookup_company,),                 # host callables become tools
+    limits=RunLimits(max_iterations=12, deadline_s=120),
+)
+agent = kernel.agent(spec)                     # one agent per equal spec
+result = await agent.run("Research Acme Robotics", session="app:acme", tags={"job": "42"})
+print(result.stop_reason, result.content, result.cost_usd, result.usage)
+```
+
+- `AgentSpec(name, system_prompt=None, bootstrap={}, model=None, sampling=None,
+  tools_allow=None, tools_deny=(), actions=(), mcp_servers={}, skills_include=None,
+  skills_exclude=(), inline_skills=(), memory=False, doc_scopes=(),
+  limits=RunLimits(), policy=None, offline=False)` is frozen and hashable.
+  - `system_prompt` becomes the agent's `AGENTS.md` persona unless `bootstrap`
+    supplies one; `bootstrap` maps section names (`AGENTS.md`, `SOUL.md`,
+    `USER.md`, or any other name, appended) to text. Nothing is written to disk.
+  - `tools_allow=None` keeps the kernel config's tool set; `()` gives the agent
+    no tools. The scope applies to every tool whoever registers it: with an
+    allow list, actions, `search_documents` and MCP tools must be listed too.
+  - `inline_skills` are `InlineSkillConfig` values or dicts
+    (`{"name", "content", "description"}`).
+  - `memory=True` gives the loop semantic memory in `kernel.memory("agent:<name>")`.
+  - `doc_scopes` adds a read-only `search_documents(query, scope=None, k=5)`
+    action over those `kernel.memory` scopes.
+  - `AgentSpec.from_profile(profile, *, name="default")` converts a legacy
+    `AgentProfileConfig`. A profile that sets `planning` or `limits` raises
+    `ValueError` instead of losing them. A profile's `memory_enabled` defaults to
+    True, so a converted spec opens semantic memory unless the profile says
+    otherwise.
+- `RunLimits(max_iterations=None, max_policy_denials=6, max_tool_errors=None,
+  deadline_s=None)`. `max_tool_errors` is not implemented yet (`kernel.agent`
+  raises `NotImplementedError` when it is set).
+- `run(message, *, session=None, media=(), sampling=None, deadline_s=None,
+  tags=None) -> RunResult`:
+  - `session` is a key or a `kernel.sessions` handle; default `"agent:<name>"`.
+    Runs on one key are serialised across all the kernel's agents.
+  - `sampling` replaces the spec's sampling for this run; `deadline_s` overrides
+    `limits.deadline_s`; `tags` go on the run's span (every event, and budget
+    `per_tag` caps).
+  - Every stop reason returns a `RunResult`. Cancelling the task awaiting `run`
+    raises `CancelledError` as usual; closing the agent or kernel mid-run returns
+    `stop_reason="cancelled"`.
+  - Caveat: awaiting `run` directly on the kernel loop thread (for example from
+    an async action another agent is running) skips the hop onto that loop. Then
+    `agent.aclose()` or `kernel.close()` cancels the awaiting task itself, which
+    sees `CancelledError` instead of a `cancelled` result.
+- `RunResult`: `content`, `stop_reason`, `iterations`, `usage` (a `Usage`),
+  `cost_usd` (summed from the run's `model.call` events; `None` if unpriced),
+  `tools_used`, `error` (a typed `LLMError` or a message), `question` (an
+  `AskUser(question, options)` when the model asked the user), `session_key`,
+  `trace_id`, `messages`.
+
+| `stop_reason` | Meaning |
+|---|---|
+| `completed` | The model gave a final answer. |
+| `ask_user` | The model called `ask_user`; see `result.question`. |
+| `max_iterations` | `RunLimits.max_iterations` (or the config default) was reached. |
+| `policy_denials` | `max_policy_denials` policy denials in one run (I5). |
+| `empty_final_response` | The model ended with no text. |
+| `tool_error` | A tool raised a fatal error and the run ended. |
+| `error` | A provider error; `result.error` is the typed `LLMError`. |
+| `budget` | The budget refused a call; `result.error` is the `BudgetExceeded`. |
+| `deadline` | `deadline_s` expired. |
+| `cancelled` | The agent or kernel was closed mid-run. |
+
+- `stream(message, **same_args) -> AgentStream` is the same run as typed
+  `StreamEvent`s: `run.started`, `text.delta` / `text.completed`,
+  `reasoning.delta` / `reasoning.completed`, `tool.started` / `tool.completed` /
+  `tool.failed`, then `run.completed` or `run.failed`. `run.failed` ends the
+  stop reasons `error`, `tool_error`, `deadline`, `budget` and `cancelled`; the
+  others, including `max_iterations`, `policy_denials` and
+  `empty_final_response`, end with `run.completed`. The final event's `result` is
+  the `RunResult` (and `metadata["stop_reason"]`). `await stream.result()` drains
+  it. Use `async with` so leaving early cancels the run; `stream_sync` for
+  threads.
+
+  ```python
+  async with agent.stream("Draft a cover letter", session=chat) as events:
+      async for ev in events:
+          if ev.type == "text.delta":
+              print(ev.delta, end="")
+      result = await events.result()
+  ```
+
+- `agent.tools` lists `ToolInfo(name, description, read_only, parameters)` as the
+  model sees them; `agent.fingerprint()` digests what the model sees (see
+  [Variants](#variants-and-fingerprints)); `await agent.aclose()` cancels in-flight
+  runs and closes the loop (the kernel closes all agents on `close`).
+
+### Actions, policies and plugins
+
+- Host actions are `Tool` instances or plain callables (sync or async), passed
+  in `AgentSpec.actions` or added later:
+
+  ```python
+  from moeka.tools import CapabilityRequest
+
+  def lookup_company(name: str) -> str:
+      """Return what the CRM knows about a company."""
+      return crm.describe(name)
+
+  agent.add_action(lookup_company, read_only=True)
+  agent.add_action(save_note, capabilities=[CapabilityRequest("fs.write", "/srv/notes")])
+  ```
+
+  - A callable becomes a `FunctionTool`: the JSON schema comes from its type
+    hints, the description from its docstring's first paragraph.
+    `add_action(action, *, name=None, description=None, read_only=False,
+    capabilities=(), output_model=None, replace=False)` returns the tool name.
+  - `output_model` (a pydantic model) validates the action's result; a result
+    that fails is a tool error, never passed on as fact.
+  - `add_action` raises `ValueError` when the tool scope excludes the action,
+    the agent's policy denies its declared capabilities everywhere, it declares
+    a network capability while offline, or the name is taken (unless
+    `replace=True`). Nothing is dropped silently.
+  - Caveat: a capability given as a bare string (`"fs.write"`) has an empty
+    resource, so resource-scoped `deny_rules` (`("fs.write", "/etc/*")`) never
+    match it; only capability-wide denies do. Declare a `CapabilityRequest` with
+    the resource when a resource rule must apply.
+- Policies (`moeka.tools`): `DefaultPolicy(deny_capabilities=frozenset(),
+  deny_rules=(), allowed=None)`, `OfflinePolicy()`, `IntersectionPolicy(*members)`,
+  or any object with `decide(principal, request, ctx)`. An agent's policy is
+  `Kernel(policy=)` intersected with `AgentSpec.policy`. Floors (fork bombs,
+  writes to kernel state) run before any policy and cannot be undone by one.
+  Denials count toward `max_policy_denials`.
+- MCP servers: `AgentSpec(mcp_servers={"files": MCPServer(command="npx", args=[...])})`
+  (or plain dicts). They connect on the first run, `tools` or `fingerprint`,
+  from this spec only (never from config files). Their tools are named
+  `mcp_<server>_<tool>` and are subject to the tool scope (list them when
+  `tools_allow` is set). A server that fails is logged and traced as `mcp.error`;
+  the agent runs without it and it is not retried. A stdio server's environment
+  comes from `exec_base_env` and the server's own `env` only; nothing leaks in
+  from the host process, so set `PATH` in `exec_base_env`.
+- Plugins: `Kernel(plugins=PluginRegistry(state_dir))` loads an entry-point tool
+  plugin only when the registry has it active at its pinned hash, with the grant
+  `policy ∩ declared capabilities`. `None` keeps legacy entry-point loading.
+
+### Offline agents
+
+`AgentSpec(offline=True)` or `Environment.for_host(offline=True)`:
+
+- No `web_search` / `web_fetch`, no tool that declares a network capability
+  (`net.*`, `mcp.call`), and no MCP servers (`mcp_servers` with offline raises
+  `ValueError`).
+- `OfflinePolicy` is intersected into the agent's policy, so a declared network
+  request any remaining tool makes is denied.
+- It covers what tools declare. A plugin or host action that opens sockets
+  without declaring a network capability is not stopped, and `exec` can still
+  reach the network. The container or sandbox is the real boundary; for RSI
+  rollouts against a local vLLM, run them in a container whose only reachable
+  endpoint is the model server.
+
+## Sessions
+
+`kernel.sessions` hands out `Session` handles over the kernel's session store
+(under `state_dir`), the same store agent runs use. Every mutation is saved
+before it returns, so sessions survive a restart on the same `state_dir`.
+
+```python
+chat = await kernel.sessions.create("coach:alice")
+cp = await chat.append({"role": "user", "name": "me", "content": "Can we talk?"})
+best = await chat.fork(cp, key="coach:alice/best")         # a copy of the prefix
+await best.append({"role": "assistant", "name": "alice", "content": "Sure."})
+await chat.append({"role": "assistant", "name": "alice", "content": "Not now."})
+await chat.rewind(cp)                                       # drop the reply again
+snap = chat.snapshot()                                      # serialisable
+```
+
+- `Sessions`: `create(key=None, metadata=None)` (an existing key raises
+  `ValueError`), `get(key) -> Session | None`, `open(key)` (get or create),
+  `list() -> [SessionInfo]`, `restore(snapshot, *, key=None)`, `delete(key)`.
+- `Session`: `key`, `messages` and `metadata` (read-only copies),
+  `checkpoint()`, `snapshot()`, `append(*messages, timeout=None) -> Checkpoint`,
+  `rewind(to)`, `fork(at=None, *, key=None) -> Session`, `set_metadata(**kv)`.
+- Messages are OpenAI-shaped (`role` in system/user/assistant/tool, `content`);
+  `name` marks the speaker. The host decides the order.
+- A `Checkpoint(key, n_messages, digest)` is checked by content: rewinding or
+  forking at a checkpoint whose prefix has changed raises `CheckpointMismatch`.
+  A checkpoint taken on a parent also applies to its forks.
+- `rewind`, `fork` and `delete` never wait: on a key with a run in progress they
+  raise `SessionBusyError`. `append` and `set_metadata` wait for the key's lock
+  (`append` up to `timeout`, then `SessionBusyError`).
+- Caveat: calling `append` or `set_metadata` from inside a run on the same key
+  (from an action the agent is executing) waits for that run, which waits for
+  the action: it deadlocks until the run's deadline, or forever without one.
+  Write to another key, or pass `append(timeout=...)` to get `SessionBusyError`
+  instead.
+- `list()` loads every transcript; it is meant for small stores and admin views.
+
+## Memory
+
+`kernel.memory(scope)` returns a `DocStore` over `<state_dir>/memory/<scope>.db`;
+`kernel.memory(path=...)` opens a file the host chooses. All stores of a kernel
+share one embedder.
+
+```python
+docs = kernel.memory("jobs")
+docs.add(posting_text, source="acme-123", tags=["remote"], collection="postings")
+hits = docs.search("async python backend", k=5, collection="postings")
+for hit in hits:
+    print(hit.source, hit.score, hit.text[:80])
+```
+
+- `add(text, *, source=None, tags=(), collection="default") -> int` (chunks stored).
+- `search(query, *, k=5, mode="hybrid", tags=None, since=None, collection="default")
+  -> [Hit(source, text, score, tags, collection)]`. `mode` is `hybrid`
+  (reciprocal-rank fusion), `vec` or `keyword`; `score` is lower-is-better in
+  every mode. `collection=None` searches all collections.
+- `count(*, collection=None, source=None)`, `sources(*, collection=None) -> {source: chunks}`
+  (chunks added without a source are not listed).
+- `clear(*, collection="default", source=None)`. Wiping every collection needs an
+  explicit `collection=None`.
+- Collection defaults differ on purpose: `add`, `search` and `clear` default to
+  the `"default"` collection; `count` and `sources` default to all collections.
+- `get_meta(key)` / `set_meta(key, value)` keep host strings in the file (a
+  corpus signature, for example). `available` (vector search works) and
+  `keyword_available` report the backends.
+- The methods are synchronous SQLite behind a per-handle lock, safe from any
+  thread. In async code call them through `asyncio.to_thread` (a search that
+  embeds its query takes tens of milliseconds).
+- At most 32 files stay open per kernel; the least recently used is released and
+  reopened on its next use, so handles never go stale. After `kernel.close()`
+  every handle raises `RuntimeError`.
+- Without the `vec` extra only keyword search works. `kernel.memory(path=...)`
+  does not check which embedding model built an existing file.
+
+## Epistemics
+
+`kernel.epistemics` keeps facts with provenance, typed artifacts whose committed
+fields cite them, and the clarification step between the two (invariant I3:
+nothing unsupported is committed).
+
+```python
+from moeka.epistemics import Divergence, Question
+
+epi = kernel.epistemics
+rel = epi.record_fact("my manager", source="user", ref="person:dana/relationship")
+epi.register_kind("counterpart", Counterpart)   # pydantic: relationship, mood, deadline_is_fixed
+art = epi.propose("counterpart", {"relationship": "my manager", "mood": "tired"},
+                  cites={"relationship": rel})               # mood stays provisional
+decision = epi.reconcile(Divergence(kind="counterpart", artifact_id=art.artifact_id,
+                                    path="deadline_is_fixed", proposed=True))
+if isinstance(decision, Question):
+    epi.answer(decision, False, turn_ref="coach:dana:turn-4")  # user fact, then commit
+```
+
+- Facts: `record_fact(value, *, source, ref, span=None) -> fact_id` with `source`
+  in `user`, `tool`, `document`; `fact(fact_id) -> FactRecord | None`;
+  `facts(*, ref_prefix=None, source=None, limit=None)`. The subject lives in the
+  `ref` prefix: `facts(ref_prefix="person:dana/")` is everything known about Dana.
+- Artifacts: `register_kind(name, model)`, then `propose(kind, delta, *, cites,
+  artifact_id=None) -> ArtifactResult(artifact_id, kind, committed, provisional)`.
+  A leaf cited with a fact id commits; an uncited leaf stays provisional; a cite
+  to no fact rejects the whole proposal (`CitationError`). Read back with
+  `artifact(kind, id)` (committed leaves), `artifact_model(kind, id)`,
+  `provisional(kind, id)`, `citations(kind, id)`.
+- Clarify: `reconcile(Divergence(kind, artifact_id, path, proposed, known=None,
+  known_trace_id=None))` is pure. It returns `CommitReady` when the draft differs
+  from a grounded value only in formatting (case, whitespace); commit it with
+  `propose(kind, ready.delta, cites=ready.cites, artifact_id=...)`. Otherwise
+  it returns ONE `Question` (`prompt`, `path`, ...) about that one leaf.
+  `answer(question, answer, *, turn_ref)` records the answer as a `user` fact
+  and commits it citing that fact. Ask questions one at a time.
+- Synchronous SQLite (`state_dir/facts.db`, `artifacts.db`), safe from any
+  thread; typically well under a millisecond per call.
+- Caveat: the facts file is at schema version 2. Once a kernel has opened it,
+  code from before this API (schema 1) refuses to open it, so a rollback past
+  this release needs a copy of `facts.db` taken before the upgrade.
+
+## Variants and fingerprints
+
+For evaluation and self-improvement harnesses: swap what the model sees per
+kernel, and identify exactly what it saw.
+
+```python
+from moeka.variants import Variant
+
+variant = Variant(
+    name="terse-tools-v3",
+    tool_descriptions={"read_file": "Read a UTF-8 file. Prefer small ranges."},
+    templates_dir="variants/v3/templates",       # shadows agent/identity.md etc.
+    builtin_skills_dir="variants/v3/skills",
+    bootstrap={"SOUL.md": "Be brief."},
+)
+with Kernel(env, variant=variant) as kernel:
+    agent = kernel.agent(spec)
+    fp = agent.fingerprint()
+    print(fp.digest, dict(fp.components))
+```
+
+- `Variant(name="base", tool_descriptions_dir=None, tool_descriptions={},
+  templates_dir=None, builtin_skills_dir=None, bootstrap={})`. Two kernels with
+  different variants in one process never see each other's overrides.
+  `Variant()` and `None` both mean the built-in text.
+- Tool description overrides apply to tools the loader builds; MCP tools and
+  host actions keep their own descriptions. Templates cover the main system
+  prompt and sub-agent prompts; memory and runner templates stay built-in.
+- `Fingerprint(digest, components)`: sha256 over the rendered system prompt,
+  the tool definitions, the model and the sampling (`components` holds each
+  part's hash). Workspace and skills paths are normalised and per-session memory
+  and history are excluded, so the digest is stable across rollouts of one
+  variant. `fingerprint()` connects the agent's MCP servers first, so their tools
+  are part of the digest.
+- `Kernel(solvers=SolverRegistry(), baselines=...)` gives a kernel its own
+  deterministic-solver and baseline registries; `None` uses the process-wide ones.
+- A rollout recipe: one kernel per rollout with its own `JsonlTraceSink`, a
+  `Variant`, `Sampling(seed=...)` with `on_unsupported="raise"`, a local
+  `ProviderSpec(name="vllm", api_base=...)` with `tier="local"` models, and
+  `offline=True`. Record `fingerprint().digest` with the rollout's metrics.
+
+## Sync and async
+
+- Each kernel owns one event-loop thread. All provider I/O, agent loops and
+  session mutations run there; async methods hop onto it from your loop and
+  `*_sync` twins block on it from any thread.
+- `*_sync` is safe inside a running event loop (for example a sync library
+  called from an async web handler): it blocks that thread, not the kernel.
+- Twins: `llm.generate_sync`, `complete_sync`, `complete_json_sync`,
+  `stream_sync`, `batch_sync`; `agent.run_sync`, `stream_sync`;
+  `session.append_sync`, `rewind_sync`, `fork_sync`, `set_metadata_sync`;
+  `sessions.create_sync`, `restore_sync`, `delete_sync`. Reads (`messages`,
+  `checkpoint()`, `get`, `list`, `agent.tools`, `agent.fingerprint()`) and
+  `add_action` are plain sync methods. `DocStore` and `Epistemics` are
+  sync-only.
+- There is no `Kernel(loop="caller")`: an async host with a single event loop
+  still goes through the kernel's loop thread for every call. The hop is cheap,
+  but provider clients never live on the host's loop.
+- `with Kernel(env)` / `async with Kernel(env)` close agents, stores, providers
+  and the loop thread; `close()` / `aclose()` are idempotent. Calling `close()`
+  from the kernel's own loop thread raises `RuntimeError`.
+
+## Testing with FakeProvider
+
+`moeka.testing.FakeProvider` scripts model replies so kernel code runs with no
+network.
+
+```python
+from moeka.testing import FakeProvider, error, reply
+
+fake = FakeProvider([
+    '{"label": "bug", "confidence": 0.9}',          # a plain reply
+    reply("cut off", finish_reason="length"),        # a truncated reply
+    error(429, "slow down", retry_after=0.1),        # a provider error response
+])
+kernel.llm.register_provider("fast", fake, env.models["fast"])
+...
+assert fake.calls[0].messages[-1]["role"] == "user"
+```
+
+- Script items are consumed one per physical call: a `str`, an `LLMResponse`
+  (`reply(...)`, `error(...)`), an exception instance (raised), or a callable
+  `fn(call) -> item` (sync or async) that decides from the `FakeCall`
+  (`messages`, `kwargs`, `provider_context`, `stream`).
+- `default=` answers once the script is used up (`None` fails loudly);
+  `push(*items)` extends the script; `delay=` makes calls slow enough to test
+  deadlines; every call is recorded in `calls`.
+- Register it for every alias the code under test uses. One provider may serve
+  several aliases; each is priced from its own `ModelSpec`.
+
+## Legacy: Nanobot SDK and MoekaCore
+
+- `nanobot.api.complete` (`acomplete`, `complete`, `acomplete_json`,
+  `complete_json`, `acomplete_stream`, `complete_stream`), `MoekaCore`
+  (`create`, `scoped`, `scoped_async`, `from_config`) and
+  `nanobot.core.vec.open_vec_store` still work unchanged, but each emits a
+  `DeprecationWarning` naming its replacement. They are removed once awork has
+  migrated. [`migration-moeka-api.md`](migration-moeka-api.md) maps every one of
+  them, and the awork patterns built on them, to this API.
+- `AgentHook` and `AgentProfileConfig` stay importable for the same period but
+  are no longer part of the host surface: observe runs through `StreamEvent`s and
+  `kernel.trace`, and convert profiles with `AgentSpec.from_profile`.
+- `nanobot.Nanobot` is the chat-bot runtime's own SDK: it reads
+  `~/.nanobot/config.json`, runs the full agent runtime with its workspace, and is
+  what the CLI and gateway use. It is not deprecated, but it is not the embedding
+  surface either. Its reference follows.
+
+### Nanobot SDK quick reference
+
+```python
+from nanobot import Nanobot
+
+async with Nanobot.from_config() as bot:          # ~/.nanobot/config.json
+    result = await bot.run("Summarize this repo", session_key="sdk:demo")
+    print(result.content)
+```
+
+### Nanobot SDK API reference
+
+#### `Nanobot.from_config(config_path=None, *, workspace=None, model=None, model_preset=None)`
 
 Create a `Nanobot` instance from a config file.
 
@@ -477,7 +787,7 @@ Create a `Nanobot` instance from a config file.
 Raises `FileNotFoundError` if an explicit config path does not exist.
 Raises `ValueError` if both `model` and `model_preset` are provided.
 
-### `await bot.run(...)`
+#### `await bot.run(...)`
 
 Run the agent once and return a `RunResult`.
 
@@ -500,7 +810,7 @@ default when that session has no saved selection. `model` and `model_preset` are
 mutually exclusive per-run overrides; they do not change the saved session selection
 or `bot.runtime.model` after the run completes.
 
-### `await bot.run_streamed(...)`
+#### `await bot.run_streamed(...)`
 
 Start a streamed agent turn and return a `RunStream`. It accepts the same
 parameters as `bot.run(...)`.
@@ -514,7 +824,7 @@ async for event in run.stream_events():
 result = await run.wait()
 ```
 
-### `bot.stream(...)`
+#### `bot.stream(...)`
 
 Convenience wrapper around `run_streamed()` for direct event iteration. It
 accepts the same parameters as `bot.run(...)`.
@@ -524,7 +834,7 @@ async for event in bot.stream("Generate a long answer"):
     ...
 ```
 
-### `RunStream`
+#### `RunStream`
 
 | Method | Description |
 |--------|-------------|
@@ -538,7 +848,7 @@ SDK runs with different session keys may overlap, including runs with per-run
 `model` or `model_preset` overrides. Each run receives an immutable runtime without
 mutating the instance default. Runs sharing one session key remain serialized.
 
-### `StreamEvent`
+#### `StreamEvent`
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -572,7 +882,7 @@ Use the exported constants instead of hard-coded strings when possible:
 
 `STREAM_EVENT_TYPES` contains all stable v1 event values.
 
-### `await bot.aclose()`
+#### `await bot.aclose()`
 
 Release resources held by the SDK instance, including tool connections. The async context manager calls this automatically:
 
@@ -581,7 +891,7 @@ async with Nanobot.from_config() as bot:
     result = await bot.run("Summarize this repo")
 ```
 
-### `RunResult`
+#### `RunResult`
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -593,9 +903,9 @@ async with Nanobot.from_config() as bot:
 | `error` | `str \| None` | Error text when the run failed inside the agent runtime. |
 | `metadata` | `dict` | Outbound metadata such as latency. |
 
-## Session, Memory, And Runtime Helpers
+### Nanobot SDK session, memory and runtime helpers
 
-### `bot.sessions`
+#### `bot.sessions`
 
 | Method | Description |
 |--------|-------------|
@@ -617,7 +927,7 @@ model-only runtime context. `export()` is an explicit backup boundary and includ
 that internal context so `restore()` can preserve the exact model-visible history.
 Do not expose exported snapshots directly to chat users.
 
-### `bot.memory`
+#### `bot.memory`
 
 | Method | Description |
 |--------|-------------|
@@ -626,7 +936,7 @@ Do not expose exported snapshots directly to chat users.
 | `append_history(text, session_key=None)` | Append one `memory/history.jsonl` entry and return its cursor. |
 | `read_history(session_key=None)` | Read memory history entries, optionally filtered by session key. |
 
-### `bot.runtime`
+#### `bot.runtime`
 
 | Method / Property | Description |
 |-------------------|-------------|
@@ -637,7 +947,7 @@ Do not expose exported snapshots directly to chat users.
 | `await compact_session(session_key)` | Run token-based consolidation for a session. |
 | `await compact_idle_session(session_key, max_suffix=8)` | Run idle-session compaction and return its summary. |
 
-### Host integration context and persisted-turn callbacks
+#### Host integration context and persisted-turn callbacks
 
 Host applications can attach external context without copying or modifying the
 nanobot agent loop. A context provider receives a `RequestContext` before each
@@ -722,11 +1032,11 @@ is appended verbatim to model-visible context. Apply equivalent bounding,
 encoding, and delimiter escaping to untrusted external content.
 Persisted-turn callbacks are not invoked for `ephemeral=True` runs.
 
-## Hooks
+### Nanobot SDK hooks
 
 Hooks let you observe or customize the agent loop. Subclass `AgentHook` and override the methods you need.
 
-### Hook lifecycle
+#### Hook lifecycle
 
 | Method | When |
 |--------|------|
@@ -751,7 +1061,7 @@ Useful fields on `AgentHookContext` include:
 - `stop_reason`
 - `error`
 
-### Example: audit tool calls
+#### Example: audit tool calls
 
 ```python
 from nanobot.agent import AgentHook, AgentHookContext
@@ -775,7 +1085,7 @@ print(result.content)
 print(f"Tools observed: {hook.calls}")
 ```
 
-### Example: receive streaming tokens
+#### Example: receive streaming tokens
 
 ```python
 from nanobot.agent import AgentHook, AgentHookContext
@@ -792,7 +1102,7 @@ class StreamingHook(AgentHook):
         print()
 ```
 
-### Compose multiple hooks
+#### Compose multiple hooks
 
 Pass multiple hooks when you want to combine behaviors:
 
@@ -802,7 +1112,7 @@ result = await bot.run("hi", hooks=[AuditHook(), MetricsHook()])
 
 Async hook methods are fan-out with error isolation. `finalize_content` is a pipeline: each hook receives the previous hook's output.
 
-### Example: post-process final content
+#### Example: post-process final content
 
 ```python
 from nanobot.agent import AgentHook
@@ -812,201 +1122,3 @@ class Censor(AgentHook):
     def finalize_content(self, context, content):
         return content.replace("secret", "***") if content else content
 ```
-
-## Full Example
-
-```python
-import asyncio
-import time
-
-from nanobot import Nanobot
-from nanobot.agent import AgentHook, AgentHookContext
-
-
-class TimingHook(AgentHook):
-    def __init__(self) -> None:
-        super().__init__()
-        self._started_at = 0.0
-
-    async def before_iteration(self, context: AgentHookContext) -> None:
-        self._started_at = time.perf_counter()
-
-    async def after_iteration(self, context: AgentHookContext) -> None:
-        elapsed_ms = (time.perf_counter() - self._started_at) * 1000
-        print(f"[timing] iteration {context.iteration} took {elapsed_ms:.1f}ms")
-
-
-async def main() -> None:
-    async with Nanobot.from_config(workspace="/my/project") as bot:
-        result = await bot.run(
-            "Explain the main function",
-            session_key="sdk:demo",
-            hooks=[TimingHook()],
-        )
-    print(result.content)
-
-
-asyncio.run(main())
-```
-
-## MoekaCore — the embeddable agent/RAG core
-
-`Nanobot` (above) wraps the full chat-bot runtime. `nanobot.core.MoekaCore` is a
-smaller, channel-free facade over the same agent engine — no gateway, no
-channels, no WebUI — meant for embedding in another Python application (e.g. a
-content pipeline). The import boundary is enforced by
-`tests/core/test_import_boundary.py`: importing `nanobot.core` pulls in zero
-chat-runtime dependencies.
-
-```python
-from nanobot.core import MoekaCore
-
-core = MoekaCore.create(config_dict={
-    "providers": {"openrouter": {"apiKey": "${OPENROUTER_API_KEY}"}},
-    "agents": {"defaults": {"model": "google/gemini-3-flash-preview",
-                             "provider": "openrouter"}},
-})
-
-@core.action
-def get_disk_usage(path: str) -> str:
-    "Return human-readable disk usage for a path."
-    import shutil
-    total, used, free = shutil.disk_usage(path)
-    return f"{used // 2**30} GiB used, {free // 2**30} GiB free"
-
-result = await core.run("How much disk is free on /?")
-print(result.content, result.tools_used)
-core.cleanup()
-```
-
-`MoekaCore.create()` takes **at most one** config source (`config=`, a built
-`Config`; `config_dict=`, a plain dict; or `config_path=`, a file) plus optional
-`workspace=`, `model=`, `provider=`, and `profile=`. With no workspace and an
-in-memory config it runs in a throwaway temp dir rather than touching
-`~/.nanobot`. `MoekaCore.from_config(config, workspace=...)` is the pure data
-seam underneath — no file discovery.
-
-See [`docs/core-architecture.md`](core-architecture.md) for the full subsystem
-design (`core.py`, `vec.py`, `vec_store.py`, `function_tool.py`).
-
-### Scoped agent profiles
-
-`MoekaCore.scoped(profile=...)` (sync) / `MoekaCore.scoped_async(profile=...)`
-context-manage a core whose workspace is guaranteed to be cleaned up, and apply
-an `AgentProfileConfig` — a name from `config.profiles`, an
-`AgentProfileConfig` instance, or a plain dict:
-
-```python
-with MoekaCore.scoped(
-    profile={
-        "system_prompt": "You are a terse changelog editor.",
-        "tools_allow": ["read_file", "web_search"],
-        "planning": True,
-    },
-    config_path="~/.nanobot/config.json",
-) as core:
-    answer = await core.run("Summarize the diff.")
-```
-
-Profile fields: `model_preset`, `system_prompt` / `system_prompt_file`,
-`tools_allow` (hard allowlist — tools added later never silently appear) /
-`tools_deny`, `skills_include` / `skills_exclude`, `skills_inline`,
-`memory_enabled`, `planning`, and `limits` (a `RunnerLimits` override). This
-lets one host process run multiple differently-scoped agent personas or
-subagents against the same underlying core.
-
-### In-memory bootstrap and inline skills
-
-Personality and skills can be passed as objects rather than round-tripped
-through workspace files — an embedded core never writes `AGENTS.md` or
-`SKILL.md` into a host's workspace:
-
-```python
-from nanobot.config.schema import InlineSkillConfig
-
-core = MoekaCore.create(
-    config_dict=cfg,
-    bootstrap={"AGENTS.md": persona_text, "USER.md": profile_text},
-    skills=[InlineSkillConfig(name="triage", content=SKILL_MD, description="Triage tickets")],
-)
-core.set_bootstrap("USER.md", updated_profile)   # takes effect next run()
-core.add_skill({"name": "deploy", "content": DEPLOY_MD})
-```
-
-- `bootstrap` maps a section name to markdown content. A key matching a
-  bootstrap file (`AGENTS.md`, `SOUL.md`, `USER.md`, ...) **shadows** the
-  workspace file; any other key is appended as an extra section.
-- A profile's `system_prompt` / `system_prompt_file` feeds the same channel
-  under `"AGENTS.md"` (an explicit `bootstrap` key wins). `system_prompt_file`
-  is read once at `create()` — the path is the host's choice, the core only
-  sees content. **Behavior note:** the profile persona now beats a pre-existing
-  workspace `AGENTS.md`, which fixes stale personas in persistent host
-  workspaces (the old seed was written once and never refreshed).
-- Inline skills shadow workspace/builtin skills of the same name and bypass
-  `skills_include` (the host registered them explicitly), but still honor
-  `skills_exclude` and `requires`/`always` metadata. Subagents see the same
-  inline set. `skills_include=[]` is the documented opt-out from the builtin
-  catalog.
-
-### Documents — hybrid FTS5 + vector RAG
-
-`core.ingest()` / `core.ingest_text()` index host-supplied text or files into a
-SQLite-backed store (`<workspace>/memory/vec.db`, via `nanobot/core/vec_store.py`);
-`core.retrieve()` / `core.retrieve_documents()` search it back:
-
-```python
-core.ingest("Project X ships on Friday.", source="notes", tags=["planning"])
-chunks = core.retrieve("when does X ship?", mode="hybrid", k=5)
-```
-
-`mode` is one of:
-
-| Mode | Needs `moeka[vec]`? | Description |
-|------|---------------------|-------------|
-| `"vec"` (default) | Yes | Semantic KNN over sentence-transformer embeddings |
-| `"keyword"` | No | FTS5/BM25 keyword search — works with stock `sqlite3` |
-| `"hybrid"` | No (degrades to keyword-only without `vec`) | Reciprocal-rank fusion of both |
-
-`tags` and `since` filter by stored metadata; `collection` scopes to a named
-corpus (`collection=None` searches all collections); `caller` labels the entry
-in the optional retrieval-log (`vec.log_retrievals`). `core.retrieve()` returns
-bare strings; `core.retrieve_documents()` returns `RetrievedChunk(text, source,
-score)` for source attribution and score-based thresholding. All document
-methods degrade to empty/`0`/no-op — never raise — when `moeka[vec]` isn't
-installed.
-
-For a standalone embeddings store with no `AgentLoop`/provider/config at all,
-use `nanobot.core.vec.open_vec_store(db_path)` directly.
-
-### One-shot completion (no agent loop)
-
-`MoekaCore.complete()` / `MoekaCore.complete_sync()` skip the tool-calling loop
-entirely — a single provider call through moeka's model-preset/fallback layer,
-usable without any workspace:
-
-```python
-text = await MoekaCore.complete("Summarize this README", system="Be terse.")
-text = MoekaCore.complete_sync("...")  # sync bridge; raises inside a running loop
-```
-
-Streaming variants (`nanobot.api.complete.acomplete_stream` /
-`complete_stream`) yield text chunks as they arrive; `complete_stream` runs the
-async version in a worker thread with its own event loop so synchronous host
-applications (e.g. a pipeline that runs `complete_stream(...)` inside a plain
-`for` loop) can consume it without an `asyncio.run()` of their own. Structured
-one-shot output is available via `MoekaCore.think_structured(prompt, schema=...)`
-or `model_cls=<a pydantic model>` — a provider-agnostic parse-retry loop, no
-native JSON mode required.
-
-### Planning & reflection
-
-Independent of `MoekaCore`, two opt-in `AgentLoop`/`AgentRunner` behaviors
-apply to both the chat-bot runtime and the embeddable core:
-
-- **Planning** — `agents.defaults.planning: true` (or a profile's
-  `planning: true`) runs one extra LLM call before the main turn to produce a
-  short execution plan, injected as a plan note.
-- **Reflection** — after `limits.tool_failure_reflection_threshold`
-  (default `3`) consecutive iterations where every tool call in the turn
-  failed, the runner injects a "stop and reassess" reflection message instead
-  of continuing to retry blindly. Set the threshold to `0` to disable.
