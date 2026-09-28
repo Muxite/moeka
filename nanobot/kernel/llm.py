@@ -470,16 +470,26 @@ class _RateGate:
         loop = asyncio.get_running_loop()
         self._resume_at = max(self._resume_at, loop.time() + max(0.0, seconds))
 
-    async def wait(self) -> None:
+    async def wait(self, limit: float | None = None) -> bool:
+        """Wait until the gate reopens; ``False`` if that is more than *limit* seconds
+        away (then return after waiting nothing)."""
         loop = asyncio.get_running_loop()
         while (remaining := self._resume_at - loop.time()) > 0:
+            if limit is not None and remaining > limit:
+                return False
             await asyncio.sleep(remaining)
+            if limit is not None:
+                limit -= remaining
+        return True
 
 
 # Systemic errors abort a whole batch: retrying other items cannot succeed.
 _SYSTEMIC_ERRORS: tuple[type[LLMError], ...] = (AuthError, QuotaError, BudgetExceeded)
 _BATCH_RATE_LIMIT_RETRIES = 3
 _DEFAULT_RETRY_AFTER_S = 1.0
+# The longest pause a batch waits out; a longer ``retry_after`` (an hourly or daily
+# window) is systemic: waiting it out would stall the whole batch.
+_MAX_BATCH_RATE_PAUSE_S = 60.0
 
 
 def _spec_pricing(spec: ModelSpec) -> ModelPricing | None:
@@ -1330,7 +1340,10 @@ class LLM:
           error, and ``BatchResult.systemic`` is set.
         - ``RateLimitError`` pauses new dispatches for ``retry_after`` (1s when
           unknown) and retries that item, up to 3 times; after that the error is
-          the item's outcome.
+          the item's outcome. A ``retry_after`` over 60 s is systemic like a quota
+          error (the batch is cancelled with it) instead of stalling the batch.
+          An item with ``opts.timeout_s`` waits at most that long for a pause
+          (then its outcome is ``LLMTimeoutError``).
         - Any other ``LLMError`` is that item's outcome.
         """
         requests = list(requests)
@@ -1367,20 +1380,37 @@ class LLM:
 
         async def run(index: int, request: Request) -> None:
             rate_limited = 0
+            opts = request.opts or GenerateOptions()
+            # The item's own timeout also bounds how long it waits on rate pauses.
+            gate_budget = opts.timeout_s
             while True:
                 async with semaphore:
-                    await gate.wait()
+                    loop = asyncio.get_running_loop()
+                    waited_from = loop.time()
+                    if not await gate.wait(gate_budget):
+                        outcomes[index] = LLMTimeoutError(
+                            f"batch item would wait past timeout_s={opts.timeout_s} for a "
+                            "rate-limit pause",
+                            model=opts.model,
+                        )
+                        return
+                    if gate_budget is not None:
+                        gate_budget = max(0.0, gate_budget - (loop.time() - waited_from))
                     if systemic:
                         return
                     try:
                         outcomes[index] = await self._run_request(request)
                         return
                     except RateLimitError as exc:
+                        wait = exc.retry_after
+                        if wait is not None and wait > _MAX_BATCH_RATE_PAUSE_S:
+                            outcomes[index] = exc
+                            abort(exc, index)
+                            return
                         if rate_limited >= _BATCH_RATE_LIMIT_RETRIES:
                             outcomes[index] = exc
                             return
                         rate_limited += 1
-                        wait = exc.retry_after
                         gate.pause(_DEFAULT_RETRY_AFTER_S if wait is None else wait)
                     except _SYSTEMIC_ERRORS as exc:
                         outcomes[index] = exc

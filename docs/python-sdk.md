@@ -209,7 +209,10 @@ async with kernel.llm.stream(msgs) as stream:
     is systemic too, so one exhausted tag stops the whole batch; split a batch
     per tag when that matters.
   - `RateLimitError` pauses new dispatches for its `retry_after` (1 s when
-    unknown) and retries that item up to 3 times. Any other error is that item's
+    unknown) and retries that item up to 3 times. A `retry_after` over 60 s (an
+    hourly or daily window) is systemic like `QuotaError`, so a batch never
+    parks for it. An item with `opts.timeout_s` waits at most that long for a
+    pause; then its outcome is `LLMTimeoutError`. Any other error is that item's
     outcome.
 - `estimate(request) -> CallEstimate` is the worst case a request can cost (what
   a budget would be asked to admit); `request_key(request) -> str` is its stable

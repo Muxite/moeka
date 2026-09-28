@@ -10,7 +10,14 @@ from typing import Any
 import pytest
 
 from moeka.budget import CapBudget
-from moeka.errors import AuthError, BudgetExceeded, LLMError, QuotaError, RateLimitError
+from moeka.errors import (
+    AuthError,
+    BudgetExceeded,
+    LLMError,
+    LLMTimeoutError,
+    QuotaError,
+    RateLimitError,
+)
 from moeka.llm import BatchResult, Completion, GenerateOptions, Request, user
 from moeka.testing import FakeCall, FakeProvider, error
 from nanobot.kernel.hostenv import Environment, ModelSpec, ProviderSpec
@@ -154,6 +161,42 @@ async def test_rate_limit_gives_up_after_three_retries(kernel) -> None:
     assert isinstance(result.outcomes[1], RateLimitError)
     assert [o.text for o in (result.outcomes[0], result.outcomes[2])] == ["ok", "ok"]
     assert sum(1 for c in fake.calls if _item(c) == 1) == 4
+
+
+async def test_long_retry_after_is_systemic_not_a_stall(kernel) -> None:
+    # A daily window must not park batch_sync forever: > 60 s aborts the batch.
+    async def answer(call: FakeCall) -> Any:
+        if _item(call) == 0:
+            return error(429, "daily limit", retry_after=86_400)
+        await asyncio.sleep(0.5)
+        return "ok"
+
+    fake = FakeProvider(default=answer)
+    kernel.llm.register_provider("main", fake, MAIN)
+    started = time.monotonic()
+    result = await kernel.llm.batch(_requests(4), concurrency=1)
+    assert time.monotonic() - started < 5
+    assert isinstance(result.systemic, RateLimitError)
+    assert all(o is result.systemic for o in result.outcomes)
+    assert len(fake.calls) == 1
+
+
+async def test_rate_pause_is_bounded_by_the_item_timeout(kernel) -> None:
+    async def answer(call: FakeCall) -> Any:
+        if _item(call) == 0:
+            return error(429, "slow down", retry_after=30)
+        return "ok"
+
+    fake = FakeProvider(default=answer)
+    kernel.llm.register_provider("main", fake, MAIN)
+    opts = GenerateOptions(attempts=1, timeout_s=0.3)
+    requests = [Request([user(f"item {i}")], opts) for i in range(3)]
+    started = time.monotonic()
+    result = await kernel.llm.batch(requests, concurrency=1)
+    assert time.monotonic() - started < 5
+    assert result.systemic is None
+    assert all(isinstance(o, LLMTimeoutError) for o in result.outcomes)
+    assert "timeout_s=0.3" in str(result.outcomes[1])
 
 
 async def test_json_requests_in_a_batch(kernel) -> None:
