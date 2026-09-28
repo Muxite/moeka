@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -133,6 +134,48 @@ async def test_json_hit_keeps_parsed(kernel) -> None:
     again = await kernel.llm.complete_json("give a", model_cls=Thing)
     assert again.cached and again.parsed == Thing(a=5) == first.parsed
     assert len(fake.calls) == 1
+
+
+class JsonRoundTripCache:
+    """A cache that serialises like a SQLite/JSON store: ``parsed`` comes back plain."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    def get(self, key: str) -> Completion | None:
+        raw = self.data.get(key)
+        if raw is None:
+            return None
+        return Completion(**json.loads(raw))
+
+    def put(self, key: str, completion: Completion) -> None:
+        parsed = completion.parsed
+        if hasattr(parsed, "model_dump"):
+            parsed = parsed.model_dump()
+        self.data[key] = json.dumps({
+            "text": completion.text, "parsed": parsed, "model": completion.model,
+            "provider": completion.provider, "finish_reason": completion.finish_reason,
+        })
+
+
+async def test_json_hit_from_a_serialising_cache_rederives_parsed(tmp_path, sink) -> None:
+    class Thing(BaseModel):
+        a: int
+
+    cache = JsonRoundTripCache()
+    async with Kernel(_env(tmp_path, sink), cache=cache) as kernel:
+        fake = _fake(kernel, '{"a": 5}')
+        first = await kernel.llm.complete_json("give a", model_cls=Thing)
+        again = await kernel.llm.complete_json("give a", model_cls=Thing)
+        assert again.cached and len(fake.calls) == 1
+        assert isinstance(again.parsed, Thing) and again.parsed == first.parsed
+        # A stored entry whose text no longer validates is a miss, not a bad value.
+        [key] = cache.data
+        cache.data[key] = json.dumps({"text": '{"a": "x"}', "parsed": {"a": "x"},
+                                      "model": "m", "provider": "p"})
+        fake.push('{"a": 7}')
+        third = await kernel.llm.complete_json("give a", model_cls=Thing)
+        assert not third.cached and third.parsed == Thing(a=7)
 
 
 async def test_stream_uses_the_cache(kernel) -> None:

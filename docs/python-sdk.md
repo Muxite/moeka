@@ -324,7 +324,11 @@ with Kernel(env, budget=budget) as kernel:
   makes no provider call and no admission, and emits `cache.hit`) for calls
   whose `GenerateOptions.cache` is True. Only successful, non-truncated
   completions are stored. A hit comes back with `cached=True`, `attempts=0`,
-  `cost_usd=0.0` and a fresh `call_id`.
+  `cost_usd=0.0` and a fresh `call_id`. For a JSON call (`complete_json`, a JSON
+  `Request`) the hit's `parsed` is re-derived from its `text` with the call's
+  `model_cls` / schema, exactly as on a miss, so a cache that serialises
+  (SQLite, JSON) need not store `parsed` faithfully; an entry whose text no
+  longer validates is treated as a miss.
 
 ## Tracing
 

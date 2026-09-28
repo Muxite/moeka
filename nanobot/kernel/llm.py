@@ -891,6 +891,16 @@ class LLM:
         if not isinstance(hit, Completion):
             logger.warning("response cache returned {} (not a Completion); ignored", type(hit))
             return key, None
+        parsed = hit.parsed
+        if plan.kind == "json":
+            # Re-derived from the text, as on a miss: a cache that serialises
+            # (SQLite, JSON) hands ``parsed`` back as a plain dict, never model_cls.
+            try:
+                parsed = coerce_json(json.loads(extract_json_text(hit.text)), plan.model_cls)
+            except Exception:  # noqa: BLE001 - an unusable entry is a miss
+                logger.warning("response cache entry {} is not valid JSON for this call; "
+                               "ignored", key[:16])
+                return key, None
         safe_emit(self._kernel.trace, {
             "event": "cache.hit",
             "call_id": call_id,
@@ -901,6 +911,7 @@ class LLM:
         })
         return key, replace(
             hit,
+            parsed=parsed,
             call_id=call_id,
             cached=True,
             attempts=0,
