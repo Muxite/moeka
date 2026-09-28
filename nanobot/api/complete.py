@@ -135,13 +135,15 @@ async def _acomplete_impl(
     response_format: dict[str, Any] | None = None,
     env: Any | None = None,
 ) -> str:
-    """:func:`acomplete`'s implementation, unwarned — for internal (in-repo) callers.
+    """:func:`acomplete`'s implementation, unwarned — called by :func:`acomplete`
+    and :func:`complete` so calling the sync wrapper emits exactly one
+    ``DeprecationWarning`` instead of two.
 
-    Any legacy code that still needs this behaviour (e.g. :class:`MoekaCore`'s
-    ``complete``/``complete_sync``/``think_structured``, which are themselves
-    deprecated and already covered by their own construction-time warning)
-    should call this instead of the public :func:`acomplete`, so one host call
-    still emits exactly one ``DeprecationWarning``.
+    Note: :class:`MoekaCore`'s ``complete``/``complete_sync`` deliberately keep
+    calling the *public* :func:`acomplete`/:func:`complete` instead of this impl
+    — per Task 12 ruling 1 (warn at ``MoekaCore`` construction only, not on
+    every method), those methods add no warning of their own, so the one that
+    surfaces on a bare, unconstructed call comes from here.
 
     Args:
         prompt: The user message.
@@ -370,9 +372,19 @@ async def _acomplete_json_impl(
     task_payload: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Any:
-    """:func:`acomplete_json`'s implementation, unwarned — for internal (in-repo)
-    callers (e.g. :mod:`nanobot.kernel.router`'s dispatch, :class:`MoekaCore`'s
-    ``think_structured``) that must not re-trigger the public function's warning.
+    """:func:`acomplete_json`'s implementation, unwarned — called by
+    :func:`acomplete_json`/:func:`complete_json` (so the sync wrapper emits one
+    warning, not two) and by :mod:`nanobot.kernel.router`'s ``_default_dispatch``
+    (kernel-internal code must not trigger the public function's warning — Task
+    12 ruling 3).
+
+    Note: :class:`MoekaCore`'s ``think_structured`` calls this only on its
+    *routed* path (``slot=``/``tier=``/``verify=``, which goes through the
+    router above); its plain path deliberately keeps calling the public
+    :func:`acomplete_json` — per Task 12 ruling 1 (warn at ``MoekaCore``
+    construction only, not on every method), ``think_structured`` adds no
+    warning of its own, so the one that surfaces on a bare, unconstructed call
+    comes from there instead.
 
     One-shot completion constrained to JSON, with parse-retry.
 

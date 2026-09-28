@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, get_args
@@ -47,10 +48,11 @@ from nanobot.llm_usage.models import LLMCallRecord
 from nanobot.providers.base import LLMResponse, LLMUsage
 from nanobot.providers.factory import _ledger_pricing, make_provider
 
-# Task 12: MoekaCore.think_structured is now a deprecation shim (behaviour
-# unchanged) — this file intentionally exercises it directly; allow the
-# warning here.
-pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+# Task 12: no module-wide ignore — only test_acomplete_without_env_keeps_the_old_
+# make_provider_call below calls a real (unmocked) public deprecated function and
+# is marked individually. Every ``route(...)``/``MoekaCore.think_structured(slot=...)``
+# call in this file goes through the router's *unwarned* internal impl (ruling 3)
+# and must stay silent — see test_default_dispatch_does_not_warn_kernel_internal.
 
 
 class _RecordingSink:
@@ -700,6 +702,26 @@ async def test_default_dispatch_goes_through_acomplete_json_with_the_tier_preset
 
 
 @pytest.mark.asyncio
+async def test_default_dispatch_does_not_warn_kernel_internal(monkeypatch, tmp_path: Path) -> None:
+    """Task 12 regression: ``_default_dispatch`` calls the unwarned
+    ``_acomplete_json_impl``, never the public (deprecated) ``acomplete_json`` —
+    the router is kernel-internal code and must never trigger that
+    ``DeprecationWarning`` (ruling 3). This is the same path
+    ``test_default_dispatch_goes_through_acomplete_json_with_the_tier_preset``
+    exercises above; here the assertion is the *absence* of a warning.
+    """
+    _install(monkeypatch, ['{"ok": true}'])
+    env = _env(tmp_path, _RecordingSink())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        result = await route(
+            "extract.title", "title", {"prompt": "x"}, prompt="x",
+            config=_ladder_config(), env=env,
+        )
+    assert result.value == {"ok": True}
+
+
+@pytest.mark.asyncio
 async def test_think_structured_routes_when_slot_given(monkeypatch) -> None:
     made = _install(monkeypatch, ['{"a": 1}'])
     out = await MoekaCore.think_structured(
@@ -749,6 +771,7 @@ async def test_think_structured_without_slot_is_unchanged(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # calls the real, unmocked acomplete
 async def test_acomplete_without_env_keeps_the_old_make_provider_call(monkeypatch) -> None:
     made = _install(monkeypatch, ["hi"])
     await complete_mod.acomplete("x", config=_ladder_config())
