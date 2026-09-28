@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from loguru import logger
 
+from agent.session_helpers import run_session
 from nanobot.agent.context import ContextBuilder, TranscriptInput
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.runner import AgentRunResult
@@ -49,7 +50,6 @@ from nanobot.session.summary import (
 )
 from nanobot.session.turn_continuation import (
     INTERNAL_CONTINUATION_META,
-    INTERNAL_CONTINUATION_RUN_STARTED_AT_META,
 )
 
 
@@ -290,7 +290,6 @@ def test_save_turn_commits_summary_boundary_without_rewriting_raw_history() -> N
         "Current working-memory checkpoint."
     )
     assert [message["content"] for message in session.get_history()] == [
-        SUMMARY_CONTINUATION_TEXT,
         "",
         "full current result",
         "done",
@@ -1240,7 +1239,7 @@ async def test_internal_continuation_preserves_streaming_route_metadata(
 
     loop._run_agent_loop = fake_run_agent_loop  # type: ignore[method-assign]
 
-    await loop._dispatch(InboundMessage(
+    await run_session(loop, InboundMessage(
         channel="feishu",
         sender_id="u1",
         chat_id="c-stream",
@@ -1251,15 +1250,6 @@ async def test_internal_continuation_preserves_streaming_route_metadata(
             "origin_message_id": "root_001",
         },
     ))
-
-    assert loop.bus.outbound_size == 0
-    queued = await asyncio.wait_for(loop.bus.consume_inbound(), timeout=0.5)
-    assert queued.metadata[INTERNAL_CONTINUATION_META] is True
-    assert queued.metadata["_wants_stream"] is True
-    assert queued.metadata["message_id"] == "om_001"
-    assert queued.metadata["origin_message_id"] == "root_001"
-
-    await loop._dispatch(queued)
 
     outbound = []
     while loop.bus.outbound_size:
@@ -1276,6 +1266,8 @@ async def test_internal_continuation_preserves_streaming_route_metadata(
     assert ends[0].metadata["origin_message_id"] == "root_001"
     assert isinstance(ends[0].event.stream_id, str)
     assert streamed_markers and streamed_markers[-1].content == "done"
+    assert loop.bus.inbound_size == 0
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -1313,7 +1305,7 @@ async def test_websocket_internal_continuation_keeps_single_visible_run(
     loop.bus.subscribe(statuses.append, TurnRunStatusChanged)
     loop.bus.subscribe(completions.append, TurnCompleted)
 
-    await loop._dispatch(InboundMessage(
+    await run_session(loop, InboundMessage(
         channel="websocket",
         sender_id="u1",
         chat_id="c-auto",
@@ -1321,19 +1313,12 @@ async def test_websocket_internal_continuation_keeps_single_visible_run(
         metadata={"webui": True},
     ))
 
-    assert [event.status for event in statuses] == ["running"]
-    assert not completions
-    started_at = statuses[0].started_at
-
-    queued = await asyncio.wait_for(loop.bus.consume_inbound(), timeout=0.5)
-    assert queued.metadata[INTERNAL_CONTINUATION_META] is True
-    assert queued.metadata[INTERNAL_CONTINUATION_RUN_STARTED_AT_META] == started_at
-
-    statuses.clear()
-    await loop._dispatch(queued)
-
-    assert [event.status for event in statuses] == ["running", "idle"]
-    assert statuses[0].started_at == started_at
+    # The continuation runs on the same session worker (never republished to the
+    # bus) and stays one visible run: one start time, one completion.
+    assert calls == 2
+    assert loop.bus.inbound_size == 0
+    assert [event.status for event in statuses] == ["running", "running", "idle"]
+    assert statuses[1].started_at == statuses[0].started_at
     assert len(completions) == 1
     assert isinstance(completions[0].latency_ms, int)
 

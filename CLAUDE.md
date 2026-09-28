@@ -92,12 +92,11 @@ nanobot status | sessions | provider
 
 ## Branching Strategy
 
-- `core-slim` (this branch) — the slim kernel. The harness repo pins a `core-slim` commit as its kernel submodule.
-  Do not merge it into `main`.
-- `main` — the full chat-bot distribution; the live systemd service follows it.
-- `nightly` — integrates upstream `HKUDS/nanobot` plus moeka work for `main`. The `upstream` remote points at
-  `HKUDS/nanobot`; moeka syncs from `upstream/main` (upstream's `nightly` went stale after 2026-06-03).
-  Moeka deviations must survive conflict resolution.
+- `core-slim` (this branch) — the slim kernel (the `moeka` package). A long-lived branch *downstream* of `main`: it deletes channels, the WebUI and the gateway, so never merge it into `main`. The harness repo pins a `core-slim` commit as its kernel submodule, so never rebase it.
+- `main` — the full chat-bot distribution; the live systemd service follows it. Upstream syncs land there.
+- `nightly` — retired 2026-09-28 (fast-forwarded to `main`, kept only as an alias).
+
+Syncing: `upstream/main` (the `upstream` remote is `HKUDS/nanobot`) → merge branch off `main` → `main` → `git merge main` into `core-slim`. Here, modify/delete conflicts on files this branch removed resolve as "keep deleted"; upstream tests for removed subsystems are dropped too. Moeka deviations must survive conflict resolution.
 
 ## Code Style
 
