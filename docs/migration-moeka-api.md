@@ -67,6 +67,11 @@ them, to the `moeka` API described in [`python-sdk.md`](python-sdk.md).
 
 - `tools=` takes the same `tools` config section `moeka_config` built (only
   when the research agent needs web search).
+- Make `data_dir` absolute (`Path(...).resolve()`): relative `state_dir` /
+  `work_dir` resolve against the process's current directory.
+- A missing key (`secrets` has no `OPENROUTER_API_KEY`) raises
+  `moeka.errors.AuthError` on the first call, naming the credential ref
+  (`openrouter` here), not `ModelNotFound`.
 - `moeka_config_source(...)` has no replacement: nothing takes config kwargs
   any more.
 
@@ -75,7 +80,9 @@ them, to the `moeka` API described in [`python-sdk.md`](python-sdk.md).
 - `llm.complete(prompt, system, model=, images=, max_tokens=, temperature=)` ->
   `kernel.llm.complete_sync(prompt, system=system, images=images,
   opts=GenerateOptions(model=..., sampling=Sampling(max_tokens=..., temperature=...))).text`.
-- `llm.complete_json(...)` -> `kernel.llm.complete_json_sync(..., model_cls=...).parsed`.
+- `llm.complete_json(...)` -> `kernel.llm.complete_json_sync(..., model_cls=...,
+  retries=_JSON_RETRIES).parsed`. Pass `retries` explicitly: the kernel's
+  `complete_json` defaults to 2 re-prompts, awork's `_JSON_RETRIES` is 1.
 - `complete_many(calls, max_concurrency=8)` (thread-pool fan-out, results in
   order) -> `kernel.llm.batch_sync([Request(messages, opts=..., model_cls=...)],
   concurrency=8)`:
@@ -85,7 +92,40 @@ them, to the `moeka` API described in [`python-sdk.md`](python-sdk.md).
     keep their `Completion`s; only unfinished ones get the error. That replaces
     `last_partial` salvage: read `result.completions`.
   - Rate limits pause the whole batch and retry the item (up to 3 times) instead
-    of failing it.
+    of failing it. A `retry_after` over 60 s is systemic (the batch stops with
+    that `RateLimitError`), and an item with `timeout_s` never waits longer than
+    that for a pause.
+- `complete_json_many(calls, max_concurrency=8)` -> one `batch_sync` of JSON
+  requests:
+
+  ```python
+  requests = [
+      Request(
+          [system(c["system"]), user(c["prompt"])] if c.get("system") else [user(c["prompt"])],
+          opts=GenerateOptions(
+              model=c.get("model"),
+              sampling=Sampling(max_tokens=c.get("max_tokens"),
+                                temperature=c.get("temperature")),
+              cache=c.get("temperature") == 0,        # awork caches only temperature 0
+          ),
+          schema=c.get("schema"),
+          retries=_JSON_RETRIES,                      # Request.retries defaults to 0
+      )
+      for c in calls
+  ]
+  result = kernel.llm.batch_sync(requests, concurrency=max_concurrency)
+  if result.systemic is not None:
+      ...                                             # BudgetExceeded -> BudgetHalt, etc.
+  parsed = [o.parsed if isinstance(o, Completion) else None for o in result.outcomes]
+  ```
+
+  - `Request.retries` defaults to 0, unlike `complete_json`'s 2. Without
+    `retries=_JSON_RETRIES` every unparseable reply fails its item at once.
+  - The response cache lookup and write-back that `complete_json_many` did per
+    item are the kernel's now (`Kernel(cache=...)`, see `llm_cache` below).
+  - An item whose reply never parses is a `ParseError` outcome, its siblings
+    unaffected. The serial second pass over empty replies can stay: re-run
+    those items with `complete_json_sync(..., retries=_JSON_RETRIES)`.
 
 ### `usage_sink=ledger.record` / `UsageLedger` -> budget and trace
 
@@ -156,7 +196,12 @@ them, to the `moeka` API described in [`python-sdk.md`](python-sdk.md).
 ### Research agent: `MoekaCore.scoped` + `AgentProfileConfig` + `AgentHook`
 
 ```python
+import dataclasses
+
 spec = AgentSpec.from_profile(_research_profile(memory=False), name="research")
+# The profile leaves memory_enabled at its default (True), which from_profile maps
+# to memory=True (semantic memory, and the embedder loads). Turn it off here.
+spec = dataclasses.replace(spec, memory=False)
 agent = kernel.agent(spec)
 result = agent.run_sync(task, session="awork:research", tags={"stage": "research"})
 text, tools, usage, cost = result.content, result.tools_used, result.usage, result.cost_usd
@@ -170,9 +215,19 @@ text, tools, usage, cost = result.content, result.tools_used, result.usage, resu
 - `from_profile` raises `ValueError` for a profile that sets `planning` or
   `limits`: move limits into `AgentSpec(limits=RunLimits(max_iterations=...,
   deadline_s=...))`; planning has no equivalent.
-- A profile's `memory_enabled` defaults to True, which gives the agent semantic
-  memory (and loads the embedder). Set it False in the profile, or build the
-  `AgentSpec` directly, if the research agent should not remember.
+- A profile's `memory_enabled` defaults to True, and `_research_profile` never
+  sets it, so `from_profile` gives even `_research_profile(memory=False)` semantic
+  memory (and loads the embedder). Use `dataclasses.replace(spec, memory=False)`
+  as above, or build the `AgentSpec` directly.
+- Memory is per agent: a `memory=True` agent keeps `MEMORY.md` and its archived
+  history in `state_dir/agents/<name>/memory`, and only such an agent sees them
+  in its prompt. `work_dir/memory/MEMORY.md` is never read, so nothing leaks
+  between the research agent, the discovery agent and later rollouts.
+- Default tools: a kernel agent never gets the session tools (`list_sessions`,
+  `read_session`, `search_sessions`), `my`, `spawn`, the goal tools or
+  `defer_action` unless `tools_allow` names them, and the bus-delivered ones
+  (`spawn`, goals, `defer_action`, `send_session_message`) raise `ValueError`
+  when named. `RESEARCH_TOOLS` (`web_search`, `web_fetch`) is unaffected.
 - `_research_profile(memory=True)` sets `vec_collections=[RESEARCH_COLLECTION]`,
   which `from_profile` maps to `doc_scopes`. A non-empty `doc_scopes` adds the
   `search_documents` action, and the action is checked against `tools_allow`.
@@ -192,7 +247,10 @@ text, tools, usage, cost = result.content, result.tools_used, result.usage, resu
     one-off migration script, and `add`
     them to the new scope.
 - Host actions become `AgentSpec(actions=(fn, ...))`; with `tools_allow` set,
-  list the action names in it too.
+  list the action names in it too. awork's sync actions (`remember_fact`,
+  `recall_research`, `search_knowledge`) run in a worker thread, not on the
+  kernel loop, so they may block on `DocStore` calls or call `*_sync` kernel
+  APIs (`kernel.llm.complete_sync`) without stalling or deadlocking the kernel.
 - `MoekaCore.scoped` made a temporary workspace and deleted it. The kernel works
   in the `work_dir` the host chose; use a `tempfile.TemporaryDirectory` for it
   when the workspace must not persist. Sessions now persist in `state_dir`.
@@ -225,8 +283,11 @@ hits = docs.search(query, k=8, collection=public)
   sampling, response format, schema and retries.
 - The cache sees `Completion` objects (a frozen dataclass): `put` serialises the
   fields the host needs (`text`, `usage`, `model`, `cost_usd`, ...) and `get`
-  rebuilds a `Completion`. For JSON calls `text` is the raw reply; the kernel
-  re-parses nothing on a hit, so store `parsed` too (or rebuild it from `text`).
+  rebuilds a `Completion`. For JSON calls `text` is the raw reply, and on a hit
+  the kernel re-derives `parsed` from `text` with the call's `model_cls` /
+  schema, so `complete_json(model_cls=X)` returns an `X` whether it hit or
+  missed. The cache need not store `parsed`; an entry whose text no longer
+  validates counts as a miss.
 - Which calls may be cached stays the host's policy: pass
   `GenerateOptions(cache=False)` for non-deterministic calls (awork caches only
   temperature 0). Only successful, untruncated replies are stored; a hit costs
