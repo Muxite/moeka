@@ -195,6 +195,33 @@ async def test_blocking_sync_action_does_not_stall_other_runs(make_kernel) -> No
     assert (await task).content == "a done"
 
 
+async def test_sync_actions_run_on_the_kernels_own_action_pool(make_kernel) -> None:
+    # Blocking actions get their own pool, not the loop's default executor (which
+    # memory search and built-in tools use), so they cannot starve the kernel.
+    with pytest.raises(ValueError, match="action_workers"):
+        make_kernel(FakeProvider(), action_workers=0)
+    names: list[str] = []
+
+    def which() -> str:
+        names.append(threading.current_thread().name)
+        return "ok"
+
+    shared = FunctionTool(which, name="shared")  # a host-built tool gets the pool too
+    kernel = make_kernel(FakeProvider([tool_call("which", {}), tool_call("shared", {}),
+                                       "done"]), action_workers=2)
+    agent = kernel.agent(AgentSpec(name="p", actions=[which, shared]))
+    assert (await agent.run("go")).content == "done"
+    assert len(names) == 2 and all(n.startswith("moeka-action") for n in names)
+    pool = kernel._action_pool
+    assert pool is not None and pool._max_workers == 2
+    await asyncio.to_thread(kernel.close)
+    assert pool._shutdown
+    # Outside a kernel run, a FunctionTool still uses asyncio.to_thread.
+    names.clear()
+    assert await shared.execute() == "ok"
+    assert names and not names[0].startswith("moeka-action")
+
+
 def test_spec_actions_are_registered_and_checked(make_kernel) -> None:
     kernel = make_kernel(FakeProvider())
 

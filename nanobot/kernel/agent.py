@@ -88,6 +88,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from loguru import logger
 
 from nanobot.agent.hook import AgentHookContext, AgentRunHookContext, SDKCaptureHook
+from nanobot.core.function_tool import ACTION_EXECUTOR
 from nanobot.kernel.frozen import FrozenMap, freeze, thaw
 from nanobot.kernel.llm import Usage
 from nanobot.kernel.llm_errors import BudgetExceeded, LLMError, classify
@@ -1315,6 +1316,7 @@ class Agent:
         try:
             with run_span, turn_request_extras(self._request_extras(sampling)):
                 token = _ACTIVE_RUN.set(cost)
+                pool_token = ACTION_EXECUTOR.set(self._kernel._action_executor())
                 try:
                     try:
                         async with timeout:
@@ -1341,6 +1343,7 @@ class Agent:
                         pending.result = result("cancelled")
                         raise
                 finally:
+                    ACTION_EXECUTOR.reset(pool_token)
                     _ACTIVE_RUN.reset(token)
         finally:
             unsubscribe()

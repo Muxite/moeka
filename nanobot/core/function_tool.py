@@ -8,11 +8,13 @@ Schema derived from type hints (or supplied explicitly).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import inspect
 import types
 import typing
 from collections.abc import Callable, Sequence
+from concurrent.futures import Executor
 from typing import Any, get_args, get_origin, get_type_hints
 
 from nanobot.agent.tools.base import Tool, ToolResult, capability_request
@@ -148,6 +150,15 @@ def _is_async_callable(fn: Any) -> bool:
     )
 
 
+# The executor sync callables run on; ``None`` = ``asyncio.to_thread`` (the loop's
+# default executor). A kernel sets its own action pool for the duration of each
+# agent run, so blocking host actions cannot starve the default executor that
+# memory search and built-in tools share.
+ACTION_EXECUTOR: contextvars.ContextVar[Executor | None] = contextvars.ContextVar(
+    "moeka_action_executor", default=None,
+)
+
+
 class FunctionTool(Tool):
     """Adapts a plain (sync or async) Python callable into a moeka Tool.
 
@@ -155,8 +166,9 @@ class FunctionTool(Tool):
     ``_plugin_discoverable`` is False. The callable is invoked with validated,
     cast keyword arguments and its return value is passed straight back to the
     agent loop (string or content blocks). A coroutine function is awaited on the
-    caller's loop; any other callable runs in a worker thread (``asyncio.to_thread``,
-    which copies the context, so trace spans and budget attribution still apply), so
+    caller's loop; any other callable runs in a worker thread (the running kernel's
+    action pool, see :data:`ACTION_EXECUTOR`, else ``asyncio.to_thread``; either way
+    in a copy of the context, so trace spans and budget attribution still apply), so
     a blocking action never stalls the loop and may itself call blocking ``*_sync``
     APIs of the kernel it runs on.
 
@@ -251,6 +263,9 @@ class FunctionTool(Tool):
     async def execute(self, **kwargs: Any) -> Any:
         if _is_async_callable(self._fn):
             result = self._fn(**kwargs)
+        elif (executor := ACTION_EXECUTOR.get()) is not None:
+            call = functools.partial(contextvars.copy_context().run, self._fn, **kwargs)
+            result = await asyncio.get_running_loop().run_in_executor(executor, call)
         else:
             result = await asyncio.to_thread(self._fn, **kwargs)
         if inspect.isawaitable(result):

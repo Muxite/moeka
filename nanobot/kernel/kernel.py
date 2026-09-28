@@ -7,7 +7,8 @@ sync and async form. Agents, sessions and memory attach here.
 The host may pass a :class:`~nanobot.kernel.budget.Budget` (every model call is
 admitted against it, see :mod:`nanobot.kernel.budget`), a
 :class:`~nanobot.kernel.budget.ResponseCache`, and ``max_concurrency`` (the
-default concurrency of ``kernel.llm.batch``).
+default concurrency of ``kernel.llm.batch``), and ``action_workers`` (the threads of
+the pool agents' sync host actions run on).
 
 Per kernel (Task 8): ``variant`` (a :class:`~nanobot.kernel.variants.Variant`, stored as
 ``kernel.variant`` and handed to the agents the kernel builds) and the ``solvers`` /
@@ -49,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING
@@ -91,6 +93,7 @@ class Kernel:
         max_concurrency: int = 16,
         solvers: SolverRegistry | None = None,
         baselines: BaselineRegistry | None = None,
+        action_workers: int = 8,
     ) -> None:
         if not isinstance(env, Environment):
             raise TypeError(
@@ -128,12 +131,18 @@ class Kernel:
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) \
                 or max_concurrency < 1:
             raise ValueError(f"max_concurrency must be a positive int, got {max_concurrency!r}")
+        if isinstance(action_workers, bool) or not isinstance(action_workers, int) \
+                or action_workers < 1:
+            raise ValueError(f"action_workers must be a positive int, got {action_workers!r}")
         self._env = env
         self._tracer = Tracer(env.trace)
         self._core_env = dataclasses.replace(env.core, trace=self._tracer)
         self._budget = budget
         self._cache = cache
         self._max_concurrency = max_concurrency
+        # Sync host actions' worker threads (built on first use, shut down on close).
+        self._action_workers = action_workers
+        self._action_pool: ThreadPoolExecutor | None = None
         self._variant = variant
         self._policy = policy
         self._plugins = plugins
@@ -394,12 +403,30 @@ class Kernel:
             with self._agents_lock:
                 self._closing = True
             self._close_agents()
+            self._close_action_pool()
             self._close_stores()
             self._close_llm()
             self._bridge.stop()
             # Only after stop() returned: a failed stop leaves the kernel open
             # so a later close() can retry.
             self._closed = True
+
+    def _action_executor(self) -> ThreadPoolExecutor:
+        """The pool sync host actions run on (see ``function_tool.ACTION_EXECUTOR``)."""
+        with self._agents_lock:
+            if self._action_pool is None:
+                self._action_pool = ThreadPoolExecutor(
+                    max_workers=self._action_workers, thread_name_prefix="moeka-action",
+                )
+            return self._action_pool
+
+    def _close_action_pool(self) -> None:
+        # After the agents: no run can submit another action. A cancelled run's
+        # action thread may still be running; it is not waited for.
+        with self._agents_lock:
+            pool, self._action_pool = self._action_pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _close_agents(self) -> None:
         # Agents' loops (and their in-flight runs) live on the loop thread; then the

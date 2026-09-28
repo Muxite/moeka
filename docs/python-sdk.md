@@ -540,9 +540,14 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
 
   - A callable becomes a `FunctionTool`: the JSON schema comes from its type
     hints, the description from its docstring's first paragraph. A sync callable
-    runs in a worker thread (with the run's trace context), so it may block and
-    may call `*_sync` kernel APIs (`kernel.llm.complete_sync`, `DocStore`
-    methods) without stalling other calls. An async callable runs on the kernel
+    runs in a worker thread of the kernel's own action pool (with the run's trace
+    context), so it may block and may call `*_sync` kernel APIs
+    (`kernel.llm.complete_sync`, `DocStore` methods) without stalling other
+    calls. The pool has `Kernel(action_workers=8)` threads, separate from the
+    loop's default executor that memory search and built-in tools use, so many
+    blocking actions queue behind each other rather than starving the kernel.
+    `kernel.close()` does not wait for an action thread a cancelled run left
+    running. An async callable runs on the kernel
     loop: it must not block, and it awaits kernel APIs directly.
     `add_action(action, *, name=None, description=None, read_only=False,
     capabilities=(), output_model=None, replace=False)` returns the tool name.
