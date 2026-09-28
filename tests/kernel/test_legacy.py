@@ -103,6 +103,7 @@ def test_from_config_builds_default_env(tmp_path):
     assert loop.env.credentials.resolve(
         "providers/openrouter/api_key", "provider:openrouter"
     ) == SECRET
+    loop.sessions.close()
 
 
 def test_explicit_env_stored_and_reaches_tool_context(tmp_path, monkeypatch):
@@ -128,6 +129,7 @@ def test_explicit_env_stored_and_reaches_tool_context(tmp_path, monkeypatch):
     assert seen and all(c.env is env for c in seen)
     sub_ctx_env = [c.env for c in seen]
     assert sub_ctx_env[0] is env
+    loop.sessions.close()
 
 
 def test_process_env_secret_not_in_repr(tmp_path, monkeypatch):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -309,7 +310,7 @@ CREATE TABLE llm_calls (
 
 
 def _columns(path: Path) -> set[str]:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         return {row[1] for row in connection.execute("PRAGMA table_info(llm_calls)")}
 
 
@@ -319,7 +320,7 @@ def test_schema_version_is_bumped() -> None:
 
 def test_v1_database_migrates_without_data_loss(tmp_path: Path) -> None:
     path = tmp_path / "llm_usage.sqlite3"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(_V1_SCHEMA)
         connection.execute(
             "INSERT INTO llm_calls (started_at_ms, duration_ms, provider, model, source, "
@@ -348,9 +349,11 @@ def test_v1_database_migrates_without_data_loss(tmp_path: Path) -> None:
     store.close()
 
     assert {"tier", "cost_usd"} <= _columns(path)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    rows = {row["model"]: row for row in LLMUsageStore(path).recent_calls(limit=10)}
+    reader = LLMUsageStore(path)
+    rows = {row["model"]: row for row in reader.recent_calls(limit=10)}
+    reader.close()
     assert rows["old-model"]["total_tokens"] == 10
     assert rows["old-model"]["tier"] is None
     assert rows["old-model"]["cost_usd"] is None
@@ -360,7 +363,7 @@ def test_v1_database_migrates_without_data_loss(tmp_path: Path) -> None:
 
 def test_migration_is_idempotent_across_reopens(tmp_path: Path) -> None:
     path = tmp_path / "llm_usage.sqlite3"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(_V1_SCHEMA)
         connection.execute("PRAGMA user_version = 1")
     for _ in range(2):
@@ -375,6 +378,7 @@ def test_new_database_has_ledger_columns(tmp_path: Path) -> None:
     store = LLMUsageStore(path)
     store.record(_record(usage=LLMUsage.reported(input_tokens=2, output_tokens=1)))
     row = store.recent_calls(limit=1)[0]
+    store.close()
     assert row["tier"] is None
     assert row["cost_usd"] is None
     assert {"tier", "cost_usd"} <= _columns(path)
@@ -434,7 +438,9 @@ async def test_factory_wires_one_priced_ledger_event_per_call(tmp_path: Path) ->
     assert ledger[0]["tokens_in"] == 1_000
     assert ledger[0]["tokens_out"] == 200
     assert ledger[0]["cost_usd"] == pytest.approx(1_000 * 0.25 / 1e6 + 200 * 2.0 / 1e6)
-    rows = LLMUsageStore(env.paths.data_dir / "llm_usage.sqlite3").recent_calls(limit=5)
+    reader = LLMUsageStore(env.paths.data_dir / "llm_usage.sqlite3")
+    rows = reader.recent_calls(limit=5)
+    reader.close()
     assert len(rows) == 1
     assert rows[0]["tier"] == "fast"
     assert rows[0]["cost_usd"] == pytest.approx(ledger[0]["cost_usd"])
