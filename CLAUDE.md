@@ -88,11 +88,11 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 
 ## Branching Strategy
 
-Two branches:
-- `main` — stable; the running systemd unit follows this branch.
-- `nightly` — integrates upstream `HKUDS/nanobot` plus moeka work; merged into `main` when stable.
+- `main` — the full distribution; the running systemd unit follows this branch. Upstream syncs land here.
+- `core-slim` — the slim kernel (the `moeka` package), a long-lived branch *downstream* of `main`: it deletes channels, the WebUI and the gateway, so it is never merged into `main`. It syncs by `git merge main` (never rebased: the RSI harness repo pins its SHAs).
+- `nightly` — retired 2026-09-28 (fast-forwarded to `main`, kept only as an alias); do not integrate there.
 
-The `upstream` remote points at `HKUDS/nanobot`. Upstream's own `nightly` branch went stale after 2026-06-03 (HKUDS kept developing on `upstream/main` instead), so moeka now syncs periodically from `upstream/main` directly rather than `upstream/nightly`. Periodic merges of `upstream/main` into local `nightly` pull in new providers, channels, and runtime features; moeka-specific deviations (see *Project Overview*) must be preserved during conflict resolution.
+The `upstream` remote points at `HKUDS/nanobot`; moeka syncs from `upstream/main` (upstream's `nightly` went stale after 2026-06-03). Flow: `upstream/main` → merge branch off `main` (e.g. `merge/upstream-main-<date>`) → `main` after tests and a deploy check → `git merge main` into `core-slim` (modify/delete conflicts there resolve as "keep deleted"). Moeka-specific deviations (see *Project Overview*) must be preserved during conflict resolution.
 
 ## Code Style
 
