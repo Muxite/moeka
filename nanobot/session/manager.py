@@ -1669,6 +1669,7 @@ class SessionManager:
         self._overflow_cache: WeakValueDictionary[str, Session] = WeakValueDictionary()
         self._max_cached_sessions = SESSION_CACHE_MAX_SIZE
         self._delete_observer: Callable[[str], None] | None = None
+        self._history_reset_observers: list[Callable[[str], None]] = []
 
     @property
     def legacy_sessions_dir(self) -> Path:
@@ -1702,6 +1703,27 @@ class SessionManager:
     def set_delete_observer(self, observer: Callable[[str], None]) -> None:
         """Observe explicit session deletion for process-local state cleanup."""
         self._delete_observer = observer
+
+    def add_history_reset_observer(self, observer: Callable[[str], None]) -> None:
+        """Call *observer(key)* when *key*'s archived memory history no longer matches it.
+
+        Memory archives (``history.jsonl`` entries, kept by the agent's memory store,
+        not here) record no message offsets; every entry for a key covers the
+        prefix ``messages[:last_archived]`` summarised by the session's committed
+        summary. So the entries stay valid exactly while that summary does. The
+        observer runs when :meth:`truncate` leaves no committed summary (the cut
+        dropped it, or there was none: the whole kept prefix replays raw), for the
+        target of :meth:`fork_session` (a new or replaced transcript under that
+        key), and for :meth:`delete_session`. Observers must not raise.
+        """
+        self._history_reset_observers.append(observer)
+
+    def _history_reset(self, key: str) -> None:
+        for observer in self._history_reset_observers:
+            try:
+                observer(key)
+            except Exception:  # noqa: BLE001 - a cleanup hook never fails the mutation
+                logger.exception("history reset observer failed for session {}", key)
 
     @staticmethod
     def safe_key(key: str) -> str:
@@ -1896,6 +1918,7 @@ class SessionManager:
         deleted = self._store.delete(key)
         if self._delete_observer is not None:
             self._delete_observer(key)
+        self._history_reset(key)
         return deleted
 
     def restore_sessions_to_workspace(self) -> SessionRestoreResult:
@@ -1980,6 +2003,7 @@ class SessionManager:
             last_consolidated=last_consolidated,
         )
         self.save(target, fsync=True)
+        self._history_reset(target_key)
         return target
 
     def truncate(self, key: str, n: int) -> Session | None:
@@ -1991,7 +2015,9 @@ class SessionManager:
         holding it sees the cut), its ``provider_state`` is dropped, the in-flight
         turn keys in ``_TRUNCATE_VOLATILE_METADATA_KEYS`` are removed, and the
         consolidation state is cut by :func:`_cut_consolidation_state`. Saving
-        also removes a JSONL store's runtime-checkpoint sidecar.
+        also removes a JSONL store's runtime-checkpoint sidecar. When no committed
+        summary survives, the history-reset observers run for *key* (see
+        :meth:`add_history_reset_observer`).
         """
         session = self._cached(key)
         if session is None:
@@ -2013,6 +2039,8 @@ class SessionManager:
         session.provider_state = None
         session.updated_at = datetime.now()
         self.save(session, fsync=True)
+        if session.last_consolidated == 0:
+            self._history_reset(key)
         return session
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:

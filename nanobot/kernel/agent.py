@@ -9,7 +9,13 @@ spec applied, living on the kernel's loop thread:
   ``AGENTS.md`` unless ``bootstrap`` has one), memory.
 - **Memory** (Task 11). ``spec.memory`` gives the loop's semantic memory the kernel
   document store ``kernel.memory(f"agent:{name}")`` (under ``state_dir``, the kernel's
-  shared embedder, pinned open while the agent is). ``spec.doc_scopes`` adds the
+  shared embedder, pinned open while the agent is). Every kernel agent keeps its
+  memory files (MEMORY.md, history.jsonl, cursors) in
+  ``<state_dir>/agents/<name>/memory`` (:func:`agent_memory_dir`), never in
+  ``work_dir`` and never shared with another agent; only a ``memory=True`` agent's
+  prompt includes them (the long-term memory and the "Recent History" section).
+  Rewinding, forking into or deleting a session drops that key's archived history
+  entries when they no longer match the transcript (see ``Kernel``). ``spec.doc_scopes`` adds the
   read-only ``search_documents(query, scope=None, k=5)`` action over those scopes
   (hybrid search), registered like any action: the tool scope must admit it.
 - **Model.** ``spec.model`` resolves like ``kernel.llm`` (an alias from
@@ -92,6 +98,7 @@ from nanobot.kernel.strict import fully_denied
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
+    from pathlib import Path
     from types import TracebackType
 
     from pydantic import BaseModel
@@ -141,6 +148,36 @@ _KERNEL_DEFAULT_DENY: frozenset[str] = frozenset({
 _BUS_TOOLS: frozenset[str] = frozenset({
     "spawn", "create_goal", "update_goal", "defer_action", "send_session_message",
 })
+
+
+# Per-agent state lives in ``<state_dir>/agents/<dirname>/``.
+AGENTS_DIRNAME = "agents"
+_MAX_AGENT_DIRNAME = 200
+
+
+def agent_dirname(name: str) -> str:
+    """A file-system-safe, injective directory name for agent *name*.
+
+    Percent-encoded (dots too, so ``.``/``..`` cannot escape); a name whose encoding
+    is too long becomes an encoded prefix plus a sha256 suffix of the whole name.
+    """
+    import hashlib
+    from urllib.parse import quote
+
+    encoded = quote(name, safe="-_").replace(".", "%2E")
+    if len(encoded) <= _MAX_AGENT_DIRNAME:
+        return encoded
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:32]
+    prefix = encoded[:64]
+    cut = prefix.rfind("%", len(prefix) - 2)
+    if cut != -1:  # never end on half an escape
+        prefix = prefix[:cut]
+    return f"{prefix}~{digest}"
+
+
+def agent_memory_dir(state_dir: Path, name: str) -> Path:
+    """Where agent *name* keeps MEMORY.md, history.jsonl and its cursors."""
+    return state_dir / AGENTS_DIRNAME / agent_dirname(name) / "memory"
 
 
 def _opt_positive(value: Any, name: str) -> None:
@@ -763,6 +800,10 @@ class Agent:
             "provider": route.provider,
             "model": route.model,
             "session_manager": kernel._session_manager(),
+            # Per-agent memory files under state_dir (never shared, never in work_dir);
+            # only a memory=True agent's prompt reads them back.
+            "memory_dir": agent_memory_dir(env.paths.state_dir, spec.name),
+            "inject_memory": spec.memory,
             "variant": kernel.variant,
             "max_policy_denials": spec.limits.max_policy_denials,
             "plugin_registry": kernel.plugins,

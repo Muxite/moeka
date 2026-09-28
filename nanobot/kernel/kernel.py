@@ -328,7 +328,37 @@ class Kernel:
                 self._sessions = SessionManager(
                     paths.work_dir, sessions_root=paths.sessions_root, store=store,
                 )
+                self._sessions.add_history_reset_observer(self._drop_session_history)
             return self._sessions
+
+    def _drop_session_history(self, key: str) -> None:
+        """Drop *key*'s archived memory history from every agent's memory dir.
+
+        Runs when a rewind leaves no committed summary, a fork creates or replaces
+        *key*, or *key* is deleted (``SessionManager.add_history_reset_observer``):
+        those entries summarise messages the transcript no longer has, and would
+        otherwise come back as "Recent History". Built agents' stores are rewritten
+        under their append lock; other agents' files (built in an earlier process)
+        directly.
+        """
+        from nanobot.agent.memory import drop_session_history
+        from nanobot.kernel.agent import AGENTS_DIRNAME
+
+        with self._agents_lock:
+            agents = list(self._agents.values())
+        live = {}
+        for agent in agents:
+            loop = agent._loop
+            if loop is not None:
+                store = loop.context.memory
+                live[store.history_file] = store
+        root = self._env.paths.state_dir / AGENTS_DIRNAME
+        for history in sorted(root.glob("*/memory/history.jsonl")):
+            store = live.get(history)
+            if store is not None:
+                store.drop_session_history(key)
+            else:
+                drop_session_history(history, key)
 
     # -- lifecycle -------------------------------------------------------
 

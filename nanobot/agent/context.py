@@ -118,8 +118,13 @@ class ContextBuilder:
         inline_skills: Sequence[Any] | None = None,
         env: CoreEnvironment | None = None,
         variant: Variant | None = None,
+        memory_dir: Path | None = None,
+        inject_memory: bool = True,
     ):
         self.workspace = workspace
+        # ``False`` (kernel agents without ``memory=True``): the prompt gets neither
+        # MEMORY.md nor the history-based "Recent History" section.
+        self.inject_memory = inject_memory
         # Variant (Task 8): template roots, bundled-skills dir and bootstrap entries.
         # ``None`` / ``Variant()`` = the built-ins, byte for byte.
         self.variant = variant
@@ -136,7 +141,7 @@ class ContextBuilder:
         }
         # Host env: ``skill.listed`` goes to ``env.trace`` (none without an env).
         self._env = env
-        self.memory = MemoryStore(workspace, vec_store=vec_store, env=env)
+        self.memory = MemoryStore(workspace, vec_store=vec_store, env=env, memory_dir=memory_dir)
         self.skills = SkillsLoader(
             workspace,
             builtin_skills_dir=variant.builtin_skills_dir if variant is not None else None,
@@ -165,6 +170,8 @@ class ContextBuilder:
         renders the prompt without it being a turn).
         """
         root = workspace or self.workspace
+        if not getattr(self, "inject_memory", True):
+            include_memory = include_memory_recent_history = False
         parts = [self._get_identity(channel=channel, workspace=root)]
 
         bootstrap = self._load_bootstrap_files(root)

@@ -437,6 +437,90 @@ async def test_agent_memory_uses_the_state_dir_scope(kernel) -> None:
     assert not store._pinned
 
 
+def _system_prompt(call: Any) -> str:
+    return next(m["content"] for m in call.messages if m.get("role") == "system")
+
+
+async def test_agent_memory_files_are_per_agent_and_off_by_default(kernel) -> None:
+    from nanobot.kernel.agent import agent_memory_dir
+
+    work_memory = kernel.env.paths.work_dir / "memory"
+    work_memory.mkdir(parents=True)
+    (work_memory / "MEMORY.md").write_text("WORKSPACE-SECRET", encoding="utf-8")
+    state = kernel.env.paths.state_dir
+    for name in ("alice", "bob"):
+        mem = agent_memory_dir(state, f"coach-{name}")
+        mem.mkdir(parents=True)
+        (mem / "MEMORY.md").write_text(f"MEMORY-OF-{name.upper()}", encoding="utf-8")
+    fake = FakeProvider(default="ok")
+    kernel.llm.register_provider("main", fake, MAIN)
+
+    await kernel.agent(AgentSpec(name="coach-alice", memory=True)).run("hi")
+    prompt = _system_prompt(fake.calls[-1])
+    assert "MEMORY-OF-ALICE" in prompt
+    assert "MEMORY-OF-BOB" not in prompt and "WORKSPACE-SECRET" not in prompt
+    await kernel.agent(AgentSpec(name="coach-bob", memory=True)).run("hi")
+    prompt = _system_prompt(fake.calls[-1])
+    assert "MEMORY-OF-BOB" in prompt and "MEMORY-OF-ALICE" not in prompt
+    # memory=False: no long-term memory at all, its own or the workspace's.
+    plain = kernel.agent(AgentSpec(name="plain"))
+    await plain.run("hi")
+    prompt = _system_prompt(fake.calls[-1])
+    assert "MEMORY-OF-" not in prompt and "WORKSPACE-SECRET" not in prompt
+    assert plain._loop.context.memory.memory_dir == agent_memory_dir(state, "plain")
+    # Nothing new was written into work_dir.
+    assert sorted(p.name for p in work_memory.iterdir()) == ["MEMORY.md"]
+
+
+def test_agent_dirname_is_safe() -> None:
+    from nanobot.kernel.agent import agent_dirname
+
+    assert agent_dirname("coach") == "coach"
+    assert agent_dirname("..") == "%2E%2E" and agent_dirname("a/b") == "a%2Fb"
+    long = agent_dirname("é" * 300)
+    assert len(long) < 120 and "~" in long and long != agent_dirname("é" * 301)
+
+
+async def test_rewind_fork_and_delete_drop_archived_history_for_the_key(kernel) -> None:
+    from nanobot.agent.memory import MemoryStore
+    from nanobot.kernel.agent import agent_memory_dir
+
+    fake = FakeProvider(default="ok")
+    kernel.llm.register_provider("main", fake, MAIN)
+    agent = kernel.agent(AgentSpec(name="coach", memory=True))
+    key = "coach:dana"
+    chat = await kernel.sessions.create(key)
+    cp = await chat.append({"role": "user", "content": "one"},
+                           {"role": "assistant", "content": "two"})
+    await chat.append({"role": "user", "content": "three"},
+                      {"role": "assistant", "content": "four"})
+    agent.tools  # noqa: B018 - builds the loop (its memory store)
+    store = agent._loop.context.memory
+    # An archive of the later turns (as consolidation would write), another key's
+    # entry, and an agent built in an earlier process with entries for these keys.
+    store.append_history("ARCHIVED-LATER-TURNS", session_key=key)
+    store.append_history("OTHER-KEY-ENTRY", session_key="coach:other")
+    ghost = MemoryStore(kernel.env.paths.work_dir,
+                        memory_dir=agent_memory_dir(kernel.env.paths.state_dir, "ghost"))
+    ghost.append_history("GHOST-ENTRY", session_key=key)
+    ghost.append_history("GHOST-FORK-TARGET", session_key=f"{key}/b")
+
+    await agent.run("again", session=chat)
+    assert "ARCHIVED-LATER-TURNS" in _system_prompt(fake.calls[-1])
+
+    await chat.rewind(cp)  # no committed summary survives: the key's entries go
+    await agent.run("after rewind", session=chat)
+    assert "ARCHIVED-LATER-TURNS" not in _system_prompt(fake.calls[-1])
+    contents = [e["content"] for e in store._read_entries()]
+    assert contents == ["OTHER-KEY-ENTRY"]
+    assert [e["content"] for e in ghost._read_entries()] == ["GHOST-FORK-TARGET"]
+
+    await chat.fork(cp, key=f"{key}/b")  # a new transcript under that key
+    assert ghost._read_entries() == []
+    await kernel.sessions.delete("coach:other")
+    assert store._read_entries() == []
+
+
 async def test_doc_scopes_search_tool_in_a_run(kernel) -> None:
     kb = kernel.memory("kb")
     _keyword_ok(kb)

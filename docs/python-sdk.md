@@ -420,7 +420,18 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
     leave it out of `tools_allow` when the agent must not run commands.
   - `inline_skills` are `InlineSkillConfig` values or dicts
     (`{"name", "content", "description"}`).
-  - `memory=True` gives the loop semantic memory in `kernel.memory("agent:<name>")`.
+  - Every kernel agent keeps its own memory files (`MEMORY.md`, the archived
+    `history.jsonl`, cursors) in `<state_dir>/agents/<name>/memory/`, never in
+    `work_dir` and never shared with another agent, persona or rollout. Only
+    `memory=True` puts them in the prompt (long-term memory plus a "Recent
+    History" section of the session's archived turns) and gives the loop
+    semantic memory in `kernel.memory("agent:<name>")`. With the default
+    `memory=False` the prompt has neither, and a workspace `memory/MEMORY.md` is
+    never read.
+  - Caveat: with `memory=True` the memory lookup (and its query embedding) runs
+    synchronously on the kernel loop while the prompt is built, so it delays
+    other calls on the kernel by that long (tens of milliseconds with the `vec`
+    extra).
   - `doc_scopes` adds a read-only `search_documents(query, scope=None, k=5)`
     action over those `kernel.memory` scopes.
   - `AgentSpec.from_profile(profile, *, name="default")` converts a legacy
@@ -505,7 +516,11 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
   ```
 
   - A callable becomes a `FunctionTool`: the JSON schema comes from its type
-    hints, the description from its docstring's first paragraph.
+    hints, the description from its docstring's first paragraph. A sync callable
+    runs in a worker thread (with the run's trace context), so it may block and
+    may call `*_sync` kernel APIs (`kernel.llm.complete_sync`, `DocStore`
+    methods) without stalling other calls. An async callable runs on the kernel
+    loop: it must not block, and it awaits kernel APIs directly.
     `add_action(action, *, name=None, description=None, read_only=False,
     capabilities=(), output_model=None, replace=False)` returns the tool name.
   - `output_model` (a pydantic model) validates the action's result; a result
@@ -586,6 +601,12 @@ snap = chat.snapshot()                                      # serialisable
   the action: it deadlocks until the run's deadline, or forever without one.
   Write to another key, or pass `append(timeout=...)` to get `SessionBusyError`
   instead.
+- Rewinds also clean agent memory: when a rewind leaves no committed summary,
+  every agent's archived history entries for that key are dropped, so a rewound
+  branch never returns as "Recent History". A fork's target key and a deleted
+  key get the same cleanup. Archived entries record no message offsets; while a
+  committed summary survives the cut, the entries it summarises lie inside the
+  kept prefix and stay. Long-term `MEMORY.md` is not rewound.
 - `list()` loads every transcript; it is meant for small stores and admin views.
 
 ## Memory
@@ -698,8 +719,9 @@ with Kernel(env, variant=variant) as kernel:
   prompt and sub-agent prompts; memory and runner templates stay built-in.
 - `Fingerprint(digest, components)`: sha256 over the rendered system prompt,
   the tool definitions, the model and the sampling (`components` holds each
-  part's hash). Workspace and skills paths are normalised and per-session memory
-  and history are excluded, so the digest is stable across rollouts of one
+  part's hash). Workspace and skills paths are normalised and memory is
+  excluded (the long-term memory and "Recent History" sections are left out even
+  for a `memory=True` agent), so the digest is stable across rollouts of one
   variant. `fingerprint()` connects the agent's MCP servers first, so their tools
   are part of the digest.
 - `Kernel(solvers=SolverRegistry(), baselines=...)` gives a kernel its own

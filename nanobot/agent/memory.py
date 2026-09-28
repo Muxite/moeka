@@ -56,6 +56,48 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def drop_session_history(history_file: Path, session_key: str) -> int:
+    """Rewrite *history_file* without the entries recorded for *session_key*.
+
+    Returns how many entries were removed (the file is only rewritten when some
+    were). Lines that are not JSON objects are kept as they are. The cursor
+    counter is left alone, so cursors stay monotonic. Used when a session is cut
+    back, replaced or deleted (``SessionManager.add_history_reset_observer``):
+    archived summaries of messages that no longer exist must not come back as
+    "Recent History". Entries Dream already folded into MEMORY.md stay there.
+    """
+    try:
+        lines = history_file.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return 0
+    kept: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry: object = json.loads(line)
+        except json.JSONDecodeError:
+            entry = None
+        if isinstance(entry, dict) and entry.get("session_key") == session_key:
+            continue
+        kept.append(line)
+    removed = sum(1 for line in lines if line.strip()) - len(kept)
+    if not removed:
+        return 0
+    tmp_path = history_file.with_suffix(history_file.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for line in kept:
+                f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, history_file)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return removed
+
+
 class MemoryStore:
     """Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
 
@@ -81,6 +123,7 @@ class MemoryStore:
         max_history_entries: int = _DEFAULT_MAX_HISTORY,
         vec_store: VecStore | None = None,
         env: Any | None = None,
+        memory_dir: Path | None = None,
     ):
         self.workspace = workspace
         # Host env (``CoreEnvironment``): Dream's file tools take their floor and
@@ -88,7 +131,10 @@ class MemoryStore:
         self._env = env
         self.max_history_entries = max_history_entries
         self.vec_store = vec_store
-        self.memory_dir = ensure_dir(workspace / "memory")
+        # ``memory_dir`` (kernel agents: ``<state_dir>/agents/<name>/memory``) moves
+        # MEMORY.md, history.jsonl and the cursors out of the workspace; SOUL.md and
+        # USER.md stay workspace files.
+        self.memory_dir = ensure_dir(memory_dir if memory_dir is not None else workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "history.jsonl"
         self.legacy_history_file = self.memory_dir / "HISTORY.md"
@@ -525,6 +571,14 @@ class MemoryStore:
             updated_memory = self.read_memory()
             if updated_memory:
                 self.vec_store.upsert_memory_chunks(updated_memory)
+
+    def drop_session_history(self, session_key: str) -> int:
+        """Remove every history entry recorded for *session_key*; return the count.
+
+        See :func:`drop_session_history`; serialised with :meth:`append_history`.
+        """
+        with self._append_lock:
+            return drop_session_history(self.history_file, session_key)
 
     # -- JSONL helpers -------------------------------------------------------
 

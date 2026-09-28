@@ -343,6 +343,8 @@ class AgentLoop:
         variant: Variant | None = None,
         max_policy_denials: int | None = None,
         plugin_registry: PluginRegistry | None = None,
+        memory_dir: Path | None = None,
+        inject_memory: bool = True,
     ):
         from nanobot.config.schema import ToolsConfig
         from nanobot.kernel.gate import AGENT_PRINCIPAL
@@ -449,6 +451,8 @@ class AgentLoop:
             inline_skills=inline_skills,
             env=env,
             variant=variant,
+            memory_dir=memory_dir,
+            inject_memory=inject_memory,
         )
         if session_manager is not None:
             self.sessions = session_manager
