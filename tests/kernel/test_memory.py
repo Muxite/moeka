@@ -491,6 +491,52 @@ async def test_identity_prompt_points_at_the_agents_own_memory_dir(kernel) -> No
     assert "Long-term memory:" not in prompt and "History log:" not in prompt
 
 
+async def test_memory_key_separates_same_name_agents(kernel) -> None:
+    from loguru import logger
+
+    from nanobot.kernel.agent import agent_memory_dir
+
+    state = kernel.env.paths.state_dir
+    fake = FakeProvider(default="ok")
+    kernel.llm.register_provider("main", fake, MAIN)
+    for key in ("coach", "coach-dana", "coach-erin"):
+        mem = agent_memory_dir(state, key)
+        mem.mkdir(parents=True)
+        (mem / "MEMORY.md").write_text(f"MEMORY-OF-{key.upper()}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="memory_key"):
+        AgentSpec(name="coach", memory_key="")
+    legacy = AgentSpec(name="coach", memory=True)
+    assert legacy.effective_memory_key == "coach"
+    await kernel.agent(legacy).run("hi")
+    assert "MEMORY-OF-COACH" in _system_prompt(fake.calls[-1])
+
+    logs: list[str] = []
+    hid = logger.add(lambda m: logs.append(str(m)), level="WARNING")
+    try:
+        dana = kernel.agent(AgentSpec(name="coach", memory=True, memory_key="coach-dana",
+                                      system_prompt="dana"))
+        erin = kernel.agent(AgentSpec(name="coach", memory=True, memory_key="coach-erin",
+                                      system_prompt="erin"))
+        assert not logs  # same name, distinct keys: nothing is shared
+        await dana.run("hi")
+        prompt = _system_prompt(fake.calls[-1])
+        assert "MEMORY-OF-COACH-DANA" in prompt and "MEMORY-OF-COACH-ERIN" not in prompt
+        await erin.run("hi")
+        prompt = _system_prompt(fake.calls[-1])
+        assert "MEMORY-OF-COACH-ERIN" in prompt and "MEMORY-OF-COACH-DANA" not in prompt
+        assert dana._loop.context.memory.memory_dir == agent_memory_dir(state, "coach-dana")
+        # Each key has its own default session, too.
+        assert kernel.sessions.get("agent:coach-dana") is not None
+        assert kernel.sessions.get("agent:coach-erin") is not None
+
+        # A different spec reusing a live key shares its memory: warned about.
+        kernel.agent(AgentSpec(name="other", memory=True, memory_key="coach-dana"))
+        assert any("coach-dana" in m and "share" in m for m in logs)
+    finally:
+        logger.remove(hid)
+
+
 def test_agent_dirname_is_safe() -> None:
     from nanobot.kernel.agent import agent_dirname
 

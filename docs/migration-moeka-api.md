@@ -220,9 +220,11 @@ text, tools, usage, cost = result.content, result.tools_used, result.usage, resu
   memory (and loads the embedder). Use `dataclasses.replace(spec, memory=False)`
   as above, or build the `AgentSpec` directly.
 - Memory is per agent: a `memory=True` agent keeps `MEMORY.md` and its archived
-  history in `state_dir/agents/<name>/memory`, and only such an agent sees them
-  in its prompt. `work_dir/memory/MEMORY.md` is never read, so nothing leaks
-  between the research agent, the discovery agent and later rollouts.
+  history in `state_dir/agents/<key>/memory` (`<key>` = `AgentSpec.memory_key`,
+  default the name), and only such an agent sees them in its prompt.
+  `work_dir/memory/MEMORY.md` is never read, so nothing leaks between the
+  research agent, the discovery agent and later rollouts, as long as they have
+  different names or `memory_key`s.
 - Default tools: a kernel agent never gets the session tools (`list_sessions`,
   `read_session`, `search_sessions`), `my`, `spawn`, the goal tools or
   `defer_action` unless `tools_allow` names them, and the bus-delivered ones

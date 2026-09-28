@@ -8,11 +8,14 @@ spec applied, living on the kernel's loop thread:
   allow/deny, skills include/exclude/inline, persona (``system_prompt`` fills
   ``AGENTS.md`` unless ``bootstrap`` has one), memory.
 - **Memory** (Task 11). ``spec.memory`` gives the loop's semantic memory the kernel
-  document store ``kernel.memory(f"agent:{name}")`` (under ``state_dir``, the kernel's
+  document store ``kernel.memory(f"agent:{key}")`` (under ``state_dir``, the kernel's
   shared embedder, pinned open while the agent is). Every kernel agent keeps its
   memory files (MEMORY.md, history.jsonl, cursors) in
-  ``<state_dir>/agents/<name>/memory`` (:func:`agent_memory_dir`), never in
-  ``work_dir`` and never shared with another agent; only a ``memory=True`` agent's
+  ``<state_dir>/agents/<key>/memory`` (:func:`agent_memory_dir`), never in
+  ``work_dir``. ``key`` is ``spec.memory_key``, default the name: agents with the
+  same key share that memory (and default session), so specs that must not
+  share one give distinct keys (``kernel.agent`` warns when two live, different
+  specs share a key); only a ``memory=True`` agent's
   prompt includes them (the long-term memory and the "Recent History" section).
   Rewinding, forking into or deleting a session drops that key's archived history
   entries when they no longer match the transcript (see ``Kernel``). ``spec.doc_scopes`` adds the
@@ -253,8 +256,9 @@ class AgentSpec:
     ``mcp_servers`` values are validated (``InlineSkillConfig`` / ``MCPServer``) and
     stored as frozen dicts. ``actions`` are ``Tool`` instances or callables (see
     :meth:`Agent.add_action`). ``doc_scopes`` names ``kernel.memory`` scopes the
-    agent can search (the ``search_documents`` action). ``offline``: see the module
-    docstring.
+    agent can search (the ``search_documents`` action). ``memory_key`` names the
+    agent's memory (files, semantic store, default session; default ``name``).
+    ``offline``: see the module docstring.
     """
 
     name: str
@@ -274,6 +278,7 @@ class AgentSpec:
     limits: RunLimits = field(default_factory=RunLimits)
     policy: PermissionPolicy | None = None
     offline: bool = False
+    memory_key: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -282,6 +287,10 @@ class AgentSpec:
             raise TypeError("AgentSpec.system_prompt must be a str or None")
         if self.model is not None and (not isinstance(self.model, str) or not self.model):
             raise TypeError("AgentSpec.model must be a non-empty str or None")
+        if self.memory_key is not None and (
+            not isinstance(self.memory_key, str) or not self.memory_key
+        ):
+            raise ValueError("AgentSpec.memory_key must be a non-empty str or None")
         if self.sampling is not None and not isinstance(self.sampling, Sampling):
             raise TypeError(f"AgentSpec.sampling must be a Sampling, got {self.sampling!r}")
         if not isinstance(self.limits, RunLimits):
@@ -316,6 +325,11 @@ class AgentSpec:
         set_(self, "inline_skills", tuple(_inline_skill(s) for s in self.inline_skills))
         set_(self, "memory", bool(self.memory))
         set_(self, "offline", bool(self.offline))
+
+    @property
+    def effective_memory_key(self) -> str:
+        """The key the agent's memory and default session live under."""
+        return self.memory_key or self.name
 
     @classmethod
     def from_profile(cls, profile: AgentProfileConfig, *, name: str = "default") -> AgentSpec:
@@ -802,7 +816,7 @@ class Agent:
             "session_manager": kernel._session_manager(),
             # Per-agent memory files under state_dir (never shared, never in work_dir);
             # only a memory=True agent's prompt reads them back.
-            "memory_dir": agent_memory_dir(env.paths.state_dir, spec.name),
+            "memory_dir": agent_memory_dir(env.paths.state_dir, spec.effective_memory_key),
             "inject_memory": spec.memory,
             "variant": kernel.variant,
             "max_policy_denials": spec.limits.max_policy_denials,
@@ -821,7 +835,7 @@ class Agent:
             # directly, so it must never be released by the LRU under the loop.
             # Pinned once per agent (a retried build reuses the pin).
             if self._memory is None:
-                store = kernel.memory(f"agent:{spec.name}")
+                store = kernel.memory(f"agent:{spec.effective_memory_key}")
                 store._pin()
                 self._memory = store
             extra["vec_store"] = self._memory._pin_store()
@@ -1184,7 +1198,7 @@ class Agent:
             body,
             final_event=_final_event,
             started_metadata={
-                "session_key": session or f"agent:{self._spec.name}",
+                "session_key": session or f"agent:{self._spec.effective_memory_key}",
                 "agent": self._spec.name,
             },
         )
@@ -1246,12 +1260,14 @@ class Agent:
         if task is not None:
             self._runs.add(task)
         spec = self._spec
-        session_key = session or f"agent:{spec.name}"
+        session_key = session or f"agent:{spec.effective_memory_key}"
         deadline = deadline_s if deadline_s is not None else spec.limits.deadline_s
         route = self._route
         capture = _RunCapture(model=route.model, provider=route.provider.provider_name)
         cost = _RunCost()
         span_tags = {**dict(tags or {}), "agent": spec.name}
+        if spec.memory_key is not None and spec.memory_key != spec.name:
+            span_tags["memory_key"] = spec.memory_key
         run_span = self._kernel.trace.span("agent.run", **span_tags)
         unsubscribe = self._kernel.trace.subscribe("model.call", cost.on_event)
 

@@ -303,6 +303,15 @@ class Kernel:
                 raise RuntimeError("kernel is closed")
             agent = self._agents.get(spec)
             if agent is None or agent.closed:
+                key = spec.effective_memory_key
+                for other, live in self._agents.items():
+                    if other.effective_memory_key == key and not live.closed:
+                        logger.warning(
+                            "kernel: agents {!r} and {!r} share memory key {!r} (memory "
+                            "and default session); set AgentSpec.memory_key to separate "
+                            "them", other.name, spec.name, key,
+                        )
+                        break
                 agent = Agent(self, spec)
                 self._agents[spec] = agent
             return agent

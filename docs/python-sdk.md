@@ -439,12 +439,16 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
     leave it out of `tools_allow` when the agent must not run commands.
   - `inline_skills` are `InlineSkillConfig` values or dicts
     (`{"name", "content", "description"}`).
-  - Every kernel agent keeps its own memory files (`MEMORY.md`, the archived
-    `history.jsonl`, cursors) in `<state_dir>/agents/<name>/memory/`, never in
-    `work_dir` and never shared with another agent, persona or rollout. Only
-    `memory=True` puts them in the prompt (long-term memory plus a "Recent
+  - Every kernel agent keeps its memory files (`MEMORY.md`, the archived
+    `history.jsonl`, cursors) in `<state_dir>/agents/<key>/memory/`, never in
+    `work_dir`. `<key>` is `AgentSpec.memory_key`, default the agent's `name`:
+    agents with the same key share one memory and one default session
+    (`"agent:<key>"`), so give specs that must stay apart (two personas or
+    rollouts under one name) distinct `memory_key`s; `kernel.agent()` logs a
+    warning when a second, different spec takes a live agent's key. Only
+    `memory=True` puts the files in the prompt (long-term memory plus a "Recent
     History" section of the session's archived turns) and gives the loop
-    semantic memory in `kernel.memory("agent:<name>")`. With the default
+    semantic memory in `kernel.memory("agent:<key>")`. With the default
     `memory=False` the prompt has neither, and a workspace `memory/MEMORY.md` is
     never read.
   - Caveat: with `memory=True` the memory lookup (and its query embedding) runs
@@ -621,11 +625,14 @@ snap = chat.snapshot()                                      # serialisable
   Write to another key, or pass `append(timeout=...)` to get `SessionBusyError`
   instead.
 - Rewinds also clean agent memory: when a rewind leaves no committed summary,
-  every agent's archived history entries for that key are dropped, so a rewound
-  branch never returns as "Recent History". A fork's target key and a deleted
-  key get the same cleanup. Archived entries record no message offsets; while a
-  committed summary survives the cut, the entries it summarises lie inside the
-  kept prefix and stay. Long-term `MEMORY.md` is not rewound.
+  every agent's archived history entries for that key's current transcript are
+  dropped, so a rewound branch never returns as "Recent History". Entries
+  archived before a `/new` summarise a transcript no rewind reaches, and stay
+  (each `/new` starts a new history generation). A fork's target key and a
+  deleted key drop every entry for the key. Archived entries record no message
+  offsets; while a committed summary survives the cut, the entries it
+  summarises lie inside the kept prefix and stay. Long-term `MEMORY.md` is not
+  rewound.
 - `list()` loads every transcript; it is meant for small stores and admin views.
 
 ## Memory
