@@ -130,16 +130,10 @@ def test_from_profile_maps_fields(tmp_path: Path) -> None:
         AgentSpec.from_profile(AgentProfileConfig(planning=True))
 
 
-def test_part_b_fields_raise(make_kernel) -> None:
+def test_max_tool_errors_not_implemented(make_kernel) -> None:
     kernel = make_kernel(FakeProvider())
-    for spec in (
-        AgentSpec(name="x", actions=[lambda: None]),
-        AgentSpec(name="x", mcp_servers={"s": {}}),
-        AgentSpec(name="x", offline=True),
-        AgentSpec(name="x", limits=RunLimits(max_tool_errors=3)),
-    ):
-        with pytest.raises(NotImplementedError):
-            kernel.agent(spec)
+    with pytest.raises(NotImplementedError):
+        kernel.agent(AgentSpec(name="x", limits=RunLimits(max_tool_errors=3)))
 
 
 def test_kernel_agent_caches_per_spec(make_kernel) -> None:

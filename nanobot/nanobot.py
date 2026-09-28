@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,7 @@ from nanobot.sdk.runtime import (
     build_process_direct_kwargs,
     ensure_single_model_selector,
 )
-from nanobot.sdk.streaming import RunStream, SDKStreamEmitter, SDKStreamingHook
+from nanobot.sdk.streaming import RunStream, StreamWiring, start_streamed_run
 from nanobot.sdk.types import (
     STREAM_EVENT_REASONING_COMPLETED,
     STREAM_EVENT_REASONING_DELTA,
@@ -40,7 +39,6 @@ from nanobot.sdk.types import (
     StreamEventType,
     result_from_response,
 )
-from nanobot.utils.llm_runtime import LLMRuntime
 
 __all__ = [
     "Nanobot",
@@ -228,43 +226,9 @@ class Nanobot:
             model_preset=model_preset,
             config=self._config,
         )
-        queue: asyncio.Queue[StreamEvent | object] = asyncio.Queue(maxsize=256)
-        emitter = SDKStreamEmitter(queue)
-        stream_hook = SDKStreamingHook(emitter)
         capture = SDKCaptureHook()
-        per_run_hooks = [capture, stream_hook, *(hooks or [])]
-        run_started = False
 
-        async def _emit_run_started(runtime: LLMRuntime | None = None) -> None:
-            nonlocal run_started
-            if run_started:
-                return
-            if runtime is None:
-                runtime = override_runtime
-            metadata: dict[str, Any] = {
-                "session_key": session_key,
-                "channel": channel,
-                "chat_id": chat_id,
-                "sender_id": sender_id,
-            }
-            if runtime is not None:
-                metadata.update({
-                    "model": runtime.model,
-                    "model_preset": runtime.model_preset,
-                })
-            await emitter.emit(StreamEvent(
-                type=STREAM_EVENT_RUN_STARTED,
-                metadata=metadata,
-            ))
-            run_started = True
-
-        async def _on_stream(delta: str) -> None:
-            await emitter.text_delta(delta)
-
-        async def _on_stream_end(*_args: Any, resuming: bool = False, **_kwargs: Any) -> None:
-            await emitter.text_completed(resuming=resuming)
-
-        async def _run() -> RunResult:
+        async def _body(wiring: StreamWiring) -> RunResult:
             kwargs = build_process_direct_kwargs(
                 session_key=session_key,
                 channel=channel,
@@ -273,44 +237,39 @@ class Nanobot:
                 media=media,
                 ephemeral=ephemeral,
                 attributes=attributes,
-                on_stream=_on_stream,
-                on_stream_end=_on_stream_end,
             )
-            kwargs["on_runtime_admitted"] = _emit_run_started
+            kwargs.update(wiring.process_kwargs())
             if override_runtime is not None:
                 kwargs["runtime"] = override_runtime
-            try:
-                if self._mcp_provider is not None:
-                    await self._mcp_provider.connect()
-                response = await self._loop.process_direct(
-                    message,
-                    **kwargs,
-                    hooks=per_run_hooks,
-                )
-                await _emit_run_started()
-                await emitter.text_completed(resuming=False, force=False)
-                result = result_from_response(response, capture)
-                await emitter.emit(StreamEvent(
-                    type=STREAM_EVENT_RUN_COMPLETED,
-                    content=result.content,
-                    result=result,
-                    usage=result.usage,
-                    metadata=dict(result.metadata),
-                ))
-                return result
-            except Exception as exc:
-                await _emit_run_started()
-                await emitter.emit(StreamEvent(
-                    type=STREAM_EVENT_RUN_FAILED,
-                    error=str(exc),
-                    metadata={"exception_type": type(exc).__name__},
-                ))
-                raise
-            finally:
-                await emitter.close()
+            if self._mcp_provider is not None:
+                await self._mcp_provider.connect()
+            response = await self._loop.process_direct(
+                message,
+                **kwargs,
+                hooks=[capture, wiring.hook, *(hooks or [])],
+            )
+            return result_from_response(response, capture)
 
-        task = asyncio.create_task(_run())
-        return RunStream(task, queue)
+        def _completed(result: RunResult) -> StreamEvent:
+            return StreamEvent(
+                type=STREAM_EVENT_RUN_COMPLETED,
+                content=result.content,
+                result=result,
+                usage=result.usage,
+                metadata=dict(result.metadata),
+            )
+
+        return start_streamed_run(
+            _body,
+            final_event=_completed,
+            started_metadata={
+                "session_key": session_key,
+                "channel": channel,
+                "chat_id": chat_id,
+                "sender_id": sender_id,
+            },
+            runtime=override_runtime,
+        )
 
     async def stream(
         self,

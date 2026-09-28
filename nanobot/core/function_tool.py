@@ -10,13 +10,15 @@ from __future__ import annotations
 import inspect
 import types
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, get_args, get_origin, get_type_hints
 
-from nanobot.agent.tools.base import Tool, ToolResult
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request
 
 if typing.TYPE_CHECKING:
     from pydantic import BaseModel
+
+    from nanobot.kernel.policy import CapabilityRequest
 
 # Python annotation -> JSON Schema "type" string.
 _PY_TO_JSON: dict[type, str] = {
@@ -156,9 +158,18 @@ class FunctionTool(Tool):
     always freshly validated, and the kernel's ``validate_result`` trusts it (for this
     exact class only) rather than re-checking its dumped form.
     Without it the return value passes exactly as before.
+
+    ``capabilities`` (optional): what every call needs, as ``CapabilityRequest``s or
+    bare capability names (a name means that capability with an empty resource).
+    ``capabilities(params)`` returns the whole declaration for every call, so the
+    kernel gate evaluates it like any built-in tool's, and it is the tool's static
+    ``capability_surface``. Default: none (the gate only runs its floors).
     """
 
     _plugin_discoverable = False
+    # Per instance (set from ``capabilities``); declared here so ``capability_surface``
+    # trusts it (it must sit on the class that overrides ``capabilities``).
+    _capability_names: frozenset[str] | None = frozenset()
 
     def __init__(
         self,
@@ -169,6 +180,7 @@ class FunctionTool(Tool):
         parameters: dict[str, Any] | None = None,
         read_only: bool = False,
         output_model: type[BaseModel] | None = None,
+        capabilities: Sequence[CapabilityRequest | str] = (),
     ) -> None:
         if not callable(fn):
             raise TypeError(f"FunctionTool expects a callable, got {type(fn).__name__}")
@@ -181,6 +193,20 @@ class FunctionTool(Tool):
         self._output_model = output_model
         if output_model is not None:
             self.output_schema = output_model.model_json_schema()
+        if isinstance(capabilities, str):
+            raise TypeError("FunctionTool capabilities must be a sequence, not a str")
+        declared = []
+        for item in capabilities:
+            if isinstance(item, str):
+                item = capability_request(item)
+            elif not isinstance(getattr(item, "capability", None), str):
+                raise TypeError(
+                    f"FunctionTool capabilities items must be CapabilityRequest or str, "
+                    f"got {item!r}"
+                )
+            declared.append(item)
+        self._declared_capabilities: tuple[CapabilityRequest, ...] = tuple(declared)
+        self._capability_names = frozenset(r.capability for r in declared)
 
     @property
     def name(self) -> str:
@@ -197,6 +223,10 @@ class FunctionTool(Tool):
     @property
     def read_only(self) -> bool:
         return self._read_only
+
+    def capabilities(self, params: dict[str, Any]) -> list[CapabilityRequest]:
+        """The declared capabilities (the same for every call)."""
+        return list(self._declared_capabilities)
 
     @property
     def output_model(self) -> type[BaseModel] | None:

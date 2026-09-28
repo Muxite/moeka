@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     )
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.policy import PermissionPolicy
+    from nanobot.kernel.registry import PluginRegistry
     from nanobot.kernel.variants import Variant
 
 _T = TypeVar("_T")
@@ -341,6 +342,7 @@ class AgentLoop:
         policy: PermissionPolicy | None = None,
         variant: Variant | None = None,
         max_policy_denials: int | None = None,
+        plugin_registry: PluginRegistry | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
         from nanobot.kernel.gate import AGENT_PRINCIPAL
@@ -427,6 +429,9 @@ class AgentLoop:
 
         self.tools_allow = list(tools_allow) if tools_allow is not None else None
         self.tools_deny = list(tools_deny) if tools_deny else []
+        # Kernel-mode plugin loading (P4) for this loop's and its sub-agents' tools;
+        # ``None`` keeps legacy entry-point loading.
+        self.plugin_registry = plugin_registry
         self.planning = planning
         from nanobot.agent.runner import RunnerLimits
         self.runner_limits = runner_limits or RunnerLimits()
@@ -501,6 +506,7 @@ class AgentLoop:
             env=env,
             policy=self.policy,
             variant=variant,
+            plugin_registry=plugin_registry,
         )
         self._unified_session = unified_session
         self._running = False
@@ -755,7 +761,7 @@ class AgentLoop:
             env=self.env,
             variant=self.variant,
         )
-        loader = ToolLoader()
+        loader = ToolLoader(plugin_registry=self.plugin_registry)
         registered = loader.load(ctx, self.tools, allow=self.tools_allow, deny=self.tools_deny)
 
         # MyTool needs runtime state reference — manual registration

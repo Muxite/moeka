@@ -18,7 +18,8 @@ SURFACE: dict[str, list[str]] = {
         "StaticCredentialResolver",
     ],
     "moeka.agents": [
-        "Agent", "AgentSpec", "AskUser", "RunLimits", "RunResult", "StopReason", "ToolInfo",
+        "Agent", "AgentSpec", "AgentStream", "AskUser", "RunLimits", "RunResult",
+        "StopReason", "StreamEvent", "StreamEventType", "ToolInfo",
     ],
     "moeka.budget": ["Budget", "CallEstimate", "CapBudget", "ResponseCache"],
     "moeka.errors": [
@@ -57,6 +58,8 @@ SURFACE: dict[str, list[str]] = {
         "DefaultPolicy",
         "FunctionTool",
         "IntersectionPolicy",
+        "MCPServer",
+        "OfflinePolicy",
         "PermissionPolicy",
         "PluginRegistry",
         "Tool",

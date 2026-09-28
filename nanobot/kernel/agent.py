@@ -1,4 +1,4 @@
-"""Agents (Task 9A): ``kernel.agent(AgentSpec(...))`` runs an agent loop on the kernel.
+"""Agents (Task 9): ``kernel.agent(AgentSpec(...))`` runs an agent loop on the kernel.
 
 An :class:`Agent` is an ``AgentLoop`` built from the kernel's environment with the
 spec applied, living on the kernel's loop thread:
@@ -27,8 +27,32 @@ kernel was closed mid-run). A caller cancelling its own ``run`` task gets
 ``CancelledError`` as usual. A provider error ends the run with ``error`` set to the
 typed :class:`~nanobot.kernel.llm_errors.LLMError`.
 
-Not built yet (Task 9B): ``actions``, ``mcp_servers``, ``offline`` and streaming.
-Setting them raises ``NotImplementedError`` rather than being ignored.
+Tools (Task 9B):
+
+- **Scope.** The effective ``tools_allow`` / ``tools_deny`` (the kernel config's with the
+  spec's applied) is the agent registry's ``admit`` check, so it holds for every tool
+  whoever registers it: built-ins, plugins, MCP tools (``mcp_<server>_<tool>``) and
+  actions.
+- **Actions.** ``spec.actions`` (tools or callables, wrapped as ``FunctionTool``) are
+  registered when the loop is built; :meth:`Agent.add_action` adds one later. An action
+  the scope excludes, whose declared capabilities the agent's policy denies everywhere,
+  that declares a network capability offline, or whose name is taken raises
+  ``ValueError``; nothing is ever dropped silently.
+- **MCP.** ``spec.mcp_servers`` (``MCPServer`` configs, or dicts validated into them)
+  connect through an ``MCPProvider`` on the first run (or ``tools``/``fingerprint``),
+  from those servers only (never the config files). A server that fails is logged and
+  traced as ``mcp.error``; the agent runs without it. ``aclose`` closes them.
+- **Plugins.** With ``Kernel(plugins=registry)``, the agent's and its sub-agents' tool
+  loaders run in kernel mode (only registry-active plugins load).
+- **Offline** (``spec.offline`` or ``env.offline``): no web tools and no tool declaring
+  a network capability, no MCP (``mcp_servers`` with offline raises ``ValueError``),
+  and :class:`~nanobot.kernel.policy.OfflinePolicy` intersected into the policy, so a
+  network request any remaining tool makes is denied with ``OFFLINE_MARKER``. ``exec``
+  is not network-sandboxed by this: the container or sandbox is the real boundary.
+
+Streaming: :meth:`Agent.stream` is :meth:`Agent.run` (same span, hooks, session lock,
+deadline, budget and cancellation) with the SDK's typed ``StreamEvent`` events,
+through the same ``start_streamed_run`` as ``Nanobot.run_streamed``.
 """
 
 from __future__ import annotations
@@ -43,17 +67,32 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from loguru import logger
 
 from nanobot.agent.hook import AgentHookContext, AgentRunHookContext, SDKCaptureHook
-from nanobot.kernel.frozen import FrozenMap, freeze
+from nanobot.kernel.frozen import FrozenMap, freeze, thaw
 from nanobot.kernel.llm import Usage
 from nanobot.kernel.llm_errors import BudgetExceeded, LLMError, classify
+from nanobot.kernel.policy import (
+    OfflinePolicy,
+    is_network_capability,
+    policy_denies_everywhere,
+)
 from nanobot.kernel.sampling import Sampling
+from nanobot.kernel.strict import fully_denied
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+    from types import TracebackType
+
+    from pydantic import BaseModel
+
     from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.tools.base import Tool
+    from nanobot.agent.tools.mcp import MCPProvider
     from nanobot.config.schema import AgentProfileConfig
     from nanobot.kernel.kernel import Kernel
-    from nanobot.kernel.policy import PermissionPolicy
+    from nanobot.kernel.policy import CapabilityRequest, PermissionPolicy
     from nanobot.kernel.variants import Fingerprint
+    from nanobot.sdk.streaming import StreamWiring
+    from nanobot.sdk.types import StreamEvent
 
 
 StopReason = Literal[
@@ -70,7 +109,9 @@ StopReason = Literal[
 ]
 _STOP_REASONS: frozenset[str] = frozenset(get_args(StopReason))
 
-_PART_B = "is not implemented yet (kernel Task 9B)"
+# Built-in web tools an offline agent never gets (by name; any other tool declaring
+# a network capability is refused by its surface).
+_WEB_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch"})
 
 
 def _opt_positive(value: Any, name: str) -> None:
@@ -117,6 +158,18 @@ def _str_tuple(value: Any, name: str, *, optional: bool = False) -> tuple[str, .
     return items
 
 
+def _mcp_server(name: Any, server: Any) -> FrozenMap:
+    from nanobot.config.schema import MCPServerConfig
+
+    if not isinstance(name, str) or not name:
+        raise TypeError(f"AgentSpec.mcp_servers keys must be non-empty str, got {name!r}")
+    if not isinstance(server, MCPServerConfig):
+        server = MCPServerConfig.model_validate(
+            thaw(server) if isinstance(server, Mapping) else server
+        )
+    return FrozenMap(server.model_dump())
+
+
 def _inline_skill(skill: Any) -> FrozenMap:
     from nanobot.config.schema import InlineSkillConfig
 
@@ -130,11 +183,11 @@ def _inline_skill(skill: Any) -> FrozenMap:
 class AgentSpec:
     """What an agent is (hashable: ``kernel.agent(spec)`` caches one agent per spec).
 
-    Mappings are stored frozen, sequences as tuples; ``inline_skills`` are validated
-    ``InlineSkillConfig`` values stored as frozen dicts. ``doc_scopes`` is kept for
-    the kernel's document memory (Task 11). ``actions``, ``mcp_servers`` and
-    ``offline`` are accepted here but raise ``NotImplementedError`` when the agent
-    is built (Task 9B).
+    Mappings are stored frozen, sequences as tuples; ``inline_skills`` and
+    ``mcp_servers`` values are validated (``InlineSkillConfig`` / ``MCPServer``) and
+    stored as frozen dicts. ``actions`` are ``Tool`` instances or callables (see
+    :meth:`Agent.add_action`). ``doc_scopes`` is kept for the kernel's document
+    memory (Task 11). ``offline``: see the module docstring.
     """
 
     name: str
@@ -177,13 +230,21 @@ class AgentSpec:
             raise TypeError("AgentSpec.policy must implement decide(principal, request, ctx)")
         set_ = object.__setattr__
         set_(self, "bootstrap", FrozenMap(self.bootstrap))
-        set_(self, "mcp_servers", FrozenMap(self.mcp_servers))
+        set_(self, "mcp_servers", FrozenMap({
+            name: _mcp_server(name, server) for name, server in self.mcp_servers.items()
+        }))
         set_(self, "tools_allow", _str_tuple(self.tools_allow, "tools_allow", optional=True))
         set_(self, "tools_deny", _str_tuple(self.tools_deny, "tools_deny"))
         set_(self, "skills_include",
              _str_tuple(self.skills_include, "skills_include", optional=True))
         set_(self, "skills_exclude", _str_tuple(self.skills_exclude, "skills_exclude"))
         set_(self, "doc_scopes", _str_tuple(self.doc_scopes, "doc_scopes"))
+        if isinstance(self.actions, (str, bytes)) or not isinstance(self.actions, Sequence):
+            raise TypeError("AgentSpec.actions must be a sequence of tools or callables")
+        for action in self.actions:
+            if not callable(action) and not _is_tool(action):
+                raise TypeError(f"AgentSpec.actions items must be Tools or callables, "
+                                f"got {action!r}")
         set_(self, "actions", tuple(self.actions))
         set_(self, "inline_skills", tuple(_inline_skill(s) for s in self.inline_skills))
         set_(self, "memory", bool(self.memory))
@@ -332,25 +393,260 @@ def _combine_policies(*policies: PermissionPolicy | None) -> PermissionPolicy | 
     return IntersectionPolicy(*present)
 
 
+# -- actions ------------------------------------------------------------------------
+
+
+def _is_tool(value: Any) -> bool:
+    from nanobot.agent.tools.base import Tool
+
+    return isinstance(value, Tool)
+
+
+def _as_tool(
+    action: Any,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    read_only: bool = False,
+    capabilities: Sequence[CapabilityRequest | str] = (),
+    output_model: type[BaseModel] | None = None,
+) -> Tool:
+    """*action* itself when it is a ``Tool``, else a ``FunctionTool`` wrapping it."""
+    if _is_tool(action):
+        if name is not None or description is not None or read_only or capabilities \
+                or output_model is not None:
+            raise TypeError(
+                "name/description/read_only/capabilities/output_model apply to a callable "
+                "action; a Tool declares its own"
+            )
+        return action
+    if not callable(action):
+        raise TypeError(f"an action is a Tool or a callable, got {action!r}")
+    from nanobot.core.function_tool import FunctionTool
+
+    return FunctionTool(
+        action, name=name, description=description, read_only=read_only,
+        capabilities=capabilities, output_model=output_model,
+    )
+
+
+def _surface(tool: Any) -> frozenset[str] | None:
+    """``tool.capability_surface()`` (``None`` = unknown, also when it raises)."""
+    surface_fn = getattr(tool, "capability_surface", None)
+    try:
+        return surface_fn() if callable(surface_fn) else None
+    except Exception:  # noqa: BLE001 - a broken declaration is an unknown surface
+        return None
+
+
+def _declares_network(tool: Any) -> bool:
+    return any(is_network_capability(c) for c in _surface(tool) or ())
+
+
+# -- streaming -----------------------------------------------------------------------
+
+# Stop reasons a stream reports as ``run.failed`` (the result is still attached).
+_FAILED_STOPS: frozenset[str] = frozenset({"error", "tool_error", "deadline", "budget",
+                                           "cancelled"})
+
+
+def _final_event(result: RunResult) -> StreamEvent:
+    """``run.completed``, or ``run.failed`` for a failed stop reason, carrying *result*."""
+    from nanobot.sdk.types import (
+        STREAM_EVENT_RUN_COMPLETED,
+        STREAM_EVENT_RUN_FAILED,
+        StreamEvent,
+    )
+
+    failed = result.stop_reason in _FAILED_STOPS
+    error = None
+    if failed:
+        error = str(result.error) if result.error is not None else result.stop_reason
+    return StreamEvent(
+        type=STREAM_EVENT_RUN_FAILED if failed else STREAM_EVENT_RUN_COMPLETED,
+        content=result.content,
+        result=result,  # type: ignore[arg-type] - the kernel RunResult
+        usage=result.usage,  # type: ignore[arg-type] - the kernel Usage
+        error=error,
+        metadata={
+            "stop_reason": result.stop_reason,
+            "session_key": result.session_key,
+            "trace_id": result.trace_id,
+        },
+    )
+
+
+class _StreamOut:
+    """Where a stream's generator leaves its result (never a reference to its owner)."""
+
+    __slots__ = ("error", "result")
+
+    def __init__(self) -> None:
+        self.result: RunResult | None = None
+        self.error: BaseException | None = None
+
+    def final(self) -> RunResult:
+        if self.error is not None:
+            raise self.error
+        if self.result is None:
+            raise RuntimeError("stream was closed before it completed")
+        return self.result
+
+
+class AgentStream:
+    """The typed ``StreamEvent`` events of one :meth:`Agent.stream` run.
+
+    An async iterator (``run.started``, ``text.delta``/``text.completed``,
+    ``reasoning.*``, ``tool.started``/``tool.completed``/``tool.failed``, then
+    ``run.completed`` or ``run.failed``); ``await result()`` drains it and returns the
+    :class:`RunResult` ``run()`` would have. The run starts on the first iteration.
+    Use ``async with`` (or ``aclose()``) so an early exit cancels the run; a stream
+    dropped mid-run without closing is finalised by the kernel loop, which cancels it.
+    """
+
+    def __init__(self, agent: Agent, gen: AsyncIterator[StreamEvent], out: _StreamOut) -> None:
+        self._agent = agent
+        self._gen = gen
+        self._out = out
+        self._finished = False
+
+    def __aiter__(self) -> AgentStream:
+        return self
+
+    async def __anext__(self) -> StreamEvent:
+        if self._finished:
+            raise StopAsyncIteration
+        gen = self._gen
+
+        async def _next() -> StreamEvent:
+            return await gen.__anext__()
+
+        try:
+            return await self._agent._on_loop(_next())
+        except BaseException:
+            self._finished = True
+            raise
+
+    async def result(self) -> RunResult:
+        """Drain the remaining events and return the run's :class:`RunResult`."""
+        async for _ in self:
+            pass
+        return self._out.final()
+
+    async def aclose(self) -> None:
+        """Stop the stream early (cancels the run). Idempotent."""
+        self._finished = True
+        if self._agent._kernel.closed:
+            return  # the kernel close already cancelled the run
+        gen = self._gen
+
+        async def _close() -> None:
+            await gen.aclose()  # type: ignore[attr-defined]
+
+        await self._agent._on_loop(_close())
+
+    async def __aenter__(self) -> AgentStream:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+
+
+class SyncAgentStream:
+    """Sync twin of :class:`AgentStream` (:meth:`Agent.stream_sync`).
+
+    Iterate the events, then ``result()``; use ``with`` (or ``close()``) so an early
+    exit cancels the run.
+    """
+
+    def __init__(self, stream: AgentStream) -> None:
+        self._stream = stream
+        self._iter: Iterator[StreamEvent] = stream._agent._kernel._bridge.iterate(stream._gen)
+
+    def __iter__(self) -> SyncAgentStream:
+        return self
+
+    def __next__(self) -> StreamEvent:
+        return next(self._iter)
+
+    def result(self) -> RunResult:
+        """Drain the remaining events and return the run's :class:`RunResult`."""
+        for _ in self._iter:
+            pass
+        return self._stream._out.final()
+
+    def close(self) -> None:
+        """Stop the stream early (cancels the run). Idempotent."""
+        close = getattr(self._iter, "close", None)
+        if callable(close):
+            close()
+
+    def __enter__(self) -> SyncAgentStream:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+def _check_run_args(sampling: Any, deadline_s: Any) -> None:
+    if sampling is not None and not isinstance(sampling, Sampling):
+        raise TypeError(f"sampling must be a Sampling, got {type(sampling).__name__}")
+    _check_deadline(deadline_s, "deadline_s")
+
+
 class Agent:
     """An agent on a kernel. Build with ``kernel.agent(spec)``; see the module docstring."""
 
     def __init__(self, kernel: Kernel, spec: AgentSpec) -> None:
-        if spec.actions:
-            raise NotImplementedError(f"AgentSpec.actions {_PART_B}")
-        if spec.mcp_servers:
-            raise NotImplementedError(f"AgentSpec.mcp_servers {_PART_B}")
-        if spec.offline:
-            raise NotImplementedError(f"AgentSpec.offline {_PART_B}")
         if spec.limits.max_tool_errors is not None:
             raise NotImplementedError(
                 "RunLimits.max_tool_errors: the runner has no tool-error ceiling yet"
             )
         self._kernel = kernel
         self._spec = spec
+        self._offline = spec.offline or kernel.env.offline
+        if self._offline and spec.mcp_servers:
+            raise ValueError(
+                f"agent {spec.name!r} is offline"
+                + (" (env.offline)" if not spec.offline else "")
+                + ": it cannot have mcp_servers"
+            )
+        # The effective tool scope: the kernel config's lists with the spec's applied
+        # (as ``apply_profile`` merges them), plus the web tools when offline.
+        defaults = kernel.env.config.agents.defaults
+        allow = spec.tools_allow if spec.tools_allow is not None else defaults.tools_allow
+        self._tools_allow: frozenset[str] | None = (
+            None if allow is None else frozenset(allow)
+        )
+        self._tools_deny: frozenset[str] = frozenset(
+            {*defaults.tools_deny, *spec.tools_deny, *(_WEB_TOOLS if self._offline else ())}
+        )
+        self._policy = _combine_policies(
+            kernel.policy, spec.policy, OfflinePolicy() if self._offline else None,
+        )
+        self._actions: list[Tool] = []
+        for action in spec.actions:
+            tool = _as_tool(action)
+            if any(t.name == tool.name for t in self._actions):
+                raise ValueError(f"AgentSpec.actions has two actions named {tool.name!r}")
+            self._check_action(tool)
+            self._actions.append(tool)
         self._loop: AgentLoop | None = None
         self._route: Any = None
         self._vec_store: Any = None
+        self._mcp: MCPProvider | None = None
+        self._mcp_ready = False
+        self._mcp_lock: asyncio.Lock | None = None
         self._runs: set[asyncio.Task[Any]] = set()
         self._closed = False
 
@@ -404,6 +700,9 @@ class Agent:
             vec_collections=list(spec.doc_scopes),
         )
         cfg, prof = apply_profile(env.config, profile)
+        d = cfg.agents.defaults
+        d.tools_allow = sorted(self._tools_allow) if self._tools_allow is not None else None
+        d.tools_deny = sorted(self._tools_deny)
         # No preset selection: the loop would build its own (unmetered) provider for
         # it. The kernel pool's provider and resolved model are passed explicitly.
         cfg.agents.defaults.model_preset = None
@@ -415,6 +714,7 @@ class Agent:
             "session_manager": kernel._session_manager(),
             "variant": kernel.variant,
             "max_policy_denials": spec.limits.max_policy_denials,
+            "plugin_registry": kernel.plugins,
         }
         if route.spec is not None and route.spec.context_window is not None:
             extra["context_window_tokens"] = route.spec.context_window
@@ -438,15 +738,152 @@ class Agent:
         # Runtime preset switches (/model, the my tool, the Dream model override)
         # resolve through the kernel pool too, so they stay metered and ledgered.
         extra["preset_snapshot_loader"] = self._preset_loader(cfg)
+        registry = ToolRegistry()
+        registry.admit = self._admits
         loop = AgentLoop.from_config(
             cfg,
-            tool_registry=ToolRegistry(),
+            tool_registry=registry,
             env=kernel.core_env,
-            policy=_combine_policies(kernel.policy, spec.policy),
+            policy=self._policy,
             **extra,
         )
         self._route = route
+        for tool in self._actions:
+            self._register_action(loop, tool, replace=False)
+        if spec.mcp_servers:
+            from nanobot.agent.tools.mcp import MCPProvider
+            from nanobot.config.schema import MCPServerConfig
+
+            servers = {
+                name: MCPServerConfig.model_validate(server.as_dict())
+                for name, server in spec.mcp_servers.items()
+            }
+            core = kernel.core_env
+            # An explicit in-memory loader: never the ambient one (it reads config files).
+            self._mcp = MCPProvider(
+                servers, registry,
+                server_loader=lambda: dict(servers),
+                data_dir=core.paths.data_dir,
+                media_dir=core.paths.media_dir,
+                base_env=core.exec_base_env,
+            )
         return loop
+
+    # -- tool scope and actions --------------------------------------------------------
+
+    def _admits(self, tool: Tool) -> bool:
+        """The agent registry's ``admit`` check: the tool scope, and offline's no-net."""
+        name = tool.name
+        if name in self._tools_deny:
+            return False
+        if self._tools_allow is not None and name not in self._tools_allow:
+            return False
+        return not (self._offline and _declares_network(tool))
+
+    def _check_action(self, tool: Tool) -> None:
+        """Raise ``ValueError`` when *tool* can never run on this agent."""
+        name = tool.name
+        if name in self._tools_deny:
+            raise ValueError(f"action {name!r} is excluded by the agent's tools_deny")
+        if self._tools_allow is not None and name not in self._tools_allow:
+            raise ValueError(f"action {name!r} is not in the agent's tools_allow")
+        surface = _surface(tool)
+        if self._offline and _declares_network(tool):
+            raise ValueError(
+                f"action {name!r} declares a network capability and the agent is offline"
+            )
+        policy = self._policy
+        if policy is None or not surface:
+            return
+        from nanobot.core.function_tool import FunctionTool
+
+        if isinstance(tool, FunctionTool):
+            # Every call requests the whole static declaration: one capability denied
+            # everywhere denies every call.
+            denied = sorted(c for c in surface if policy_denies_everywhere(policy, c))
+        else:
+            denied = sorted(surface) if fully_denied(policy, surface) else []
+        if denied:
+            raise ValueError(
+                f"action {name!r}: the agent's policy denies {denied} for every resource"
+            )
+
+    def _register_action(self, loop: AgentLoop, tool: Tool, *, replace: bool) -> None:
+        self._check_action(tool)
+        name = tool.name
+        if loop.tools.has(name) and not replace:
+            raise ValueError(
+                f"agent {self._spec.name!r} already has a tool named {name!r} "
+                "(pass replace=True to replace it)"
+            )
+        if not loop.tools.register(tool):
+            raise ValueError(
+                f"action {name!r} was not registered (strict mode drops a tool whose "
+                "capabilities the policy denies everywhere)"
+            )
+
+    def add_action(
+        self,
+        action: Tool | Callable[..., Any],
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        read_only: bool = False,
+        capabilities: Sequence[CapabilityRequest | str] = (),
+        output_model: type[BaseModel] | None = None,
+        replace: bool = False,
+    ) -> str:
+        """Register *action* (a ``Tool``, or a callable wrapped as a ``FunctionTool``
+        with these options) and return its name. Builds the agent if needed; safe from
+        any thread (it runs on the kernel loop).
+
+        Raises ``ValueError`` when the tool scope excludes it, the agent's policy
+        denies its declared capabilities everywhere, it declares a network capability
+        while offline, or a tool of that name exists (unless ``replace=True``).
+        """
+        self._check_open()
+        tool = _as_tool(
+            action, name=name, description=description, read_only=read_only,
+            capabilities=capabilities, output_model=output_model,
+        )
+
+        def add() -> str:
+            self._register_action(self._ensure_loop(), tool, replace=replace)
+            return tool.name
+
+        if threading.current_thread() is self._kernel._bridge._thread:
+            return add()
+
+        async def add_on_loop() -> str:
+            return add()
+
+        return self._sync(add_on_loop())
+
+    async def _ensure_mcp(self) -> None:
+        """Connect the spec's MCP servers once (on the kernel loop); trace failures."""
+        provider = self._mcp
+        if provider is None or self._mcp_ready:
+            return
+        if self._mcp_lock is None:
+            self._mcp_lock = asyncio.Lock()
+        async with self._mcp_lock:
+            if self._mcp_ready:
+                return
+            await provider.connect()
+            self._mcp_ready = True
+            status = provider.runtime_status()
+            for server in sorted(self._spec.mcp_servers):
+                state = status.get(server)
+                if state == "connected":
+                    continue
+                error = ("waiting for OAuth authorization" if state is None
+                         else "failed to connect (see the log for the cause)")
+                logger.warning("agent {}: MCP server {!r} {}; running without it",
+                               self._spec.name, server, error)
+                self._kernel.trace.emit({
+                    "event": "mcp.error", "agent": self._spec.name, "server": server,
+                    "error": error,
+                })
 
     def _preset_loader(self, cfg: Any) -> Callable[[str], Any]:
         """A ``preset_snapshot_loader`` backed by the kernel LLM pool.
@@ -492,6 +929,7 @@ class Agent:
 
     async def _tools(self) -> list[ToolInfo]:
         loop = self._ensure_loop()
+        await self._ensure_mcp()
         infos = []
         for schema in loop.tools.get_definitions():
             fn = schema.get("function", {})
@@ -514,6 +952,7 @@ class Agent:
         from nanobot.kernel.variants import fingerprint
 
         loop = self._ensure_loop()
+        await self._ensure_mcp()
         return fingerprint(loop, model=self._route.model, sampling=self._spec.sampling)
 
     def fingerprint(self) -> Fingerprint:
@@ -577,6 +1016,97 @@ class Agent:
                 return pending.result
             raise
 
+    def stream(
+        self,
+        message: str,
+        *,
+        session: str | None = None,
+        media: Sequence[str] = (),
+        sampling: Sampling | None = None,
+        deadline_s: float | None = None,
+        tags: Mapping[str, str] | None = None,
+    ) -> AgentStream:
+        """:meth:`run` as an :class:`AgentStream` of typed ``StreamEvent`` events.
+
+        Same arguments, span, hooks, session lock, deadline, budget and cancellation
+        as :meth:`run`; ``await stream.result()`` is the :class:`RunResult`. The final
+        event is ``run.failed`` for the stop reasons error, tool_error, deadline,
+        budget and cancelled (``event.result`` is still the RunResult), else
+        ``run.completed``. Closing the stream early cancels the run.
+        """
+        self._check_open()
+        _check_run_args(sampling, deadline_s)
+        out = _StreamOut()
+        gen = self._stream_events(message, session, media, sampling, deadline_s, tags, out)
+        return AgentStream(self, gen, out)
+
+    def stream_sync(
+        self,
+        message: str,
+        *,
+        session: str | None = None,
+        media: Sequence[str] = (),
+        sampling: Sampling | None = None,
+        deadline_s: float | None = None,
+        tags: Mapping[str, str] | None = None,
+    ) -> SyncAgentStream:
+        """Sync :meth:`stream` (safe from any thread): iterate, then ``result()``."""
+        return SyncAgentStream(self.stream(
+            message, session=session, media=media, sampling=sampling,
+            deadline_s=deadline_s, tags=tags,
+        ))
+
+    async def _stream_events(
+        self,
+        message: str,
+        session: str | None,
+        media: Sequence[str],
+        sampling: Sampling | None,
+        deadline_s: float | None,
+        tags: Mapping[str, str] | None,
+        out: _StreamOut,
+    ) -> AsyncIterator[StreamEvent]:
+        """Runs on the kernel loop: yields the run's events, then stores its result.
+
+        *out* is a plain holder, not the ``AgentStream``: the generator must not
+        reference its owner, so a dropped stream is finalised (and its run cancelled)
+        as soon as it is unreachable, not at some later cyclic GC.
+        """
+        from nanobot.sdk.streaming import start_streamed_run
+
+        async def body(wiring: StreamWiring) -> RunResult:
+            pending = _Pending()
+            try:
+                return await self._run(
+                    message, session, media, sampling, deadline_s, tags, pending,
+                    stream=wiring,
+                )
+            except asyncio.CancelledError:
+                if pending.result is not None and self._closed:
+                    return pending.result  # the agent (or kernel) closed mid-run
+                raise
+
+        run = start_streamed_run(
+            body,
+            final_event=_final_event,
+            started_metadata={
+                "session_key": session or f"agent:{self._spec.name}",
+                "agent": self._spec.name,
+            },
+        )
+        events = run.stream_events()
+        try:
+            async for event in events:
+                yield event
+            out.result = await run.wait()
+        except Exception as exc:
+            out.error = exc
+            raise
+        finally:
+            await events.aclose()
+            if not run.done:
+                await run.aclose()
+
     def _request_extras(self, sampling: Sampling | None) -> Any:
         from nanobot.providers.base import RequestExtras
 
@@ -599,13 +1129,12 @@ class Agent:
         deadline_s: float | None,
         tags: Mapping[str, str] | None,
         pending: _Pending,
+        stream: StreamWiring | None = None,
     ) -> RunResult:
         from nanobot.agent.runner import turn_request_extras
         from nanobot.kernel.trace_hook import TraceHook
 
-        if sampling is not None and not isinstance(sampling, Sampling):
-            raise TypeError(f"sampling must be a Sampling, got {type(sampling).__name__}")
-        _check_deadline(deadline_s, "deadline_s")
+        _check_run_args(sampling, deadline_s)
         loop = self._ensure_loop()
         task = asyncio.current_task()
         if task is not None:
@@ -650,12 +1179,17 @@ class Agent:
             self._kernel.trace, session_key=session_key, model=route.model,
             stop_reason=trace_stop,
         )]
+        stream_kwargs: dict[str, Any] = {}
+        if stream is not None:
+            hooks.append(stream.hook)
+            stream_kwargs = stream.process_kwargs()
         try:
             with run_span, turn_request_extras(self._request_extras(sampling)):
                 token = _ACTIVE_RUN.set(cost)
                 try:
                     try:
                         async with timeout:
+                            await self._ensure_mcp()
                             # Serialise same-key runs across the kernel's agents: they
                             # share one SessionManager (and its cached Session objects).
                             async with self._kernel._session_lock(session_key):
@@ -664,6 +1198,7 @@ class Agent:
                                     session_key=session_key,
                                     media=list(media) or None,
                                     hooks=hooks,
+                                    **stream_kwargs,
                                 )
                     except BudgetExceeded as exc:
                         return result("budget", error=exc)
@@ -722,7 +1257,14 @@ class Agent:
         if runs:
             await asyncio.gather(*runs, return_exceptions=True)
         loop, self._loop = self._loop, None
+        mcp, self._mcp = self._mcp, None
         try:
+            if mcp is not None:
+                try:
+                    await mcp.aclose()
+                except Exception as exc:  # noqa: BLE001 - still close the loop
+                    logger.warning("agent {}: closing MCP servers failed: {!r}",
+                                   self._spec.name, exc)
             if loop is not None:
                 await loop.aclose()
         finally:
@@ -749,9 +1291,11 @@ class Agent:
 __all__ = [
     "Agent",
     "AgentSpec",
+    "AgentStream",
     "AskUser",
     "RunLimits",
     "RunResult",
     "StopReason",
+    "SyncAgentStream",
     "ToolInfo",
 ]

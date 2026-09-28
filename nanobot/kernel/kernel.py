@@ -18,6 +18,9 @@ behaviour); a kernel given its own registry never sees solvers registered elsewh
 Agents (Task 9): ``kernel.agent(spec)`` returns the :class:`~nanobot.kernel.agent.Agent`
 for an ``AgentSpec`` (cached per equal spec). All agents share one ``SessionManager``
 under ``env.paths.state_dir``; ``policy`` (optional) is intersected with each spec's.
+``plugins`` (a :class:`~nanobot.kernel.registry.PluginRegistry`) switches every agent's
+tool loading, and its sub-agents', to kernel mode: an entry-point plugin loads only
+when the registry has it active. ``None`` keeps legacy entry-point loading.
 ``close``/``aclose`` closes the agents, then the session store, then the LLM
 providers, then the loop thread.
 
@@ -49,6 +52,7 @@ if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.llm import LLM
     from nanobot.kernel.policy import PermissionPolicy
+    from nanobot.kernel.registry import PluginRegistry
     from nanobot.kernel.solvers import SolverRegistry
     from nanobot.kernel.variants import Variant
     from nanobot.session.manager import SessionManager
@@ -66,6 +70,7 @@ class Kernel:
         cache: ResponseCache | None = None,
         variant: Variant | None = None,
         policy: PermissionPolicy | None = None,
+        plugins: PluginRegistry | None = None,
         max_concurrency: int = 16,
         solvers: SolverRegistry | None = None,
         baselines: BaselineRegistry | None = None,
@@ -92,6 +97,11 @@ class Kernel:
             raise TypeError(
                 f"policy must implement decide(principal, request, ctx), got {type(policy).__name__}"
             )
+        if plugins is not None:
+            from nanobot.kernel.registry import PluginRegistry
+
+            if not isinstance(plugins, PluginRegistry):
+                raise TypeError(f"plugins must be a PluginRegistry, got {type(plugins).__name__}")
         if solvers is not None and not isinstance(solvers, _solvers.SolverRegistry):
             raise TypeError(f"solvers must be a SolverRegistry, got {type(solvers).__name__}")
         if baselines is not None and not isinstance(baselines, _baselines.BaselineRegistry):
@@ -109,6 +119,7 @@ class Kernel:
         self._max_concurrency = max_concurrency
         self._variant = variant
         self._policy = policy
+        self._plugins = plugins
         # ``None`` = the process-wide default, looked up on each access.
         self._solvers = solvers
         self._baselines = baselines
@@ -162,6 +173,11 @@ class Kernel:
     def policy(self) -> PermissionPolicy | None:
         """The kernel's permission policy; each agent's is this ∩ ``AgentSpec.policy``."""
         return self._policy
+
+    @property
+    def plugins(self) -> PluginRegistry | None:
+        """The kernel's plugin registry (``None``: agents load plugins the legacy way)."""
+        return self._plugins
 
     @property
     def solvers(self) -> SolverRegistry:

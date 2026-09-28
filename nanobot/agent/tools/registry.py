@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.agent.tools.base import Tool, ToolResult
@@ -37,6 +38,9 @@ class ToolRegistry:
         self.gate_principal: Principal | None = None
         self.gate_env: CoreEnvironment | None = None
         self.gate_workspace: Path | None = None
+        # Optional owner-set admission check (a kernel agent's tool scope): a tool it
+        # rejects is never registered, whoever registers it (loader, MCP, host).
+        self.admit: Callable[[Tool], bool] | None = None
 
     def configure_gate(
         self,
@@ -118,8 +122,14 @@ class ToolRegistry:
 
         Returns False when strict mode drops it (``_strict_drop``): the tool is then not
         registered, any earlier tool of the same name is removed, and the model never
-        sees it.
+        sees it. Also returns False, registering nothing and leaving any earlier tool
+        in place, when ``admit`` rejects it.
         """
+        if self.admit is not None and not self.admit(tool):
+            from loguru import logger
+
+            logger.debug("tool {} not admitted by this registry's scope", tool.name)
+            return False
         if self._strict_drop(tool):
             self.unregister(tool.name)
             return False

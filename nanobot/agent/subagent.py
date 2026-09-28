@@ -44,6 +44,7 @@ from nanobot.utils.prompt_templates import render_template
 if TYPE_CHECKING:
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.policy import PermissionPolicy
+    from nanobot.kernel.registry import PluginRegistry
     from nanobot.kernel.variants import Variant
 
 
@@ -133,8 +134,12 @@ class SubagentManager:
         max_policy_denials: int = DEFAULT_MAX_POLICY_DENIALS,
         child_policy: "PermissionPolicy | None" = None,
         variant: "Variant | None" = None,
+        plugin_registry: "PluginRegistry | None" = None,
     ):
         self.env = env
+        # The parent loop's kernel plugin registry (P4): children load plugins in
+        # kernel mode too. ``None`` keeps legacy entry-point loading.
+        self.plugin_registry = plugin_registry
         # The parent loop's Variant (Task 8): children see the same overrides.
         self.variant = variant
         # The parent loop's gate policy; None means DefaultPolicy(). Each run gets
@@ -276,7 +281,7 @@ class SubagentManager:
             env=self.env,
             variant=getattr(self, "variant", None),
         )
-        ToolLoader().load(
+        ToolLoader(plugin_registry=getattr(self, "plugin_registry", None)).load(
             ctx, registry, scope="subagent",
             allow=self.tools_allow, deny=self.tools_deny,
         )

@@ -393,6 +393,8 @@ EVENTS: Mapping[str, str] = MappingProxyType({
     "skill.listed": "skills (names rendered into the system prompt), active (always-on "
                     "skills loaded in full)",
     "skill.read": "skill, path (read_file read a skills/<name>/SKILL.md)",
+    "mcp.error": "agent, server, error (an agent's MCP server failed to connect; the "
+                 "agent runs without its tools)",
 })
 
 

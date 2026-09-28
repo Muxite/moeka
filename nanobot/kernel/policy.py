@@ -19,6 +19,13 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
 POLICY_MARKER = "blocked by permission policy"
+OFFLINE_MARKER = "blocked in offline mode"
+
+# Every capability the codebase uses for network access: ``net.fetch`` (web_search,
+# web_fetch, image_generation, remote MCP tools) and ``mcp.call`` (any MCP server,
+# local stdio ones included: offline connects none). Any other ``net.*`` name is
+# treated as network too (``is_network_capability``).
+NETWORK_CAPABILITIES: frozenset[str] = frozenset({"net.fetch", "mcp.call"})
 
 PrincipalKind = Literal["agent", "subagent", "plugin", "host"]
 
@@ -245,6 +252,55 @@ class DefaultPolicy:
         if narrower is not None:
             extra.append(narrower)
         return IntersectionPolicy(child, *extra) if extra else child
+
+
+def is_network_capability(capability: str) -> bool:
+    """True for a :data:`NETWORK_CAPABILITIES` name or any ``net.*`` capability."""
+    return capability in NETWORK_CAPABILITIES or capability.startswith("net.")
+
+
+class OfflinePolicy:
+    """Denies every network capability (``is_network_capability``) for every resource.
+
+    The deny carries :data:`OFFLINE_MARKER` (not ``POLICY_MARKER``). Intersect it with
+    another policy (``IntersectionPolicy``); on its own it allows everything else.
+    It covers what tools *declare*: ``exec`` is not network-sandboxed by it (a shell
+    command can still open sockets); the container or sandbox is the real boundary.
+    """
+
+    def denies_everywhere(self, capability: str) -> bool:
+        return is_network_capability(capability)
+
+    def decide(self, principal: Principal, req: CapabilityRequest, ctx: Any) -> Allow | Deny:
+        if not is_network_capability(req.capability):
+            return Allow()
+        target = f" on {req.resource!r}" if req.resource else ""
+        return Deny(
+            reason=(
+                f"Error: {req.capability}{target} {OFFLINE_MARKER}: this agent has no "
+                "network access. Do not retry with another network tool."
+            ),
+            marker=OFFLINE_MARKER,
+            capability=req.capability,
+        )
+
+    def attenuate(
+        self, requested: frozenset[str], narrower: PermissionPolicy | None = None,
+    ) -> PermissionPolicy:
+        """A child allowing only ``requested`` (∩ ``narrower``), still offline."""
+        members: list[PermissionPolicy] = [self, DefaultPolicy(allowed=frozenset(requested))]
+        if narrower is not None:
+            members.append(narrower)
+        return IntersectionPolicy(*members)
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is OfflinePolicy
+
+    def __hash__(self) -> int:
+        return hash(OfflinePolicy)
+
+    def __repr__(self) -> str:
+        return "OfflinePolicy()"
 
 
 class IntersectionPolicy:
