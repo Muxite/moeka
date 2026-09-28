@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     from nanobot.config.schema import AgentProfileConfig
     from nanobot.kernel.kernel import Kernel
     from nanobot.kernel.policy import CapabilityRequest, PermissionPolicy
+    from nanobot.kernel.sessions import Session
     from nanobot.kernel.variants import Fingerprint
     from nanobot.sdk.streaming import StreamWiring
     from nanobot.sdk.types import StreamEvent
@@ -966,7 +967,7 @@ class Agent:
         self,
         message: str,
         *,
-        session: str | None = None,
+        session: Session | str | None = None,
         media: Sequence[str] = (),
         sampling: Sampling | None = None,
         deadline_s: float | None = None,
@@ -974,14 +975,15 @@ class Agent:
     ) -> RunResult:
         """Run one turn. ``sampling`` replaces the spec's sampling for this run only;
         ``deadline_s`` overrides ``spec.limits.deadline_s``; ``tags`` are added to the
-        run's span (so to every event and to budget ``per_tag`` caps). ``session``
-        defaults to ``"agent:<name>"``.
+        run's span (so to every event and to budget ``per_tag`` caps). ``session`` is a
+        key or a ``kernel.sessions`` handle and defaults to ``"agent:<name>"``.
 
         Returns a :class:`RunResult` for every stop reason. Cancelling the task
         awaiting this raises ``CancelledError`` as usual; closing the agent or kernel
         mid-run instead returns ``stop_reason="cancelled"``.
         """
         self._check_open()
+        session = self._session_key(session)
         pending = _Pending()
         coro = self._run(message, session, media, sampling, deadline_s, tags, pending)
         try:
@@ -996,7 +998,7 @@ class Agent:
         self,
         message: str,
         *,
-        session: str | None = None,
+        session: Session | str | None = None,
         media: Sequence[str] = (),
         sampling: Sampling | None = None,
         deadline_s: float | None = None,
@@ -1006,6 +1008,7 @@ class Agent:
         import concurrent.futures
 
         self._check_open()
+        session = self._session_key(session)
         pending = _Pending()
         try:
             return self._sync(
@@ -1020,7 +1023,7 @@ class Agent:
         self,
         message: str,
         *,
-        session: str | None = None,
+        session: Session | str | None = None,
         media: Sequence[str] = (),
         sampling: Sampling | None = None,
         deadline_s: float | None = None,
@@ -1035,6 +1038,7 @@ class Agent:
         ``run.completed``. Closing the stream early cancels the run.
         """
         self._check_open()
+        session = self._session_key(session)
         _check_run_args(sampling, deadline_s)
         out = _StreamOut()
         gen = self._stream_events(message, session, media, sampling, deadline_s, tags, out)
@@ -1044,7 +1048,7 @@ class Agent:
         self,
         message: str,
         *,
-        session: str | None = None,
+        session: Session | str | None = None,
         media: Sequence[str] = (),
         sampling: Sampling | None = None,
         deadline_s: float | None = None,
@@ -1106,6 +1110,18 @@ class Agent:
             await events.aclose()
             if not run.done:
                 await run.aclose()
+
+    def _session_key(self, session: Session | str | None) -> str | None:
+        """The key for a run's ``session=`` (a handle must be on this agent's kernel)."""
+        from nanobot.kernel.sessions import Session
+
+        if session is None or isinstance(session, str):
+            return session
+        if isinstance(session, Session):
+            if session._kernel is not self._kernel:
+                raise ValueError(f"{session!r} belongs to another kernel")
+            return session.key
+        raise TypeError(f"session must be a Session, str or None, got {type(session).__name__}")
 
     def _request_extras(self, sampling: Sampling | None) -> Any:
         from nanobot.providers.base import RequestExtras

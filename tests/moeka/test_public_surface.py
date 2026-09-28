@@ -52,6 +52,10 @@ SURFACE: dict[str, list[str]] = {
         "system",
         "user",
     ],
+    "moeka.sessions": [
+        "Checkpoint", "CheckpointMismatch", "Session", "SessionBusyError", "SessionInfo",
+        "SessionSnapshot", "Sessions",
+    ],
     "moeka.testing": ["FakeCall", "FakeProvider", "error", "reply"],
     "moeka.tools": [
         "CapabilityRequest",

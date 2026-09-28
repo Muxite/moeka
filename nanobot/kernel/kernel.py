@@ -15,6 +15,10 @@ Per kernel (Task 8): ``variant`` (a :class:`~nanobot.kernel.variants.Variant`, s
 behaviour); a kernel given its own registry never sees solvers registered elsewhere.
 ``kernel.llm.complete_json``'s deterministic fast path consults ``kernel.solvers``.
 
+Sessions (Task 10): ``kernel.sessions`` hands out :class:`~nanobot.kernel.sessions.Session`
+handles over that same store (append, checkpoint, fork, rewind, snapshot/restore),
+sharing the per-key locks agent runs take.
+
 Agents (Task 9): ``kernel.agent(spec)`` returns the :class:`~nanobot.kernel.agent.Agent`
 for an ``AgentSpec`` (cached per equal spec). All agents share one ``SessionManager``
 under ``env.paths.state_dir``; ``policy`` (optional) is intersected with each spec's.
@@ -53,6 +57,7 @@ if TYPE_CHECKING:
     from nanobot.kernel.llm import LLM
     from nanobot.kernel.policy import PermissionPolicy
     from nanobot.kernel.registry import PluginRegistry
+    from nanobot.kernel.sessions import Sessions
     from nanobot.kernel.solvers import SolverRegistry
     from nanobot.kernel.variants import Variant
     from nanobot.session.manager import SessionManager
@@ -132,6 +137,7 @@ class Kernel:
         # Agents (Task 9): one per spec, sharing one SessionManager (both built lazily).
         self._agents: dict[AgentSpec, Agent] = {}
         self._sessions: SessionManager | None = None
+        self._session_handles: Sessions | None = None
         # Not _close_lock: a run building its loop on the loop thread must never wait
         # on a close() that is itself waiting for the loop thread.
         self._agents_lock = threading.Lock()
@@ -211,6 +217,22 @@ class Kernel:
                     self._llm = LLM(self)
                 llm = self._llm
         return llm
+
+    @property
+    def sessions(self) -> Sessions:
+        """Session handles over the shared store (created on first access; see
+        :mod:`nanobot.kernel.sessions`)."""
+        handles = self._session_handles
+        if handles is None:
+            with self._agents_lock:
+                if self._closed or self._closing:
+                    raise RuntimeError("kernel is closed")
+                if self._session_handles is None:
+                    from nanobot.kernel.sessions import Sessions
+
+                    self._session_handles = Sessions(self)
+                handles = self._session_handles
+        return handles
 
     @property
     def closed(self) -> bool:

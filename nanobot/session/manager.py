@@ -66,6 +66,14 @@ _FORK_VOLATILE_METADATA_KEYS = {
     "title",
     "title_user_edited",
 }
+# Keys describing an in-flight or just-finished turn: meaningless once the transcript
+# is cut before its end (``SessionManager.truncate``).
+_TRUNCATE_VOLATILE_METADATA_KEYS = (
+    "pending_user_turn",
+    "pending_user_followups",
+    "runtime_checkpoint",
+    "webui_recovery",
+)
 _WORKSPACE_STATE_DIR = ".nanobot"
 _WORKSPACE_ID_FILE = "workspace-id"
 _WORKSPACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -259,6 +267,27 @@ def _metadata_title(metadata: object) -> str:
     if metadata_data.get("title_user_edited") is True:
         return title
     return strip_think(title)
+
+
+def _cut_consolidation_state(
+    metadata: dict[str, Any], last_archived: int, cut: int, total: int,
+) -> int:
+    """Consolidation state for a transcript cut to its first *cut* of *total* messages.
+
+    Mutates *metadata* and returns the new ``last_consolidated``:
+
+    - a committed summary covers ``messages[:last_archived]``; it survives when that
+      prefix is still whole (``last_archived <= cut``), else ``_last_summary`` is
+      dropped and the offset resets to 0 (the whole kept prefix replays raw);
+    - ``_last_usage`` (the token usage of the latest turn) is dropped when the cut
+      removes messages, since it describes a context that no longer exists.
+    """
+    if cut < total:
+        metadata.pop("_last_usage", None)
+    if last_archived > cut:
+        metadata.pop("_last_summary", None)
+        return 0
+    return last_archived
 
 
 @dataclass(frozen=True)
@@ -1893,29 +1922,53 @@ class SessionManager:
         if source is None:
             return None
 
-        copied: list[dict[str, Any]] = []
+        upto_message: int | None = None
         user_index = 0
-        found_target = False
-        for message in source.messages:
+        for index, message in enumerate(source.messages):
             if message.get("role") == "user" and not is_hidden_history_message(message):
                 if user_index == before_user_index:
-                    found_target = True
+                    upto_message = index
                     break
                 user_index += 1
-            copied.append(public_history_message(message))
-        if user_index == before_user_index:
-            found_target = True
-        if not found_target:
+        if upto_message is None:
+            if user_index != before_user_index:
+                return None
+            upto_message = len(source.messages)
+        return self.fork_session(source_key, target_key, upto_message=upto_message)
+
+    def fork_session(
+        self,
+        source_key: str,
+        target_key: str,
+        *,
+        upto_message: int,
+        strip_runtime_context: bool = True,
+        drop_metadata: Collection[str] = _FORK_VOLATILE_METADATA_KEYS,
+    ) -> Session | None:
+        """Create (or replace) *target_key* holding ``source.messages[:upto_message]``.
+
+        Returns ``None`` when the source does not exist or *upto_message* is outside
+        ``0..len(messages)``. The copy gets fresh timestamps, no provider state, and
+        the source metadata minus *drop_metadata* (default: the in-flight/UI keys in
+        ``_FORK_VOLATILE_METADATA_KEYS``). ``strip_runtime_context`` removes the
+        trusted runtime-context suffix from copied messages (the WebUI default);
+        pass ``False`` for an exact prefix copy. Consolidation state is cut to the
+        copied prefix exactly as :meth:`truncate` does (see
+        :func:`_cut_consolidation_state`).
+        """
+        source = self._cached(source_key) or self._load(source_key)
+        if source is None or not 0 <= upto_message <= len(source.messages):
             return None
-
+        copied = [
+            public_history_message(message) if strip_runtime_context else deepcopy(message)
+            for message in source.messages[:upto_message]
+        ]
         metadata = deepcopy(source.metadata)
-        for key in _FORK_VOLATILE_METADATA_KEYS:
+        for key in drop_metadata:
             metadata.pop(key, None)
-
-        last_consolidated = min(source.last_archived, len(copied))
-        if source.last_archived > len(copied):
-            metadata.pop("_last_summary", None)
-            last_consolidated = 0
+        last_consolidated = _cut_consolidation_state(
+            metadata, source.last_archived, upto_message, len(source.messages),
+        )
 
         now = datetime.now()
         target = Session(
@@ -1928,6 +1981,39 @@ class SessionManager:
         )
         self.save(target, fsync=True)
         return target
+
+    def truncate(self, key: str, n: int) -> Session | None:
+        """Keep only the first *n* messages of *key* (in place) and persist it.
+
+        Returns ``None`` when the session does not exist; raises ``ValueError``
+        when *n* is outside ``0..len(messages)``. ``n == len(messages)`` changes
+        nothing. Otherwise the cached ``Session`` object itself is cut (so a loop
+        holding it sees the cut), its ``provider_state`` is dropped, the in-flight
+        turn keys in ``_TRUNCATE_VOLATILE_METADATA_KEYS`` are removed, and the
+        consolidation state is cut by :func:`_cut_consolidation_state`. Saving
+        also removes a JSONL store's runtime-checkpoint sidecar.
+        """
+        session = self._cached(key)
+        if session is None:
+            session = self._load(key)
+            if session is None:
+                return None
+            self._remember(session)
+        total = len(session.messages)
+        if isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= total:
+            raise ValueError(f"truncate: n must be an int in 0..{total}, got {n!r}")
+        if n == total:
+            return session
+        for meta_key in _TRUNCATE_VOLATILE_METADATA_KEYS:
+            session.metadata.pop(meta_key, None)
+        session.last_consolidated = _cut_consolidation_state(
+            session.metadata, session.last_archived, n, total,
+        )
+        del session.messages[n:]
+        session.provider_state = None
+        session.updated_at = datetime.now()
+        self.save(session, fsync=True)
+        return session
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
         """Read a session without populating the cache."""
