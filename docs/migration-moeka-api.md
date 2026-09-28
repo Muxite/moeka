@@ -111,22 +111,30 @@ them, to the `moeka` API described in [`python-sdk.md`](python-sdk.md).
   (also a builtin `TimeoutError`).
 - `timeout_s` is one deadline for the whole logical call, retries and JSON
   rounds included, not per attempt. For awork's "N attempts of T seconds",
-  pass `timeout_s=N * T`, or retry `LLMTimeoutError` in the host.
+  pass `timeout_s=N * T`, or retry the kernel's `LLMTimeoutError` in the host
+  (import it under an alias: awork has its own class of that name).
 - The sync twins are safe from any thread and inside a running event loop, so
   the daemon-thread bridge is not needed.
 
 ### `_provider_error_message(text)` -> typed errors
 
 - Nothing to sniff: errors are exceptions, never content.
+- awork defines its own `LLMError`, `LLMProviderError` and `LLMTimeoutError`
+  (`awork/llm.py`), and two of those names clash with `moeka.errors`. Import the
+  kernel's under aliases, for example `from moeka import errors as merr`.
 
   ```python
+  from moeka import errors as merr
+
   try:
       done = kernel.llm.complete_json_sync(prompt, model_cls=Fit)
-  except QuotaError as exc:       # out of credits: stop the run
-      raise AworkLLMProviderError(str(exc)) from exc
-  except (AuthError, BudgetExceeded):
-      raise
-  except LLMError as exc:         # exc.kind, exc.status, exc.raw, exc.retryable
+  except merr.BudgetExceeded:
+      raise BudgetHalt("spend cap reached") from None   # see Behaviour differences
+  except (merr.QuotaError, merr.AuthError, merr.RateLimitError) as exc:
+      raise LLMProviderError(str(exc)) from exc          # awork's own class
+  except merr.LLMTimeoutError as exc:
+      raise LLMTimeoutError(str(exc)) from exc           # awork's own class
+  except merr.LLMError as exc:    # exc.kind, exc.status, exc.raw, exc.retryable
       ...
   ```
 
@@ -148,7 +156,7 @@ them, to the `moeka` API described in [`python-sdk.md`](python-sdk.md).
 ### Research agent: `MoekaCore.scoped` + `AgentProfileConfig` + `AgentHook`
 
 ```python
-spec = AgentSpec.from_profile(research_profile(), name="research")
+spec = AgentSpec.from_profile(_research_profile(memory=False), name="research")
 agent = kernel.agent(spec)
 result = agent.run_sync(task, session="awork:research", tags={"stage": "research"})
 text, tools, usage, cost = result.content, result.tools_used, result.usage, result.cost_usd
@@ -165,6 +173,24 @@ text, tools, usage, cost = result.content, result.tools_used, result.usage, resu
 - A profile's `memory_enabled` defaults to True, which gives the agent semantic
   memory (and loads the embedder). Set it False in the profile, or build the
   `AgentSpec` directly, if the research agent should not remember.
+- `_research_profile(memory=True)` sets `vec_collections=[RESEARCH_COLLECTION]`,
+  which `from_profile` maps to `doc_scopes`. A non-empty `doc_scopes` adds the
+  `search_documents` action, and the action is checked against `tools_allow`.
+  That profile's `tools_allow` is `RESEARCH_TOOLS`, which lacks it, so
+  `kernel.agent(spec)` raises `ValueError`. Add `"search_documents"` to the allow
+  list (and the names of the memory actions `_add_memory_actions` registers,
+  `remember_fact` / `recall_research`).
+- The research memory does not carry over. The legacy agent kept its collection
+  inside `<workspace>/memory/vec.db`. A doc scope is its own file,
+  `state_dir/memory/<scope>.db`, so the new agent starts empty. If continuity
+  matters, copy the old collection once, before the first run. `DocStore` has
+  no "list every chunk" call (`search` ranks and `sources` only counts), so do
+  one of these:
+  - re-ingest from the host's own records into `kernel.memory(RESEARCH_COLLECTION)`;
+  - read the text rows of that collection straight from the old file's
+    `documents_data` table (`source`, `text`, `collection`) with `sqlite3` in a
+    one-off migration script, and `add`
+    them to the new scope.
 - Host actions become `AgentSpec(actions=(fn, ...))`; with `tools_allow` set,
   list the action names in it too.
 - `MoekaCore.scoped` made a temporary workspace and deleted it. The kernel works
@@ -208,6 +234,15 @@ hits = docs.search(query, k=8, collection=public)
 
 ## Behaviour differences
 
+- `BudgetExceeded` is an ordinary `Exception` (an `LLMError`), but awork's
+  `BudgetHalt` is deliberately a `BaseException`, so that its many best-effort
+  `except Exception` sites cannot swallow a spend stop. A straight port would
+  let those sites catch budget refusals and retry the work serially. At the LLM
+  boundary, either translate `BudgetExceeded` into `BudgetHalt` (see the
+  `_provider_error_message` example above), or re-raise it above every
+  best-effort handler. The same applies to agent runs, where a refusal is
+  `result.stop_reason == "budget"` and not an exception: check it and raise
+  `BudgetHalt`. In a batch, it is `BatchResult.systemic`.
 - Errors are raised, typed. `acomplete` returned provider errors as content
   (`"Error: ..."`, `"Error calling LLM: ..."`); `kernel.llm` raises an `LLMError`
   subclass and never returns error text.

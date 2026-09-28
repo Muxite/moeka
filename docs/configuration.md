@@ -2363,8 +2363,10 @@ Disabled skills are excluded from the main agent's skill summary, from always-on
 `agents.defaults.vec` configures the hybrid FTS5 + vector store
 (`<workspace>/memory/vec.db`, `nanobot/core/vec_store.py`) used for semantic
 recall over `MEMORY.md`, `history.jsonl`, skills, and any host-ingested
-documents (via `MoekaCore.ingest()` — see [`docs/python-sdk.md`](python-sdk.md)
-and [`docs/memory.md`](memory.md)):
+documents (via `kernel.memory(...)` — see the Memory section of
+[`docs/python-sdk.md`](python-sdk.md#memory) — or the deprecated `MoekaCore.ingest()`,
+mapped in [`docs/migration-moeka-api.md`](migration-moeka-api.md); also
+[`docs/memory.md`](memory.md)):
 
 ```json
 {

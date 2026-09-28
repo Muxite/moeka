@@ -53,8 +53,11 @@ holds four logical stores:
 - `history_entries` — `history.jsonl` entries
 - `skills` — skill definitions (indexed at startup, used to keep large skill
   lists within context)
-- `documents` — host-supplied text ingested via `MoekaCore.ingest()` /
-  `ingest_text()` (see [`docs/python-sdk.md`](python-sdk.md)), optionally split
+- `documents` — host-supplied text, added through a `moeka` `DocStore`
+  (`kernel.memory(scope).add(...)`, see the Memory section of
+  [`docs/python-sdk.md`](python-sdk.md#memory)) or the deprecated
+  `MoekaCore.ingest()` / `ingest_text()` (mapped in
+  [`docs/migration-moeka-api.md`](migration-moeka-api.md)), optionally split
   into named collections
 
 Each document chunk carries metadata (`source`, `tags`, `created_at`) and
