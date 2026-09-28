@@ -52,7 +52,8 @@ MAIN = ModelSpec(
 AGENT = Principal("agent", "agent")
 
 
-def _env(tmp_path: Path, sink: Any, *, offline: bool = False) -> Environment:
+def _env(tmp_path: Path, sink: Any, *, offline: bool = False,
+         exec_base_env: dict[str, str] | None = None) -> Environment:
     return Environment.for_host(
         state_dir=tmp_path / "state",
         work_dir=tmp_path / "work",
@@ -62,6 +63,7 @@ def _env(tmp_path: Path, sink: Any, *, offline: bool = False) -> Environment:
         default_model="main",
         trace=sink,
         offline=offline,
+        exec_base_env=exec_base_env,
     )
 
 
@@ -93,8 +95,10 @@ def make_kernel(tmp_path, sink):
     kernels: list[Kernel] = []
 
     def make(fake: FakeProvider | None = None, *, offline: bool = False,
-             **kwargs: Any) -> Kernel:
-        kernel = Kernel(_env(tmp_path, sink, offline=offline), **kwargs)
+             exec_base_env: dict[str, str] | None = None, **kwargs: Any) -> Kernel:
+        kernel = Kernel(
+            _env(tmp_path, sink, offline=offline, exec_base_env=exec_base_env), **kwargs,
+        )
         if fake is not None:
             kernel.llm.register_provider("main", fake, MAIN)
         kernels.append(kernel)
@@ -297,6 +301,46 @@ async def test_mcp_servers_listed_called_and_closed(make_kernel, sink, tmp_path)
     assert provider is not None and provider.connected_server_names == {"stub"}
     await agent.aclose()
     assert provider.connected_server_names == set()
+
+
+_ENV_MCP_SERVER = '''
+import json
+import os
+
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("envdump")
+
+
+@mcp.tool()
+def environ() -> str:
+    """The server process environment."""
+    return json.dumps(dict(os.environ))
+
+
+mcp.run()
+'''
+
+
+async def test_stdio_mcp_server_sees_only_the_host_env(
+    make_kernel, tmp_path, monkeypatch,
+) -> None:
+    script = tmp_path / "env_mcp.py"
+    script.write_text(_ENV_MCP_SERVER, encoding="utf-8")
+    monkeypatch.setenv("HOME", "/poisoned-home")
+    monkeypatch.setenv("USER", "poisoned-user")
+    fake = FakeProvider([tool_call("mcp_envdump_environ", {}), "ok"])
+    kernel = make_kernel(fake, exec_base_env={"PATH": "/x"})
+    agent = kernel.agent(AgentSpec(name="e", mcp_servers={
+        "envdump": {"command": sys.executable, "args": [str(script)],
+                    "env": {"SERVER_OWN": "1"}},
+    }))
+    result = await agent.run("dump env")
+    text = _tool_message(fake.calls[1], "mcp_envdump_environ")
+    child = json.loads(text[text.index("{"):])  # after the untrusted-content banner
+    assert child.get("PATH") == "/x" and child.get("SERVER_OWN") == "1"
+    assert "/poisoned-home" not in child.values() and "poisoned-user" not in child.values()
+    assert "HOME" not in child and "USER" not in child
 
 
 def test_mcp_spec_values_are_validated() -> None:

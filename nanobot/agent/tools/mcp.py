@@ -10,7 +10,8 @@ import re
 import shutil
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack, contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
@@ -357,6 +358,54 @@ def _normalize_windows_stdio_command(
         base_env = process_env_snapshot()
     comspec = (env or {}).get("COMSPEC") or base_env.get("COMSPEC") or "cmd.exe"
     return comspec, ["/d", "/c", command, *normalized_args], env
+
+
+# The explicit environment for the stdio server being spawned by this task, or None.
+_STDIO_CHILD_ENV: ContextVar[dict[str, str] | None] = ContextVar(
+    "nanobot_mcp_stdio_child_env", default=None,
+)
+
+
+def _host_stdio_env(base_env: Mapping[str, str], env: Mapping[str, str] | None) -> dict[str, str]:
+    """A stdio server's whole environment on the host path (``base_env`` given).
+
+    The MCP SDK's inherited variables (``DEFAULT_INHERITED_ENV_VARS``: PATH, HOME, ...)
+    taken from the host's ``exec_base_env`` only, then the server's own ``env`` on top.
+    """
+    from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS
+
+    child = {k: base_env[k] for k in DEFAULT_INHERITED_ENV_VARS if k in base_env}
+    child.update(env or {})
+    return child
+
+
+@contextmanager
+def _explicit_stdio_env(env: dict[str, str]) -> Any:
+    """Make the SDK spawn the stdio server in the current task with exactly *env*.
+
+    ``stdio_client`` always merges ``get_default_environment()`` (read from
+    ``os.environ``) under ``StdioServerParameters.env``, so a variable the host did
+    not declare would still leak in from the process. A shim, installed once, returns
+    this task's explicit env while it is set and defers to the SDK's function
+    otherwise (every other caller, legacy MCP included, is unchanged).
+    """
+    import mcp.client.stdio as sdk_stdio
+
+    current = sdk_stdio.get_default_environment
+    if not getattr(current, "_nanobot_explicit_env_shim", False):
+        original = current
+
+        def get_default_environment() -> dict[str, str]:
+            explicit = _STDIO_CHILD_ENV.get()
+            return dict(explicit) if explicit is not None else original()
+
+        get_default_environment._nanobot_explicit_env_shim = True  # type: ignore[attr-defined]
+        sdk_stdio.get_default_environment = get_default_environment
+    token = _STDIO_CHILD_ENV.set(dict(env))
+    try:
+        yield
+    finally:
+        _STDIO_CHILD_ENV.reset(token)
 
 
 def _extract_nullable_branch(options: Any) -> tuple[dict[str, Any], bool] | None:
@@ -1188,13 +1237,22 @@ async def connect_mcp_servers(
                     cfg.env or None,
                     base_env,
                 )
+                if base_env is not None:
+                    # Host path (I1): the child sees the host-declared env only.
+                    env = _host_stdio_env(base_env, env)
                 params = StdioServerParameters(
                     command=command,
                     args=args,
                     env=env,
                     cwd=cfg.cwd or None,
                 )
-                read, write = await server_stack.enter_async_context(stdio_client(params))
+                if base_env is None:
+                    read, write = await server_stack.enter_async_context(stdio_client(params))
+                else:
+                    with _explicit_stdio_env(env):
+                        read, write = await server_stack.enter_async_context(
+                            stdio_client(params)
+                        )
             elif transport_type == "sse":
                 if not await _probe_http_url(cfg.url):
                     logger.warning("MCP server '{}': {} unreachable, skipping", name, _redact_url(cfg.url))
