@@ -506,6 +506,8 @@ class LLM:
         )
         # alias -> the BudgetedProvider around that alias's provider (with a budget).
         self._wrapped: dict[str, BudgetedProvider] = {}
+        # Set by the kernel's close: no new pool provider after that.
+        self._closed = False
 
     # -- provider pool -----------------------------------------------------
 
@@ -569,6 +571,8 @@ class LLM:
             provider = self._pool.get(alias)
             if provider is not None:
                 return provider
+            if self._closed:
+                raise RuntimeError("kernel is closed")
             from nanobot.providers.factory import make_provider
 
             env = self._kernel.env
@@ -595,9 +599,14 @@ class LLM:
             raise ModelNotFound(f"unknown model {alias!r} and no default model", model=alias)
         return _Route(None, None, self._provider_for(default), alias)
 
+    def _refuse_new_providers(self) -> None:
+        with self._lock:
+            self._closed = True
+
     async def _aclose(self) -> None:
         """Close the pool's providers (on the loop their clients live on)."""
         with self._lock:
+            self._closed = True
             providers = list(self._pool.values())
             self._pool.clear()
         for provider in providers:

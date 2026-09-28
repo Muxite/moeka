@@ -61,6 +61,19 @@ def get_llm_usage_store(
         return store
 
 
+def close_llm_usage_store(path: Path | None = None, *, data_dir: Path | None = None) -> None:
+    """Close the cached store's connection for that path, if one was opened.
+
+    The store stays cached and reconnects on its next use; this only releases the
+    SQLite connection (a kernel closes it with the kernel).
+    """
+    resolved = (path or llm_usage_store_path(data_dir)).resolve(strict=False)
+    with _STORES_LOCK:
+        store = _STORES.get(resolved)
+    if store is not None:
+        store.close()
+
+
 def record_llm_call(call: LLMCallRecord, *, data_dir: Path | None = None) -> None:
     """Default fail-open callback attached to gateway provider snapshots."""
     try:
@@ -98,6 +111,7 @@ __all__ = [
     "LLMCallRecord",
     "LLMUsageStore",
     "empty_usage_payload",
+    "close_llm_usage_store",
     "get_llm_usage_store",
     "llm_usage_recorder",
     "record_llm_call",

@@ -145,7 +145,6 @@ class Kernel:
         self._close_lock = threading.Lock()
         # Internal: the loop that ``*_sync`` twins run on. Starts lazily on first use.
         self._bridge = LoopThread(name="moeka-kernel-loop")
-        self._llm: LLM | None = None
         # Agents (Task 9): one per spec, sharing one SessionManager (both built lazily).
         self._agents: dict[AgentSpec, Agent] = {}
         self._sessions: SessionManager | None = None
@@ -158,6 +157,12 @@ class Kernel:
         # Task 11: document stores and the epistemic facade (both built lazily).
         self._memory_registry: _MemoryRegistry | None = None
         self._epistemics: Epistemics | None = None
+        # Built eagerly (cheap: no provider is made until a call needs one). A lazy
+        # build would need a lock that close() holds while it waits on the loop
+        # thread, where an agent's first build asks for ``kernel.llm``.
+        from nanobot.kernel.llm import LLM
+
+        self._llm: LLM = LLM(self)
 
     @property
     def env(self) -> Environment:
@@ -220,18 +225,10 @@ class Kernel:
 
     @property
     def llm(self) -> LLM:
-        """The model-call layer (created on first access, one per kernel)."""
-        llm = self._llm
-        if llm is None:
-            with self._close_lock:
-                if self._closed:
-                    raise RuntimeError("kernel is closed")
-                if self._llm is None:
-                    from nanobot.kernel.llm import LLM
-
-                    self._llm = LLM(self)
-                llm = self._llm
-        return llm
+        """The model-call layer (one per kernel). ``RuntimeError`` once close started."""
+        if self._closed or self._closing:
+            raise RuntimeError("kernel is closed")
+        return self._llm
 
     @property
     def sessions(self) -> Sessions:
@@ -405,14 +402,24 @@ class Kernel:
                 logger.warning("kernel: closing agent {!r} failed: {!r}", agent.spec.name, exc)
 
     def _close_llm(self) -> None:
+        # From here on the LLM builds no pool provider (one built after its close
+        # would never be closed); a host holding ``kernel.llm`` gets RuntimeError.
+        self._llm._refuse_new_providers()
         # Pool providers' HTTP clients live on the loop thread: close them there,
         # before it stops. Never started = no client was ever used.
-        if self._llm is None or self._bridge._state != "running":
-            return
+        if self._bridge._state == "running":
+            try:
+                self._bridge.run(self._llm._aclose(), timeout=10.0)
+            except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
+                logger.warning("kernel: closing LLM providers failed: {!r}", exc)
+        # The cost ledger's usage store (shared by pool and host-registered
+        # providers); it reopens lazily if a host-owned provider records again.
+        from nanobot.llm_usage import close_llm_usage_store
+
         try:
-            self._bridge.run(self._llm._aclose(), timeout=10.0)
-        except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
-            logger.warning("kernel: closing LLM providers failed: {!r}", exc)
+            close_llm_usage_store(data_dir=self._core_env.paths.data_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("kernel: closing the LLM usage store failed: {!r}", exc)
 
     async def aclose(self) -> None:
         """Async :meth:`close`: stops the loop thread off the caller's event loop."""

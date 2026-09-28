@@ -473,6 +473,54 @@ async def test_kernel_aclose_closes_agents_and_sessions(tmp_path, sink) -> None:
         kernel.agent(AgentSpec(name="a"))
 
 
+def test_close_racing_the_first_agent_build_returns_promptly(tmp_path, sink, monkeypatch) -> None:
+    # The first build asks for kernel.llm on the loop thread while close() is already
+    # waiting on that thread; a lazily built LLM behind close's lock made this hang.
+    import time
+
+    kernel = Kernel(_env(tmp_path, sink))
+    agent = kernel.agent(AgentSpec(name="a"))
+    entered = threading.Event()
+    real_build = Agent._build
+
+    def slow_build(self: Agent) -> Any:
+        entered.set()
+        deadline = time.monotonic() + 10
+        while not kernel._closing and time.monotonic() < deadline:
+            time.sleep(0.005)
+        return real_build(self)
+
+    monkeypatch.setattr(Agent, "_build", slow_build)
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            agent.run_sync("hi")
+        except BaseException as exc:  # noqa: BLE001 - the run fails: the kernel closed
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert entered.wait(10)
+    started = time.monotonic()
+    kernel.close()
+    assert time.monotonic() - started < 5
+    thread.join(10)
+    assert not thread.is_alive() and errors
+
+
+def test_llm_refuses_new_providers_once_closing(tmp_path, sink) -> None:
+    kernel = Kernel(_env(tmp_path, sink))
+    llm = kernel.llm
+    kernel.close()
+    with pytest.raises(RuntimeError, match="kernel is closed"):
+        kernel.llm  # noqa: B018
+    # A host still holding the LLM cannot build a provider that nobody would close.
+    with pytest.raises(RuntimeError, match="kernel is closed"):
+        llm._raw_provider_for("main")
+    assert llm._pool == {}
+
+
 async def test_goal_runtime_template_uses_variant_roots(tmp_path, make_kernel) -> None:
     templates = tmp_path / "templates" / "agent"
     templates.mkdir(parents=True)

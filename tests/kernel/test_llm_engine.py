@@ -563,8 +563,8 @@ async def test_kernel_aclose_closes_pool_providers(tmp_path, monkeypatch) -> Non
     await kernel.aclose()
     assert len(built) == 1 and built[0].closed
     assert not injected.closed  # host-injected providers stay host-owned
-    with pytest.raises(RuntimeError, match="bridge stopped"):
-        await kernel.llm.complete("x")
+    with pytest.raises(RuntimeError, match="kernel is closed"):
+        kernel.llm  # noqa: B018
 
 
 async def test_fallback_candidates_keep_their_own_settings(tmp_path, monkeypatch) -> None:
