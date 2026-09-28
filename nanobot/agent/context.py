@@ -376,6 +376,18 @@ class ContextBuilder:
         root = workspace or self.workspace
         workspace_path = str(root.expanduser().resolve())
         agent_workspace_path = str(self.workspace.expanduser().resolve())
+        # Where this agent's memory files actually live: relative to the workspace
+        # for the default layout, absolute otherwise (kernel agents keep theirs under
+        # state_dir); none at all when memory is not injected.
+        memory_dir = self.memory.memory_dir.expanduser().resolve()
+        if not getattr(self, "inject_memory", True):
+            memory_path = ""
+        elif memory_dir != Path(agent_workspace_path) / "memory":
+            memory_path = str(memory_dir)
+        elif agent_workspace_path != workspace_path:
+            memory_path = f"{agent_workspace_path}/memory"
+        else:
+            memory_path = "memory"
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
@@ -385,6 +397,7 @@ class ContextBuilder:
             roots=roots,
             workspace_path=workspace_path,
             agent_workspace_path=agent_workspace_path,
+            memory_path=memory_path,
             runtime=runtime,
             platform_policy=render_template(
                 "agent/platform_policy.md", roots=roots, system=system,

@@ -472,6 +472,25 @@ async def test_agent_memory_files_are_per_agent_and_off_by_default(kernel) -> No
     assert sorted(p.name for p in work_memory.iterdir()) == ["MEMORY.md"]
 
 
+async def test_identity_prompt_points_at_the_agents_own_memory_dir(kernel) -> None:
+    from nanobot.kernel.agent import agent_memory_dir
+
+    fake = FakeProvider(default="ok")
+    kernel.llm.register_provider("main", fake, MAIN)
+    await kernel.agent(AgentSpec(name="coach", memory=True)).run("hi")
+    prompt = _system_prompt(fake.calls[-1])
+    mem = agent_memory_dir(kernel.env.paths.state_dir, "coach").resolve()
+    assert f"Long-term memory: {mem / 'MEMORY.md'}" in prompt
+    assert f"History log: {mem / 'history.jsonl'}" in prompt
+    work = str(kernel.env.paths.work_dir.resolve())
+    assert f"{work}/memory" not in prompt and "memory/MEMORY.md" not in prompt.replace(
+        str(mem), "")
+    # memory=False: the prompt names no memory files at all.
+    await kernel.agent(AgentSpec(name="plain")).run("hi")
+    prompt = _system_prompt(fake.calls[-1])
+    assert "Long-term memory:" not in prompt and "History log:" not in prompt
+
+
 def test_agent_dirname_is_safe() -> None:
     from nanobot.kernel.agent import agent_dirname
 
