@@ -166,13 +166,44 @@ def test_sources_count_and_clear_by_source(kernel) -> None:
     assert store.count(collection="phrases") == 3
     assert store.count(source="block-b") == 2
     assert store.count(collection="phrases", source="block-b") == 1
-    store.clear(source="block-a")
+    # clear() defaults to the "default" collection, like add/search (and legacy).
+    store.clear(source="block-a")  # nothing of block-a lives in "default"
+    assert store.sources() == {"block-a": 2, "block-b": 2}
+    store.clear(collection="phrases", source="block-a")
     assert store.sources() == {"block-b": 2}
     assert store.search("one", mode="keyword", collection=None) == []
     store.clear(collection="other", source="block-b")
     assert store.sources() == {"block-b": 1}
-    store.clear()
+    store.clear()  # only the unsourced chunk in "default"
+    assert store.count() == 1 and store.count(collection="default") == 0
+    store.clear(collection=None)  # everything, explicitly
     assert store.count() == 0 and store.sources() == {}
+
+
+def test_long_and_non_ascii_scopes_get_bounded_file_names(kernel) -> None:
+    thai = "agent:" + "\u0e01" * 30  # 281 bytes percent-encoded
+    long_cjk = "agent:" + "\u52a9\u624b" * 60
+    names = {scope_filename(s) for s in (thai, long_cjk, thai + "x", long_cjk[:-1])}
+    assert len(names) == 4
+    for scope in (thai, long_cjk):
+        name = scope_filename(scope)
+        assert len(name.encode()) <= 200 and name == scope_filename(scope)
+        assert name.startswith("agent%3A%E0%B8%81") or name.startswith("agent%3A%E5")
+        store = kernel.memory(scope)
+        _keyword_ok(store)
+        assert store.add("sawasdee krap", source="greeting") == 1
+        assert [h.source for h in store.search("sawasdee", mode="keyword")] == ["greeting"]
+    assert scope_filename("agent:coach") == "agent%3Acoach.db"  # short names unchanged
+
+
+def test_unopenable_store_raises_instead_of_going_silent(kernel, tmp_path) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("file, not a directory")
+    store = kernel.memory(path=blocker / "kb.db")
+    with pytest.raises(RuntimeError, match="cannot open document store"):
+        store.add("hello")
+    with pytest.raises(RuntimeError, match="cannot open document store"):
+        store.search("hello")
 
 
 def test_search_hits_carry_tags_collection_and_filters(kernel) -> None:
@@ -408,6 +439,8 @@ async def test_doc_scopes_search_tool_in_a_run(kernel) -> None:
     kb = kernel.memory("kb")
     _keyword_ok(kb)
     kb.add("Alice and Bob met at the climbing gym in 2019.", source="notes/alice.md")
+    kb.add("Alice prefers bouldering to rope climbing.", source="notes/prefs.md",
+           collection="preferences")
     kernel.memory("faq").add("The gym opens at seven.", source="faq.md")
     kernel.memory("secret").add("Alice climbing secret diary", source="diary.md")
     fake = FakeProvider([
@@ -423,8 +456,9 @@ async def test_doc_scopes_search_tool_in_a_run(kernel) -> None:
     result = await agent.run("How did Alice and Bob meet?")
     assert result.stop_reason == "completed" and result.content == "They met climbing."
     first = json.loads(_tool_message(fake.calls[1], "search_documents"))
-    assert first == [{"scope": "kb", "source": "notes/alice.md",
-                      "text": "Alice and Bob met at the climbing gym in 2019."}]
+    # Every collection of the scope is searched, not only "default".
+    assert {r["source"] for r in first} == {"notes/alice.md", "notes/prefs.md"}
+    assert all(r["scope"] == "kb" for r in first)
     denied = _tool_message(fake.calls[2], "search_documents")
     assert "unknown document scope 'secret'" in denied and "kb, faq" in denied
     assert "diary" not in denied

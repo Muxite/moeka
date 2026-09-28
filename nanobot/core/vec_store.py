@@ -188,6 +188,8 @@ class VecStore:
         self._fts_available = False
         self._embed_dim_checked = False
         self._log_retrievals = log_retrievals
+        # Why the file could not be opened at all (None when it opened).
+        self.init_error: Exception | None = None
         self._available = self._try_init()
 
     # ------------------------------------------------------------------
@@ -842,8 +844,9 @@ class VecStore:
         try:
             conn = self._connection()
             self._ensure_schema(conn)
-        except Exception:
+        except Exception as exc:
             logger.exception("VecStore: failed to open vec.db")
+            self.init_error = exc
             return False
         return vec_importable and embed_importable and self._vec_loaded
 

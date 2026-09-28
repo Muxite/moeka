@@ -8,7 +8,11 @@ Where the files live:
 - ``kernel.memory(scope)`` -> ``<state_dir>/memory/<scope>.db``. A scope is a
   non-empty name without path separators, NUL or ``..``; it is percent-encoded
   into the file name (``agent:coach`` -> ``agent%3Acoach.db``), so distinct scopes
-  never share a file. ``scope=None`` is ``"default"``.
+  never share a file. A name whose encoding passes 200 bytes becomes an encoded
+  prefix plus a sha256 suffix (file systems cap names at 255 bytes; non-ASCII scopes
+  such as CJK agent names inflate 6-12x). ``scope=None`` is ``"default"``.
+- A file that cannot be opened at all raises ``RuntimeError`` on use (never a silent
+  0 / ``[]``).
 - ``kernel.memory(path=...)`` opens a host-chosen file instead (awork's corpora).
 - ``state_dir``, not ``work_dir``: this is kernel state the agent's file tools do
   not own (invariant I2).
@@ -44,6 +48,7 @@ action, so the tool scope, policy and offline rules apply.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import weakref
@@ -66,6 +71,8 @@ MEMORY_DIRNAME = "memory"
 SEARCH_TOOL_NAME = "search_documents"
 _SEARCH_MODES = frozenset({"vec", "keyword", "hybrid"})
 _MAX_SCOPE_LEN = 128
+_MAX_FILENAME_BYTES = 200  # percent-encoding is pure ASCII: chars == bytes
+_HASHED_PREFIX_BYTES = 120
 _MAX_TOOL_K = 20
 
 _T = TypeVar("_T")
@@ -85,8 +92,25 @@ def validate_scope(scope: Any) -> str:
 
 
 def scope_filename(scope: str) -> str:
-    """The file name a scope is stored in (percent-encoded, so injective)."""
-    return quote(validate_scope(scope), safe="-_.") + ".db"
+    """The file name a scope is stored in.
+
+    Percent-encoded (injective). When that would be longer than
+    :data:`_MAX_FILENAME_BYTES` (non-ASCII inflates to 6-12 bytes a character, and
+    file systems cap names at 255 bytes), it is a readable encoded prefix of the scope
+    plus a sha256 suffix of the whole scope instead: stable, and distinct in practice.
+    """
+    validate_scope(scope)
+    encoded = quote(scope, safe="-_.")
+    if len(encoded) + 3 <= _MAX_FILENAME_BYTES:
+        return encoded + ".db"
+    digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:32]
+    prefix = ""
+    for ch in scope:
+        piece = quote(ch, safe="-_.")
+        if len(prefix) + len(piece) > _HASHED_PREFIX_BYTES:
+            break
+        prefix += piece
+    return f"{prefix}~{digest}.db"
 
 
 @dataclass(frozen=True)
@@ -155,7 +179,15 @@ class DocStore:
             kwargs: dict[str, Any] = {"log_retrievals": self._log_retrievals}
             if self._embedder is not None:
                 kwargs["embedder"] = self._embedder
-            self._vec = VecStore(self._path, **kwargs)
+            vec = VecStore(self._path, **kwargs)
+            if vec.init_error is not None:
+                # Neither backend can work on a file that never opened: fail loudly
+                # rather than return 0 / [] forever. The next call retries.
+                vec.close()
+                raise RuntimeError(
+                    f"cannot open document store {str(self._path)!r}: {vec.init_error}"
+                ) from vec.init_error
+            self._vec = vec
         return self._vec
 
     def _run(self, fn: Callable[[VecStore], _T]) -> _T:
@@ -273,8 +305,12 @@ class DocStore:
         """Chunk count per source (chunks added without a source are not listed)."""
         return self._run(lambda v: v.document_sources(collection=collection))
 
-    def clear(self, *, collection: str | None = None, source: str | None = None) -> None:
-        """Delete chunks: everything by default, else one collection and/or source."""
+    def clear(
+        self, *, collection: str | None = "default", source: str | None = None,
+    ) -> None:
+        """Delete chunks of *collection* (``"default"``, like ``add``/``search``),
+        optionally only those of one *source*. ``collection=None`` deletes across every
+        collection (with no *source*: the whole file); it must be passed explicitly."""
         self._run(lambda v: v.clear_documents(collection=collection, source=source))
 
     def get_meta(self, key: str) -> str | None:
@@ -423,7 +459,8 @@ def search_documents_tool(stores: Callable[[str], DocStore], scopes: Sequence[st
     """The read-only ``search_documents(query, scope=None, k=5)`` action over *scopes*.
 
     ``stores(scope)`` returns the scope's :class:`DocStore` (``kernel.memory``). The
-    search is hybrid; with no ``scope`` every scope is searched and the results are
+    search is hybrid over every collection of the scope (a scope is the access
+    boundary; collections sit inside it); with no ``scope`` every scope is searched and the results are
     interleaved by rank. An unknown scope is a tool error listing the allowed ones.
     """
     import asyncio
@@ -438,7 +475,9 @@ def search_documents_tool(stores: Callable[[str], DocStore], scopes: Sequence[st
     def _search(query: str, scope: str | None, k: int) -> list[dict[str, Any]]:
         targets = [scope] if scope is not None else list(allowed)
         per_scope = [
-            [(name, hit) for hit in stores(name).search(query, k=k, mode="hybrid")]
+            [(name, hit) for hit in stores(name).search(
+                query, k=k, mode="hybrid", collection=None,
+            )]
             for name in targets
         ]
         merged: list[tuple[str, Hit]] = []
