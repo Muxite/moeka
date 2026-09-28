@@ -148,6 +148,53 @@ async def test_schema_violating_action_result_is_a_tool_error(make_kernel) -> No
     assert RESULT_SCHEMA_MARKER in _tool_message(fake.calls[1], "weather")
 
 
+async def test_sync_action_runs_off_the_loop_and_can_call_the_kernel(make_kernel, sink) -> None:
+    # A sync action runs in a worker thread: blocking *_sync kernel calls work from it
+    # (on the loop thread they would deadlock), and the run's span still applies.
+    fake = FakeProvider([tool_call("summarize", {"text": "moeka"}), "inner", "done"])
+    kernel = make_kernel(fake)
+    threads: list[threading.Thread] = []
+
+    def summarize(text: str) -> str:
+        threads.append(threading.current_thread())
+        return kernel.llm.complete_sync(f"summarize {text}").text
+
+    agent = kernel.agent(AgentSpec(name="s", actions=[summarize]))
+    result = await agent.run("go")
+    assert result.stop_reason == "completed" and result.content == "done"
+    assert _tool_message(fake.calls[2], "summarize") == "inner"
+    assert threads and threads[0] is not kernel._bridge._thread
+    calls = [e for e in sink.events if e.get("event") == "model.call"]
+    assert len(calls) == 3 and {e.get("trace_id") for e in calls} == {result.trace_id}
+
+
+async def test_blocking_sync_action_does_not_stall_other_runs(make_kernel) -> None:
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow() -> str:
+        started.set()
+        release.wait(10)
+        return "slow done"
+
+    kernel = make_kernel(FakeProvider([tool_call("slow", {}), "a done"]))
+    kernel.llm.register_provider(
+        "other", FakeProvider(["b done"]),
+        ModelSpec(name="other", model="fake-other", provider="openai"),
+    )
+    blocked = kernel.agent(AgentSpec(name="a", actions=[slow]))
+    free = kernel.agent(AgentSpec(name="b", model="other"))
+    task = asyncio.create_task(blocked.run("block"))
+    try:
+        assert await asyncio.to_thread(started.wait, 10)
+        other = await asyncio.wait_for(free.run("hi"), 10)
+        assert other.content == "b done"
+        assert not task.done()
+    finally:
+        release.set()
+    assert (await task).content == "a done"
+
+
 def test_spec_actions_are_registered_and_checked(make_kernel) -> None:
     kernel = make_kernel(FakeProvider())
 

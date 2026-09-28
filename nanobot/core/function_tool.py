@@ -7,6 +7,8 @@ Schema derived from type hints (or supplied explicitly).
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import inspect
 import types
 import typing
@@ -137,13 +139,26 @@ def _field_values(value: Any) -> Any:
     return value
 
 
+def _is_async_callable(fn: Any) -> bool:
+    """A coroutine function (also behind ``functools.partial`` or as ``__call__``)."""
+    while isinstance(fn, functools.partial):
+        fn = fn.func
+    return inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+        getattr(fn, "__call__", None)
+    )
+
+
 class FunctionTool(Tool):
     """Adapts a plain (sync or async) Python callable into a moeka Tool.
 
     Instances are created dynamically by a host (not auto-discovered), so
     ``_plugin_discoverable`` is False. The callable is invoked with validated,
     cast keyword arguments and its return value is passed straight back to the
-    agent loop (string or content blocks).
+    agent loop (string or content blocks). A coroutine function is awaited on the
+    caller's loop; any other callable runs in a worker thread (``asyncio.to_thread``,
+    which copies the context, so trace spans and budget attribution still apply), so
+    a blocking action never stalls the loop and may itself call blocking ``*_sync``
+    APIs of the kernel it runs on.
 
     ``output_model`` (optional, typed calls, design 5b): a pydantic model the return
     value must validate against. A dict, a model instance or JSON text is validated
@@ -234,7 +249,10 @@ class FunctionTool(Tool):
         return self._output_model
 
     async def execute(self, **kwargs: Any) -> Any:
-        result = self._fn(**kwargs)
+        if _is_async_callable(self._fn):
+            result = self._fn(**kwargs)
+        else:
+            result = await asyncio.to_thread(self._fn, **kwargs)
         if inspect.isawaitable(result):
             result = await result
         if self._output_model is not None:
