@@ -53,6 +53,9 @@ COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY nanobot/ nanobot/
 COPY moeka/ moeka/
 COPY scripts/ scripts/
+# tests/examples runs examples/*.py and the quick start in docs/python-sdk.md.
+COPY examples/ examples/
+COPY docs/python-sdk.md docs/python-sdk.md
 COPY tests/ tests/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-extras ${NO_EXTRA:+--no-extra ${NO_EXTRA}}

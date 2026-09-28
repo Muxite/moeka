@@ -28,6 +28,8 @@ nohup.out
 *.log
 images
 docs
+# ... except the SDK page whose quick start tests/examples executes.
+!docs/python-sdk.md
 media
 .assets
 .docs
