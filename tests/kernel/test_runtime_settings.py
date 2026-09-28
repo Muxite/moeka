@@ -103,10 +103,24 @@ def test_openai_compat_timeout_legacy_vs_kernel(tmp_path, monkeypatch):
 # -- concurrency cap (AgentLoop) ------------------------------------------
 
 
+_BUILT: list = []
+
+
+@pytest.fixture(autouse=True)
+def _close_built_loops():
+    # Loops built directly (not by a Kernel) own a SQLite session store: close it so
+    # it is not left for the GC (an "unclosed database" ResourceWarning).
+    yield
+    while _BUILT:
+        _BUILT.pop().sessions.close()
+
+
 def _loop(tmp_path, env, **extra):
-    return AgentLoop.from_config(
+    loop = AgentLoop.from_config(
         _config(tmp_path), tool_registry=ToolRegistry(), provider=_provider(), env=env, **extra
     )
+    _BUILT.append(loop)
+    return loop
 
 
 def test_max_concurrent_requests_legacy_env_var_honoured(tmp_path, monkeypatch):

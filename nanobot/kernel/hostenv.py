@@ -14,6 +14,7 @@ resolver for ``providers/<name>/api_key`` (scope ``provider:<name>``), and
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -359,7 +360,8 @@ class Environment:
         else:
             from nanobot.config.loader import _migrate_config
 
-            cfg = _validate_config(_migrate_config(dict(config)))
+            # Deep: the migration rewrites nested sections in place.
+            cfg = _validate_config(_migrate_config(copy.deepcopy(dict(config))))
         paths = _make_paths(work_dir, state_dir, strict)
         cfg.agents.defaults.workspace = str(paths.work_dir)
 

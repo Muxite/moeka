@@ -264,6 +264,22 @@ async def test_empty_final_response(make_kernel) -> None:
     assert isinstance(result.error, str)
 
 
+async def test_unknown_runner_stop_reason_is_an_error(make_kernel, monkeypatch) -> None:
+    from nanobot.kernel import agent as agent_mod
+
+    real = agent_mod._RunCapture.after_run
+
+    async def after_run(self: Any, context: Any) -> None:
+        await real(self, context)
+        self.stop_reason = "brand_new_reason"
+
+    monkeypatch.setattr(agent_mod._RunCapture, "after_run", after_run)
+    kernel = make_kernel(FakeProvider(["hi"]))
+    result = await kernel.agent(AgentSpec(name="a")).run("x")
+    assert result.stop_reason == "error"
+    assert "brand_new_reason" in str(result.error)
+
+
 async def test_deadline(make_kernel, sink) -> None:
     fake = FakeProvider(["late"], delay=5.0)
     kernel = make_kernel(fake)

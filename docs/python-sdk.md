@@ -105,9 +105,15 @@ Environment.for_host(
 
 - `state_dir` holds kernel state: sessions (`state_dir/sessions`), the cost
   ledger (`state_dir/data`), facts and artifacts, document memory
-  (`state_dir/memory/<scope>.db`), logs. `work_dir` is what agents' file and shell
-  tools work in. With `strict=True` (the default) the two must not overlap
-  (`PathsOverlapError`, a `ValueError`); agents' file tools are denied `state_dir`.
+  (`state_dir/memory/<scope>.db`), each agent's memory files
+  (`state_dir/agents/<name>/memory`), logs. `work_dir` is what agents' file and
+  shell tools work in. With `strict=True` (the default) the two must not overlap
+  (`moeka.PathsOverlapError`, a `ValueError`); agents' file tools are denied
+  `state_dir`.
+- Relative `state_dir` / `work_dir` resolve against the process's current
+  directory when the environment is built. Pass absolute paths: a host that
+  changes directory, or runs from a different one next time, otherwise gets a
+  different kernel state.
 - `credentials` is a `Mapping[str, str]` or a `CredentialResolver`
   (`resolve(ref, scope) -> str | None`). A provider asks for its key only when it
   is first built. With a mapping, a key a `ProviderSpec` names is readable only
@@ -145,7 +151,8 @@ Environment.for_host(
 - `Environment.from_config(config, *, state_dir, work_dir, trace=None, strict=False,
   credentials=None)` wraps a legacy `Config` (or its dict form) without reading
   anything ambient. `${VAR}` placeholders are left as they are; expand them first.
-  Its `models` are the config's presets plus `default`. It exists for migration.
+  A dict is deep-copied first (the legacy migration never rewrites yours). Its
+  `models` are the config's presets plus `default`. It exists for migration.
 
 ## LLM calls
 
@@ -257,8 +264,10 @@ Every failed call raises a subclass of `moeka.errors.LLMError`. Its `kind` is th
 stable category; `call_id`, `model`, `provider`, `status`, `retry_after`,
 `retryable` and `raw` (the provider text, diagnostic only) describe the failure.
 
-- `AuthError` (`auth`): credentials rejected. A credential the resolver does
-  not have currently surfaces as `ModelNotFound` when the provider is built.
+- `AuthError` (`auth`): credentials rejected, or missing: a known alias whose
+  provider needs a key the resolver does not have raises `AuthError` when the
+  provider is built, naming the credential ref (your `ProviderSpec.credential`
+  name, else `providers/<name>/api_key`).
 - `QuotaError` (`quota`): out of credits or quota, including the empty-body
   credit errors some gateways send. Not retryable.
 - `RateLimitError` (`rate_limit`): retryable, honour `retry_after`.
@@ -269,7 +278,8 @@ stable category; `call_id`, `model`, `provider`, `status`, `retry_after`,
 - `TruncatedError` (`truncated`): a required whole answer hit the token limit.
 - `BudgetExceeded` (`budget`): the budget refused the call; nothing was sent.
 - `ModelNotFound` (`model_not_found`): the provider does not know the model, or
-  the provider for an alias could not be built. A name that is not an alias is
+  the configuration cannot build a provider for the alias (other than a missing
+  credential, which is `AuthError`). A name that is not an alias is
   not an error by itself: it is sent as a raw model id to the default model's
   provider.
 - `UnsupportedRequestError` (`unsupported`): `on_unsupported="raise"` and a
@@ -295,7 +305,8 @@ with Kernel(env, budget=budget) as kernel:
   - `admit(estimate: CallEstimate)` returns an opaque reservation or raises
     `BudgetExceeded` to refuse (nothing is sent).
   - `settle(reservation, event)` runs once per physical attempt's `model.call`
-    ledger event (`event.cost_usd` may be `None`).
+    ledger event, a `moeka.budget.ModelCallEvent` (`event.cost_usd` may be
+    `None`).
   - `release(reservation)` runs once when the logical call ends, to free what
     was reserved and not settled.
 - Admission happens once per logical call. A `complete_json` call admits its
@@ -375,7 +386,8 @@ sink.close()
 - `subscribe(event_or_None, fn)` returns an idempotent unsubscribe function.
   Delivery is synchronous on the emitting thread, usually the kernel loop
   thread: a slow subscriber stalls every call in the kernel. Hand heavy work to
-  a queue.
+  a queue. `fn` must be a plain function: a coroutine function raises
+  `TypeError` (it would never be awaited).
 - One JSONL file per rollout: give each rollout its own kernel and sink, or
   keep one kernel and route events by `trace_id` from a subscriber.
 
@@ -490,8 +502,8 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
   others, including `max_iterations`, `policy_denials` and
   `empty_final_response`, end with `run.completed`. The final event's `result` is
   the `RunResult` (and `metadata["stop_reason"]`). `await stream.result()` drains
-  it. Use `async with` so leaving early cancels the run; `stream_sync` for
-  threads.
+  it. Use `async with` so leaving early cancels the run; `stream_sync` returns
+  a `SyncAgentStream` (`with`/`for`, then `result()`) for threads.
 
   ```python
   async with agent.stream("Draft a cover letter", session=chat) as events:

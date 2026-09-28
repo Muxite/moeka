@@ -1257,9 +1257,16 @@ class Agent:
 
         def result(stop: str, *, content: str = "", error: LLMError | str | None = None,
                    question: AskUser | None = None) -> RunResult:
+            if stop not in _STOP_REASONS:
+                # A runner stop reason this API does not know: never report success.
+                logger.warning("agent {}: unknown runner stop reason {!r}; reported as "
+                               "'error'", spec.name, stop)
+                if error is None:
+                    error = f"unknown stop reason {stop!r}"
+                stop = "error"
             return RunResult(
                 content=content,
-                stop_reason=stop if stop in _STOP_REASONS else "completed",  # type: ignore[arg-type]
+                stop_reason=stop,  # type: ignore[arg-type]
                 iterations=capture.iterations,
                 usage=Usage.from_llm_usage(capture.usage),
                 cost_usd=cost.total,

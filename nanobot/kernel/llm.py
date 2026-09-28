@@ -583,19 +583,32 @@ class LLM:
                 return provider
             if self._closed:
                 raise RuntimeError("kernel is closed")
-            from nanobot.providers.factory import make_provider
+            from nanobot.providers.factory import MissingCredentialError, make_provider
 
             env = self._kernel.env
             try:
                 provider = make_provider(
                     env.config, preset_name=alias, env=self._kernel.core_env,
                 )
-            except Exception as exc:
+            except MissingCredentialError as exc:
+                raise AuthError(
+                    f"model {alias!r}: no credential for provider {exc.provider_name!r} "
+                    f"(credential ref {self._credential_ref(exc.ref)!r})",
+                    model=alias, provider=exc.provider_name,
+                ) from exc
+            except (ValueError, KeyError) as exc:  # the config cannot build this alias
                 raise ModelNotFound(
                     f"no provider can serve model {alias!r}: {exc}", model=alias,
                 ) from exc
             self._pool[alias] = provider
             return provider
+
+    def _credential_ref(self, ref: str) -> str:
+        """The host's ref name for kernel ref *ref* (a ``ProviderSpec.credential`` alias)."""
+        aliases = getattr(self._kernel.core_env.credentials, "_aliases", None)
+        if isinstance(aliases, dict) and isinstance(aliases.get(ref), str):
+            return aliases[ref]
+        return ref
 
     def _route(self, model: str | None) -> _Route:
         env = self._kernel.env

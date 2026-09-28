@@ -156,6 +156,15 @@ def _provider_spec_for_config(
     return spec
 
 
+class MissingCredentialError(ValueError):
+    """No API key for a provider that needs one (config or credential resolver)."""
+
+    def __init__(self, provider_name: str) -> None:
+        super().__init__(f"No API key configured for provider '{provider_name}'.")
+        self.provider_name = provider_name
+        self.ref = f"providers/{provider_name}/api_key"
+
+
 def _resolve_provider_setup(
     config: Config,
     *,
@@ -204,7 +213,7 @@ def _resolve_provider_setup(
         needs_key = not _provider_api_key(provider_name, p, env)
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
-            raise ValueError(f"No API key configured for provider '{provider_name}'.")
+            raise MissingCredentialError(provider_name)
 
     return _ProviderSetup(
         model=model,

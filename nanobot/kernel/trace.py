@@ -28,6 +28,7 @@ Imports: stdlib and loguru only (``nanobot.llm_usage.context`` lazily); import-c
 
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 import time
@@ -335,6 +336,13 @@ class Tracer:
         """
         if not callable(fn):
             raise TypeError(f"subscriber must be callable, got {type(fn).__name__}")
+        if inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+            getattr(fn, "__call__", None)
+        ):
+            raise TypeError(
+                "subscriber must be a plain function: events are delivered synchronously "
+                "and a coroutine would never run (hand work off to your own loop instead)"
+            )
         key = object()
         with self._lock:
             self._subs = (*self._subs, (key, event_type, fn))

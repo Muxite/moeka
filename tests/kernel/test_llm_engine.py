@@ -132,10 +132,46 @@ def test_alias_resolution_and_model_not_found(kernel) -> None:
     assert llm._route(None).provider is main.provider  # one provider per alias, cached
     raw = llm._route("gpt-4o-mini")  # a raw id rides the default model's provider
     assert (raw.alias, raw.provider, raw.model) == (None, main.provider, "gpt-4o-mini")
-    with pytest.raises(ModelNotFound):
-        llm._route("claude")  # anthropic has no credential: no provider can serve it
-    with pytest.raises(ModelNotFound):
+    # A known alias whose provider has no credential is an auth problem, naming the ref.
+    with pytest.raises(AuthError, match="providers/anthropic/api_key") as info:
+        llm._route("claude")
+    assert info.value.kind == "auth" and info.value.provider == "anthropic"
+    with pytest.raises(AuthError):
         llm.generate_sync([user("hi")], GenerateOptions(model="claude"))
+
+
+def test_kernel_close_releases_the_usage_store(tmp_path) -> None:
+    from nanobot.llm_usage import get_llm_usage_store
+
+    kernel = Kernel(_env(tmp_path))
+    kernel.llm.register_provider(
+        "main", FakeProvider(default="x"), ModelSpec(name="main", model="m", provider="openai"),
+    )
+    kernel.llm.generate_sync([user("hi")])
+    store = get_llm_usage_store(data_dir=kernel.core_env.paths.data_dir)
+    assert store._connection is not None  # the ledger recorded the call
+    kernel.close()
+    assert store._connection is None
+
+
+def test_missing_credential_names_the_host_ref(tmp_path) -> None:
+    env = Environment.for_host(
+        state_dir=tmp_path / "state", work_dir=tmp_path / "work",
+        credentials={},
+        providers=[ProviderSpec(name="openai", credential="OPENAI_KEY")],
+        models=[ModelSpec(name="main", model="gpt-4.1", provider="openai")],
+        default_model="main",
+    )
+    with Kernel(env) as kernel:
+        with pytest.raises(AuthError, match="'OPENAI_KEY'"):
+            kernel.llm.generate_sync([user("hi")])
+
+
+def test_unknown_alias_without_default_is_model_not_found(tmp_path, monkeypatch) -> None:
+    with Kernel(_env(tmp_path)) as kernel:
+        monkeypatch.setattr(kernel.llm, "_spec_for", lambda alias: None)
+        with pytest.raises(ModelNotFound):
+            kernel.llm._route("nope")
 
 
 async def test_affinity_key_reaches_session_id(kernel) -> None:

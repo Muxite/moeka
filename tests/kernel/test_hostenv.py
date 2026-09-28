@@ -259,6 +259,19 @@ def test_from_config_wraps_legacy_config_without_ambient_reads(dirs) -> None:
     assert make_provider(from_dict.config, env=from_dict.core).api_key == "sk-res"
 
 
+def test_from_config_dict_leaves_the_callers_dict_alone(dirs) -> None:
+    import copy
+
+    raw = {
+        "agents": {"defaults": {"model": "gpt-4.1", "provider": "openai"}},
+        "tools": {"exec": {"restrictToWorkspace": True}, "myEnabled": True},
+    }
+    before = copy.deepcopy(raw)
+    env = Environment.from_config(raw, state_dir=dirs[1], work_dir=dirs[0])
+    assert raw == before  # the legacy migration rewrote a copy, not the host's dict
+    assert env.config.tools.restrict_to_workspace is True
+
+
 def test_config_validation_matches_model_validate_and_keeps_cross_checks(monkeypatch) -> None:
     from nanobot.kernel.hostenv import _validate_config
 

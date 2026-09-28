@@ -18,7 +18,9 @@ messages and metadata survive a kernel restart on the same ``state_dir``.
   which cut consolidation state to the kept prefix: a summary covering messages
   past the cut is dropped (offset reset to 0), ``provider_state``, the latest
   turn's usage and the in-flight turn keys are dropped. Built agents also forget
-  their file-read state for the key.
+  their file-read state for the key. When no committed summary survives a rewind
+  (and for a fork's target key and a deleted key), every agent's archived memory
+  history for that key is dropped too (``Kernel._drop_session_history``).
 
 Locking: runs, appends, rewinds, forks, restores and deletes on one key are
 serialised by the kernel's per-key ``asyncio.Lock`` (all on the kernel loop).

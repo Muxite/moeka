@@ -521,6 +521,18 @@ async def test_floor_denials_keep_their_classification(tmp_path):
 # -- AgentLoop wiring --------------------------------------------------------------
 
 
+_BUILT: list = []
+
+
+@pytest.fixture(autouse=True)
+def _close_built_loops():
+    # Loops built directly (not by a Kernel) own a SQLite session store: close it so
+    # it is not left for the GC (an "unclosed database" ResourceWarning).
+    yield
+    while _BUILT:
+        _BUILT.pop().sessions.close()
+
+
 def _loop(tmp_path, **extra):
     from nanobot.agent.loop import AgentLoop
     from nanobot.config.schema import Config
@@ -531,7 +543,9 @@ def _loop(tmp_path, **extra):
     })
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    return AgentLoop.from_config(config, tool_registry=ToolRegistry(), provider=provider, **extra)
+    loop = AgentLoop.from_config(config, tool_registry=ToolRegistry(), provider=provider, **extra)
+    _BUILT.append(loop)
+    return loop
 
 
 def test_loop_default_policy_and_principal(tmp_path):

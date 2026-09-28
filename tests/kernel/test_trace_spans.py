@@ -273,6 +273,23 @@ def test_tracer_isolates_a_failing_host_sink_and_copies_per_subscriber() -> None
         tracer.subscribe(None, "nope")  # type: ignore[arg-type]
 
 
+def test_subscribe_rejects_coroutine_functions() -> None:
+    tracer = Tracer(MemoryTraceSink())
+
+    async def handler(event: dict) -> None:  # would never be awaited
+        pass
+
+    class AsyncCallable:
+        async def __call__(self, event: dict) -> None:
+            pass
+
+    with pytest.raises(TypeError, match="plain function"):
+        tracer.subscribe("model.call", handler)
+    with pytest.raises(TypeError, match="plain function"):
+        tracer.subscribe(None, AsyncCallable())
+    tracer.subscribe(None, lambda event: None)
+
+
 def test_subscribe_is_thread_safe() -> None:
     tracer = Tracer()
     counts: list[int] = []

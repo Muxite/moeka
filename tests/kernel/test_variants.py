@@ -19,6 +19,17 @@ from nanobot.kernel.variants import Fingerprint, Variant, fingerprint
 from nanobot.providers.base import GenerationSettings, LLMResponse
 from nanobot.utils.prompt_templates import render_template
 
+_BUILT: list = []
+
+
+@pytest.fixture(autouse=True)
+def _close_built_loops():
+    # Loops built directly (not by a Kernel) own a SQLite session store: close it so
+    # it is not left for the GC (an "unclosed database" ResourceWarning).
+    yield
+    while _BUILT:
+        _BUILT.pop().sessions.close()
+
 
 def _loop(workspace: Path, variant: Variant | None = None, **kwargs) -> AgentLoop:
     workspace.mkdir(parents=True, exist_ok=True)
@@ -29,10 +40,12 @@ def _loop(workspace: Path, variant: Variant | None = None, **kwargs) -> AgentLoo
     provider.chat_stream_with_retry = AsyncMock(
         return_value=LLMResponse(content="done", tool_calls=[]),
     )
-    return AgentLoop(
+    loop = AgentLoop(
         bus=MessageBus(), provider=provider, workspace=workspace, model="test-model",
         variant=variant, **kwargs,
     )
+    _BUILT.append(loop)
+    return loop
 
 
 def _fp(loop: AgentLoop, *, model: str = "m", sampling: Sampling | None = None) -> Fingerprint:
