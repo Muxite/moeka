@@ -132,7 +132,8 @@ Trace (values never on the trace):
 Wiring (what is live): :meth:`ArtifactStore.from_env` builds the store (and, unless
 given, its fact store) from a ``CoreEnvironment``. ``MoekaKernel.artifacts`` (Task 25)
 is that store over ``MoekaKernel.facts``, and ``MoekaKernel.propose`` passes through to
-:meth:`ArtifactStore.propose`. No gateway, ``AgentLoop`` or built-in tool path proposes
+:meth:`ArtifactStore.propose`. ``Kernel.epistemics`` (Task 11) wraps the same store for
+the public kernel. No gateway, ``AgentLoop`` or built-in tool path proposes
 artifacts on its own: a host (or a host action the agent calls) does.
 
 Imports: stdlib, pydantic and kernel modules only; import-cheap.

@@ -73,7 +73,8 @@ Answers (:func:`record_answer`):
 
 Wiring (what is live): ``MoekaKernel.answer(question, answer, turn_ref)`` (Task 25) is a
 thin passthrough to :func:`record_answer` over the kernel's own stores. The host calls
-:func:`resolve_divergence` and asks the question; no gateway, ``AgentLoop`` or tool
+:func:`resolve_divergence` (``Kernel.epistemics.reconcile`` / ``.answer`` on the public
+kernel, Task 11) and asks the question; no gateway, ``AgentLoop`` or tool
 path runs this loop on its own.
 
 Imports: stdlib and kernel modules only; no model or provider imports.

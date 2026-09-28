@@ -28,6 +28,15 @@ when the registry has it active. ``None`` keeps legacy entry-point loading.
 ``close``/``aclose`` closes the agents, then the session store, then the LLM
 providers, then the loop thread.
 
+Memory and epistemics (Task 11): ``kernel.memory(scope)`` / ``kernel.memory(path=...)``
+returns a :class:`~nanobot.kernel.memory.DocStore` (``<state_dir>/memory/<scope>.db``;
+all of a kernel's stores share one embedder, and at most
+:data:`~nanobot.kernel.memory.DEFAULT_MAX_OPEN` files stay open, least recently used
+released first). ``kernel.epistemics`` is the
+:class:`~nanobot.kernel.epistemics.Epistemics` facade (facts, cited artifacts,
+clarification), built from ``kernel.core_env`` so its events reach ``kernel.trace``.
+Both are closed by ``close``/``aclose`` after the agents.
+
 Trace routing: ``kernel.trace`` is a :class:`~nanobot.kernel.trace.Tracer` wrapping
 ``env.trace`` (the host's sink). Everything the kernel builds (pool providers, their
 ledgers, budget metering, cache events) is handed ``kernel.core_env``, a copy of
@@ -40,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import threading
+from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING
 
@@ -54,7 +64,9 @@ if TYPE_CHECKING:
     from nanobot.kernel.baselines import BaselineRegistry
     from nanobot.kernel.budget import Budget, ResponseCache
     from nanobot.kernel.env import CoreEnvironment
+    from nanobot.kernel.epistemics import Epistemics
     from nanobot.kernel.llm import LLM
+    from nanobot.kernel.memory import DocStore, _MemoryRegistry
     from nanobot.kernel.policy import PermissionPolicy
     from nanobot.kernel.registry import PluginRegistry
     from nanobot.kernel.sessions import Sessions
@@ -143,6 +155,9 @@ class Kernel:
         self._agents_lock = threading.Lock()
         # Per session key, across all agents (runs execute on the kernel loop thread).
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Task 11: document stores and the epistemic facade (both built lazily).
+        self._memory_registry: _MemoryRegistry | None = None
+        self._epistemics: Epistemics | None = None
 
     @property
     def env(self) -> Environment:
@@ -235,6 +250,46 @@ class Kernel:
         return handles
 
     @property
+    def epistemics(self) -> Epistemics:
+        """Facts with provenance, cited artifacts and clarification (created on first
+        access; see :mod:`nanobot.kernel.epistemics`)."""
+        epi = self._epistemics
+        if epi is None:
+            with self._agents_lock:
+                if self._closed or self._closing:
+                    raise RuntimeError("kernel is closed")
+                if self._epistemics is None:
+                    from nanobot.kernel.epistemics import Epistemics
+
+                    self._epistemics = Epistemics(self._core_env)
+                epi = self._epistemics
+        return epi
+
+    def memory(self, scope: str | None = None, *, path: str | Path | None = None) -> DocStore:
+        """The document store for *scope* (``<state_dir>/memory/<scope>.db``; ``None`` is
+        ``"default"``) or for a host-chosen file (``path=``). One handle per file; see
+        :mod:`nanobot.kernel.memory` for scope names, the shared embedder and the LRU."""
+        return self._memory_stores().get(scope, path)
+
+    def _memory_stores(self) -> _MemoryRegistry:
+        registry = self._memory_registry
+        if registry is None:
+            with self._agents_lock:
+                if self._closed or self._closing:
+                    raise RuntimeError("kernel is closed")
+                if self._memory_registry is None:
+                    from nanobot.kernel.memory import _MemoryRegistry
+
+                    vec = self._env.config.agents.defaults.vec
+                    self._memory_registry = _MemoryRegistry(
+                        self._env.paths.state_dir,
+                        embedding_model=vec.embedding_model,
+                        log_retrievals=vec.log_retrievals,
+                    )
+                registry = self._memory_registry
+        return registry
+
+    @property
     def closed(self) -> bool:
         return self._closed
 
@@ -302,6 +357,7 @@ class Kernel:
             with self._agents_lock:
                 self._closing = True
             self._close_agents()
+            self._close_stores()
             self._close_llm()
             self._bridge.stop()
             # Only after stop() returned: a failed stop leaves the kernel open
@@ -326,6 +382,19 @@ class Kernel:
                 sessions.close()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("kernel: closing the session store failed: {!r}", exc)
+
+    def _close_stores(self) -> None:
+        # After the agents (they pin their memory stores); plain SQLite, no loop needed.
+        with self._agents_lock:
+            registry, self._memory_registry = self._memory_registry, None
+            epi, self._epistemics = self._epistemics, None
+        for name, closer in (("document stores", registry), ("epistemics", epi)):
+            if closer is None:
+                continue
+            try:
+                closer.close()
+            except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
+                logger.warning("kernel: closing {} failed: {!r}", name, exc)
 
     @staticmethod
     async def _aclose_agents(agents: list[Agent]) -> None:

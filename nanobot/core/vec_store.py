@@ -19,6 +19,13 @@ All public methods degrade gracefully: if sqlite-vec or
 sentence-transformers are unavailable the caller gets None/[] back (keyword
 search keeps working with stock sqlite3 + FTS5). Import this module safely;
 it never raises at import time.
+
+Embedders: a store embeds through an :class:`Embedder` (``model_name`` plus
+``embed(texts) -> list[np.ndarray]``, float32 and L2-normalised; an optional
+``available`` attribute says whether it can embed at all). ``VecStore(...,
+embedder=e)`` uses *e*, so many stores can share one loaded model (the kernel's
+``DocStore`` scopes do). Without one the store lazily loads its own
+``SentenceTransformer`` exactly as before.
 """
 
 from __future__ import annotations
@@ -26,10 +33,11 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from loguru import logger
 
@@ -46,6 +54,53 @@ _VEC_STORES = ("memory_chunks", "history_entries", "skills", "documents")
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@runtime_checkable
+class Embedder(Protocol):
+    """What a :class:`VecStore` embeds with (see the module docstring)."""
+
+    model_name: str
+
+    def embed(self, texts: list[str]) -> list[np.ndarray]: ...
+
+
+class SentenceTransformerEmbedder:
+    """A lazily loaded ``SentenceTransformer`` shareable by many stores and threads.
+
+    Constructing it is cheap: the model loads on the first :meth:`embed`. The load and
+    each ``encode`` run under one lock, so concurrent stores never load it twice.
+    """
+
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
+        self.model_name = model_name
+        self._model: Any = None
+        self._lock = threading.Lock()
+
+    @property
+    def available(self) -> bool:
+        """``sentence-transformers`` is importable (the model itself loads lazily)."""
+        try:
+            import sentence_transformers  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    def embed(self, texts: list[str]) -> list[np.ndarray]:
+        import numpy as np
+
+        with self._lock:
+            if self._model is None:
+                from sentence_transformers import SentenceTransformer
+
+                logger.debug("VecStore: loading embedding model {}", self.model_name)
+                self._model = SentenceTransformer(self.model_name)
+            result = self._model.encode(
+                texts, convert_to_numpy=True, normalize_embeddings=True,
+            )
+        if result.ndim == 1:
+            return [result.astype(np.float32)]
+        return [row.astype(np.float32) for row in result]
 
 
 def _chunk_markdown(text: str) -> list[str]:
@@ -121,10 +176,13 @@ class VecStore:
         model_name: str = "all-MiniLM-L6-v2",
         *,
         log_retrievals: bool = False,
+        embedder: Embedder | None = None,
     ) -> None:
         self._db_path = db_path
-        self._model_name = model_name
-        self._model = None  # lazy-loaded
+        # An injected embedder names the model the stored vectors come from.
+        self._embedder = embedder
+        self._model_name = embedder.model_name if embedder is not None else model_name
+        self._model = None  # lazy-loaded (only without an injected embedder)
         self._conn: sqlite3.Connection | None = None
         self._vec_loaded = False  # sqlite-vec extension active on the connection
         self._fts_available = False
@@ -362,25 +420,62 @@ class VecStore:
         Filters: ``collection`` (None = all), ``tags`` (all listed tags must be
         present), ``since`` (ISO timestamp; only chunks indexed at/after it).
         """
-        if mode not in ("vec", "keyword", "hybrid"):
-            raise ValueError(f"unknown search mode {mode!r}")
-        if not query.strip():
+        rows = self._search_logged(
+            query, k, collection=collection, mode=mode, tags=tags, since=since, caller=caller,
+        )
+        return [(source, text, score) for _id, source, text, score in rows]
+
+    def search_documents_detailed(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        collection: str | None = "default",
+        mode: str = "vec",
+        tags: list[str] | None = None,
+        since: str | None = None,
+        caller: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """:meth:`search_documents_scored` with each chunk's metadata, best first.
+
+        Each result is ``{"source", "text", "score", "tags", "collection",
+        "created_at"}`` (``tags`` a list, empty when the chunk has none); the ranking
+        and scores are exactly :meth:`search_documents_scored`'s.
+        """
+        rows = self._search_logged(
+            query, k, collection=collection, mode=mode, tags=tags, since=since, caller=caller,
+        )
+        if not rows:
             return []
         try:
-            results = self._search_documents_inner(
-                query, k, collection=collection, mode=mode, tags=tags, since=since,
-            )
+            ids = [row[0] for row in rows]
+            marks = ",".join("?" * len(ids))
+            meta = {
+                r[0]: (r[1], r[2], r[3])
+                for r in self._connection().execute(
+                    f"SELECT id, tags, collection, created_at FROM documents_data"
+                    f" WHERE id IN ({marks})",
+                    ids,
+                ).fetchall()
+            }
         except Exception:
-            logger.exception("VecStore: search_documents_scored failed")
+            logger.exception("VecStore: search_documents_detailed metadata lookup failed")
             return []
-        self._log_retrieval(
-            "documents", caller, query, k,
-            [text for _s, text, _d in results],
-            mode=mode, collection=collection,
-        )
-        return results
+        out: list[dict[str, Any]] = []
+        for doc_id, source, text, score in rows:
+            tags_json, coll, created = meta.get(doc_id, (None, "default", None))
+            try:
+                tag_list = json.loads(tags_json) if tags_json else []
+            except ValueError:
+                tag_list = []
+            out.append({
+                "source": source, "text": text, "score": score,
+                "tags": [str(t) for t in tag_list] if isinstance(tag_list, list) else [],
+                "collection": coll, "created_at": created,
+            })
+        return out
 
-    def _search_documents_inner(
+    def _search_logged(
         self,
         query: str,
         k: int,
@@ -389,7 +484,38 @@ class VecStore:
         mode: str,
         tags: list[str] | None,
         since: str | None,
-    ) -> list[tuple[str | None, str, float]]:
+        caller: str | None,
+    ) -> list[tuple[int, str | None, str, float]]:
+        """The shared body of the search methods: validate, search, log."""
+        if mode not in ("vec", "keyword", "hybrid"):
+            raise ValueError(f"unknown search mode {mode!r}")
+        if not query.strip():
+            return []
+        try:
+            results = self._search_document_rows(
+                query, k, collection=collection, mode=mode, tags=tags, since=since,
+            )
+        except Exception:
+            logger.exception("VecStore: search_documents_scored failed")
+            return []
+        self._log_retrieval(
+            "documents", caller, query, k,
+            [text for _id, _s, text, _d in results],
+            mode=mode, collection=collection,
+        )
+        return results
+
+    def _search_document_rows(
+        self,
+        query: str,
+        k: int,
+        *,
+        collection: str | None,
+        mode: str,
+        tags: list[str] | None,
+        since: str | None,
+    ) -> list[tuple[int, str | None, str, float]]:
+        """Ranked ``(id, source, text, score)`` rows for one search, best first."""
         vec_ok = self._available
         fts_ok = self._fts_available
         if mode == "vec" and not vec_ok:
@@ -400,17 +526,15 @@ class VecStore:
             if vec_ok and fts_ok:
                 vec_rows = self._vec_documents(query, k, collection, tags, since)
                 kw_rows = self._keyword_documents(query, k, collection, tags, since)
-                return self._rrf_fuse(vec_rows, kw_rows, k)
+                return self._rrf_fuse_rows(vec_rows, kw_rows, k)
             mode = "vec" if vec_ok else "keyword"
             if mode == "vec" and not vec_ok:
                 return []
             if mode == "keyword" and not fts_ok:
                 return []
         if mode == "keyword":
-            return [(s, t, score) for _id, s, t, score in
-                    self._keyword_documents(query, k, collection, tags, since)]
-        return [(s, t, score) for _id, s, t, score in
-                self._vec_documents(query, k, collection, tags, since)]
+            return self._keyword_documents(query, k, collection, tags, since)
+        return self._vec_documents(query, k, collection, tags, since)
 
     def _doc_filter_sql(
         self, collection: str | None, tags: list[str] | None, since: str | None,
@@ -510,6 +634,18 @@ class VecStore:
         k: int,
     ) -> list[tuple[str | None, str, float]]:
         """Reciprocal-rank fusion. Returns ``(source, text, -rrf)`` best first."""
+        return [
+            (source, text, score)
+            for _id, source, text, score in VecStore._rrf_fuse_rows(vec_rows, kw_rows, k)
+        ]
+
+    @staticmethod
+    def _rrf_fuse_rows(
+        vec_rows: list[tuple[int, str | None, str, float]],
+        kw_rows: list[tuple[int, str | None, str, float]],
+        k: int,
+    ) -> list[tuple[int, str | None, str, float]]:
+        """Reciprocal-rank fusion. Returns ``(id, source, text, -rrf)`` best first."""
         scores: dict[int, float] = {}
         rows_by_id: dict[int, tuple[str | None, str]] = {}
         for rank_list in (vec_rows, kw_rows):
@@ -518,49 +654,82 @@ class VecStore:
                 rows_by_id.setdefault(doc_id, (source, text))
         ordered = sorted(scores.items(), key=lambda item: -item[1])[:k]
         return [
-            (rows_by_id[doc_id][0], rows_by_id[doc_id][1], -score)
+            (doc_id, rows_by_id[doc_id][0], rows_by_id[doc_id][1], -score)
             for doc_id, score in ordered
         ]
 
-    def count_documents(self, *, collection: str | None = "default") -> int:
-        """Number of indexed document chunks. ``collection=None`` counts all."""
+    @staticmethod
+    def _scope_sql(collection: str | None, source: str | None) -> tuple[str, list]:
+        """``WHERE`` clause + params selecting documents by collection and source."""
+        clauses: list[str] = []
+        params: list = []
+        if collection is not None:
+            clauses.append("collection = ?")
+            params.append(collection)
+        if source is not None:
+            clauses.append("source = ?")
+            params.append(source)
+        return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
+
+    def count_documents(
+        self, *, collection: str | None = "default", source: str | None = None,
+    ) -> int:
+        """Number of indexed document chunks. ``collection=None`` counts all
+        collections; ``source`` counts only chunks added under that source."""
         if not (self._available or self._fts_available):
             return 0
         try:
-            conn = self._connection()
-            if collection is None:
-                row = conn.execute("SELECT count(*) FROM documents_data").fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT count(*) FROM documents_data WHERE collection = ?",
-                    (collection,),
-                ).fetchone()
+            where, params = self._scope_sql(collection, source)
+            row = self._connection().execute(
+                f"SELECT count(*) FROM documents_data{where}", params,
+            ).fetchone()
             return int(row[0])
         except Exception:
             logger.exception("VecStore: count_documents failed")
             return 0
 
-    def clear_documents(self, *, collection: str | None = "default") -> None:
-        """Delete indexed document chunks. ``collection=None`` clears all collections."""
+    def document_sources(self, *, collection: str | None = None) -> dict[str, int]:
+        """Chunk count per ``source`` (``collection=None``: across all collections).
+
+        Chunks added without a source are not listed (they still count in
+        :meth:`count_documents`).
+        """
+        if not (self._available or self._fts_available):
+            return {}
+        try:
+            where, params = self._scope_sql(collection, None)
+            where = (where + " AND" if where else " WHERE") + " source IS NOT NULL"
+            rows = self._connection().execute(
+                f"SELECT source, count(*) FROM documents_data{where}"
+                " GROUP BY source ORDER BY source",
+                params,
+            ).fetchall()
+            return {str(r[0]): int(r[1]) for r in rows}
+        except Exception:
+            logger.exception("VecStore: document_sources failed")
+            return {}
+
+    def clear_documents(
+        self, *, collection: str | None = "default", source: str | None = None,
+    ) -> None:
+        """Delete indexed document chunks. ``collection=None`` clears all collections;
+        ``source`` deletes only chunks added under that source."""
         if not (self._available or self._fts_available):
             return
         try:
             conn = self._connection()
-            if collection is None:
-                if self._vec_loaded:
-                    conn.execute("DELETE FROM documents_vec")
-                conn.execute("DELETE FROM documents_data")
-            else:
+            where, params = self._scope_sql(collection, source)
+            if self._vec_loaded:
                 # vec rows first, while the data rows still identify them.
-                if self._vec_loaded:
+                if where:
                     conn.execute(
                         "DELETE FROM documents_vec WHERE rowid IN "
-                        "(SELECT id FROM documents_data WHERE collection = ?)",
-                        (collection,),
+                        f"(SELECT id FROM documents_data{where})",
+                        params,
                     )
-                conn.execute(
-                    "DELETE FROM documents_data WHERE collection = ?", (collection,)
-                )
+                else:
+                    conn.execute("DELETE FROM documents_vec")
+            conn.execute(f"DELETE FROM documents_data{where}", params)
             conn.commit()
         except Exception:
             logger.exception("VecStore: clear_documents failed")
@@ -657,10 +826,13 @@ class VecStore:
             import sqlite_vec  # noqa: F401
         except ImportError:
             vec_importable = False
-        try:
-            from sentence_transformers import SentenceTransformer  # noqa: F401
-        except ImportError:
-            embed_importable = False
+        if self._embedder is not None:
+            embed_importable = bool(getattr(self._embedder, "available", True))
+        else:
+            try:
+                from sentence_transformers import SentenceTransformer  # noqa: F401
+            except ImportError:
+                embed_importable = False
         if not (vec_importable and embed_importable):
             logger.info(
                 "VecStore: sqlite-vec or sentence-transformers not installed; "
@@ -865,6 +1037,11 @@ class VecStore:
             return None
 
     def _embed(self, texts: list[str]) -> list[np.ndarray]:
+        if self._embedder is not None:
+            vectors = list(self._embedder.embed(texts))
+            if not self._embed_dim_checked and vectors:
+                self._check_embedding_dim(len(vectors[0]))
+            return vectors
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 

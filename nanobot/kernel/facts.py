@@ -14,6 +14,10 @@ Contract:
   decoded on resolve. A non-JSON value raises ``ValueError`` and records nothing.
 - Generic mechanics only: no domain schemas, no dedupe, no update or delete. A fact
   is immutable once recorded.
+- :meth:`FactStore.query` lists facts in creation order, filtered by a ``source_ref``
+  prefix and/or ``source_kind``. The subject of a fact is carried by the ref (a
+  convention such as ``person:alice/relationship``; no subject column exists), so
+  ``query(ref_prefix="person:alice/")`` is "everything recorded about alice".
 
 Trace IDs:
 - Format ``fact-<32 hex>`` from ``uuid4`` (122 random bits).
@@ -35,10 +39,13 @@ Storage:
   that version inside one ``BEGIN IMMEDIATE`` transaction (concurrent first opens
   converge). A file with a NEWER version is refused with :class:`FactStoreError`
   (fail closed, never downgrade).
+- Version 2 (Task 11) adds the ``facts_ref_idx`` index on ``source_ref`` for
+  :meth:`FactStore.query`'s prefix scans. A version-1 file is migrated on open, in the
+  same ``BEGIN IMMEDIATE`` (every statement is ``IF NOT EXISTS``, so the step is
+  idempotent and concurrent openers converge); the table itself is unchanged.
 - The WAL switch is retried with backoff on ``database is locked``: SQLite skips
   the busy handler for a journal-mode change, so concurrent first opens of a fresh
-  file otherwise fail at once (seen in the concurrent-process test). A future bump adds an ``_migrate`` step keyed on
-  the stored version, as ``nanobot/llm_usage/store.py`` does.
+  file otherwise fail at once (seen in the concurrent-process test).
 - Concurrency: calls on one instance are serialised by a lock; separate instances
   and separate processes are serialised by SQLite's WAL locking plus the busy
   timeout. Tests cover shared-instance threads, per-thread instances and separate
@@ -58,6 +65,8 @@ Wiring (what is live):
 - :meth:`FactStore.from_env` builds the store a host gets from a ``CoreEnvironment``
   (``env.paths.state_dir`` and ``env.trace``). ``MoekaKernel.facts`` (Task 25) is that
   store, built lazily from the kernel's env; the host records facts through it.
+  The public kernel's ``Kernel.epistemics`` (Task 11, :mod:`nanobot.kernel.epistemics`)
+  wraps it (``record_fact`` / ``fact`` / ``facts``), built from ``kernel.core_env``.
 - Nothing in the gateway, ``AgentLoop``, typed tool results or
   ``MoekaCore.ingest_text``/``retrieve`` records facts automatically; the host (or its
   actions) calls ``record``, and ``clarify.record_answer`` records ``user`` facts.
@@ -87,7 +96,7 @@ SourceKind = Literal["document", "tool", "user"]
 SOURCE_KINDS: frozenset[str] = frozenset(get_args(SourceKind))
 
 FACTS_DB_FILENAME = "facts.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TRACE_ID_PREFIX = "fact-"
 
 _CONNECT_TIMEOUT_S = 30.0
@@ -131,6 +140,27 @@ def _enable_wal(conn: sqlite3.Connection) -> None:
                 raise
         time.sleep(delay)
         delay = min(delay * 2, 0.1)
+
+
+def _record(row: sqlite3.Row) -> FactRecord:
+    return FactRecord(
+        trace_id=row["trace_id"],
+        source_kind=row["source_kind"],
+        source_ref=row["source_ref"],
+        span=row["span"],
+        value=json.loads(row["value"]),
+        created_at=row["created_at"],
+    )
+
+
+def _prefix_upper_bound(prefix: str) -> str | None:
+    """The smallest string greater than every string starting with *prefix*, or
+    ``None`` when the last character cannot be incremented."""
+    last = ord(prefix[-1])
+    if last >= 0x10FFFF:
+        return None
+    nxt = 0xE000 if 0xD800 <= last + 1 <= 0xDFFF else last + 1  # skip surrogates
+    return prefix[:-1] + chr(nxt)
 
 
 def new_trace_id() -> str:
@@ -205,6 +235,10 @@ class FactStore:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS facts_source_idx "
                     "ON facts(source_kind, source_ref)"
+                )
+                # v2: prefix scans on source_ref alone (FactStore.query).
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS facts_ref_idx ON facts(source_ref)"
                 )
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 conn.execute("COMMIT")
@@ -287,14 +321,56 @@ class FactStore:
             ).fetchone()
         if row is None:
             return None
-        return FactRecord(
-            trace_id=row["trace_id"],
-            source_kind=row["source_kind"],
-            source_ref=row["source_ref"],
-            span=row["span"],
-            value=json.loads(row["value"]),
-            created_at=row["created_at"],
+        return _record(row)
+
+    def query(
+        self,
+        *,
+        ref_prefix: str | None = None,
+        source_kind: str | None = None,
+        limit: int | None = None,
+    ) -> list[FactRecord]:
+        """Facts in creation order (oldest first), optionally filtered.
+
+        ``ref_prefix`` keeps facts whose ``source_ref`` starts with it (case-sensitive,
+        no wildcards); ``source_kind`` keeps one kind; ``limit`` caps the count (the
+        oldest ``limit`` matches).
+        """
+        if ref_prefix is not None and not isinstance(ref_prefix, str):
+            raise ValueError("ref_prefix must be a string or None")
+        if source_kind is not None and source_kind not in SOURCE_KINDS:
+            raise ValueError(
+                f"source_kind must be one of {sorted(SOURCE_KINDS)}, got {source_kind!r}"
+            )
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
+                                  or limit < 0):
+            raise ValueError(f"limit must be a non-negative int or None, got {limit!r}")
+        where: list[str] = []
+        params: list[Any] = []
+        if ref_prefix:
+            upper = _prefix_upper_bound(ref_prefix)
+            if upper is None:
+                where.append("substr(source_ref, 1, ?) = ?")
+                params += [len(ref_prefix), ref_prefix]
+            else:
+                # A range the facts_ref_idx index serves (BINARY collation compares
+                # UTF-8 bytes, which order like code points).
+                where.append("source_ref >= ? AND source_ref < ?")
+                params += [ref_prefix, upper]
+        if source_kind is not None:
+            where.append("source_kind = ?")
+            params.append(source_kind)
+        sql = (
+            "SELECT trace_id, source_kind, source_ref, span, value, created_at FROM facts"
+            + (" WHERE " + " AND ".join(where) if where else "")
+            + " ORDER BY rowid"
         )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        with self._lock:
+            rows = self._conn().execute(sql, params).fetchall()
+        return [_record(row) for row in rows]
 
     def count(self) -> int:
         """Number of recorded facts."""

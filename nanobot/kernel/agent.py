@@ -7,6 +7,11 @@ spec applied, living on the kernel's loop thread:
   ``MoekaCore.create(profile=...)`` uses (:mod:`nanobot.config.profile`): tool
   allow/deny, skills include/exclude/inline, persona (``system_prompt`` fills
   ``AGENTS.md`` unless ``bootstrap`` has one), memory.
+- **Memory** (Task 11). ``spec.memory`` gives the loop's semantic memory the kernel
+  document store ``kernel.memory(f"agent:{name}")`` (under ``state_dir``, the kernel's
+  shared embedder, pinned open while the agent is). ``spec.doc_scopes`` adds the
+  read-only ``search_documents(query, scope=None, k=5)`` action over those scopes
+  (hybrid search), registered like any action: the tool scope must admit it.
 - **Model.** ``spec.model`` resolves like ``kernel.llm`` (an alias from
   ``env.models`` / ``register_provider``, else a raw id on the default model's
   provider; ``None`` = the default model). The provider comes from the kernel's
@@ -89,6 +94,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.mcp import MCPProvider
     from nanobot.config.schema import AgentProfileConfig
     from nanobot.kernel.kernel import Kernel
+    from nanobot.kernel.memory import DocStore
     from nanobot.kernel.policy import CapabilityRequest, PermissionPolicy
     from nanobot.kernel.sessions import Session
     from nanobot.kernel.variants import Fingerprint
@@ -187,8 +193,9 @@ class AgentSpec:
     Mappings are stored frozen, sequences as tuples; ``inline_skills`` and
     ``mcp_servers`` values are validated (``InlineSkillConfig`` / ``MCPServer``) and
     stored as frozen dicts. ``actions`` are ``Tool`` instances or callables (see
-    :meth:`Agent.add_action`). ``doc_scopes`` is kept for the kernel's document
-    memory (Task 11). ``offline``: see the module docstring.
+    :meth:`Agent.add_action`). ``doc_scopes`` names ``kernel.memory`` scopes the
+    agent can search (the ``search_documents`` action). ``offline``: see the module
+    docstring.
     """
 
     name: str
@@ -642,9 +649,20 @@ class Agent:
                 raise ValueError(f"AgentSpec.actions has two actions named {tool.name!r}")
             self._check_action(tool)
             self._actions.append(tool)
+        if spec.doc_scopes:
+            from nanobot.kernel.memory import search_documents_tool
+
+            tool = search_documents_tool(kernel.memory, spec.doc_scopes)
+            if any(t.name == tool.name for t in self._actions):
+                raise ValueError(
+                    f"AgentSpec.actions has an action named {tool.name!r}, which "
+                    "doc_scopes also provides"
+                )
+            self._check_action(tool)
+            self._actions.append(tool)
         self._loop: AgentLoop | None = None
         self._route: Any = None
-        self._vec_store: Any = None
+        self._memory: DocStore | None = None
         self._mcp: MCPProvider | None = None
         self._mcp_ready = False
         self._mcp_lock: asyncio.Lock | None = None
@@ -726,16 +744,15 @@ class Agent:
         if inline:
             extra["inline_skills"] = inline
         if spec.memory:
-            from nanobot.core.vec import open_vec_store
-
-            vec = cfg.agents.defaults.vec
-            self._vec_store = open_vec_store(
-                env.paths.work_dir / "memory" / "vec.db",
-                model=vec.embedding_model,
-                log_retrievals=vec.log_retrievals,
-            )
-            extra["vec_config"] = vec
-            extra["vec_store"] = self._vec_store
+            # The kernel's store for this agent, pinned: the loop uses its VecStore
+            # directly, so it must never be released by the LRU under the loop.
+            # Pinned once per agent (a retried build reuses the pin).
+            if self._memory is None:
+                store = kernel.memory(f"agent:{spec.name}")
+                store._pin()
+                self._memory = store
+            extra["vec_store"] = self._memory._pin_store()
+            extra["vec_config"] = cfg.agents.defaults.vec
         # Runtime preset switches (/model, the my tool, the Dream model override)
         # resolve through the kernel pool too, so they stay metered and ledgered.
         extra["preset_snapshot_loader"] = self._preset_loader(cfg)
@@ -1284,12 +1301,10 @@ class Agent:
             if loop is not None:
                 await loop.aclose()
         finally:
-            vec, self._vec_store = self._vec_store, None
-            if vec is not None:
-                try:
-                    vec.close()
-                except Exception:  # noqa: BLE001 - closing must not fail the agent close
-                    logger.warning("agent {}: closing its vec store failed", self._spec.name)
+            # The store is the kernel's (it closes it); only the pin is the agent's.
+            memory, self._memory = self._memory, None
+            if memory is not None:
+                memory._unpin()
 
     async def aclose(self) -> None:
         """Cancel in-flight runs (they return ``stop_reason="cancelled"``) and close

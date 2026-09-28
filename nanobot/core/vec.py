@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from nanobot.core.vec_store import VecStore
+from nanobot.core.vec_store import Embedder, VecStore
 
 __all__ = ["RetrievedChunk", "VecStore", "open_vec_store"]
 
@@ -40,6 +40,7 @@ def open_vec_store(
     *,
     model: str | None = None,
     log_retrievals: bool = False,
+    embedder: Embedder | None = None,
 ) -> VecStore:
     """Open (or create) a :class:`VecStore` at *db_path* — embeddings only.
 
@@ -48,10 +49,13 @@ def open_vec_store(
     extras are missing the returned store degrades to FTS5 keyword search
     (``.available is False`` but ``.keyword_available`` may stay True).
     ``log_retrievals=True`` records every search to the ``retrieval_log``
-    table for observability.
+    table for observability. ``embedder`` shares an already built embedder (see
+    :class:`~nanobot.core.vec_store.Embedder`) instead of loading a model per store;
+    ``model`` is then ignored (the embedder names its model).
     """
     return VecStore(
         Path(db_path),
         model_name=model or _DEFAULT_EMBEDDING_MODEL,
         log_retrievals=log_retrievals,
+        embedder=embedder,
     )
