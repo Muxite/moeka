@@ -38,6 +38,13 @@ Tools (Task 9B):
   spec's applied) is the agent registry's ``admit`` check, so it holds for every tool
   whoever registers it: built-ins, plugins, MCP tools (``mcp_<server>_<tool>``) and
   actions.
+- **Default deny.** A kernel agent never gets the session tools (``list_sessions``,
+  ``read_session``, ``search_sessions``, ``send_session_message``: they reach every
+  session on the kernel's shared store), ``my``, ``spawn``, ``create_goal``,
+  ``update_goal`` or ``defer_action`` unless ``spec.tools_allow`` names them. Naming a
+  bus tool (``spawn``, the goal tools, ``defer_action``, ``send_session_message``)
+  raises ``ValueError``: they deliver through the gateway's message bus, which a
+  kernel does not run. Hosts should pass an explicit ``tools_allow``.
 - **Actions.** ``spec.actions`` (tools or callables, wrapped as ``FunctionTool``) are
   registered when the loop is built; :meth:`Agent.add_action` adds one later. An action
   the scope excludes, whose declared capabilities the agent's policy denies everywhere,
@@ -119,6 +126,21 @@ _STOP_REASONS: frozenset[str] = frozenset(get_args(StopReason))
 # Built-in web tools an offline agent never gets (by name; any other tool declaring
 # a network capability is refused by its surface).
 _WEB_TOOLS: frozenset[str] = frozenset({"web_search", "web_fetch"})
+
+# Built-ins a kernel agent does not get unless its spec names them in ``tools_allow``:
+# the session tools read and write any session on the kernel's shared store (other
+# users' or personas' transcripts), and ``my`` inspects and edits the agent's own
+# runtime settings.
+_KERNEL_DEFAULT_DENY: frozenset[str] = frozenset({
+    "list_sessions", "read_session", "search_sessions", "send_session_message",
+    "spawn", "create_goal", "update_goal", "defer_action", "my",
+})
+# Of those, the ones that deliver through the gateway's message bus. A kernel has no
+# consumer for it (sub-agent results and goal/deferred wake-ups would be lost), so
+# naming one in ``tools_allow`` is an error rather than a silent no-op.
+_BUS_TOOLS: frozenset[str] = frozenset({
+    "spawn", "create_goal", "update_goal", "defer_action", "send_session_message",
+})
 
 
 def _opt_positive(value: Any, name: str) -> None:
@@ -630,15 +652,25 @@ class Agent:
                 + ": it cannot have mcp_servers"
             )
         # The effective tool scope: the kernel config's lists with the spec's applied
-        # (as ``apply_profile`` merges them), plus the web tools when offline.
+        # (as ``apply_profile`` merges them), plus the web tools when offline, plus
+        # the kernel default-deny set minus what the spec's tools_allow names.
+        named = frozenset(spec.tools_allow or ())
+        unsupported = sorted(named & _BUS_TOOLS)
+        if unsupported:
+            raise ValueError(
+                f"agent {spec.name!r}: tools {unsupported} need the gateway's message bus "
+                "(sub-agent results, goals and deferred actions are delivered through it) "
+                "and are not supported on a kernel agent"
+            )
         defaults = kernel.env.config.agents.defaults
         allow = spec.tools_allow if spec.tools_allow is not None else defaults.tools_allow
         self._tools_allow: frozenset[str] | None = (
             None if allow is None else frozenset(allow)
         )
-        self._tools_deny: frozenset[str] = frozenset(
-            {*defaults.tools_deny, *spec.tools_deny, *(_WEB_TOOLS if self._offline else ())}
-        )
+        self._tools_deny: frozenset[str] = frozenset({
+            *defaults.tools_deny, *spec.tools_deny, *(_WEB_TOOLS if self._offline else ()),
+            *(_KERNEL_DEFAULT_DENY - named),
+        })
         self._policy = _combine_policies(
             kernel.policy, spec.policy, OfflinePolicy() if self._offline else None,
         )

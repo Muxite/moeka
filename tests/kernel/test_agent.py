@@ -521,7 +521,12 @@ def test_llm_refuses_new_providers_once_closing(tmp_path, sink) -> None:
     assert llm._pool == {}
 
 
-async def test_goal_runtime_template_uses_variant_roots(tmp_path, make_kernel) -> None:
+async def test_goal_runtime_template_uses_variant_roots(
+    tmp_path, make_kernel, monkeypatch,
+) -> None:
+    # Goal tools are default-denied on kernel agents (no gateway bus); lift that to
+    # check the variant's template roots still reach them.
+    monkeypatch.setattr("nanobot.kernel.agent._KERNEL_DEFAULT_DENY", frozenset())
     templates = tmp_path / "templates" / "agent"
     templates.mkdir(parents=True)
     (templates / "goal_runtime.md").write_text("VARIANT GOAL GUIDANCE\n", encoding="utf-8")
@@ -531,6 +536,29 @@ async def test_goal_runtime_template_uses_variant_roots(tmp_path, make_kernel) -
     agent.tools  # noqa: B018 - builds the loop
     tool = agent._loop.tools.get("create_goal")
     assert tool._template_roots == (tmp_path / "templates",)
+
+
+_SESSION_TOOLS = {"list_sessions", "read_session", "search_sessions", "send_session_message"}
+_BUS_ONLY = {"spawn", "create_goal", "update_goal", "defer_action", "send_session_message"}
+
+
+def test_kernel_agents_default_deny_cross_session_and_bus_tools(make_kernel) -> None:
+    kernel = make_kernel(FakeProvider())
+    names = {t.name for t in kernel.agent(AgentSpec(name="a")).tools}
+    assert not names & (_SESSION_TOOLS | _BUS_ONLY | {"my"})
+    assert {"read_file", "list_dir"} <= names
+    # Named in tools_allow: the session readers and my come back.
+    allowed = kernel.agent(AgentSpec(
+        name="b", tools_allow=["read_file", "list_sessions", "read_session", "my"],
+    ))
+    assert {t.name for t in allowed.tools} == {"read_file", "list_sessions", "read_session", "my"}
+
+
+@pytest.mark.parametrize("tool", sorted(_BUS_ONLY))
+def test_bus_tools_explicitly_allowed_raise(make_kernel, tool) -> None:
+    kernel = make_kernel(FakeProvider())
+    with pytest.raises(ValueError, match="message bus"):
+        kernel.agent(AgentSpec(name="a", tools_allow=["read_file", tool]))
 
 
 # -- model switches stay metered; same-key runs are serialised --------------------------------

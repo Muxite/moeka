@@ -401,9 +401,23 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
   - `system_prompt` becomes the agent's `AGENTS.md` persona unless `bootstrap`
     supplies one; `bootstrap` maps section names (`AGENTS.md`, `SOUL.md`,
     `USER.md`, or any other name, appended) to text. Nothing is written to disk.
-  - `tools_allow=None` keeps the kernel config's tool set; `()` gives the agent
-    no tools. The scope applies to every tool whoever registers it: with an
-    allow list, actions, `search_documents` and MCP tools must be listed too.
+  - `tools_allow=None` keeps the kernel config's tool set minus the kernel
+    default-deny set below; `()` gives the agent no tools. The scope applies to
+    every tool whoever registers it: with an allow list, actions,
+    `search_documents` and MCP tools must be listed too. Recommended: always pass
+    an explicit `tools_allow` for an embedded agent.
+  - Default tool set: the file tools (`read_file`, `write_file`, `edit_file`,
+    `apply_patch`, `list_dir`, `find_files`, `grep`), `exec`, `exec_session`,
+    `list_exec_sessions`, `web_search`, `web_fetch` and `ask_user`, plus your
+    actions. A kernel agent never gets `list_sessions`, `read_session`,
+    `search_sessions` (they read every session on the kernel's shared store, so
+    other users' or personas' transcripts) or `my` unless `tools_allow` names
+    them. `spawn`, `create_goal`, `update_goal`, `defer_action` and
+    `send_session_message` deliver through the gateway's message bus, which a
+    kernel does not run: they are always absent, and naming one in `tools_allow`
+    raises `ValueError`. `exec` follows moeka's permissive posture (strict mode
+    requires a sandbox); deny it with `tools_deny=("exec", "exec_session")` or
+    leave it out of `tools_allow` when the agent must not run commands.
   - `inline_skills` are `InlineSkillConfig` values or dicts
     (`{"name", "content", "description"}`).
   - `memory=True` gives the loop semantic memory in `kernel.memory("agent:<name>")`.
