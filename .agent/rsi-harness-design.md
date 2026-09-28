@@ -1,7 +1,11 @@
 # RSI harness for moeka-core: design
 
-Status: draft for review, 2026-09-25. Nothing in this spec is built. Research
-basis: `.agent/rsi-daemon-feasibility.md` and `.agent/rsi-and-agent-core-report.md`.
+Status: draft for review, 2026-09-25; revised 2026-09-28 against the moeka kernel
+API (core-slim `5b9c7d43`, `docs/python-sdk.md` there). Nothing in this spec is
+built. Research basis: `.agent/rsi-daemon-feasibility.md` and
+`.agent/rsi-and-agent-core-report.md` (both predate the kernel API; where they
+name `MoekaCore`, `AgentHook` or `ToolLoader tools_allow`, section 4 here wins).
+Implementation plan: `.agent/rsi-harness-impl-plan.md`.
 
 ## 1. Intent
 
@@ -36,29 +40,121 @@ Stated constraints (from the owner):
 
 ```
 moeka-rsi/                     harness repo (the judge; not mutable by the daemon)
-  core/                        git submodule: cut-down moeka (the subject)
+  core/                        git submodule: moeka core-slim, pinned (the kernel)
+  runner/                      rollout entrypoint: variant tree -> Kernel + AgentSpec
   supervisor/                  claim-run-record loop, gates, stop protocol
   evalsuite/                   tasks, fixtures, verifiers, reference solutions
   archive/                     schema and migrations (data lives on a volume)
   mutator/                     prompts and policy for proposing changes
   papers/                      paper-finding module
-  compose.yml                  supervisor + vllm + sandbox runner
+  compose.yml                  supervisor + vllm + rollout runner
   docs/                        journal templates, runbooks
+volume (not in the repo):
+  variants.git                 candidate variant trees, one branch per candidate
+  archive.db, traces/, tests-traces/, bare remote
 ```
 
-The mutator can write **only inside `core/`** (and only on scratch branches).
-The evaluator, gate, task suite, supervisor and promotion logic are outside its
-write scope. This structural boundary is the main defence against the evaluator
-tampering seen in DGM and STOP.
+- The mutator can write **only inside a candidate's variant tree** (section 7),
+  on that candidate's scratch branch of `variants.git`.
+- `core/` is pinned and read-only to the daemon in v1: every v1 mutation target
+  is something the kernel loads per `Variant` or `AgentSpec`, so no candidate
+  needs a `core/` diff. `core/` becomes writable only with tier 2 (code
+  mutation).
+- The evaluator, gate, task suite, runner, supervisor and promotion logic are
+  outside the mutator's write scope. This structural boundary is the main
+  defence against the evaluator tampering seen in DGM and STOP.
 
-## 4. Prerequisite: cut-down moeka (separate track)
+## 4. The subject: moeka kernel (core-slim)
 
-Before the loop runs, produce a slim moeka branch (`core-slim`): channels,
-gateway, WebUI, bridge and pairing removed, leaving the agent loop, runner,
-providers, tools, skills, memory and MoekaCore. This diverges from the upstream
-sync policy in `CLAUDE.md`, which is expected. Acceptance: the existing core
-and tool tests still pass in Docker (`scripts/test-docker.sh`). This is planned
-as its own task and does not block writing the harness.
+### 4.1 Status
+- `core-slim` exists: channels, gateway, WebUI, bridge and pairing are gone;
+  the agent loop, runner, providers, tools, skills and memory remain, fronted by
+  the `moeka` package (a re-export of `nanobot.kernel`). `MoekaCore` is
+  deprecated legacy; the harness never uses it.
+- The 5 parked kernel residuals are fixed (`c8a9cd08..5b9c7d43`): rewind after
+  `/new` keeps the pre-`/new` archive, `AgentSpec.memory_key`, the dedicated
+  `Kernel(action_workers=8)` pool, shared usage store survives one kernel
+  closing, identity prompt names the real memory files.
+- This diverges from the upstream sync policy in `CLAUDE.md`, as expected.
+
+### 4.2 How the harness drives the kernel
+- **One kernel per rollout.** `Kernel(Environment.for_host(...), variant=...,
+  budget=..., solvers=SolverRegistry(), baselines=BaselineRegistry())`, used as
+  a context manager and closed when the rollout ends. Per-kernel `variant` and
+  registries mean nothing leaks between rollouts even in one process.
+- **Environment** (`Environment.for_host`, no ambient reads):
+  - `state_dir` a fresh temp dir inside the rollout container; `work_dir` the
+    seeded fixture copy (`strict=True` keeps them disjoint and denies file
+    tools `state_dir`).
+  - `providers=[ProviderSpec(name="vllm", api_base=<sidecar>)]`,
+    `models=[ModelSpec(name="local", model=<served id>, provider="vllm",
+    tier="local", context_window=...)]`, `default_model="local"`.
+  - `trace=JsonlTraceSink(<out>/trace.jsonl)`, `exec_base_env={PATH, HOME}`,
+    `offline=True`.
+- **Agent.** `kernel.agent(AgentSpec(name="rollout", offline=True,
+  tools_allow=<task family's tool set>, sampling=Sampling(seed=<seed>, ...),
+  limits=RunLimits(max_iterations=..., deadline_s=...), memory=False))`.
+  - `tools_allow` is always explicit and comes from the task, not the variant.
+  - `system_prompt` and `bootstrap` stay unset on the spec: they would win over
+    the variant's `bootstrap`, so persona text has one owner (the variant).
+  - `offline` removes web tools, MCP and declared network capabilities; `exec`
+    can still open sockets, so the container network (only the vLLM sidecar
+    reachable) is the real boundary.
+- **Rollout identity** is span tags, not a kernel id:
+  `with kernel.trace.span("rollout", rollout=<id>, task=..., seed=...,
+  candidate=..., tier=..., pool="practice"|"test"):` around
+  `agent.run_sync(prompt, session=<task key>)`. Every event is stamped with the
+  tags, the root span's `trace_id`, and span path `rollout/agent.run`.
+- **Config hash** is `agent.fingerprint().digest` (system prompt, tool
+  definitions, model, sampling; paths and memory normalised out), taken before
+  the run and stored with the result. Until prerequisite K1 lands it misses
+  non-always-on skill bodies, so the result cache key is (task, seed,
+  fingerprint digest, variant tree hash, `core/` commit).
+- **Budgets.** `CapBudget(limit_tokens=N)` per kernel. Local-tier models cost
+  `0.0`, so USD caps, `per_tag` caps (USD-only) and `baselines.cost_ratio` are
+  degenerate here; token caps and `RunLimits` are the enforced limits. The
+  container's CPU, memory and wall-clock limits sit outside all of them.
+- **Outputs** per rollout: `trace.jsonl`, `result.json` (the `RunResult`:
+  `stop_reason`, `iterations`, `usage`, `tools_used`, `messages`, `trace_id`,
+  error as text), `fingerprint.json`, and the final `work_dir` for the verifier.
+- **Fixtures** never ship a `skills/` directory: `<work_dir>/skills` would
+  shadow the variant's skills. The verifier fails a rollout that creates one.
+
+### 4.3 Kernel prerequisites
+Gaps the harness needs closed in core-slim, each tagged with the first
+milestone that needs it. All have interim workarounds; none blocks M2.
+- **K1 skill content in the fingerprint** (M4). Today the fingerprint sees the
+  skills summary and always-on skill bodies only.
+  API: `Fingerprint.components["skills"]` = sha256 over sorted (relpath, bytes)
+  of the effective skills tree (`builtin_skills_dir` after include/exclude, plus
+  `inline_skills`).
+- **K2 tool parameter-description overrides** (M5). `Variant` overrides only
+  the top-level tool description; parameter schemas are not mutable.
+  API: `Variant.tool_param_descriptions: Mapping[str, Mapping[str, str]]` (tool
+  -> {parameter path -> description}); structural schema keys rejected.
+- **K3 argument digest on `tool.call`** (M4). Needed for loop/repeat rate and
+  "same call retried" without parsing transcripts.
+  API: `tool.call.args_digest` = sha256 of the canonical arguments JSON.
+- **K4 `RunLimits.max_tool_errors`** (M5). Declared but raises
+  `NotImplementedError` in `kernel.agent`.
+  API: implement it; the run ends with `stop_reason="tool_error"` at the cap.
+- **K5 strict sampling on agent runs** (M3). `on_unsupported="raise"` exists
+  only on `GenerateOptions`; an agent run with a dropped `seed` just emits
+  `sampling.dropped`. API: `AgentSpec(on_unsupported="raise")`, ending the run
+  with `stop_reason="error"` and `UnsupportedRequestError`. Interim: the runner
+  marks any rollout with a `sampling.dropped` event non-reproducible.
+- **K6 skill reads outside `read_file`** (M5, optional). `skill.read` fires only
+  when `read_file` opens a `SKILL.md`; `exec cat` or `grep` is invisible.
+  API: emit `skill.read` with `via=<tool>` from any `fs.read` capability check
+  whose resource is a `SKILL.md`. Interim: `skill.read` is a lower bound.
+
+Deliberately not prerequisites:
+- Rollout id: span tags plus `trace_id` cover it.
+- Transcript: `RunResult.messages` carries tool arguments and results.
+- Outcome score: the verifier runs outside the rollout container, so the kernel
+  cannot see it. The supervisor writes a harness-owned `rollout.scored` record
+  keyed by the rollout tag. There is no host hook seam on kernel agents
+  (`AgentSpec` takes no hooks), and none is wanted.
 
 ## 5. Components
 
@@ -74,13 +170,15 @@ as its own task and does not block writing the harness.
    `--max-num-seqs` starting at 16 and raised when headroom exists. Exposed to
    moeka through `api_base`. The image must be smoke-tested on this Blackwell
    card before anything depends on it.
-4. **Rollout runner.** Runs moeka-core on a task in a fresh no-network
-   container from a seeded fixture. Rollouts are short and idempotent, with an
-   id of (task, seed, variant).
+4. **Rollout runner.** Builds one kernel per rollout from a variant tree
+   (section 4.2) in a fresh container whose only reachable endpoint is the vLLM
+   sidecar, on a seeded fixture copy. Rollouts are short and idempotent, with an
+   id of (task, seed, candidate) carried as span tags; the config hash is the
+   agent's fingerprint.
 5. **Verifier.** Deterministic; runs outside the rollout container on a copy of
    the final state, read-only to the agent. No LLM judge in any gate.
 6. **Mutator.** Proposes one change per candidate on a scratch branch of
-   `core/`, using the local model.
+   `variants.git`, using the local model.
 7. **Archive.** SQLite: variant id, parent id, git commit, score vector,
    transcripts, gate verdicts, source (self-proposed or paper id). Open-ended.
    The **active** set (what moeka actually loads) is capped and separate.
@@ -93,10 +191,10 @@ as its own task and does not block writing the harness.
 gate open? -> pick task type:
   eval-baseline   score current best (fills the archive, measures noise)
   mutate          pick parent (score + novelty + descendant success)
-                  -> one change in core/ on a scratch branch
+                  -> one change to a variant tree on a scratch branch
                   -> tier 0 smoke -> tier 1 dev subset -> tier 2 full dev
                   -> pass gate? admit to archive : discard (kept as evidence)
-  promote         occasional locked-set canary; commit to core/ branch
+  promote         occasional locked-set canary; tag the variant as best
   paper-cycle     see section 10
 every step writes SQLite first; a killed run resumes from the last row
 ```
@@ -116,17 +214,44 @@ Gate rules (deterministic, pre-commit, from the literature review):
 ## 7. Mutation scope
 
 **Decided (owner, 2026-09-25): v1 mutates tools, skills and prompts only.**
-In scope: skills (`SKILL.md` packages), system prompts, tool descriptions and
-schemas, config presets and sampling parameters. Reading "tools" as the
-definitions the model sees (name, description, parameter schema, usage notes).
-Whether the daemon may also author brand-new tool *implementations* is left
-open (see section 15); until answered, no Python code in `core/` is mutated.
+"Tools" means the definitions the model sees; no new tool implementations
+(decided, section 15). A candidate is a variant tree; each target maps to a
+kernel field:
+
+```
+variants/<candidate>/
+  variant.toml          name, parent, hypothesis, AgentSpec knobs below
+  skills/<name>/...     -> Variant.builtin_skills_dir (a full tree, seeded from core/)
+  templates/agent/...   -> Variant.templates_dir (per-file shadowing)
+  tool_descriptions/    -> Variant.tool_descriptions_dir (<tool>.txt)
+  bootstrap/*.md        -> Variant.bootstrap (AGENTS.md, SOUL.md, USER.md, extras)
+```
+
+- **Skills** (`SKILL.md` packages): `Variant.builtin_skills_dir`. The active set
+  and its cap: `AgentSpec.skills_include` / `skills_exclude` (from
+  `variant.toml`), also the lever for per-skill ablation.
+- **System prompts**: `Variant.templates_dir` for the identity, tool contract
+  and skills-section templates (main and sub-agent prompts; memory and runner
+  templates stay built-in); `Variant.bootstrap` for persona sections.
+- **Tool descriptions**: `Variant.tool_descriptions_dir` (or the in-memory
+  `tool_descriptions`). Applies to loader-built tools only; host actions and MCP
+  tools keep their own text.
+- **Tool parameter schemas**: not mutable until K2; then parameter
+  descriptions only, never structure (the implementation must still accept it).
+- **Sampling**: `AgentSpec.sampling` (`temperature`, `top_p`, `top_k`, `min_p`,
+  penalties, `max_tokens`, `reasoning_effort`, `stop`). `seed` is rollout
+  identity, set by the runner, never by the mutator.
+- **Run knobs**: `RunLimits.max_iterations` within a harness ceiling.
+  `deadline_s`, the token budget and `tools_allow` are harness-owned.
+- **Fixed in v1**: the model alias and `ModelSpec` (one served model), `memory`
+  (off), `offline` (on).
 
 Deferred: core and tool code mutation (former "tier 2"). Revisit only after
 the v1 loop has a track record.
 
-Never mutable: the evaluator, gate, supervisor, task suite, verifiers, secrets,
-git credentials, and anything outside `core/`.
+Never mutable: the evaluator, gate, runner, supervisor, task suite, verifiers,
+secrets, git credentials, `core/`, and anything outside the candidate's variant
+tree.
 
 ## 8. Evaluation
 
@@ -166,7 +291,8 @@ Claude-Code-authored suite, plus cheap proxies.
   2 seeds), tier 2 full dev plus regression (3 seeds), tier 3 locked test
   (rate-limited), tier 4 public sanity (BFCL multi-turn slice plus about 20
   Terminal-Bench-lite tasks, no regression beyond about 2 points).
-  Results are cached by (task, seed, config hash).
+  Results are cached by (task, seed, config hash); the config hash is the
+  fingerprint plus the variant tree hash and `core/` commit until K1 (4.2).
 - **Proxies** (tie-breakers and continuous fitness, never overriding pass
   rate): tool-call validity, iterations and tokens per success, wall time,
   recovery-after-error, skill-selection accuracy, loop/repeat rate.
@@ -180,9 +306,9 @@ Claude-Code-authored suite, plus cheap proxies.
 
 **Agent-readable traces (owner requirement).** The mutator reads its own
 history to decide what to change, so tracing is designed for a model to read:
-- Every practice rollout writes a structured JSONL trace: per turn, the
-  messages, each tool call with arguments and result, validity errors, retries,
-  which skills were retrieved versus selected, tokens, wall time, stop reason.
+- Every practice rollout writes the kernel's event stream to its own
+  `trace.jsonl` (`JsonlTraceSink`) plus `result.json` (the `RunResult`,
+  including `messages`), both tagged by the rollout span (section 4.2).
 - A derived per-rollout summary (plain text) and a per-skill and per-tool
   rollup (calls, invalid-argument rate, error rate, contribution to success)
   so the mutator does not need to read raw transcripts.
@@ -193,20 +319,63 @@ history to decide what to change, so tracing is designed for a model to read:
   practice runs only. A redaction step guarantees no held-out material enters
   them: test rollouts run in a separate container and write their traces to a
   store the mutator cannot mount. Only the coarse verdict crosses over.
-- Human-readable logs share the same event stream (structured events with
-  run id, candidate id, phase), so the owner and the agent read one source.
+- Human-readable logs share the same event stream (span tags carry rollout,
+  candidate and phase), so the owner and the agent read one source.
+
+**Metric sources.** Every metric the spec uses, and the event and field that
+provides it (events per `EVENTS` in `nanobot/kernel/trace.py`; every event also
+carries `trace_id`, `span`, `tags`, `ts`). "Harness" means computed by the
+supervisor or verifier; "K*n*" is a kernel prerequisite (section 4.3).
+- Rollout, candidate, task, seed, pool, phase: `tags` on every event.
+- Config hash: `agent.fingerprint().digest` and `.components` (not an event);
+  skill bodies need K1.
+- Messages per turn, tool arguments and results: `RunResult.messages`, joined
+  to events by the tool message's `tool_call_id` = `tool.call.call_id`.
+- Stop reason: `run.completed.stop_reason` (includes `deadline`, `budget`,
+  `max_iterations`, `policy_denials`).
+- Iterations: `run.completed.iterations`; per step `iteration.tool_calls` and
+  `iteration.finish_reason`.
+- Tokens: `run.completed.usage` (run totals), `iteration.usage` (per step),
+  `model.call.tokens_in` / `tokens_out` / `tokens_cache_read`.
+- Wall time: `run.completed.ts - run.started.ts`; `model.call.latency_ms`;
+  `tool.call.duration_ms`.
+- Tool-call validity rate: share of `tool.call` with `args_valid=True`; detail
+  in `tool.invalid.error`.
+- Tool error rate: `tool.call.ok=False` by `error_kind` (`invalid_args`,
+  `tool_error`, `result_invalid`, or an exception class); `tool.result_invalid`.
+- Provider retries: `model.call.attempt > 1`.
+- Tool retries and loop/repeat rate: repeated (`tool`, arguments) within a run.
+  K3 (`args_digest`); interim, derive from `RunResult.messages`.
+- Recovery after error: harness, a `tool.call.ok=False` followed by a passing
+  outcome in the same rollout.
+- Skills offered versus read (the old "retrieved versus selected"):
+  `skill.listed.skills` and `.active` versus `skill.read.skill`. There is no
+  retrieval step; every listed skill is offered. `skill.read` sees `read_file`
+  only (K6).
+- Skill-selection accuracy: harness, `skill.read` against the task's declared
+  expected skill.
+- Per-skill contribution: harness, `skill.read` joined with outcomes, confirmed
+  by ablation (`skills_exclude`).
+- Skill hashes: K1; interim, the variant tree hash per skill directory.
+- Policy denials: `policy.decision` with `verdict="deny"`.
+- Budget used: `budget.admit` / `budget.refuse` (`worst_case_tokens`),
+  `CapBudget.spent_tokens`. `cost_usd` is `0.0` on the local tier; do not use it.
+- Seed honoured: absence of `sampling.dropped` (K5 makes it a hard failure).
+- Outcome (pass/fail, score): harness-owned `rollout.scored` record written by
+  the supervisor after the verifier; no kernel source, by design.
+- Gate evidence, verdicts, judge canary results: harness.
 
 **Journal.** Because the goal is to see what RSI does, the journal is a
 first-class output:
 - Per candidate: what changed (diff), the mutator's stated hypothesis, score
   deltas by family, gate verdict, and whether it was later retired.
 - A running changelog of admitted improvements, grouped by type (skill, prompt,
-  tool description, config, and code once tier 2 exists).
+  tool description, sampling or run knob, and code once tier 2 exists).
 - Periodic summary reports: acceptance rate, which mutation types succeed,
   score trajectory against the locked set, verifier audit results, and
   suspected gaming (for example large proxy gains with no pass-rate gain).
-- Every run logs skill hashes, retrieval candidates versus the selected skill,
-  gate evidence, budget used, and judge canary results.
+- Every run logs the fingerprint, skill hashes, skills offered versus read,
+  gate evidence, budget used, and judge canary results (sources above).
 
 ## 10. Paper-finding module
 
@@ -223,9 +392,9 @@ implementer step has no network.
 ## 11. Checkpointing and stop protocol
 
 - Every step: SQLite (WAL) on a bind-mounted volume.
-- Every few minutes and on every admission: commit to a WIP branch in `core/`,
-  plus a text snapshot of the archive into the harness repo (binary SQLite
-  diffs badly).
+- Every few minutes and on every admission: commit to a WIP branch in
+  `variants.git`, plus a text snapshot of the archive into the harness repo
+  (binary SQLite diffs badly).
 - On stop notice (SIGTERM): stop scheduling; give in-flight rollouts about 60
   seconds; flush partial transcripts as resumable; commit; if a remote exists,
   push with a hard timeout; release the GPU lock. If the push fails, the volume
@@ -238,19 +407,24 @@ implementer step has no network.
 
 ## 12. Isolation
 
-- Candidate rollouts run in containers with no network, resource limits, and no
-  access to the evaluator or the archive.
+- Candidate rollouts run in containers whose only network peer is the vLLM
+  sidecar (an internal compose network), with resource limits and no access to
+  the evaluator or the archive. Mock APIs are harness-authored host actions
+  (`AgentSpec.actions`) or processes inside the rollout container.
 - Do not rely on moeka's shell sandbox, which is permissive by default in this
   fork. The container is the boundary. Non-root user, dropped capabilities,
   read-only root filesystem, workspace volume only.
 - The verifier verifies claims about tool use against harness logs, not the
   agent's own transcript.
-- Every edit outside `core/` is logged and fails the candidate.
-- Per-run token, time and step budgets are enforced outside the agent.
+- Every edit outside the candidate's variant tree is logged and fails the
+  candidate.
+- Per-run token, time and step budgets are enforced by the kernel
+  (`CapBudget`, `RunLimits`, `deadline_s`) and backstopped outside it by the
+  container's limits and the runner's kill timer.
 
 ## 13. Milestones
 
-1. Cut-down moeka (`core-slim`) passing its tests.
+1. Cut-down moeka (`core-slim`) passing its tests. Essentially done (4.1).
 2. Compose stack: vLLM smoke test on the 5070 Ti, then the supervisor running a
    no-op task through stop, kill and resume.
 3. Task suite v0 (30 tasks) with the audit, plus the noise measurement.
@@ -275,9 +449,12 @@ Resolved by the owner: mutation scope is tools, skills and prompts only;
 local-only saves are fine for v1; no-network rollouts with mock servers are
 acceptable; tests are fully held out from the agent.
 
+Decided: "tools" means the definitions the model sees (descriptions, and
+parameter descriptions once K2 lands). No new Python tool implementations in
+v1: no host actions, plugins or MCP servers authored by the daemon, and `core/`
+stays pinned.
+
 Still open:
-- Does "tools" include authoring new tool implementations (Python), or only the
-  tool definitions the model sees? Assumed: definitions only.
 - How much of the practice pool should Claude Code author up front versus
   letting the agent propose its own? Assumed: Claude Code seeds it, the agent
   adds to it.

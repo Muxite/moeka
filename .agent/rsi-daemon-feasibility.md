@@ -1,5 +1,7 @@
 # Feasibility: containerized, opportunistic, checkpointed RSI daemon on moeka
 
+*Predates the moeka kernel API (`MoekaCore` and `AgentHook` below are superseded); see rsi-harness-design.md §4.*
+
 *2026-09-24. Investigation only, no code changed. Findings come from three
 read-only explorations (moeka runtime, moeka tools/providers/deploy, literature).
 Paper claims were read from abstracts and summaries by a subagent, not from full
