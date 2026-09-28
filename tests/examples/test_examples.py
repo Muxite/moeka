@@ -13,17 +13,10 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-import mcp.client.stdio  # noqa: F401 - see below
 import pytest
 
 import moeka
 from moeka.testing import FakeProvider
-
-# The MCP SDK binds ``sys.stderr`` as ``stdio_client``'s default ``errlog`` when it
-# is first imported. An example builds an agent, which imports it; imported inside a
-# test, it would bind that test's capture stream (gone, or without a fileno, after
-# the test), breaking every later stdio MCP test in the session. Importing it at
-# collection binds pytest's session-wide stream, as the other suites do.
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "examples"

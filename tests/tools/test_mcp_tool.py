@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -107,7 +108,7 @@ def _fake_mcp_module(
             return False
 
     @asynccontextmanager
-    async def _fake_stdio_client(_params: object):
+    async def _fake_stdio_client(_params: object, errlog: object = None):
         yield object(), object()
 
     @asynccontextmanager
@@ -890,7 +891,7 @@ async def test_connect_mcp_servers_logs_stdio_pollution_hint(
     messages: list[str] = []
 
     @asynccontextmanager
-    async def _broken_stdio_client(_params: object):
+    async def _broken_stdio_client(_params: object, errlog: object = None):
         raise RuntimeError("Parse error: Unexpected token 'INFO' before JSON-RPC headers")
         yield  # pragma: no cover
 
@@ -912,6 +913,25 @@ async def test_connect_mcp_servers_logs_stdio_pollution_hint(
     assert "stdio protocol pollution" in messages[-1]
     assert "stdout" in messages[-1]
     assert "stderr" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_gets_the_current_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """errlog is the sys.stderr of the connect call, not the one bound when the MCP SDK
+    was first imported (a test's capture stream, or a host-replaced stream)."""
+    seen: list[object] = []
+
+    @asynccontextmanager
+    async def _recording_stdio_client(_params: object, errlog: object = None):
+        seen.append(errlog)
+        raise RuntimeError("stop after recording")
+        yield  # pragma: no cover
+
+    current = io.StringIO()
+    monkeypatch.setattr(sys.modules["mcp.client.stdio"], "stdio_client", _recording_stdio_client)
+    monkeypatch.setattr(sys, "stderr", current)
+    await connect_mcp_servers({"s": MCPServerConfig(command="some-mcp")}, ToolRegistry())
+    assert seen == [current]
 
 
 def test_transient_connection_group_logs_brief_warning_and_debug_trace() -> None:
@@ -1207,7 +1227,7 @@ async def test_connect_mcp_servers_one_failure_does_not_block_others(
             return False
 
     @asynccontextmanager
-    async def _selective_stdio_client(params: object):
+    async def _selective_stdio_client(params: object, errlog: object = None):
         if params.command == "bad" and failure_mode == "exception":
             raise RuntimeError("boom")
         yield params.command, object()
@@ -1238,7 +1258,7 @@ async def test_connect_mcp_servers_propagates_external_cancellation(
     closed = asyncio.Event()
 
     @asynccontextmanager
-    async def _blocking_stdio_client(_params: object):
+    async def _blocking_stdio_client(_params: object, errlog: object = None):
         try:
             started.set()
             await asyncio.Event().wait()
@@ -1279,7 +1299,7 @@ async def test_connect_mcp_servers_rolls_back_completed_batch_on_cancellation(
             return False
 
     @asynccontextmanager
-    async def _selective_stdio_client(params: object):
+    async def _selective_stdio_client(params: object, errlog: object = None):
         command = str(params.command)
         try:
             if command == "slow":
@@ -1492,7 +1512,7 @@ async def test_connect_mcp_servers_wraps_windows_stdio_launchers(
     captured: dict[str, object] = {}
 
     @asynccontextmanager
-    async def _capturing_stdio_client(params: object):
+    async def _capturing_stdio_client(params: object, errlog: object = None):
         captured["command"] = params.command
         captured["args"] = params.args
         captured["env"] = params.env
@@ -1534,7 +1554,7 @@ async def test_connect_mcp_servers_passes_stdio_cwd(
     captured: dict[str, object] = {}
 
     @asynccontextmanager
-    async def _capturing_stdio_client(params: object):
+    async def _capturing_stdio_client(params: object, errlog: object = None):
         captured["cwd"] = params.cwd
         yield object(), object()
 

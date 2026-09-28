@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack, contextmanager, suppress
@@ -1246,12 +1247,17 @@ async def connect_mcp_servers(
                     env=env,
                     cwd=cfg.cwd or None,
                 )
+                # errlog is read now: the SDK's default binds whatever sys.stderr was
+                # when mcp.client.stdio was first imported (a test's capture stream,
+                # or a stream the host has since replaced or closed).
                 if base_env is None:
-                    read, write = await server_stack.enter_async_context(stdio_client(params))
+                    read, write = await server_stack.enter_async_context(
+                        stdio_client(params, errlog=sys.stderr)
+                    )
                 else:
                     with _explicit_stdio_env(env):
                         read, write = await server_stack.enter_async_context(
-                            stdio_client(params)
+                            stdio_client(params, errlog=sys.stderr)
                         )
             elif transport_type == "sse":
                 if not await _probe_http_url(cfg.url):
