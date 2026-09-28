@@ -16,7 +16,12 @@ Build an :class:`Environment` with :meth:`Environment.for_host`, then open a
         ...
 """
 
-from nanobot.kernel.env import CredentialResolver, Paths, StaticCredentialResolver
+from nanobot.kernel.env import (
+    CredentialResolver,
+    Paths,
+    PathsOverlapError,
+    StaticCredentialResolver,
+)
 from nanobot.kernel.hostenv import Environment, ModelSpec, ProviderSpec
 from nanobot.kernel.kernel import Kernel
 from nanobot.kernel.sampling import Sampling
@@ -27,6 +32,7 @@ __all__ = [
     "Kernel",
     "ModelSpec",
     "Paths",
+    "PathsOverlapError",
     "ProviderSpec",
     "Sampling",
     "StaticCredentialResolver",

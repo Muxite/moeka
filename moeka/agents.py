@@ -15,6 +15,7 @@ from nanobot.kernel.agent import (
     RunLimits,
     RunResult,
     StopReason,
+    SyncAgentStream,
     ToolInfo,
 )
 from nanobot.sdk.types import StreamEvent, StreamEventType
@@ -29,5 +30,6 @@ __all__ = [
     "StopReason",
     "StreamEvent",
     "StreamEventType",
+    "SyncAgentStream",
     "ToolInfo",
 ]

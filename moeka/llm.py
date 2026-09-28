@@ -10,6 +10,7 @@ from nanobot.kernel.llm import (
     Completion,
     GenerateOptions,
     Request,
+    SyncTextStream,
     TextStream,
     Usage,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "Sampling",
     "Solved",
     "SolverRegistry",
+    "SyncTextStream",
     "TextStream",
     "Usage",
     "assistant",

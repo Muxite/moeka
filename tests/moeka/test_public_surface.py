@@ -13,15 +13,16 @@ SURFACE: dict[str, list[str]] = {
         "Kernel",
         "ModelSpec",
         "Paths",
+        "PathsOverlapError",
         "ProviderSpec",
         "Sampling",
         "StaticCredentialResolver",
     ],
     "moeka.agents": [
         "Agent", "AgentSpec", "AgentStream", "AskUser", "RunLimits", "RunResult",
-        "StopReason", "StreamEvent", "StreamEventType", "ToolInfo",
+        "StopReason", "StreamEvent", "StreamEventType", "SyncAgentStream", "ToolInfo",
     ],
-    "moeka.budget": ["Budget", "CallEstimate", "CapBudget", "ResponseCache"],
+    "moeka.budget": ["Budget", "CallEstimate", "CapBudget", "ModelCallEvent", "ResponseCache"],
     "moeka.epistemics": [
         "ArtifactError",
         "ArtifactIncompleteError",
@@ -60,6 +61,7 @@ SURFACE: dict[str, list[str]] = {
         "Sampling",
         "Solved",
         "SolverRegistry",
+        "SyncTextStream",
         "TextStream",
         "Usage",
         "assistant",
@@ -116,6 +118,20 @@ def test_reexports_are_the_implementation_objects() -> None:
 
     assert moeka.Environment is Environment
     assert moeka.Kernel is Kernel
+
+    import moeka.agents
+    import moeka.budget
+    import moeka.llm
+    from nanobot.kernel.agent import SyncAgentStream
+    from nanobot.kernel.env import PathsOverlapError
+    from nanobot.kernel.ledger import LedgerEvent
+    from nanobot.kernel.llm import SyncTextStream
+
+    assert moeka.budget.ModelCallEvent is LedgerEvent
+    assert moeka.PathsOverlapError is PathsOverlapError
+    assert issubclass(moeka.PathsOverlapError, ValueError)
+    assert moeka.llm.SyncTextStream is SyncTextStream
+    assert moeka.agents.SyncAgentStream is SyncAgentStream
 
 
 def test_errors_are_the_implementation_classes() -> None:
