@@ -331,13 +331,14 @@ class Kernel:
                 self._sessions.add_history_reset_observer(self._drop_session_history)
             return self._sessions
 
-    def _drop_session_history(self, key: str) -> None:
+    def _drop_session_history(self, key: str, generation: int | None = None) -> None:
         """Drop *key*'s archived memory history from every agent's memory dir.
 
-        Runs when a rewind leaves no committed summary, a fork creates or replaces
-        *key*, or *key* is deleted (``SessionManager.add_history_reset_observer``):
-        those entries summarise messages the transcript no longer has, and would
-        otherwise come back as "Recent History". Built agents' stores are rewritten
+        Runs when a rewind leaves no committed summary (only the current history
+        *generation*), a fork creates or replaces *key*, or *key* is deleted (every
+        generation; ``SessionManager.add_history_reset_observer``): those entries
+        summarise messages the transcript no longer has, and would otherwise come
+        back as "Recent History". Built agents' stores are rewritten
         under their append lock; other agents' files (built in an earlier process)
         directly.
         """
@@ -356,9 +357,9 @@ class Kernel:
         for history in sorted(root.glob("*/memory/history.jsonl")):
             store = live.get(history)
             if store is not None:
-                store.drop_session_history(key)
+                store.drop_session_history(key, generation=generation)
             else:
-                drop_session_history(history, key)
+                drop_session_history(history, key, generation=generation)
 
     # -- lifecycle -------------------------------------------------------
 

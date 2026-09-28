@@ -26,7 +26,7 @@ from nanobot.llm_usage.context import llm_usage_source
 from nanobot.providers.base import LLMResponse, ProviderConversationState
 from nanobot.providers.conversation_state import ProviderConversationStateController
 from nanobot.runtime_context import public_history_messages
-from nanobot.session.manager import Session, SessionManager
+from nanobot.session.manager import Session, SessionManager, history_generation
 from nanobot.session.summary import is_summary_checkpoint, session_summary_from_metadata
 from nanobot.utils.gitstore import GitStore
 from nanobot.utils.helpers import (
@@ -56,9 +56,13 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def drop_session_history(history_file: Path, session_key: str) -> int:
+def drop_session_history(
+    history_file: Path, session_key: str, *, generation: int | None = None,
+) -> int:
     """Rewrite *history_file* without the entries recorded for *session_key*.
 
+    With *generation*, only that history generation's entries go (an entry
+    without a ``gen`` stamp counts as generation 0); without it, all of them.
     Returns how many entries were removed (the file is only rewritten when some
     were). Lines that are not JSON objects are kept as they are. The cursor
     counter is left alone, so cursors stay monotonic. Used when a session is cut
@@ -78,7 +82,11 @@ def drop_session_history(history_file: Path, session_key: str) -> int:
             entry: object = json.loads(line)
         except json.JSONDecodeError:
             entry = None
-        if isinstance(entry, dict) and entry.get("session_key") == session_key:
+        if (
+            isinstance(entry, dict)
+            and entry.get("session_key") == session_key
+            and (generation is None or entry.get("gen", 0) == generation)
+        ):
             continue
         kept.append(line)
     removed = sum(1 for line in lines if line.strip()) - len(kept)
@@ -381,8 +389,13 @@ class MemoryStore:
         *,
         max_chars: int | None = None,
         session_key: str | None = None,
+        generation: int | None = None,
     ) -> int:
         """Append *entry* to history.jsonl and return its auto-incrementing cursor.
+
+        *generation* is the session's history generation
+        (``nanobot.session.manager.history_generation``) of the transcript the
+        entry summarises; rewinds drop only the current generation's entries.
 
         Entries are passed through `strip_think` to drop template-level leaks
         (e.g. unclosed `<think` prefixes, `<channel|>` markers) before being
@@ -412,6 +425,8 @@ class MemoryStore:
             record = {"cursor": cursor, "timestamp": ts, "content": content}
             if session_key:
                 record["session_key"] = session_key
+                if generation is not None:
+                    record["gen"] = generation
             with open(self.history_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             self._cursor_file.write_text(str(cursor), encoding="utf-8")
@@ -572,13 +587,13 @@ class MemoryStore:
             if updated_memory:
                 self.vec_store.upsert_memory_chunks(updated_memory)
 
-    def drop_session_history(self, session_key: str) -> int:
-        """Remove every history entry recorded for *session_key*; return the count.
+    def drop_session_history(self, session_key: str, *, generation: int | None = None) -> int:
+        """Remove *session_key*'s history entries (of one *generation*); return the count.
 
         See :func:`drop_session_history`; serialised with :meth:`append_history`.
         """
         with self._append_lock:
-            return drop_session_history(self.history_file, session_key)
+            return drop_session_history(self.history_file, session_key, generation=generation)
 
     # -- JSONL helpers -------------------------------------------------------
 
@@ -829,10 +844,11 @@ class MemoryStore:
         *,
         max_chars: int | None = None,
         session_key: str | None = None,
+        generation: int | None = None,
     ) -> str:
         """Persist and return a bounded raw checkpoint when summarization degrades."""
         checkpoint = self._build_raw_checkpoint(messages, max_chars=max_chars)
-        self.append_history(checkpoint, session_key=session_key)
+        self.append_history(checkpoint, session_key=session_key, generation=generation)
         logger.warning(
             "Memory consolidation degraded: raw-archived {} messages", len(messages)
         )
@@ -942,11 +958,12 @@ class MemoryArchiver:
         messages: list[dict[str, Any]],
         *,
         session_key: str,
+        generation: int | None = None,
         previous_summary: str | None,
         max_tokens: int,
     ) -> str:
         """Persist the failed chunk and return a bounded replacement checkpoint."""
-        raw = self.store.raw_archive(messages, session_key=session_key)
+        raw = self.store.raw_archive(messages, session_key=session_key, generation=generation)
         return self._combine_raw_checkpoint(
             raw,
             previous_summary=previous_summary,
@@ -997,8 +1014,12 @@ class MemoryArchiver:
         input_token_budget: int | None = None,
         fallback_max_tokens: int | None = None,
         provider_state: ProviderConversationState | None = None,
+        generation: int | None = None,
     ) -> str | None:
-        """Append the archive prompt to H and persist its summary."""
+        """Append the archive prompt to H and persist its summary.
+
+        *generation* stamps the persisted entry (see :meth:`MemoryStore.append_history`).
+        """
         if not source_messages:
             return None
 
@@ -1006,6 +1027,7 @@ class MemoryArchiver:
             return self._raw_checkpoint(
                 source_messages,
                 session_key=session_key,
+                generation=generation,
                 previous_summary=previous_summary,
                 max_tokens=(
                     fallback_max_tokens
@@ -1152,7 +1174,7 @@ class MemoryArchiver:
             logger.warning("Memory archive provider summary was not safe to replay, raw-dumping")
             return raw_fallback()
         if summary != "(nothing)":
-            self.store.append_history(summary, session_key=session_key)
+            self.store.append_history(summary, session_key=session_key, generation=generation)
         return summary
 
     async def archive_session(
@@ -1163,7 +1185,12 @@ class MemoryArchiver:
         runtime: LLMRuntime,
         input_token_budget: int,
     ) -> str | None:
-        """Archive a captured session prefix without mutating the session."""
+        """Archive a captured session prefix without mutating the session.
+
+        The entry is stamped with *session*'s history generation: ``/new`` archives
+        a snapshot taken before ``clear()``, so it keeps the discarded transcript's.
+        """
+        generation = history_generation(session.metadata)
         messages = [
             message for message in session.messages[session.last_archived:archive_end]
             if not message.get("_command") and not is_summary_checkpoint(message)
@@ -1184,6 +1211,7 @@ class MemoryArchiver:
             return self._raw_checkpoint(
                 messages,
                 session_key=session.key,
+                generation=generation,
                 previous_summary=previous_summary,
                 max_tokens=runtime.generation.max_tokens,
             )
@@ -1205,6 +1233,7 @@ class MemoryArchiver:
             return self._raw_checkpoint(
                 messages,
                 session_key=session.key,
+                generation=generation,
                 previous_summary=previous_summary,
                 max_tokens=runtime.generation.max_tokens,
             )
@@ -1228,6 +1257,7 @@ class MemoryArchiver:
             request_tools=tools,
             previous_summary=previous_summary,
             input_token_budget=input_token_budget,
+            generation=generation,
         )
 
 
@@ -1271,6 +1301,7 @@ class Consolidator:
         session_key: str,
         tools: list[dict[str, Any]],
         provider_state: ProviderConversationState | None = None,
+        generation: int | None = None,
     ) -> str | None:
         """Summarize the exact transcript prefix already accepted by the model."""
         source_messages = [
@@ -1298,6 +1329,7 @@ class Consolidator:
             input_token_budget=input_token_budget,
             fallback_max_tokens=max(1, checkpoint_tokens),
             provider_state=provider_state,
+            generation=generation,
         )
         if summary is None:
             return None
@@ -1312,6 +1344,7 @@ class Consolidator:
         runtime: LLMRuntime,
         session_key: str,
         tools: list[dict[str, Any]],
+        generation: int | None = None,
     ) -> str | None:
         """Prompt a native compacted state without replaying its raw history."""
         return await self.summarize_transcript(
@@ -1321,6 +1354,7 @@ class Consolidator:
             session_key=session_key,
             tools=tools,
             provider_state=state,
+            generation=generation,
         )
 
     @staticmethod

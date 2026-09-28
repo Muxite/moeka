@@ -81,7 +81,12 @@ from nanobot.session.automation_turns import automation_history_overrides
 from nanobot.session.goal_state import goal_state_runtime_lines
 from nanobot.session.history_visibility import HIDDEN_HISTORY_META
 from nanobot.session.keys import UNIFIED_SESSION_KEY, remember_last_channel
-from nanobot.session.manager import SESSION_CACHE_MAX_SIZE, Session, SessionManager
+from nanobot.session.manager import (
+    SESSION_CACHE_MAX_SIZE,
+    Session,
+    SessionManager,
+    history_generation,
+)
 from nanobot.session.model_selection import (
     SESSION_MODEL_PRESET_METADATA_KEY,
     model_preset_from_metadata,
@@ -1329,6 +1334,7 @@ class AgentLoop:
                         runtime=runtime,
                         session_key=session.key,
                         tools=effective_tools.get_definitions(),
+                        generation=history_generation(session.metadata),
                     )
                     if session is not None and not ephemeral
                     else None
@@ -1339,6 +1345,7 @@ class AgentLoop:
                         runtime=runtime,
                         session_key=session.key,
                         tools=effective_tools.get_definitions(),
+                        generation=history_generation(session.metadata),
                     )
                     if session is not None and not ephemeral
                     else None

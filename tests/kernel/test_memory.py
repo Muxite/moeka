@@ -521,6 +521,75 @@ async def test_rewind_fork_and_delete_drop_archived_history_for_the_key(kernel) 
     assert store._read_entries() == []
 
 
+def test_drop_session_history_by_generation(tmp_path) -> None:
+    from nanobot.agent.memory import MemoryStore, drop_session_history
+
+    store = MemoryStore(tmp_path, memory_dir=tmp_path / "memory")
+    store.append_history("LEGACY", session_key="k")  # no generation stamp: gen 0
+    store.append_history("GEN-0", session_key="k", generation=0)
+    store.append_history("GEN-1", session_key="k", generation=1)
+    store.append_history("OTHER-GEN-1", session_key="other", generation=1)
+    assert store._read_entries()[2]["gen"] == 1
+
+    assert drop_session_history(store.history_file, "k", generation=1) == 1
+    assert [e["content"] for e in store._read_entries()] == ["LEGACY", "GEN-0", "OTHER-GEN-1"]
+    assert store.drop_session_history("k", generation=0) == 2
+    assert [e["content"] for e in store._read_entries()] == ["OTHER-GEN-1"]
+    # No generation: every entry for the key goes (fork target, delete).
+    assert drop_session_history(store.history_file, "other") == 1
+
+
+def test_session_clear_starts_a_new_history_generation() -> None:
+    from nanobot.session.manager import Session, history_generation
+
+    session = Session(key="k")
+    assert history_generation(session.metadata) == 0
+    session.add_message("user", "hi")
+    session.clear()
+    assert history_generation(session.metadata) == 1
+    session.clear()
+    assert history_generation(session.metadata) == 2
+
+
+async def test_rewind_after_new_keeps_the_archive_of_the_discarded_transcript(kernel) -> None:
+    import asyncio
+
+    fake = FakeProvider(["first reply", "PRE-NEW-SUMMARY"], default="ok")
+    kernel.llm.register_provider("main", fake, MAIN)
+    agent = kernel.agent(AgentSpec(name="coach", memory=True))
+    key = "coach:erin"
+    chat = await kernel.sessions.create(key)
+    await agent.run("before new", session=chat)
+    await agent.run("/new", session=chat)  # archives the old transcript in the background
+    store = agent._loop.context.memory
+    for _ in range(200):
+        if any(e["content"] == "PRE-NEW-SUMMARY" for e in store._read_entries()):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("the /new archive was never written")
+    assert store._read_entries()[-1]["gen"] == 0
+
+    cp = chat.checkpoint()
+    await agent.run("after new", session=chat)
+    store.append_history("POST-NEW-ARCHIVE", session_key=key, generation=1)
+    await chat.rewind(cp)
+    # The post-/new archive summarised messages the rewind removed; the pre-/new
+    # archive summarised a transcript no rewind can reach, so it stays.
+    assert [e["content"] for e in store._read_entries()] == ["PRE-NEW-SUMMARY"]
+    await agent.run("after rewind", session=chat)
+    assert "PRE-NEW-SUMMARY" in _system_prompt(fake.calls[-1])
+
+    # A late archive of an older generation, landing after a drop, is kept too.
+    store.append_history("LATE-OLD-GEN", session_key=key, generation=0)
+    await chat.rewind(cp)
+    assert "LATE-OLD-GEN" in [e["content"] for e in store._read_entries()]
+
+    # Deleting the key still drops every generation.
+    await kernel.sessions.delete(key)
+    assert store._read_entries() == []
+
+
 async def test_doc_scopes_search_tool_in_a_run(kernel) -> None:
     kb = kernel.memory("kb")
     _keyword_ok(kb)

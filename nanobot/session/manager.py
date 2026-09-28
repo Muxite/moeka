@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Collection, Generator, Protocol, TypedDict, cast
+from typing import Any, Callable, Collection, Generator, Mapping, Protocol, TypedDict, cast
 from weakref import WeakValueDictionary
 
 from filelock import FileLock
@@ -269,6 +269,23 @@ def _metadata_title(metadata: object) -> str:
     return strip_think(title)
 
 
+HISTORY_GEN_KEY = "_history_gen"
+
+
+def history_generation(metadata: Mapping[str, Any]) -> int:
+    """The session's memory-history generation: 0 until the first ``clear()`` (``/new``).
+
+    Memory archives are stamped with the generation of the transcript they
+    summarise, so a rewind drops only the current generation's archives.
+    """
+    value = metadata.get(HISTORY_GEN_KEY, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+HistoryResetObserver = Callable[[str, "int | None"], None]
+"""``observer(key, generation)``; see :meth:`SessionManager.add_history_reset_observer`."""
+
+
 def _cut_consolidation_state(
     metadata: dict[str, Any], last_archived: int, cut: int, total: int,
 ) -> int:
@@ -471,12 +488,18 @@ class Session:
         return out
 
     def clear(self) -> None:
-        """Clear all messages and reset session to initial state."""
+        """Clear all messages and reset session to initial state.
+
+        Starts a new history generation (see :func:`history_generation`): memory
+        archives of the discarded transcript keep the old one, so later rewinds of
+        the new transcript leave them alone.
+        """
         self.messages = []
         self.last_archived = 0
         self.provider_state = None
         self.updated_at = datetime.now()
         self.metadata.pop("_last_summary", None)
+        self.metadata[HISTORY_GEN_KEY] = history_generation(self.metadata) + 1
 
 class SessionPayload(TypedDict):
     key: str
@@ -1669,7 +1692,7 @@ class SessionManager:
         self._overflow_cache: WeakValueDictionary[str, Session] = WeakValueDictionary()
         self._max_cached_sessions = SESSION_CACHE_MAX_SIZE
         self._delete_observer: Callable[[str], None] | None = None
-        self._history_reset_observers: list[Callable[[str], None]] = []
+        self._history_reset_observers: list[HistoryResetObserver] = []
 
     @property
     def legacy_sessions_dir(self) -> Path:
@@ -1704,24 +1727,28 @@ class SessionManager:
         """Observe explicit session deletion for process-local state cleanup."""
         self._delete_observer = observer
 
-    def add_history_reset_observer(self, observer: Callable[[str], None]) -> None:
-        """Call *observer(key)* when *key*'s archived memory history no longer matches it.
+    def add_history_reset_observer(self, observer: HistoryResetObserver) -> None:
+        """Call *observer(key, generation)* when *key*'s archived memory history is stale.
 
         Memory archives (``history.jsonl`` entries, kept by the agent's memory store,
-        not here) record no message offsets; every entry for a key covers the
-        prefix ``messages[:last_archived]`` summarised by the session's committed
-        summary. So the entries stay valid exactly while that summary does. The
-        observer runs when :meth:`truncate` leaves no committed summary (the cut
-        dropped it, or there was none: the whole kept prefix replays raw), for the
-        target of :meth:`fork_session` (a new or replaced transcript under that
-        key), and for :meth:`delete_session`. Observers must not raise.
+        not here) record no message offsets, only the history generation of the
+        transcript they summarise (:func:`history_generation`). Within the current
+        generation every entry covers the prefix ``messages[:last_archived]``
+        summarised by the session's committed summary, so those entries stay valid
+        exactly while that summary does. The observer runs with the current
+        generation when :meth:`truncate` leaves no committed summary (the cut
+        dropped it, or there was none: the whole kept prefix replays raw); entries
+        of earlier generations summarise transcripts ``/new`` discarded, which no
+        cut reaches. It runs with ``None`` (every generation) for the target of
+        :meth:`fork_session` (a new or replaced transcript under that key) and for
+        :meth:`delete_session`. Observers must not raise.
         """
         self._history_reset_observers.append(observer)
 
-    def _history_reset(self, key: str) -> None:
+    def _history_reset(self, key: str, generation: int | None = None) -> None:
         for observer in self._history_reset_observers:
             try:
-                observer(key)
+                observer(key, generation)
             except Exception:  # noqa: BLE001 - a cleanup hook never fails the mutation
                 logger.exception("history reset observer failed for session {}", key)
 
@@ -2040,7 +2067,7 @@ class SessionManager:
         session.updated_at = datetime.now()
         self.save(session, fsync=True)
         if session.last_consolidated == 0:
-            self._history_reset(key)
+            self._history_reset(key, history_generation(session.metadata))
         return session
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
