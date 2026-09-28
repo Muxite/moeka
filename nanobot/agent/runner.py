@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import nullcontext
@@ -71,7 +70,7 @@ from nanobot.utils.runtime import (
 
 ContinuationCallback = Callable[[], str | None]
 CheckpointCallback = Callable[[dict[str, Any]], Awaitable[None]]
-InjectionCallback = Callable[..., Awaitable[Iterable[Any] | None]]
+InjectionCallback = Callable[[], Awaitable[Iterable[Any] | None]]
 
 _DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model."
 _ARREARAGE_ERROR_MESSAGE = (
@@ -114,6 +113,9 @@ class RunnerLimits(BaseModel):
 
     max_empty_retries: int = _MAX_EMPTY_RETRIES
     max_length_recoveries: int = _MAX_LENGTH_RECOVERIES
+    # Accepted for config compatibility but ignored: the session inbox now drains
+    # one finite snapshot before every model call (bounded by max_iterations), and
+    # its callback takes no limit, so capping here would drop queued user messages.
     max_injections_per_turn: int = _MAX_INJECTIONS_PER_TURN
     max_injection_cycles: int = _MAX_INJECTION_CYCLES
     microcompact_keep_recent: int = _MICROCOMPACT_KEEP_RECENT
@@ -203,20 +205,11 @@ class AgentRunner:
         iteration: int | None = None,
         allow_continuation: bool = False,
         wait_at_terminal: bool = False,
+        drain_callback: bool = True,
     ) -> tuple[bool, int]:
-        """Drain pending injections. Returns (should_continue, updated_cycles).
-
-        If injections are found and we haven't exceeded the injection-cycle
-        limit, append them to *messages* (and emit a checkpoint if
-        *assistant_message* and *iteration* are both provided) and return
-        (True, cycles+1) so the caller continues the iteration loop.
-        Otherwise return (False, cycles).
-        """
-        injections: list[dict[str, Any]] = []
-        real_injection = False
-        if injection_cycles < spec.limits.max_injection_cycles:
-            injections = await self._drain_injections(spec)
-            real_injection = bool(injections)
+        """Append one pending-input snapshot and return whether execution continues."""
+        injections = await self._drain_injections(spec) if drain_callback else []
+        real_injection = bool(injections)
         if not injections and allow_continuation and assistant_message is not None:
             continuation = self._build_continuation_message(spec)
             if continuation is not None:
@@ -224,7 +217,7 @@ class AgentRunner:
         if (
             not injections
             and wait_at_terminal
-            and injection_cycles < _MAX_INJECTION_CYCLES
+            and drain_callback
         ):
             injections = await self._drain_injections(spec, terminal=True)
             real_injection = bool(injections)
@@ -254,8 +247,8 @@ class AgentRunner:
         self._append_injected_messages(messages, injections)
         if real_injection:
             logger.info(
-                "Injected {} follow-up message(s) {} ({}/{})",
-                len(injections), phase, injection_cycles, spec.limits.max_injection_cycles,
+                "Injected {} follow-up message(s) {} (snapshot {})",
+                len(injections), phase, injection_cycles,
             )
         else:
             logger.info("Injected caller-requested continuation {}", phase)
@@ -281,13 +274,7 @@ class AgentRunner:
         *,
         terminal: bool = False,
     ) -> list[dict[str, Any]]:
-        """Drain pending user messages via the injection callback.
-
-        Returns normalized user messages (capped by
-        ``spec.limits.max_injections_per_turn``), or an empty list when there is
-        nothing to inject. Messages beyond the cap are logged so they
-        are not silently lost.
-        """
+        """Drain one pending-input snapshot via the injection callback."""
         callback = (
             spec.terminal_injection_callback
             if terminal
@@ -296,18 +283,7 @@ class AgentRunner:
         if callback is None:
             return []
         try:
-            signature = inspect.signature(callback)
-            accepts_limit = (
-                "limit" in signature.parameters
-                or any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in signature.parameters.values()
-                )
-            )
-            if accepts_limit:
-                items = await callback(limit=spec.limits.max_injections_per_turn)
-            else:
-                items = await callback()
+            items = await callback()
         except Exception:
             logger.exception("injection_callback failed")
             return []
@@ -326,14 +302,6 @@ class AgentRunner:
             content = getattr(item, "content") if hasattr(item, "content") else str(item)
             if self._has_injection_content(content):
                 injected_messages.append({"role": "user", "content": content})
-        cap = spec.limits.max_injections_per_turn
-        if len(injected_messages) > cap:
-            dropped = len(injected_messages) - cap
-            logger.warning(
-                "Injection callback returned {} messages, capping to {} ({} dropped)",
-                len(injected_messages), cap, dropped,
-            )
-            injected_messages = injected_messages[:cap]
         return injected_messages
 
     @staticmethod
@@ -446,6 +414,7 @@ class AgentRunner:
         # Segments from one uninterrupted length-recovery chain. Tool work or
         # injected user input starts a new logical answer and clears the chain.
         length_recovery_parts: list[str] = []
+        pending_length_segment: tuple[AgentHookContext, str] | None = None
         had_injections = False
         injection_cycles = 0
         consecutive_failed_tool_iterations = 0
@@ -475,7 +444,34 @@ class AgentRunner:
             events=spec.events,
         )
 
+        async def end_length_segment(*, interrupted: bool) -> None:
+            nonlocal pending_length_segment
+            if pending_length_segment is None:
+                return
+            segment_context, segment_content = pending_length_segment
+            pending_length_segment = None
+            if interrupted:
+                length_recovery_parts.clear()
+            else:
+                messages.append(build_length_recovery_message(segment_content))
+            if hook.wants_streaming():
+                segment_context.stream_continues_current_message = not interrupted
+                await hook.on_stream_end(segment_context, resuming=True)
+
         for iteration in range(spec.max_iterations):
+            # The session inbox cuts a finite snapshot before every model call.
+            # This includes follow-ups that arrived before the first request and
+            # messages received while the previous request or tools were running.
+            drained_before_request, injection_cycles = await self._try_drain_injections(
+                spec,
+                messages,
+                None,
+                injection_cycles,
+                phase="before model call",
+            )
+            if drained_before_request:
+                had_injections = True
+            await end_length_segment(interrupted=drained_before_request)
             context = AgentHookContext(
                 iteration=iteration,
                 messages=messages,
@@ -678,14 +674,6 @@ class AgentRunner:
                         consecutive_failed_tool_iterations,
                         spec.session_key or "default",
                     )
-
-                # Checkpoint 1: drain injections after tools, before next LLM call
-                _drained, injection_cycles = await self._try_drain_injections(
-                    spec, messages, None, injection_cycles,
-                    phase="after tool execution",
-                )
-                if _drained:
-                    had_injections = True
                 await hook.after_iteration(context)
                 continue
 
@@ -751,9 +739,6 @@ class AgentRunner:
                         len(length_recovery_parts),
                         spec.limits.max_length_recoveries,
                     )
-                    if hook.wants_streaming():
-                        context.stream_continues_current_message = True
-                        await hook.on_stream_end(context, resuming=True)
                     messages.append(conversation_state.project_response_message(
                         build_assistant_message(
                             clean,
@@ -762,7 +747,9 @@ class AgentRunner:
                         ),
                         response,
                     ))
-                    messages.append(build_length_recovery_message(clean or ""))
+                    # The next input snapshot decides whether to continue this
+                    # answer or close its stream before answering a new question.
+                    pending_length_segment = (context, clean or "")
                     await hook.after_iteration(context)
                     continue
 
@@ -798,6 +785,10 @@ class AgentRunner:
             # Check for mid-turn injections BEFORE signaling stream end.
             # If injections are found we keep the stream alive (resuming=True)
             # so streaming channels don't prematurely finalize the card.
+            can_make_followup_request = (
+                iteration + 1 < spec.max_iterations
+                or spec.finalize_on_max_iterations
+            )
             should_continue, injection_cycles = await self._try_drain_injections(
                 spec, messages, assistant_message, injection_cycles,
                 conversation_state=conversation_state,
@@ -811,6 +802,7 @@ class AgentRunner:
                     and response.finish_reason
                     not in {"error", "length", "refusal", "content_filter"}
                 ),
+                drain_callback=can_make_followup_request,
             )
             if should_continue:
                 had_injections = True
@@ -838,6 +830,7 @@ class AgentRunner:
                 should_continue, injection_cycles = await self._try_drain_injections(
                     spec, messages, None, injection_cycles,
                     phase="after LLM error",
+                    drain_callback=can_make_followup_request,
                 )
                 if should_continue:
                     had_injections = True
@@ -857,6 +850,7 @@ class AgentRunner:
                 should_continue, injection_cycles = await self._try_drain_injections(
                     spec, messages, None, injection_cycles,
                     phase="after empty response",
+                    drain_callback=can_make_followup_request,
                 )
                 if should_continue:
                     had_injections = True
@@ -900,19 +894,23 @@ class AgentRunner:
             break
         else:
             stop_reason = "max_iterations"
-            # Drain any remaining injections so they are appended to the
-            # conversation history instead of being re-published as
-            # independent inbound messages by _dispatch's finally block.
-            # We include them before the no-tools finalization pass so the
-            # final response can account for every known follow-up.
-            drained_after_max_iterations, injection_cycles = await self._try_drain_injections(
-                spec, messages, None, injection_cycles,
-                phase="after max_iterations",
-            )
-            if drained_after_max_iterations:
-                had_injections = True
             terminal_content = None
             if spec.finalize_on_max_iterations:
+                # The no-tools finalization is a real model boundary, so include
+                # exactly the inputs waiting before that request. Without this
+                # request, leave them in the session inbox for its worker.
+                drained_after_max_iterations, injection_cycles = (
+                    await self._try_drain_injections(
+                        spec,
+                        messages,
+                        None,
+                        injection_cycles,
+                        phase="before max-iterations finalization",
+                    )
+                )
+                if drained_after_max_iterations:
+                    had_injections = True
+                await end_length_segment(interrupted=drained_after_max_iterations)
                 terminal_content, usage = await self._try_finalize_after_max_iterations(
                     spec,
                     hook,
@@ -921,6 +919,8 @@ class AgentRunner:
                     request_state=request_state,
                     round_usages=round_usages,
                 )
+            else:
+                await end_length_segment(interrupted=False)
             if terminal_content is None:
                 terminal_content = self._max_iterations_fallback(spec)
             if length_recovery_parts:
