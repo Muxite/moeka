@@ -136,6 +136,12 @@ class Kernel:
             raise ValueError(f"action_workers must be a positive int, got {action_workers!r}")
         self._env = env
         self._tracer = Tracer(env.trace)
+        # The cost ledger's usage store, shared with other kernels on this state_dir:
+        # held for the kernel's life, released (closed by the last holder) on close.
+        from nanobot.llm_usage import acquire_llm_usage_store
+
+        acquire_llm_usage_store(data_dir=env.core.paths.data_dir)
+        self._holds_usage_store = True
         self._core_env = dataclasses.replace(env.core, trace=self._tracer)
         self._budget = budget
         self._cache = cache
@@ -480,13 +486,16 @@ class Kernel:
             except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
                 logger.warning("kernel: closing LLM providers failed: {!r}", exc)
         # The cost ledger's usage store (shared by pool and host-registered
-        # providers); it reopens lazily if a host-owned provider records again.
-        from nanobot.llm_usage import close_llm_usage_store
+        # providers, and by other kernels on this state_dir): the last holder's
+        # release closes it; it reopens lazily if a host-owned provider records again.
+        from nanobot.llm_usage import release_llm_usage_store
 
-        try:
-            close_llm_usage_store(data_dir=self._core_env.paths.data_dir)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("kernel: closing the LLM usage store failed: {!r}", exc)
+        if self._holds_usage_store:
+            self._holds_usage_store = False  # a retried close() releases once
+            try:
+                release_llm_usage_store(data_dir=self._core_env.paths.data_dir)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("kernel: closing the LLM usage store failed: {!r}", exc)
 
     async def aclose(self) -> None:
         """Async :meth:`close`: stops the loop thread off the caller's event loop."""

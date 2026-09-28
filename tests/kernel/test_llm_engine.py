@@ -154,6 +154,29 @@ def test_kernel_close_releases_the_usage_store(tmp_path) -> None:
     assert store._connection is None
 
 
+def test_closing_one_kernel_keeps_a_shared_usage_store_open(tmp_path) -> None:
+    from nanobot.llm_usage import get_llm_usage_store
+
+    first, second = Kernel(_env(tmp_path)), Kernel(_env(tmp_path))  # one state_dir
+    try:
+        for kernel in (first, second):
+            kernel.llm.register_provider(
+                "main", FakeProvider(default="x"),
+                ModelSpec(name="main", model="m", provider="openai"),
+            )
+        second.llm.generate_sync([user("hi")])
+        store = get_llm_usage_store(data_dir=second.core_env.paths.data_dir)
+        connection = store._connection
+        assert connection is not None
+        first.close()
+        assert store._connection is connection  # the other kernel still uses it
+        second.close()
+        assert store._connection is None  # the last kernel out closes it
+    finally:
+        first.close()
+        second.close()
+
+
 def test_missing_credential_names_the_host_ref(tmp_path) -> None:
     env = Environment.for_host(
         state_dir=tmp_path / "state", work_dir=tmp_path / "work",

@@ -14,6 +14,8 @@ from nanobot.llm_usage.store import LLMUsageStore
 
 _STORES_LOCK = threading.Lock()
 _STORES: dict[Path, LLMUsageStore] = {}
+# Holders (kernels) of each cached store: the last one to release it closes it.
+_HOLDERS: dict[Path, int] = {}
 
 
 def empty_usage_payload() -> dict[str, Any]:
@@ -69,6 +71,37 @@ def close_llm_usage_store(path: Path | None = None, *, data_dir: Path | None = N
     """
     resolved = (path or llm_usage_store_path(data_dir)).resolve(strict=False)
     with _STORES_LOCK:
+        store = _STORES.get(resolved)
+    if store is not None:
+        store.close()
+
+
+def acquire_llm_usage_store(*, data_dir: Path | None = None) -> LLMUsageStore:
+    """The cached store for *data_dir*, held until :func:`release_llm_usage_store`.
+
+    Several kernels on one ``state_dir`` share the store; each acquires it once and
+    releases it on close, and only the last release closes the connection.
+    """
+    resolved = llm_usage_store_path(data_dir).resolve(strict=False)
+    store = get_llm_usage_store(resolved)
+    with _STORES_LOCK:
+        _HOLDERS[resolved] = _HOLDERS.get(resolved, 0) + 1
+    return store
+
+
+def release_llm_usage_store(*, data_dir: Path | None = None) -> None:
+    """Drop one hold on *data_dir*'s store; close its connection when none remain.
+
+    Like :func:`close_llm_usage_store`, the store stays cached and reconnects on
+    its next use (a host-owned provider may still record through it).
+    """
+    resolved = llm_usage_store_path(data_dir).resolve(strict=False)
+    with _STORES_LOCK:
+        held = _HOLDERS.get(resolved, 0) - 1
+        if held > 0:
+            _HOLDERS[resolved] = held
+            return
+        _HOLDERS.pop(resolved, None)
         store = _STORES.get(resolved)
     if store is not None:
         store.close()
