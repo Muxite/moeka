@@ -14,6 +14,10 @@ import pytest
 from nanobot.core.vec import RetrievedChunk, open_vec_store
 from nanobot.core.vec_store import VecStore
 
+# Task 12: open_vec_store is now a deprecation shim (behaviour unchanged) —
+# this file intentionally exercises it directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 
 def test_open_vec_store_returns_vec_store(tmp_path):
     store = open_vec_store(tmp_path / "vec.db")

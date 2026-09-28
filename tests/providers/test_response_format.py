@@ -6,7 +6,7 @@ import sys
 from types import SimpleNamespace
 from typing import Any
 
-import pytest  # noqa: F401
+import pytest
 
 from nanobot.api.complete import _json_response_format, acomplete_json
 from nanobot.providers.base import ProviderCallContext, RequestExtras
@@ -16,6 +16,11 @@ from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 # `nanobot.api.complete` submodule for attribute access — resolve the real module
 # object via sys.modules so we can monkeypatch its `acomplete` global.
 capi = sys.modules[acomplete_json.__module__]
+
+# Task 12: acomplete_json/acomplete are now deprecation shims (behaviour
+# unchanged) — this file intentionally exercises them directly; allow the
+# warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 
 def _make_provider() -> OpenAICompatProvider:

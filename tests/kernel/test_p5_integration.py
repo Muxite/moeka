@@ -37,6 +37,10 @@ from nanobot.kernel.facts import FactStore
 from nanobot.kernel.legacy import LegacyEnvironment
 from nanobot.providers.base import GenerationSettings, LLMProvider, LLMResponse, ToolCallRequest
 
+# Task 12: MoekaKernel (MoekaCore) is now a deprecation shim (behaviour unchanged)
+# — this file intentionally exercises it directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 INVENTORY = """\
 # Inventory
 host: web-01

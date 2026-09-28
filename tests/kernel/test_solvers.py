@@ -21,6 +21,11 @@ complete_mod = importlib.import_module("nanobot.api.complete")
 
 _CONFIG = {"providers": {"openrouter": {"apiKey": "sk-test"}}}
 
+# Task 12: acomplete_json / MoekaCore.think_structured are now deprecation
+# shims (behaviour unchanged) — this file intentionally exercises them
+# directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 
 @pytest.fixture(autouse=True)
 def fresh_registry(monkeypatch):

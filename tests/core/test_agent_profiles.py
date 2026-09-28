@@ -10,6 +10,10 @@ from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.core import Config, MoekaCore
 
+# Task 12: MoekaCore is now a deprecation shim (behaviour unchanged) — this
+# file intentionally exercises it directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 _CONFIG_DATA = {
     "providers": {"openrouter": {"apiKey": "sk-test-key"}},
     "agents": {"defaults": {"model": "openai/gpt-4.1", "vec": {"enable": False}}},

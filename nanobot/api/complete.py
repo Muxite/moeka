@@ -26,6 +26,8 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
+from nanobot._deprecation import warn_deprecated
+
 
 def _usage_payload(model: str | None, usage: Any) -> dict[str, Any]:
     """Flatten provider ``LLMUsage`` into the legacy OpenAI-shaped dict hosts expect.
@@ -117,7 +119,7 @@ async def _acomplete_response(
     return response
 
 
-async def acomplete(
+async def _acomplete_impl(
     prompt: str,
     *,
     system: str | None = None,
@@ -133,7 +135,13 @@ async def acomplete(
     response_format: dict[str, Any] | None = None,
     env: Any | None = None,
 ) -> str:
-    """Run a single chat completion through moeka's provider layer.
+    """:func:`acomplete`'s implementation, unwarned — for internal (in-repo) callers.
+
+    Any legacy code that still needs this behaviour (e.g. :class:`MoekaCore`'s
+    ``complete``/``complete_sync``/``think_structured``, which are themselves
+    deprecated and already covered by their own construction-time warning)
+    should call this instead of the public :func:`acomplete`, so one host call
+    still emits exactly one ``DeprecationWarning``.
 
     Args:
         prompt: The user message.
@@ -181,7 +189,39 @@ async def acomplete(
     return response.content
 
 
-async def acomplete_stream(
+async def acomplete(
+    prompt: str,
+    *,
+    system: str | None = None,
+    images: list[str | bytes | Path] | None = None,
+    config: Any | None = None,
+    config_dict: dict[str, Any] | None = None,
+    config_path: str | Path | None = None,
+    model: str | None = None,
+    preset: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    usage_sink: Any | None = None,
+    response_format: dict[str, Any] | None = None,
+    env: Any | None = None,
+) -> str:
+    """Run a single chat completion through moeka's provider layer.
+
+    .. deprecated::
+        Use ``moeka.Kernel(...).llm.complete(...)`` instead — see
+        docs/python-sdk.md. See :func:`_acomplete_impl` for the full docstring
+        (arguments and return value are unchanged).
+    """
+    warn_deprecated("nanobot.api.complete.acomplete", "moeka.Kernel(...).llm.complete(...)")
+    return await _acomplete_impl(
+        prompt, system=system, images=images, config=config, config_dict=config_dict,
+        config_path=config_path, model=model, preset=preset, max_tokens=max_tokens,
+        temperature=temperature, usage_sink=usage_sink, response_format=response_format,
+        env=env,
+    )
+
+
+async def _acomplete_stream_impl(
     prompt: str,
     *,
     system: str | None = None,
@@ -195,12 +235,7 @@ async def acomplete_stream(
     temperature: float | None = None,
     env: Any | None = None,
 ) -> AsyncIterator[str]:
-    """Stream a single chat completion as text chunks.
-
-    Same arguments as :func:`acomplete`. Providers without native streaming
-    deliver the full reply as one chunk. Raises ``RuntimeError`` when the
-    provider reports an error.
-    """
+    """:func:`acomplete_stream`'s implementation, unwarned — see that function."""
     from nanobot.config.loader import config_from_sources
     from nanobot.kernel.llm import aclose_provider as _aclose_provider
     from nanobot.kernel.messages import user_content as _user_content
@@ -249,6 +284,38 @@ async def acomplete_stream(
         await _aclose_provider(provider)
 
 
+async def acomplete_stream(
+    prompt: str,
+    *,
+    system: str | None = None,
+    images: list[str | bytes | Path] | None = None,
+    config: Any | None = None,
+    config_dict: dict[str, Any] | None = None,
+    config_path: str | Path | None = None,
+    model: str | None = None,
+    preset: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    env: Any | None = None,
+) -> AsyncIterator[str]:
+    """Stream a single chat completion as text chunks.
+
+    Same arguments as :func:`acomplete`. Providers without native streaming
+    deliver the full reply as one chunk. Raises ``RuntimeError`` when the
+    provider reports an error.
+
+    .. deprecated::
+        Use ``moeka.Kernel(...).llm.stream(...)`` instead — see docs/python-sdk.md.
+    """
+    warn_deprecated("nanobot.api.complete.acomplete_stream", "moeka.Kernel(...).llm.stream(...)")
+    async for chunk in _acomplete_stream_impl(
+        prompt, system=system, images=images, config=config, config_dict=config_dict,
+        config_path=config_path, model=model, preset=preset, max_tokens=max_tokens,
+        temperature=temperature, env=env,
+    ):
+        yield chunk
+
+
 def complete_stream(
     prompt: str,
     **kwargs: Any,
@@ -258,17 +325,21 @@ def complete_stream(
     Runs :func:`acomplete_stream` in a worker thread with its own event loop
     and yields chunks as they arrive. Raises if called inside a running event
     loop — iterate :func:`acomplete_stream` there instead.
+
+    .. deprecated::
+        Use ``moeka.Kernel(...).llm.stream(...)`` instead — see docs/python-sdk.md.
     """
     import queue as _queue
     import threading
 
+    warn_deprecated("nanobot.api.complete.complete_stream", "moeka.Kernel(...).llm.stream(...)")
     _reject_running_loop("complete_stream", "acomplete_stream")
     chunks: _queue.Queue[Any] = _queue.Queue()
     done = object()
 
     def _worker() -> None:
         async def _consume() -> None:
-            async for chunk in acomplete_stream(prompt, **kwargs):
+            async for chunk in _acomplete_stream_impl(prompt, **kwargs):
                 chunks.put(chunk)
 
         try:
@@ -288,7 +359,7 @@ def complete_stream(
         yield item
 
 
-async def acomplete_json(
+async def _acomplete_json_impl(
     prompt: str,
     *,
     schema: dict[str, Any] | None = None,
@@ -299,7 +370,11 @@ async def acomplete_json(
     task_payload: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Any:
-    """One-shot completion constrained to JSON, with parse-retry.
+    """:func:`acomplete_json`'s implementation, unwarned — for internal (in-repo)
+    callers (e.g. :mod:`nanobot.kernel.router`'s dispatch, :class:`MoekaCore`'s
+    ``think_structured``) that must not re-trigger the public function's warning.
+
+    One-shot completion constrained to JSON, with parse-retry.
 
     Provider-agnostic by design (no native JSON mode required): a schema-aware
     instruction is appended to the system prompt, the reply is parsed, and on
@@ -403,6 +478,35 @@ async def acomplete_json(
     raise ValueError(f"model did not produce valid JSON after {retries + 1} attempt(s): {last_error}")
 
 
+async def acomplete_json(
+    prompt: str,
+    *,
+    schema: dict[str, Any] | None = None,
+    model_cls: type | None = None,
+    retries: int = 2,
+    system: str | None = None,
+    task_type: str | None = None,
+    task_payload: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """One-shot completion constrained to JSON, with parse-retry.
+
+    See :func:`_acomplete_json_impl` for the full docstring (arguments and
+    return value are unchanged).
+
+    .. deprecated::
+        Use ``moeka.Kernel(...).llm.complete_json(...)`` instead — see
+        docs/python-sdk.md.
+    """
+    warn_deprecated(
+        "nanobot.api.complete.acomplete_json", "moeka.Kernel(...).llm.complete_json(...)"
+    )
+    return await _acomplete_json_impl(
+        prompt, schema=schema, model_cls=model_cls, retries=retries, system=system,
+        task_type=task_type, task_payload=task_payload, **kwargs,
+    )
+
+
 def complete_json(
     prompt: str,
     *,
@@ -416,10 +520,17 @@ def complete_json(
 
     Raises if called from within a running event loop — use
     :func:`acomplete_json` there instead.
+
+    .. deprecated::
+        Use ``moeka.Kernel(...).llm.complete_json_sync(...)`` instead — see
+        docs/python-sdk.md.
     """
+    warn_deprecated(
+        "nanobot.api.complete.complete_json", "moeka.Kernel(...).llm.complete_json_sync(...)"
+    )
     _reject_running_loop("complete_json", "acomplete_json")
     return asyncio.run(
-        acomplete_json(
+        _acomplete_json_impl(
             prompt,
             schema=schema,
             model_cls=model_cls,
@@ -460,10 +571,15 @@ def complete(
 
     Raises if called from within a running event loop — use :func:`acomplete`
     there instead.
+
+    .. deprecated::
+        Use ``moeka.Kernel(...).llm.complete_sync(...)`` instead — see
+        docs/python-sdk.md.
     """
+    warn_deprecated("nanobot.api.complete.complete", "moeka.Kernel(...).llm.complete_sync(...)")
     _reject_running_loop("complete", "acomplete")
     return asyncio.run(
-        acomplete(
+        _acomplete_impl(
             prompt,
             system=system,
             images=images,

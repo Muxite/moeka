@@ -258,7 +258,9 @@ def _default_dispatch(
         if env is not None:
             kwargs["env"] = env
         # The solvers already ran in the router: no task_type is forwarded.
-        return await complete_api.acomplete_json(
+        # The unwarned impl, not the public (deprecated) acomplete_json: the
+        # router is kernel-internal and must not trigger its DeprecationWarning.
+        return await complete_api._acomplete_json_impl(
             prompt, model_cls=model_cls, config=config, **kwargs,
         )
 

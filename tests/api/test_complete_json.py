@@ -13,6 +13,10 @@ from pydantic import BaseModel
 
 from nanobot.api.complete import _extract_json_text, acomplete_json
 
+# Task 12: acomplete_json is now a deprecation shim (behaviour unchanged) —
+# this file intentionally exercises it directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 _CONFIG = {"providers": {"openrouter": {"apiKey": "sk-test"}}}
 
 

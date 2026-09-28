@@ -24,12 +24,18 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from loguru import logger
 
 from nanobot.config.schema import Config
 from nanobot.kernel import CoreEnvironment, MoekaKernel, Paths, StaticCredentialResolver
 from nanobot.kernel.legacy import LEGACY_ENV_REFS, LEGACY_ENV_SETTINGS
 from nanobot.providers.base import GenerationSettings, LLMProvider, LLMResponse, ToolCallRequest
+
+# Task 12: MoekaKernel (MoekaCore) is now a deprecation shim (behaviour
+# unchanged) — this file intentionally exercises it directly; allow the
+# warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 SENTINEL = "AMBIENT-MUST-NOT-BE-READ"
 

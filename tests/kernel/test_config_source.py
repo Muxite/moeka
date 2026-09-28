@@ -17,6 +17,10 @@ from nanobot.kernel.legacy import LegacyEnvironment, file_config_source
 from nanobot.providers.factory import load_provider_snapshot
 from tests._kernel_env import DictConfigSource, credential_env
 
+# Task 12: MoekaCore is now a deprecation shim (behaviour unchanged) — this
+# file intentionally exercises it directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 
 @pytest.fixture
 def config_path(tmp_path, monkeypatch):

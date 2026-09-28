@@ -14,6 +14,10 @@ import pytest
 
 from nanobot.api.complete import acomplete, complete, complete_json
 
+# Task 12: these are now deprecation shims (behaviour unchanged) — this file
+# intentionally exercises them directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 _CONFIG = {"providers": {"openrouter": {"apiKey": "sk-test"}}}
 
 

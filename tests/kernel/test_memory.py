@@ -366,6 +366,7 @@ def _assert_parity(legacy: Any, store: DocStore, mode: str) -> None:
     assert compared >= 6
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # Task 12: open_vec_store, on purpose
 def test_hybrid_matches_open_vec_store_keyword_fallback(kernel, tmp_path, monkeypatch) -> None:
     # Neither side has a vector backend: hybrid falls back to keyword identically.
     class NoEmbed(FakeEmbedder):
@@ -387,6 +388,7 @@ def test_hybrid_matches_open_vec_store_keyword_fallback(kernel, tmp_path, monkey
 
 
 @needs_sqlite_vec
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # Task 12: open_vec_store, on purpose
 def test_hybrid_matches_open_vec_store_with_vectors(kernel, tmp_path) -> None:
     legacy = open_vec_store(tmp_path / "legacy.db", embedder=FakeEmbedder())
     store = kernel.memory(path=tmp_path / "new.db")

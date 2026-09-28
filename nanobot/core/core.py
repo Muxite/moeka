@@ -37,6 +37,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot._deprecation import warn_deprecated
 from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.registry import ToolRegistry
@@ -78,7 +79,7 @@ class MoekaCore:
     _DEFAULT_WORKSPACE = "~/.nanobot"
 
     @classmethod
-    def create(
+    def _create_impl(
         cls,
         *,
         config: Any | None = None,
@@ -92,7 +93,11 @@ class MoekaCore:
         skills: Sequence[Any] | None = None,
         env: Any | None = None,
     ) -> MoekaCore:
-        """Build a core from moeka config — files optional.
+        """:meth:`create`'s implementation, unwarned — for internal (in-repo) callers
+        (:meth:`scoped`/:meth:`scoped_async`, which warn once themselves) so
+        constructing a core through them still emits exactly one warning.
+
+        Build a core from moeka config — files optional.
 
         This is the adapter/router that turns *whatever the host has* into the
         pydantic :class:`~nanobot.config.schema.Config` the core actually needs,
@@ -163,7 +168,7 @@ class MoekaCore:
                 ephemeral = Path(tempfile.mkdtemp(prefix="moeka-core-"))
                 ws = ephemeral
 
-        core = cls.from_config(
+        core = cls._from_config_impl(
             cfg, workspace=ws, model=model, provider=provider,
             bootstrap_overrides=overrides, inline_skills=inline_skills, env=env,
         )
@@ -172,6 +177,66 @@ class MoekaCore:
             core.profile = prof
             core.profile_name = profile if isinstance(profile, str) else "inline"
         return core
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        config: Any | None = None,
+        config_dict: dict[str, Any] | None = None,
+        config_path: str | Path | None = None,
+        workspace: str | Path | None = None,
+        model: str | None = None,
+        provider: Any | None = None,
+        profile: Any | None = None,
+        bootstrap: Mapping[str, str] | None = None,
+        skills: Sequence[Any] | None = None,
+        env: Any | None = None,
+    ) -> MoekaCore:
+        """Build a core from moeka config — files optional. See :meth:`_create_impl`
+        for the full docstring (arguments and return value are unchanged).
+
+        .. deprecated::
+            Use ``moeka.Kernel(env)`` plus ``kernel.agent(AgentSpec.from_profile(...))``
+            instead — see docs/python-sdk.md.
+        """
+        warn_deprecated(
+            "nanobot.core.MoekaCore.create",
+            "moeka.Kernel(env) with kernel.agent(AgentSpec.from_profile(...))",
+        )
+        return cls._create_impl(
+            config=config, config_dict=config_dict, config_path=config_path,
+            workspace=workspace, model=model, provider=provider, profile=profile,
+            bootstrap=bootstrap, skills=skills, env=env,
+        )
+
+    @classmethod
+    @contextmanager
+    def _scoped_impl(
+        cls,
+        *,
+        profile: Any | None = None,
+        workspace: str | Path | None = None,
+        **kwargs: Any,
+    ) -> Iterator[MoekaCore]:
+        """:meth:`scoped`'s implementation, unwarned — see that method, and
+        :meth:`_create_impl` on why internal callers use this instead."""
+        import shutil
+        import tempfile
+
+        owned: Path | None = None
+        if workspace is None:
+            owned = Path(tempfile.mkdtemp(prefix="moeka-scoped-"))
+            workspace = owned
+        core = None
+        try:
+            core = cls._create_impl(profile=profile, workspace=workspace, **kwargs)
+            yield core
+        finally:
+            if core is not None:
+                core.cleanup()
+            if owned is not None:
+                shutil.rmtree(owned, ignore_errors=True)
 
     @classmethod
     @contextmanager
@@ -192,23 +257,20 @@ class MoekaCore:
 
             with MoekaCore.scoped(profile="research", config_path=p) as core:
                 answer = await core.run("...")   # inside async code, see scoped_async
-        """
-        import shutil
-        import tempfile
 
-        owned: Path | None = None
-        if workspace is None:
-            owned = Path(tempfile.mkdtemp(prefix="moeka-scoped-"))
-            workspace = owned
-        core = None
-        try:
-            core = cls.create(profile=profile, workspace=workspace, **kwargs)
+        .. deprecated::
+            Use ``moeka.Kernel(env)`` as a context manager instead — see
+            docs/python-sdk.md.
+        """
+        # stacklevel=4: one deeper than a plain function (see nanobot/_deprecation.py) —
+        # @contextmanager's __enter__ calling next(self.gen) adds a frame between the
+        # `with` statement and this generator's body.
+        warn_deprecated(
+            "nanobot.core.MoekaCore.scoped", "moeka.Kernel(env) as a context manager",
+            stacklevel=4,
+        )
+        with cls._scoped_impl(profile=profile, workspace=workspace, **kwargs) as core:
             yield core
-        finally:
-            if core is not None:
-                core.cleanup()
-            if owned is not None:
-                shutil.rmtree(owned, ignore_errors=True)
 
     @classmethod
     @asynccontextmanager
@@ -219,12 +281,21 @@ class MoekaCore:
         workspace: str | Path | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[MoekaCore]:
-        """Async twin of :meth:`scoped` for hosts already inside an event loop."""
-        with cls.scoped(profile=profile, workspace=workspace, **kwargs) as core:
+        """Async twin of :meth:`scoped` for hosts already inside an event loop.
+
+        .. deprecated::
+            Use ``async with moeka.Kernel(env)`` instead — see docs/python-sdk.md.
+        """
+        # stacklevel=4: see the matching comment in scoped().
+        warn_deprecated(
+            "nanobot.core.MoekaCore.scoped_async", "async with moeka.Kernel(env)",
+            stacklevel=4,
+        )
+        with cls._scoped_impl(profile=profile, workspace=workspace, **kwargs) as core:
             yield core
 
     @classmethod
-    def from_config(
+    def _from_config_impl(
         cls,
         config: Any,
         *,
@@ -235,7 +306,10 @@ class MoekaCore:
         inline_skills: Sequence[Any] | None = None,
         env: Any | None = None,
     ) -> MoekaCore:
-        """Build a core directly from an in-memory :class:`Config` (the data seam).
+        """:meth:`from_config`'s implementation, unwarned — see :meth:`_create_impl`
+        on why internal callers (:meth:`_create_impl`) use this instead.
+
+        Build a core directly from an in-memory :class:`Config` (the data seam).
 
         Pure ``(Config, workspace) -> MoekaCore``: it does not read or discover any
         config file. ``workspace`` overrides ``config.agents.defaults.workspace``
@@ -268,6 +342,31 @@ class MoekaCore:
 
         loop = AgentLoop.from_config(config, tool_registry=ToolRegistry(), **extra)
         return cls(loop)
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Any,
+        *,
+        workspace: str | Path | None = None,
+        model: str | None = None,
+        provider: Any | None = None,
+        bootstrap_overrides: Mapping[str, str] | None = None,
+        inline_skills: Sequence[Any] | None = None,
+        env: Any | None = None,
+    ) -> MoekaCore:
+        """Build a core directly from an in-memory :class:`Config`. See
+        :meth:`_from_config_impl` for the full docstring (arguments and return
+        value are unchanged).
+
+        .. deprecated::
+            Use ``moeka.Kernel(env)`` instead — see docs/python-sdk.md.
+        """
+        warn_deprecated("nanobot.core.MoekaCore.from_config", "moeka.Kernel(env)")
+        return cls._from_config_impl(
+            config, workspace=workspace, model=model, provider=provider,
+            bootstrap_overrides=bootstrap_overrides, inline_skills=inline_skills, env=env,
+        )
 
     @staticmethod
     def _build_vec_store(config: Any, env: Any | None = None) -> Any | None:

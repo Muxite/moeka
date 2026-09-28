@@ -45,10 +45,15 @@ _load_keys_env()
 _HAS_KEY = bool(os.environ.get("OPENROUTER_API_KEY"))
 _MODEL = os.environ.get("MOEKA_TEST_MODEL", "google/gemini-3-flash-preview")
 
-pytestmark = pytest.mark.skipif(
-    not _HAS_KEY,
-    reason="no OPENROUTER_API_KEY (set it or fill repo-root keys.env) — skipping live test",
-)
+# Task 12: MoekaCore.create/complete are deprecation shims now (behaviour
+# unchanged) — this file intentionally exercises them; allow the warning here.
+pytestmark = [
+    pytest.mark.skipif(
+        not _HAS_KEY,
+        reason="no OPENROUTER_API_KEY (set it or fill repo-root keys.env) — skipping live test",
+    ),
+    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
+]
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,13 @@ from nanobot.config.schema import AgentProfileConfig, Config
 from nanobot.core import MoekaCore
 from nanobot.providers.base import LLMResponse, LLMUsage
 
+# Task 12: every function/method this file calls directly is now a deprecation
+# shim (behaviour unchanged; see nanobot/_deprecation.py) — allow the warning
+# here instead of a global ignore. tests/test_deprecation_shims.py pins the
+# exact message and call-site for each shim; this file must keep passing
+# unchanged apart from that.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 _CONFIG_DICT = {"providers": {"openrouter": {"apiKey": "sk-test"}}}
 
 

@@ -10,6 +10,10 @@ import pytest
 
 from nanobot.core import Config, MoekaCore, RunResult
 
+# Task 12: MoekaCore is now a deprecation shim (behaviour unchanged) — this
+# file intentionally exercises it directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 
 def _write_config(tmp_path: Path) -> Path:
     data = {

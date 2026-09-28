@@ -47,6 +47,11 @@ from nanobot.llm_usage.models import LLMCallRecord
 from nanobot.providers.base import LLMResponse, LLMUsage
 from nanobot.providers.factory import _ledger_pricing, make_provider
 
+# Task 12: MoekaCore.think_structured is now a deprecation shim (behaviour
+# unchanged) — this file intentionally exercises it directly; allow the
+# warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 
 class _RecordingSink:
     def __init__(self) -> None:

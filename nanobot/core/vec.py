@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from nanobot._deprecation import warn_deprecated
 from nanobot.core.vec_store import Embedder, VecStore
 
 __all__ = ["RetrievedChunk", "VecStore", "open_vec_store"]
@@ -52,7 +53,12 @@ def open_vec_store(
     table for observability. ``embedder`` shares an already built embedder (see
     :class:`~nanobot.core.vec_store.Embedder`) instead of loading a model per store;
     ``model`` is then ignored (the embedder names its model).
+
+    .. deprecated::
+        Use ``moeka.Kernel(...).memory(path=db_path)`` instead — see
+        docs/python-sdk.md.
     """
+    warn_deprecated("nanobot.core.vec.open_vec_store", "moeka.Kernel(...).memory(path=...)")
     return VecStore(
         Path(db_path),
         model_name=model or _DEFAULT_EMBEDDING_MODEL,

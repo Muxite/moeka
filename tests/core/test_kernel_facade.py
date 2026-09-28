@@ -28,6 +28,10 @@ from nanobot.kernel.facts import FACTS_DB_FILENAME, FactStore
 from nanobot.kernel.legacy import LegacyEnvironment
 from nanobot.kernel.trace import NullTraceSink
 
+# Task 12: MoekaCore/MoekaKernel are now deprecation shims (behaviour unchanged)
+# — this file intentionally exercises them directly; allow the warning here.
+pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
 _CFG = {
     "providers": {"openrouter": {"apiKey": "sk-test-key"}},
     "agents": {"defaults": {"model": "openrouter/test-model"}},
