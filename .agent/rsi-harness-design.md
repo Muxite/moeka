@@ -2,7 +2,7 @@
 
 Status: draft for review, 2026-09-25; revised 2026-09-28 against the moeka kernel
 API (core-slim `5b9c7d43`, `docs/python-sdk.md` there); prerequisites and pin
-re-checked 2026-09-30 (section 4.4, section 16). Nothing in this spec is
+re-checked 2026-09-30 (section 4.2a, section 16). Nothing in this spec is
 built: no harness repo, no task suite (M3), no M1 Docker result. Research basis: `.agent/rsi-daemon-feasibility.md` and
 `.agent/rsi-and-agent-core-report.md` (both predate the kernel API; where they
 name `MoekaCore`, `AgentHook` or `ToolLoader tools_allow`, section 4 here wins).
@@ -121,7 +121,7 @@ volume (not in the repo):
 - **Fixtures** never ship a `skills/` directory: `<work_dir>/skills` would
   shadow the variant's skills. The verifier fails a rollout that creates one.
 
-### 4.4 Pin note (2026-09-30)
+### 4.2a Pin note (2026-09-30)
 - The spec was written against `5b9c7d43`. Since then `core-slim` gained only a
   merge of `main`'s upstream sync (`d5f4e7d0`, `41e10944`, `6f80c392`: session
   inbox, compaction, memory sanitization; `nanobot/agent/runner.py` and loop
@@ -504,7 +504,7 @@ nothing below the kernel mechanics has either yet.
   have tests in the kernel (kernel design section 14, K1), but the harness that
   would run them as a candidate gate does not exist. They do not hold against an
   exec-capable agent without a sandbox.
-- **Risks carried from elsewhere.** The pin may move (section 4.4). The kernel
+- **Risks carried from elsewhere.** The pin may move (section 4.2a). The kernel
   cost ledger can be forged under `exec`, so score cost from the trace stream.
   Shared GPU contention (section 14). No consumer other than this harness
   validates the kernel objectives; awork uses the kernel through legacy
