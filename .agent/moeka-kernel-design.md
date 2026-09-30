@@ -74,6 +74,11 @@ flowchart TD
 - Changed from the owner's version: the Gate now emits to the Sink and requests from the resolver (both arrows
   were reversed), and `ConfigSource` gets an edge into the kernel.
 
+> **FLAG (2026-09-30, not yet written):** add an *Assumptions & risks* section to this doc: which optimizations
+> assume X improves Y without proof (e.g. I6 cost-per-task as a proxy for value; §8 objectives as a proxy for
+> usefulness). See `cross-project-contract.md` sections 7-8. Also re-check §3a/§10 against kernel commits after
+> 2026-09-28 05:53 (this doc was last edited 02:20 that day).
+
 ## 3. Invariants
 
 Purpose: the rules that no phase, plugin or self-improvement step may break.
@@ -674,6 +679,11 @@ and when it may accept a change.
 - Denial rate: invalid calls rejected with structured markers that guide recovery (minimise thrashing).
 - Latency: stream read-only planning speculatively while gate checks run in parallel (minimise).
 - Ambient leakage stays a hard zero: no credential in the agent's child environment; keys come just in time.
+
+> **FLAG (2026-09-30, not yet done):** *Clarification yield* has no trace event (`clarify.resolve_divergence`
+> emits none). Either add the event or drop that objective. Same gap is noted in the contract. The RSI design
+> (branch `rsi-harness-spec`, `.agent/rsi-harness-design.md`) needs the same *Assumptions & risks* section and
+> a note that its task suite (M3) does not exist, so "quality on held-out tasks" is unmeasured.
 
 **Signals available after P5** (the RSI harness that scores them does not exist yet):
 - Provenance rate: `artifact.proposed` trace events list committed paths with trace IDs and provisional paths;
