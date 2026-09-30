@@ -5,9 +5,11 @@ Naming: the host-facing API is the `moeka` package (`moeka.Kernel`, section 3a).
 migrates.
 
 Status: P1-P5 built on branch `core-slim` (2026-09-27, kernel plan Tasks 0-25; section 10 has each phase's
-proof). The public API (`moeka` package, section 3a) built on branch `kernel-api` (2026-09-28, public-API
-plan Tasks 1-13); awork's migration and the removal of the deprecated shims are that plan's Tasks 14-15.
-P6-P8 remain design only. This document began as a design plan (2026-09-26, `4d2a2d8a`); phase 0
+proof). The public API (`moeka` package, section 3a) was built on branch `kernel-api` (2026-09-28, public-API
+plan Tasks 1-13, plus final-review fixes I-1 to I-7 and later commits through `5b9c7d43`); it is now part of
+`core-slim` (the `kernel-api` branch no longer exists). awork's migration and the removal of the deprecated
+shims are that plan's Tasks 14-15 and are NOT done (section 15). P6-P8 remain design only. Last re-checked
+against the code 2026-09-30 (`core-slim` at `6f80c392` plus docs commits); tests were read, not re-run. This document began as a design plan (2026-09-26, `4d2a2d8a`); phase 0
 shipped before it. The detailed findings, threat model and phase-0 log live in the appendix spec,
 `.agent/host-plugin-permissions-design.md` ("the earlier spec"). Code facts marked (unverified) were not read.
 
@@ -73,11 +75,6 @@ flowchart TD
 
 - Changed from the owner's version: the Gate now emits to the Sink and requests from the resolver (both arrows
   were reversed), and `ConfigSource` gets an edge into the kernel.
-
-> **FLAG (2026-09-30, not yet written):** add an *Assumptions & risks* section to this doc: which optimizations
-> assume X improves Y without proof (e.g. I6 cost-per-task as a proxy for value; §8 objectives as a proxy for
-> usefulness). See `cross-project-contract.md` sections 7-8. Also re-check §3a/§10 against kernel commits after
-> 2026-09-28 05:53 (this doc was last edited 02:20 that day).
 
 ## 3. Invariants
 
@@ -147,7 +144,7 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
     `kernel.env` under `env.paths.state_dir` and share one fact store; `kernel.propose` and `kernel.answer`
     pass through. No env: both are `None` and the methods raise `RuntimeError`.
   - "No env" almost never happens for a real kernel: every `MoekaKernel.create()` path builds a
-    `LegacyEnvironment` when the host passes none (`agent/loop.py:573`). Its flat layout makes `state_dir` the
+    `LegacyEnvironment` when the host passes none (`agent/loop.py:597`). Its flat layout makes `state_dir` the
     live legacy workspace, so `facts.db` and `artifacts.db` appear there on first property access unless the
     host builds a strict or explicit env (`.agent/kernel-p5-followups.md`).
   - Proof: `tests/kernel/test_artifact_store.py` (an uncited delta never reaches `committed()`; every
@@ -186,7 +183,7 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   The grant binds declared requests only; plugin code itself runs in-process and unsandboxed (section 2).
 - Gap: kernel mode has no production caller. Since the public API (section 3a), `AgentLoop` and
   `SubagentManager._build_tools` pass their `plugin_registry` to `ToolLoader`, and `Kernel(plugins=...)`
-  supplies it to every agent and sub-agent. The gateway and legacy `MoekaCore` pass none, so they still run
+  supplies it to every agent and sub-agent. The gateway (on `main`, not on this branch) and legacy `MoekaCore` pass none, so they still run
   legacy plugin loading: a plugin that kernel mode would quarantine is importable there, with no manifest,
   hash or grant check (`.agent/kernel-p4-followups.md`, Task 19).
 
@@ -256,8 +253,15 @@ Purpose: show where each invariant surfaces in the `moeka` package, the only sur
 
 - Shape: `moeka/` only re-exports (`moeka`, `moeka.llm`, `.agents`, `.sessions`, `.memory`, `.epistemics`,
   `.trace`, `.budget`, `.errors`, `.variants`, `.tools`, `.testing`); every class lives in `nanobot/kernel/`.
-  `Kernel(env, budget, cache, variant, policy, plugins, max_concurrency, solvers, baselines)` owns one loop
-  thread; async methods hop onto it and `*_sync` twins block on it from any thread.
+  `Kernel(env, *, budget, cache, variant, policy, plugins, max_concurrency=16, solvers, baselines,
+  action_workers=8)` owns one loop thread; async methods hop onto it and `*_sync` twins block on it from any
+  thread. `action_workers` sizes the dedicated pool that agents' sync host actions run on (`ff94686d`).
+  `moeka/__init__.py` itself exports only `CredentialResolver`, `Environment`, `Kernel`, `ModelSpec`, `Paths`,
+  `PathsOverlapError`, `ProviderSpec`, `Sampling`, `StaticCredentialResolver`; everything else is reached
+  through the submodules listed above.
+- Agents: `AgentSpec.memory_key` (default: the agent's name) picks the per-agent memory root, so two agents with
+  the same name can keep separate memory (`a2875b65`). Memory injection happens only with `memory=True`.
+  Closing one kernel no longer closes a usage store shared with another (`5b9c7d43`).
 - Kept private: `AgentLoop`, the runner, `ContextBuilder`, `SessionManager`, the providers and factory, the
   `Config` schema (reachable only through `Environment.from_config`), `LegacyEnvironment`, the router, and
   `AgentHook` (hosts observe through `StreamEvent`s and `kernel.trace`).
@@ -299,6 +303,10 @@ Purpose: show where each invariant surfaces in the `moeka` package, the only sur
   network capability, no MCP servers. Limits: it binds declared capabilities only (an undeclared plugin or
   host action is not contained, nor is `exec`), and a bare-name capability (`"fs.write"`) has an empty
   resource, so resource-scoped `deny_rules` never match it.
+- Default tool set: kernel agents do not get the cross-session tools (`list_sessions`, `read_session`,
+  `search_sessions`, `send_session_message`) or the bus-delivered ones (`spawn`, goal tools, `defer_action`,
+  `my`) unless `tools_allow` names them; naming a bus-delivered tool raises `ValueError`, because a kernel
+  runs no gateway bus (`81c7dfd8`; list in `docs/python-sdk.md`).
 - `Kernel(plugins=PluginRegistry(...))` switches every agent's and sub-agent's tool loading to kernel mode
   (only registry-active plugins, with `policy ∩ declared` grants), sub-agents included. It is the public
   way into kernel mode, though no production host passes a registry yet; `None` keeps legacy loading.
@@ -370,7 +378,7 @@ flowchart LR
 
 Purpose: one choke point decides, audits and throttles every tool call.
 
-- The gate must sit in `AgentRunner._run_tool` (the `gate_call` at `nanobot/agent/runner.py:1717`) and in
+- The gate must sit in `AgentRunner._run_tool` (the `gate_call` at `nanobot/agent/runner.py:1752`) and in
   `ToolRegistry.execute`.
 - Hooks stay observers: `before_execute_tool` returns None (`nanobot/agent/hook.py:107`), so the gate is never a hook.
 - A denial must be a `ToolResult.error` whose text embeds a pinned marker phrase.
@@ -408,7 +416,7 @@ sequenceDiagram
     end
 ```
 
-- Exception: the batch-level `before_execute_tools` hook (`nanobot/agent/runner.py:617`) runs once per
+- Exception: the batch-level `before_execute_tools` hook (`nanobot/agent/runner.py:642`) runs once per
   batch before any call is gated, so it sees calls that are later denied. It is an intent announcement, not
   an execution; the per-call hooks (`before_execute_tool`, `after_execute_tool`) never see a denied call.
 - Policy and plugin grants see every view of an `fs.*` path (final review I1): the lexical path and the
@@ -417,7 +425,7 @@ sequenceDiagram
   match anything beneath it, and a grant must cover the whole subtree (`tests/kernel/test_gate.py`).
 
 **Floors** (checked before policy; no rule, flag or config removes them):
-- The exec fork bomb and internal-state writes (`_FLOOR_DENY_PATTERNS`, `nanobot/agent/tools/shell.py:299`).
+- The exec fork bomb and internal-state writes (`_FLOOR_DENY_PATTERNS`, `nanobot/agent/tools/shell.py:312`).
 - The fs floor: `/proc/*/environ|mem|maps|root`, `auth/`, `plugin-data/`, the session root, the trace store, the policy source.
 - The audit stream: a failing sink never turns a decision off; a fallback log record is written.
 - `plugin.load` is host-only.
@@ -680,11 +688,6 @@ and when it may accept a change.
 - Latency: stream read-only planning speculatively while gate checks run in parallel (minimise).
 - Ambient leakage stays a hard zero: no credential in the agent's child environment; keys come just in time.
 
-> **FLAG (2026-09-30, not yet done):** *Clarification yield* has no trace event (`clarify.resolve_divergence`
-> emits none). Either add the event or drop that objective. Same gap is noted in the contract. The RSI design
-> (branch `rsi-harness-spec`, `.agent/rsi-harness-design.md`) needs the same *Assumptions & risks* section and
-> a note that its task suite (M3) does not exist, so "quality on held-out tasks" is unmeasured.
-
 **Signals available after P5** (the RSI harness that scores them does not exist yet):
 - Provenance rate: `artifact.proposed` trace events list committed paths with trace IDs and provisional paths;
   `artifact.rejected` names the reason. Values never appear on the trace.
@@ -884,8 +887,11 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
 - Stay importable: `nanobot.config.schema.Config`, `nanobot.api.complete` functions (looked up at call time),
   `MoekaCore.scoped/create/run`, `AgentHook`, `AgentProfileConfig`, `nanobot.core.vec.open_vec_store`.
 - Gate command: `cd ~/projects/awork/backend && PYTHONPATH=/home/muk/projects/moeka-core-slim .venv/bin/python -m pytest tests/ -q`.
-- Current state: 8 awork failures come from awork's venv lacking `rapidfuzz`; the fix is on awork's side (bump
-  its moeka submodule, then `uv sync`).
+- Current state (2026-09-30): awork's unmerged branch `compat/moeka-core-slim` bumps its submodule to
+  `6f80c392` and routes every moeka import through `backend/awork/moeka_compat.py` (legacy entry points, with
+  their `DeprecationWarning` filtered). The earlier "8 awork failures" came from awork's venv lacking
+  `rapidfuzz` (used by `nanobot/utils/file_edit_events.py`); awork's `backend/uv.lock` and `pyproject.toml`
+  still do not list it, so that cause is not fixed by the bump alone. Not re-run here.
 
 ## 11. Reading pointers (unverified leads)
 
@@ -929,6 +935,22 @@ Decided by the owner (2026-09-26):
   to outside services (section 5b).
 
 Still open:
+- Clarification-yield signal (objective in section 8). The signal is unimplemented: `resolve_divergence` and
+  `Epistemics.reconcile` are pure and emit no trace event, so questions asked, and whether each was needed, are
+  not counted anywhere (`artifact.proposed` / `artifact.rejected` cover provenance only). Two options, not
+  implemented: (a) add a trace event (for example `clarify.question` / `clarify.commit_ready`, paths and
+  reasons, never values) emitted from `clarify.resolve_divergence` or the facade, plus a way to mark a
+  question as needed or not (the "high downstream variance" half needs a downstream outcome, which no event
+  carries); (b) drop clarification yield from the section 8 objectives until the harness can measure it.
+  Until decided, treat the objective as absent from any Pareto comparison.
+- Branch consolidation (owner direction 2026-09-30, a PLAN, not done). The owner wants work to move onto each
+  repo's `main` and moeka to serve awork and similar consumers better. Today `main` is the full gateway with
+  the live Telegram and Discord bot; `core-slim` is the downstream slim kernel (channels, gateway, WebUI removed),
+  and only `origin/core-slim` (at `6f80c392`) is on GitHub; the docs commits made after it are local. Open
+  question: how kernel and gateway live on one `main` (for example the kernel as a package inside `main`, with
+  the gateway as one consumer of it). No answer chosen. Consequences to settle first: the harness and awork
+  pin `core-slim` commits (never rebase it until decided), and `moeka.service` runs whatever is checked out in
+  `~/projects/moeka`. No branch is merged or renamed by this document.
 - `Paths` derivation. Default: two host attributes; `sessions_root`, `data_dir` and `logs_dir` are
   subdirectories of `state_dir`; `media_dir` sits under `work_dir`, because agent-visible attachments and
   generated media must be reachable by the agent. Owner may veto.
@@ -947,3 +969,62 @@ Still open:
   awork call sites, harness implications).
 - Phase-0 follow-ups: `.agent/phase0-followups.md` (deferred limits and owners).
 - RSI harness design: `.agent/rsi-harness-design.md` on branch `rsi-harness-spec` (paired-margin gate, cascade tiers).
+
+## 14. Assumptions and risks
+
+Purpose: name what the self-improvement and cost machinery assumes, so nobody reads a green number as proof of
+value. Cross-project view: the system contract (`awork-resume/docs/superpowers/specs/2026-09-30-system-contract.md`, sections 7-8: A8, A9, R1-R7). PROVEN means a test or
+measurement exists and is cited; it does not mean the proxy is a good one. Tests were read, not re-run, on
+2026-09-30.
+
+**Assumptions (improving X is assumed to improve Y)**
+
+| # | Assumption | Status |
+|---|---|---|
+| K1 | I1-I5 hold as mechanisms (ambient reads, path separation, uncited values provisional, attenuation, 6-denial ceiling). | PROVEN as mechanisms: `test_no_ambient_reads.py`, `test_fake_home.py`, `test_artifact_store.py`, `test_subagent_attenuation.py`, `test_incident_replay.py`. Not proven against an exec-capable agent without a sandbox (I2, I3, section 9). |
+| K2 | A solved deterministic task makes zero model calls; an over-ceiling dispatch without a recorded failure is denied. | PROVEN: `test_solvers.py`, `test_router.py`. |
+| K3 | I6: lower cost per task at target quality means more value. Cost-per-task is a proxy for value. | UNPROVEN. `tau` is whatever `verify` returns; no shipped verifier; no baseline comparator run (the RSI harness does not exist); estimated costs are flagged, not billed; the turn loop is not routed. |
+| K4 | Section 8 objectives (quality, cost, provenance, clarification yield, denial rate, latency) together measure real usefulness. | UNPROVEN. No objective has been validated against an outcome a user cares about; clarification yield has no signal at all (section 12). |
+| K5 | Provenance rate measures groundedness. | UNPROVEN, with a documented gap: "committed" means the cite resolved, not that the fact supports the value (I3 limit). A mutator can raise the rate by citing irrelevant facts. |
+| K6 | Lower denial rate means less thrashing and better recovery. | UNPROVEN. A lower rate can also mean the agent stopped trying; denials of the uncounted classes (I5) are not in the I5 count. |
+| K7 | The Pareto acceptance rule (not dominated by the parent, strictly better on one objective) selects better candidates. | UNPROVEN. It assumes held-out task quality is measurable. The task suite (RSI milestone M3) does not exist, so quality on held-out tasks is currently unmeasured, and with noisy evaluation "strictly better on one objective" can be chance. |
+| K8 | Mutating tier-1 files (skills, prompts, tool descriptions) transfers from the eval tasks to real use. | UNPROVEN, no experiment yet. |
+| K9 | The default epistemic classifier (equal after whitespace collapse and `casefold` is minor, else semantic) is a good split for what needs a question. | PROVEN as behaviour (`test_clarify.py`); UNPROVEN on real divergences. It asks a question for every non-identical value, which over-asks. |
+| K10 | The cost ledger is ground truth for cost. | PARTLY: per-call events carry tokens and cost, but an estimate is flagged (`cost_is_billed` False), cache-write premiums and hidden reasoning tokens are not priced, and the SQLite ledger can be forged by an exec-capable agent (I3 note). |
+
+**Risks**
+
+- Pinned commit and branch hygiene: awork's unmerged `compat/moeka-core-slim` branch pins `6f80c392`. That
+  commit IS on `origin/core-slim` (checked with `git ls-remote`), so the earlier "unpushed pin" concern is
+  resolved for the pin itself; the two local docs commits after it are not pushed. `core-slim` must never be
+  rebased while pins exist, and the section 12 consolidation decision may move the pin.
+- Dependency drift: `rapidfuzz` is a `core-slim` dependency (`pyproject.toml`, `uv.lock`, used by
+  `nanobot/utils/file_edit_events.py`) but absent from awork's `backend/uv.lock` and `pyproject.toml`; awork
+  installed from its own lock lacks it.
+- The live gateway runs a working tree: `moeka.service` has `WorkingDirectory=%h/projects/moeka` and runs
+  `bin/moeka.sh run`, so checking out another branch there changes production. Use worktrees for any work on
+  other branches. Live checkout was on `main` when checked.
+- Deprecated legacy entry points: `nanobot.api.complete*`, `MoekaCore` / `MoekaKernel` and
+  `nanobot.core.vec.open_vec_store` still work but emit `DeprecationWarning` and are to be deleted (plan Task 15).
+  awork's shim filters that warning, so removal would fail only at call time.
+- The kernel-mode plugin path has no production caller (I4 gap); the gate binds declared capabilities only
+  (section 2).
+- Doc drift: this file was last verified against code 2026-09-30; anything dated earlier in section 10 proof
+  logs is history, not a current test result.
+
+## 15. Consumers
+
+- awork (private dogfood; `Muxite/awork`): consumes the kernel through `backend/awork/moeka_compat.py`, a shim
+  on the unmerged branch `compat/moeka-core-slim` that still binds the legacy entry points. Today awork needs:
+  `complete`, `complete_json` and streaming (`complete_stream`, async twins); scoped agents (`MoekaCore.scoped`
+  with `AgentProfileConfig`); the vec store (`open_vec_store`); the budget and usage ledger (`usage_sink` /
+  `UsageLedger`, cache); and `AgentHook`. The old-to-new map (`Environment.for_host`, `kernel.llm`,
+  `kernel.memory(path=)`, `ResponseCache`, trace spans) is `docs/migration-moeka-api.md`.
+- The live gateway: Telegram and Discord bot on `main`, run by `moeka.service` from `~/projects/moeka`. It uses
+  the legacy loop path, not `moeka.Kernel`, and passes no plugin registry.
+- The RSI harness (`.agent/rsi-harness-design.md`, branch `rsi-harness-spec`): a separate repo pinning a
+  `core-slim` commit as a submodule; it drives `moeka.Kernel` with `Variant`s and scores from the trace stream.
+- awork-resume is explicitly NOT a consumer (owner decision 2026-09-30): it has its own `awr.llm` and depends
+  on no moeka code. Kernel invariants do not bind it, and kernel changes need not consider it.
+- Direction (owner, 2026-09-30): moeka should change to serve awork and similar consumer projects better; see
+  the consolidation item in section 12. This is a plan, not built.
