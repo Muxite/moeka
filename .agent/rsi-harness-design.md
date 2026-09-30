@@ -1,8 +1,9 @@
 # RSI harness for moeka-core: design
 
 Status: draft for review, 2026-09-25; revised 2026-09-28 against the moeka kernel
-API (core-slim `5b9c7d43`, `docs/python-sdk.md` there). Nothing in this spec is
-built. Research basis: `.agent/rsi-daemon-feasibility.md` and
+API (core-slim `5b9c7d43`, `docs/python-sdk.md` there); prerequisites and pin
+re-checked 2026-09-30 (section 4.4, section 16). Nothing in this spec is
+built: no harness repo, no task suite (M3), no M1 Docker result. Research basis: `.agent/rsi-daemon-feasibility.md` and
 `.agent/rsi-and-agent-core-report.md` (both predate the kernel API; where they
 name `MoekaCore`, `AgentHook` or `ToolLoader tools_allow`, section 4 here wins).
 Implementation plan: `.agent/rsi-harness-impl-plan.md`.
@@ -120,6 +121,22 @@ volume (not in the repo):
 - **Fixtures** never ship a `skills/` directory: `<work_dir>/skills` would
   shadow the variant's skills. The verifier fails a rollout that creates one.
 
+### 4.4 Pin note (2026-09-30)
+- The spec was written against `5b9c7d43`. Since then `core-slim` gained only a
+  merge of `main`'s upstream sync (`d5f4e7d0`, `41e10944`, `6f80c392`: session
+  inbox, compaction, memory sanitization; `nanobot/agent/runner.py` and loop
+  tests changed, some `test_runner.py` cases dropped in `b1530a0c`) and docs
+  commits. Nothing under `nanobot/kernel/` or `moeka/` changed, so the kernel
+  API this spec relies on is the same at `6f80c392`. The test suite is not the
+  same, though, so a green run on `5b9c7d43` would not cover the tip.
+- Both `5b9c7d43` and `6f80c392` are on `origin/core-slim`. awork's unmerged
+  compat branch pins `6f80c392`; pinning the harness to the same commit keeps
+  one kernel version across consumers. Not yet decided (M1 records the pin).
+- Owner direction 2026-09-30: work may consolidate onto each repo's `main`
+  (see the kernel design, "Decisions for the owner"). M1 pins `core-slim`, and
+  that consolidation may move the pin to `main`. Not decided; do not rebase
+  `core-slim` meanwhile.
+
 ### 4.3 Kernel prerequisites
 Gaps the harness needs closed in core-slim, each tagged with the first
 milestone that needs it. All have interim workarounds; none blocks M2.
@@ -147,6 +164,21 @@ milestone that needs it. All have interim workarounds; none blocks M2.
   when `read_file` opens a `SKILL.md`; `exec cat` or `grep` is invisible.
   API: emit `skill.read` with `via=<tool>` from any `fs.read` capability check
   whose resource is a `SKILL.md`. Interim: `skill.read` is a lower bound.
+
+Status of K1-K6, checked against core-slim `6f80c392` on 2026-09-30: all six
+are open (none is implemented).
+- K1 open: `variants.fingerprint` components are `system_prompt`, `tools`,
+  `model`, `sampling` only (`nanobot/kernel/variants.py`); no `skills` component.
+- K2 open: `Variant` has `tool_descriptions(_dir)` but no
+  `tool_param_descriptions`.
+- K3 open: the `tool.call` event (`nanobot/kernel/trace_hook.py`) carries no
+  `args_digest`.
+- K4 open: `RunLimits.max_tool_errors` still raises `NotImplementedError`
+  (`nanobot/kernel/agent.py`).
+- K5 open: `AgentSpec` has no `on_unsupported`; it exists only on
+  `GenerateOptions` (`nanobot/kernel/llm.py`).
+- K6 open: `skill.read` is emitted only from `read_file`
+  (`nanobot/agent/tools/filesystem.py`).
 
 Deliberately not prerequisites:
 - Rollout id: span tags plus `trace_id` cover it.
@@ -443,6 +475,40 @@ implementer step has no network.
 - Concurrent GPU users. `gpu-lock` is advisory, so the daemon must poll and
   yield rather than assume it is enforced.
 - Tier 2 (code mutation) is a larger blast radius and needs the stricter gate.
+
+## 16. Assumptions and risks
+What this design assumes without proof. PROVEN needs a test or measurement;
+nothing below the kernel mechanics has either yet.
+- **Objectives measure usefulness (UNPROVEN).** The harness optimises the
+  kernel design section 8 objectives: held-out quality, cost per task,
+  provenance rate, clarification yield, denial rate, latency. Each is a proxy.
+  Cost per task as a proxy for value is kernel invariant I6, itself unproven.
+  Provenance rate counts resolving cites, not whether the fact supports the
+  value. Clarification yield has no trace event at all (owner decision open in
+  the kernel design), so it cannot be scored today.
+- **A quality task suite can be built (UNPROVEN).** The suite is M3 and does
+  not exist. Until it does, quality on held-out tasks is unmeasured and the
+  acceptance rule (not Pareto-dominated, strictly better on one objective) has
+  nothing to compare on its main axis. The spec's own task audit (section 8) is
+  the mitigation, not a proof.
+- **Mutations transfer (UNPROVEN).** The assumption is that a prompt, skill or
+  tool-description change that wins on the practice pool helps on unseen
+  tasks and on real use, and that a 7-32B local model benefits from
+  self-authored skills. The only cited evidence points the other way (+0.0 for
+  LLM-authored skills, section 14).
+- **Evaluation is noisy (known, unquantified).** Local sampling, small suites
+  and few seeds mean small gains are indistinguishable from chance; the noise
+  measurement is part of M3, so the paired-margin gate is uncalibrated today.
+  Expect directional results first.
+- **The hard constraints are checkable (PROVEN as kernel mechanisms).** I1-I5
+  have tests in the kernel (kernel design section 14, K1), but the harness that
+  would run them as a candidate gate does not exist. They do not hold against an
+  exec-capable agent without a sandbox.
+- **Risks carried from elsewhere.** The pin may move (section 4.4). The kernel
+  cost ledger can be forged under `exec`, so score cost from the trace stream.
+  Shared GPU contention (section 14). No consumer other than this harness
+  validates the kernel objectives; awork uses the kernel through legacy
+  entry points and awork-resume does not use it at all.
 
 ## 15. Open items for the owner
 Resolved by the owner: mutation scope is tools, skills and prompts only;

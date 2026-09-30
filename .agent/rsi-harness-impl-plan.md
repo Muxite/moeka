@@ -1,13 +1,21 @@
 # RSI harness: implementation plan (M1-M7)
 
-Status: plan, 2026-09-28. Executes `.agent/rsi-harness-design.md` (the spec;
+Status: plan, 2026-09-28; status lines re-checked 2026-09-30 (nothing below is
+built; the harness repo does not exist and no M1 Docker run is recorded).
+Executes `.agent/rsi-harness-design.md` (the spec;
 section numbers below refer to it). Kernel prerequisites K1-K6 are defined in
 spec section 4.3.
 
 Conventions:
 - Harness repo `moeka-rsi/`, local-only in v1 (bare remote on the volume).
-- `core/` is a git submodule pinned to moeka `core-slim` (currently
+- `core/` is a git submodule pinned to moeka `core-slim` (planned pin
   `5b9c7d43`). The harness imports only `moeka.*`, never `nanobot.*`.
+  Pin note 2026-09-30: `core-slim` tip `6f80c392` (on `origin`) differs from
+  `5b9c7d43` only by a merge of `main`'s upstream sync and docs; `nanobot/kernel/`
+  and `moeka/` are unchanged, but the test suite is not, so M1's green run must
+  be on whichever commit is actually pinned (awork's compat branch pins
+  `6f80c392`). The owner's 2026-09-30 consolidation direction may move this pin
+  from `core-slim` to `main`; undecided.
 - Kernel prerequisites land in core-slim first (their own commits and tests),
   then the harness bumps the `core/` pin. A pin bump is its own harness commit.
 - Every milestone ends with its exit criteria checked in `docs/milestones.md`.
@@ -32,8 +40,10 @@ flowchart LR
 ## M1. core-slim green
 
 - **Goal:** a slim kernel whose tests pass and whose API the harness can pin.
-- **State:** essentially done. core-slim carries the fixes for the 5 parked
-  kernel residuals (`c8a9cd08..5b9c7d43`).
+- **State:** NOT done. The code half is done: core-slim carries the fixes for
+  the 5 parked kernel residuals (`c8a9cd08..5b9c7d43`). The exit gate is open:
+  no green `scripts/test-docker.sh` run on the pinned commit is recorded (not
+  run or verified when this was updated), and `moeka-rsi/` does not exist.
 - **Kernel prerequisites:** none.
 - Tasks:
   - [x] Remove channels, gateway, WebUI, bridge, pairing.
@@ -48,6 +58,29 @@ flowchart LR
   harness venv with `core/` installed editable.
 - **Exit criteria:** green suite on the pinned commit, recorded with the commit
   hash; harness repo exists with the pin.
+
+### Kernel prerequisites K1-K6: current status (2026-09-30)
+Checked against core-slim `6f80c392`; definitions in spec section 4.3. All open.
+
+| ID | Needed by | Status |
+|---|---|---|
+| K1 skills in fingerprint | M4 | open: fingerprint has no `skills` component |
+| K2 param-description overrides | M5 | open: no `Variant.tool_param_descriptions` |
+| K3 `tool.call` `args_digest` | M4 | open: event has no digest |
+| K4 `max_tool_errors` | M5 | open: still raises `NotImplementedError` |
+| K5 strict sampling on agents | M3 | open: no `AgentSpec.on_unsupported` |
+| K6 `skill.read` coverage | M5 (optional) | open: only `read_file` emits it |
+
+## Assumptions and risks
+- M3 (task suite v0) does not exist. Held-out quality is unmeasured, so M5's
+  acceptance gate cannot be calibrated and no mutation can yet be shown to
+  improve quality. M3's noise measurement is what will say how small a gain
+  the gate can resolve.
+- The objectives the loop optimises (kernel design section 8) are proxies for
+  usefulness, unproven; clarification yield has no signal. Mutation transfer
+  to unseen tasks and real use is assumed, not shown. Full list: spec section 16.
+- M1's Docker run is the first real evidence about the pinned commit; until it
+  is recorded every later milestone rests on an unverified pin.
 
 ## M2. Compose stack, vLLM smoke, supervisor skeleton
 
