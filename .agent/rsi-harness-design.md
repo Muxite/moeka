@@ -1,7 +1,7 @@
 # RSI harness for moeka-core: design
 
 Status: draft for review, 2026-09-25; revised 2026-09-28 against the moeka kernel
-API (core-slim `5b9c7d43`, `docs/python-sdk.md` there); prerequisites and pin
+API (written against core-slim `5b9c7d43`; pin decided `6f80c392`, section 4.2a; `docs/python-sdk.md` there); prerequisites and pin
 re-checked 2026-09-30 (section 4.2a, section 16). Nothing in this spec is
 built: no harness repo, no task suite (M3), no M1 Docker result. Research basis: `.agent/rsi-daemon-feasibility.md` and
 `.agent/rsi-and-agent-core-report.md` (both predate the kernel API; where they
@@ -129,13 +129,14 @@ volume (not in the repo):
   commits. Nothing under `nanobot/kernel/` or `moeka/` changed, so the kernel
   API this spec relies on is the same at `6f80c392`. The test suite is not the
   same, though, so a green run on `5b9c7d43` would not cover the tip.
-- Both `5b9c7d43` and `6f80c392` are on `origin/core-slim`. awork's unmerged
-  compat branch pins `6f80c392`; pinning the harness to the same commit keeps
-  one kernel version across consumers. Not yet decided (M1 records the pin).
-- Owner direction 2026-09-30: work may consolidate onto each repo's `main`
-  (see the kernel design, "Decisions for the owner"). M1 pins `core-slim`, and
-  that consolidation may move the pin to `main`. Not decided; do not rebase
-  `core-slim` meanwhile.
+- Both `5b9c7d43` and `6f80c392` are on `origin/core-slim`. Decided (owner,
+  2026-09-30, closed): pin `6f80c392`. It contains `5b9c7d43` plus the upstream
+  sync, and awork's compat branch pins it too, so one kernel version serves
+  both consumers. M1 records it and its green run must be on it.
+- Owner direction 2026-09-30, chosen but not executed: the kernel moves inside
+  moeka `main` with the gateway as a consumer (kernel design section 12). The
+  pin stays `6f80c392` until that consolidation lands, then moves to `main`.
+  Do not rebase `core-slim` meanwhile.
 
 ### 4.3 Kernel prerequisites
 Gaps the harness needs closed in core-slim, each tagged with the first
@@ -354,6 +355,17 @@ history to decide what to change, so tracing is designed for a model to read:
 - Human-readable logs share the same event stream (span tags carry rollout,
   candidate and phase), so the owner and the agent read one source.
 
+**Token accounting as an RSI objective (owner ruling 2026-09-30: "everything is
+data").** Better (larger, paid) models are acceptable when traceability and
+observation are good enough that no token is wasted. Requirement: every token
+a rollout spends is attributable to a call, a purpose and a consumer (the
+kernel's usage surface, kernel design section 3b), and wasted tokens (retries,
+cache misses, discarded drafts, failed-verification repeats) are first-class
+metrics next to tokens per success. The harness may use them as Pareto
+objectives and as gaming detectors, and traces must be replayable (the same
+inputs, recorded responses, same verdicts). Not implemented; the kernel gaps
+are listed in kernel design section 3b.
+
 **Metric sources.** Every metric the spec uses, and the event and field that
 provides it (events per `EVENTS` in `nanobot/kernel/trace.py`; every event also
 carries `trace_id`, `span`, `tags`, `ts`). "Harness" means computed by the
@@ -509,6 +521,59 @@ nothing below the kernel mechanics has either yet.
   Shared GPU contention (section 14). No consumer other than this harness
   validates the kernel objectives; awork uses the kernel through legacy
   entry points and awork-resume does not use it at all.
+
+## 17. References and lineage
+
+Entry fields: title; authors or project; year; link or id; status; decision
+supported; keywords (may be empty, other agents fit them later). "verified"
+means the title, authors and id were confirmed on 2026-09-30 through the
+paper-gatherer search (arXiv/OpenAlex metadata) or a web page; it does NOT mean
+the claims were read or replicated. "unverified lead" means not confirmed. The
+kernel design section 11 holds the shared list (cascades, citations, planning);
+only RSI-specific sources are here. No decision below rests on a paper alone.
+
+- Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents; Zhang et al.;
+  2025; arXiv:2505.22954; verified; supports keeping an archive of candidate
+  variants and validating self-modifications empirically against a benchmark
+  rather than by proof (sections 6, 7); keywords: [].
+- Godel Agent: A Self-Referential Agent Framework for Recursive Self-Improvement; Yin et al.;
+  2024; arXiv:2410.04444; verified; supports the self-modification loop
+  shape and its risk of unbounded change, which motivates the immutable
+  evaluator and mutation tiers (section 7); keywords: [].
+- Self-Taught Optimizer (STOP): Recursively Self-Improving Code Generation; Zelikman et al.;
+  2023; arXiv:2310.02304; verified; supports scaffold-level self-improvement
+  with a fixed utility function and the caution that the improver must not
+  edit its own scoring (section 7); keywords: [].
+- Promptbreeder: Self-Referential Self-Improvement Via Prompt Evolution; Fernando et al.;
+  2023; arXiv:2309.16797; verified; supports tier-1 prompt mutation as the
+  first mutation scope; keywords: [].
+- Automated Design of Agentic Systems (ADAS); Hu et al.; 2024; arXiv:2408.08435;
+  verified (title and authors via arXiv search); supports searching over agent
+  designs with a meta agent and an archive; keywords: [].
+- Reflexion: Language Agents with Verbal Reinforcement Learning; Shinn et al.;
+  2023; arXiv:2303.11366; verified; supports feeding past trajectories back in
+  as text to the mutator (section 9 agent-readable traces); keywords: [].
+- Large Language Models Cannot Self-Correct Reasoning Yet; Huang et al.; 2023;
+  arXiv:2310.01798; verified; supports never letting the mutator or rollout
+  agent grade its own output: gates use deterministic state-diff verifiers
+  and held-out tests, not intrinsic self-review (sections 6, 8); keywords: [].
+- LLM Evaluators Recognize and Favor Their Own Generations; Panickssery et al.;
+  2024; arXiv:2404.13076; verified; supports verifier independence (separate
+  context, evidence-only view; same model is tolerable, same agent is not) and
+  the "no LLM judge in any gate" rule (section 5); keywords: [].
+- Self-Preference Bias in LLM-as-a-Judge; Wataoka et al.; 2024; arXiv:2410.21819;
+  verified; same decision as above; keywords: [].
+- Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena; Zheng et al.; 2023;
+  arXiv:2306.05685; verified; supports treating any LLM judge as a biased
+  instrument whose false-pass rate is measured each epoch (section 8 canary);
+  keywords: [].
+- "The Blind Curator" (cited in section 8 for the judge false-pass metric):
+  unverified lead; not re-checked here, locate and confirm before relying on it.
+- OpenTelemetry GenAI semantic conventions (gen_ai.usage.input_tokens etc.);
+  OpenTelemetry project; 2026 pages; https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/;
+  verified (page listed in search, not read in full); supports a stable,
+  exportable token-usage and trace schema so traces are replayable and
+  consumable by other tools (section 9); keywords: [].
 
 ## 15. Open items for the owner
 Resolved by the owner: mutation scope is tools, skills and prompts only;

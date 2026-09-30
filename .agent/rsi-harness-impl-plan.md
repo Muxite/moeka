@@ -8,14 +8,13 @@ spec section 4.3.
 
 Conventions:
 - Harness repo `moeka-rsi/`, local-only in v1 (bare remote on the volume).
-- `core/` is a git submodule pinned to moeka `core-slim` (planned pin
-  `5b9c7d43`). The harness imports only `moeka.*`, never `nanobot.*`.
-  Pin note 2026-09-30: `core-slim` tip `6f80c392` (on `origin`) differs from
-  `5b9c7d43` only by a merge of `main`'s upstream sync and docs; `nanobot/kernel/`
-  and `moeka/` are unchanged, but the test suite is not, so M1's green run must
-  be on whichever commit is actually pinned (awork's compat branch pins
-  `6f80c392`). The owner's 2026-09-30 consolidation direction may move this pin
-  from `core-slim` to `main`; undecided.
+- `core/` is a git submodule pinned to moeka `core-slim` (pin
+  `6f80c392`). The harness imports only `moeka.*`, never `nanobot.*`.
+  Pin decided (owner, 2026-09-30, closed): `6f80c392`, which contains `5b9c7d43`
+  plus `main`'s upstream sync (`nanobot/kernel/` and `moeka/` unchanged, but the
+  test suite differs, so M1's green run is on `6f80c392`). awork's compat branch
+  pins the same commit. The pin stays until the planned consolidation (kernel
+  inside moeka `main`, chosen but not executed) moves it to `main`.
 - Kernel prerequisites land in core-slim first (their own commits and tests),
   then the harness bumps the `core/` pin. A pin bump is its own harness commit.
 - Every milestone ends with its exit criteria checked in `docs/milestones.md`.
