@@ -330,6 +330,98 @@ Purpose: show where each invariant surfaces in the `moeka` package, the only sur
 - Variants and fingerprints (`Variant`, `Agent.fingerprint()`) are the RSI hooks: what the model sees is
   swappable per kernel and identified by one digest.
 
+## 3b. Usage and observability surface (requirement)
+
+Purpose: a consumer such as awork must be able to show usage and spend from moeka alone, with no ledger of its
+own (owner ruling 2026-09-30: "awork should derive its usage figures from moeka, so awork's interface can know
+usage, and moeka conveniently plugs in"; this resolves awork PRD D7 in moeka's favour long-term). Second ruling
+(same day): "everything is data"; better or paid models are acceptable when traceability and observation are
+so well tested that not a single token goes to waste. This section states what must hold. Current-state facts
+are confined to the dated subsection below so they can be refreshed without touching the requirements.
+
+**Requirements (what must hold)**
+- U1, consumer-facing usage and spend surface. One public, documented API in the `moeka` package (not
+  `nanobot.*` internals) lets a host read usage for its own calls.
+- U2, per-call attribution. Every physical call is attributed to a consumer, an agent, a session, a role or
+  slot, and a call id, with the attempt number of a retried logical call. Attribution is set by the caller
+  through a typed field, never inferred from free-form tags.
+- U3, per-call content. Tokens in, tokens out, cached tokens read, cached tokens written, reasoning tokens where
+  the provider reports them, model, provider, tier, latency, cost in USD with a flag saying whether it was billed
+  or estimated, whether a response-cache hit answered the call (a hit is an event with zero billed tokens and
+  the tokens it saved), and the finish reason. Content-free: no prompt or response text.
+- U4, budget. Each event, and a separate query, states the budget in force for that scope: limit, spent,
+  reserved, remaining (USD and tokens), so a consumer can show "remaining" without recomputing it. A refusal is a
+  recorded event with the same attribution, not only an exception.
+- U5, retrievable after the fact. Query by consumer, agent, session, role, model, time range and trace id, with
+  totals and a group-by. The store is durable, survives restarts, and is readable by the consumer without the
+  agent being able to rewrite it (see the I3 note on forging).
+- U6, streamable live. A consumer subscribes to the same events as they happen (in-process callback or a
+  cross-process stream), with backpressure that never blocks or fails the model call (fail-open, as today).
+- U7, stable and versioned schema. Every event and query result carries a `schema_version`; additive changes
+  keep the version's major number, removals or meaning changes bump it, and a consumer can ask which versions
+  the kernel speaks. The schema is exportable in OpenTelemetry GenAI naming (`gen_ai.usage.input_tokens` and
+  the like) so standard tools read it (section 11).
+- U8, one source of truth. The per-call events, the stored rows and the query results agree: a total computed
+  from the stream equals the stored total for the same filter. Tests enforce it.
+- U9, every token attributable. Every token the kernel causes to be billed or computed is attributable to a
+  call, a purpose (slot or role plus task type) and a consumer. A token with no attribution is a test failure,
+  not a blank column.
+- U10, wasted-token accounting as first-class metrics. The kernel reports, per scope, tokens and USD spent on:
+  retries of a failed or malformed call, failover attempts, cache misses that a prior identical call would have
+  served, discarded drafts (an output a verifier rejected or a later call superseded), and calls refused after
+  admission. "Wasted" is a label on the call that the caller or the kernel sets, not an after-the-fact guess.
+  These metrics feed the section 8 cost objective and the RSI objectives (RSI design, section 9).
+- U11, replayable traces. A trace stream plus the recorded model responses is enough to replay a run and
+  reproduce its verdicts, cache behaviour and cost figures, without network access.
+- U12, observation is tested. Attribution completeness, schema stability, totals agreement (U8) and waste
+  labelling have tests that fail on drift; this is the precondition for allowing better or paid models.
+
+**Current state (verified against code 2026-09-30; refresh on change; not a requirement)**
+- Exists: the I6 ledger, `nanobot/kernel/ledger.py`, emits one `model.call` event per physical attempt with
+  `trace_id, slot, tier, model, provider, tokens_in, tokens_out, tokens_cache_read, latency_ms, cost_usd,
+  source, usage_source, finish_reason, call_id, alias, attempt, cached, tags`. `cost_is_billed` separates
+  reported from estimated cost. Events go to the host `TraceSink` and, through `nanobot/llm_usage`, to
+  `<data_dir>/llm_usage.sqlite3` (`LLMUsageStore`, `llm_calls` table, content-free; `usage_payload` and
+  `recent_calls` read it). The store is shared and ref-counted (`acquire_llm_usage_store`).
+- Exists: `Tracer` fans events out to in-process subscribers, each isolated (U6 in-process only). Spans carry
+  tags, so `trace_id` and tags reach each `model.call`.
+- Exists: `CapBudget` (`nanobot/kernel/budget.py`) enforces `limit_usd`, `limit_tokens` and `per_tag` caps with
+  reservations; refusal raises `BudgetExceeded` (`nanobot/kernel/llm_errors.py`, exported by `moeka.errors`) and
+  emits a `budget.refuse` event. `BudgetHalt` is NOT a kernel class: it is awork's `BaseException`
+  (`awork/llm.py`) that awork's shim translates `BudgetExceeded` into (`docs/migration-moeka-api.md`).
+- Exists, legacy: `usage_sink` on `nanobot.api.complete*` calls back with a flat per-turn dict
+  (`model`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `cached_tokens`, `cache_write_tokens`); it is
+  what awork's `UsageLedger` consumes today. It is deprecated with the legacy entry points.
+- **Gaps against U1-U12 (requirements not implemented):**
+  - G1 (U1, U5): no public `moeka` API reads usage. Consumers reach `nanobot.llm_usage` internals or the raw
+    SQLite file.
+  - G2 (U2): consumer, agent and session are not typed fields on the event or the store. `source` is one of five
+    fixed values (`user, api, cron, dream, system`); `slot` and `trace_id` exist; the rest would ride in free-form
+    `tags` by convention. The `llm_calls` table has no tags, call id, attempt or cached columns, so the SQLite
+    copy is coarser than the trace event.
+  - G3 (U3): `tokens_cache_read` exists but cache-write and reasoning tokens are not on the event, and are not
+    priced (`.agent/kernel-p3-followups.md`). Whether a response-cache hit emits a `model.call` (with
+    `cached=True`) needs checking before it is relied on.
+  - G4 (U4): the budget's remaining amount is not on any event and there is no query for it; `CapBudget` exposes
+    spent totals in process only. Budget state is not shared across processes.
+  - G5 (U6): no cross-process live stream; subscription is in-process only.
+  - G6 (U7): events carry no `schema_version`; `EVENTS` documents names and keys but is not versioned, and no
+    OpenTelemetry export exists.
+  - G7 (U8): nothing tests that stream totals equal stored totals; the two paths (trace sink and SQLite) are
+    separate writers.
+  - G8 (U9, U10): no waste label exists. Retries are visible only as `attempt > 1` and failovers as extra
+    events; discarded drafts, avoidable cache misses and post-admission refusals are not recorded, so wasted
+    tokens cannot be computed today.
+  - G9 (U11): trace replay is not built; `ResponseCache` answers repeated calls but nothing records responses
+    for offline replay.
+  - G10 (U5): the SQLite ledger can be forged by an exec-capable agent (I3 note); a consumer showing usage must
+    trust the host `TraceSink` stream or a file the agent cannot write.
+  - G11 (U2): the turn loop and sub-agents call providers directly and are not routed (section 6), so their
+    attribution is thinner than calls through the LLM layer; calls outside the LLM layer carry no
+    `call_id` or `alias`.
+  - G12 (legacy): `BudgetExceeded` versus awork's `BudgetHalt` mapping lives only in awork's shim; a consumer
+    needs one documented stop contract.
+
 ## 4. Enforcement layers
 
 Purpose: say which layer can guarantee what, so no check is trusted beyond its reach.
@@ -611,6 +703,15 @@ Purpose: facts enter the artifact only with provenance, and the user is asked on
 - A semantic divergence must produce exactly one targeted question about a single ambiguity.
 - The user's answer is recorded with user provenance before the commit.
 - Unanswered or unsupported values stay provisional flags (I3).
+- Verification independence (owner ruling 2026-09-30). Any verifier, judge or epistemic audit that accepts or
+  rejects a value must run in a context separate from the one that produced it: its own messages, no access to
+  the producer's memory, scratchpad or reasoning, and an evidence-only view (the claim plus the cited sources,
+  not the producer's justification). A different model is better than the same model; the same model is
+  acceptable when the context is separate. The same agent (same context or memory) verifying its own output is
+  an anti-pattern and the kernel must not offer it as a default. Current state: `clarify.resolve_divergence`
+  and `Epistemics.reconcile` are pure classifiers, so they are independent by construction; no shipped router
+  `verify` exists (section 6), so the requirement binds any `verify` a host or the harness supplies. Evidence:
+  self-preference bias and self-correction limits (section 11).
 - Built mechanics (Tasks 22-23): the "Record ... with user provenance" step is
   `FactStore.record("user", <turn ref>, answer)`; the "Commit" step is `ArtifactStore.propose` with that trace
   ID as the leaf's cite.
@@ -893,35 +994,87 @@ bounded exec output. See the earlier spec, "Phase 0 outcome".
   `rapidfuzz` (used by `nanobot/utils/file_edit_events.py`); awork's `backend/uv.lock` and `pyproject.toml`
   still do not list it, so that cause is not fixed by the bump alone. Not re-run here.
 
-## 11. Reading pointers (unverified leads)
+## 11. References and lineage
 
-Rule: no design decision, invariant or number in this document rests on a cited paper; each pointer must be
-read and confirmed before anyone relies on it.
+Rule: no invariant, number or decision here rests on a cited paper alone; each entry says which decision it
+supports, so a decision can be traced back to its reasoning and revisited. Entry fields: title; authors or
+project; year; link or id; status; decision supported; keywords (an empty list is fine; other agents fit them
+later). Status `verified` means title, authors and id were confirmed on 2026-09-30 through paper-gatherer
+(arXiv, OpenAlex) or a web page, and for the ones marked "abstract read" the abstract was also read. It does
+NOT mean the full paper was read or its result replicated. `unverified lead` means not confirmed here. This
+section replaces the earlier "Reading pointers (unverified leads)" list (same entries, now checked). Earlier
+citation errors prove IDs need checking: 2407.03502 is a different paper (AgentInstruct), 2211.08411 was not
+RARR, 2308.11534 is PlatoLM. RSI-specific sources (self-improving loops) are in the RSI design, section 17.
 
-- Earlier citation errors prove the IDs need checking: 2407.03502 is a different paper (AgentInstruct),
-  2211.08411 was not RARR, 2308.11534 is PlatoLM, one title was misquoted, and one cost figure was not in its abstract.
-- Lead: ADaPT: As-Needed Decomposition and Planning with Language Models, arXiv:2311.05772; about decomposing
-  only when the executor fails, relevant to P6.
-- Lead: An LLM Compiler for Parallel Function Calling (LLMCompiler), arXiv:2312.04511; about planning a dependency
-  graph of function calls for parallel execution, relevant to P6.
-- Lead: CREATOR: Tool Creation for Disentangling Abstract and Concrete Reasoning of Large Language Models,
-  arXiv:2305.14318; about LLMs writing their own tools, relevant to tier-2 plugin authoring.
-- Lead: Voyager: An Open-Ended Embodied Agent with Large Language Models, arXiv:2305.16291; about a growing
-  library of verified skills, relevant to tier-1 skill evolution.
-- Lead: FacTool: Factuality Detection in Generative AI -- A Tool Augmented Framework for Multi-Task and
-  Multi-Domain Scenarios, arXiv:2307.13528; about tool-assisted fact checking, relevant to P5.
-- Lead: RARR: Researching and Revising What Language Models Say, Using Language Models, arXiv:2210.08726; about
-  finding evidence and revising unsupported claims, relevant to P5.
-- Lead: Enabling Large Language Models to Generate Text with Citations (ALCE), arXiv:2305.14627; about citation
-  support in generated text, relevant to the provenance objective.
-- Lead: FrugalGPT: How to Use Large Language Models While Reducing Cost and Improving Performance,
-  arXiv:2305.05176; about LLM cascades for cost, relevant to P3.
-- Lead: RouteLLM: Learning to Route LLMs with Preference Data, arXiv:2406.18665; about learned routers between
-  strong and weak models, relevant to P3.
-- Lead: Large Language Model Cascades with Mixture of Thoughts Representations for Cost-efficient Reasoning,
-  arXiv:2310.03094; about escalating on weak-model answer inconsistency, relevant to the confidence gate.
-- Lead: UCCI: Calibrated Uncertainty for Cost-Optimal LLM Cascade Routing, arXiv:2605.18796; about calibrating
-  cascade escalation thresholds, relevant to P3 (single-workload study).
+Capability security and sandboxing
+- The Protection of Information in Computer Systems; Saltzer and Schroeder; 1975 (Proc. IEEE 63(9));
+  https://cgi.cse.unsw.edu.au/~cs9242/19/papers/Saltzer_Schroeder_75.pdf; verified (found by web search; the
+  least-privilege definition was in the result text); decision supported: I4 strict capability attenuation and
+  least-privilege grants, and keeping the set of audited programs small; keywords: [].
+- Defeating Prompt Injections by Design (CaMeL); Debenedetti et al.; 2025; arXiv:2503.18813; verified
+  (title, authors, id via search; abstract not read); decision supported: design analogy only for separating
+  untrusted data from control and tracking capabilities on data; nothing here implements it; keywords: [].
+- Firecracker: Lightweight Virtualization for Serverless Applications; Agache et al. (AWS); 2020 (NSDI);
+  https://www.usenix.org/conference/nsdi20/presentation/agache; verified (web search); decision supported: real
+  containment of an exec-capable agent belongs to a microVM or similar sandbox, not to regex floors (I2, I3
+  notes, section 9); keywords: [].
+
+Cost-aware routing and cascades (section 6, P3)
+- FrugalGPT: How to Use Large Language Models While Reducing Cost and Improving Performance; Chen et al.; 2023;
+  arXiv:2305.05176; verified, abstract read; supports the cascade (cheap tier first, escalate on failure) and
+  the cost-per-task objective; keywords: [].
+- Large Language Model Cascades with Mixture of Thoughts Representations for Cost-efficient Reasoning; Yue et
+  al.; 2023; arXiv:2310.03094; verified, abstract read; supports using weak-model answer inconsistency as the
+  escalation signal (the confidence gate); keywords: [].
+- UCCI: Calibrated Uncertainty for Cost-Optimal LLM Cascade Routing; Kotte; 2026; arXiv:2605.18796; verified
+  (title, author, id via arXiv search; single-workload study; abstract not read); supports calibrating
+  escalation thresholds (`tau`); keywords: [].
+- RouteLLM: Learning to Route LLMs with Preference Data; arXiv:2406.18665; unverified lead (a title search of
+  arXiv on 2026-09-30 did not return it; ID not confirmed); supports learned routing between strong and weak
+  models, relevant to P3; keywords: [].
+
+LLM-judge bias and verification independence (section 7, requirement on verifiers)
+- Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena; Zheng et al.; 2023; arXiv:2306.05685; verified;
+  supports treating any LLM verifier as a biased instrument to be measured; keywords: [].
+- Self-Preference Bias in LLM-as-a-Judge; Wataoka et al.; 2024; arXiv:2410.21819; verified (title, authors,
+  id); supports not using the producing model as its own verifier; keywords: [].
+- LLM Evaluators Recognize and Favor Their Own Generations; Panickssery et al.; 2024; arXiv:2404.13076; verified
+  (title, authors, id); supports separate context and, where possible, a different model for verification;
+  keywords: [].
+- Large Language Models Cannot Self-Correct Reasoning Yet; Huang et al.; 2023; arXiv:2310.01798; verified
+  (title, authors, id); supports the same-agent-as-verifier anti-pattern: intrinsic self-review is not a gate;
+  keywords: [].
+
+Grounding, citation and fact checking (section 7, P5)
+- FacTool: Factuality Detection in Generative AI; Chern et al.; 2023; arXiv:2307.13528; verified, abstract read;
+  supports tool-assisted claim checking in P5; keywords: [].
+- RARR: Researching and Revising What Language Models Say, Using Language Models; Gao et al.; 2022;
+  arXiv:2210.08726; verified (title, authors, id); supports finding evidence and revising unsupported claims;
+  keywords: [].
+- Enabling Large Language Models to Generate Text with Citations (ALCE); arXiv:2305.14627; unverified lead (not
+  returned by an arXiv title search on 2026-09-30); supports the provenance objective; keywords: [].
+
+Planning, tools and skills (P6, tier-1 and tier-2 mutation)
+- ADaPT: As-Needed Decomposition and Planning with Language Models; Prasad et al.; 2023; arXiv:2311.05772;
+  verified, abstract read; supports decomposing only when the executor fails (P6); keywords: [].
+- An LLM Compiler for Parallel Function Calling (LLMCompiler); Kim et al.; 2023; arXiv:2312.04511; verified
+  (title, authors, id); supports planning a dependency graph of calls for parallel execution (P6); keywords: [].
+- CREATOR: Tool Creation for Disentangling Abstract and Concrete Reasoning of Large Language Models; Qian et
+  al.; 2023; arXiv:2305.14318; verified (title, authors, id); supports LLMs writing their own tools, relevant
+  to tier-2 plugin authoring; keywords: [].
+- Voyager: An Open-Ended Embodied Agent with Large Language Models; Wang et al.; 2023; arXiv:2305.16291;
+  verified (title, authors, id); supports a growing library of verified skills, tier-1 skill evolution;
+  keywords: [].
+
+Tracing and observability (section 3b)
+- OpenTelemetry GenAI semantic conventions (`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
+  `gen_ai.client.token.usage`); OpenTelemetry project; 2026 pages;
+  https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/; verified (listed in a web search
+  and summarised there; the registry page itself was not read in full); supports U7, a stable exportable
+  usage and trace schema; keywords: [].
+
+Self-improving loops: see the RSI design, section 17 (Darwin Godel Machine, Godel Agent, STOP, Promptbreeder,
+ADAS, Reflexion). They support section 8 objectives and the acceptance rule by analogy only.
 
 ## 12. Decisions for the owner
 
@@ -943,14 +1096,18 @@ Still open:
   question as needed or not (the "high downstream variance" half needs a downstream outcome, which no event
   carries); (b) drop clarification yield from the section 8 objectives until the harness can measure it.
   Until decided, treat the objective as absent from any Pareto comparison.
-- Branch consolidation (owner direction 2026-09-30, a PLAN, not done). The owner wants work to move onto each
-  repo's `main` and moeka to serve awork and similar consumers better. Today `main` is the full gateway with
-  the live Telegram and Discord bot; `core-slim` is the downstream slim kernel (channels, gateway, WebUI removed),
-  and only `origin/core-slim` (at `6f80c392`) is on GitHub; the docs commits made after it are local. Open
-  question: how kernel and gateway live on one `main` (for example the kernel as a package inside `main`, with
-  the gateway as one consumer of it). No answer chosen. Consequences to settle first: the harness and awork
-  pin `core-slim` commits (never rebase it until decided), and `moeka.service` runs whatever is checked out in
-  `~/projects/moeka`. No branch is merged or renamed by this document.
+- Branch consolidation: chosen, not executed (owner, 2026-09-30). The owner chose: the kernel lives inside
+  moeka `main`, and the gateway (channels, WebUI, Telegram and Discord bot) sits on top as one consumer of it.
+  Nothing has been merged or renamed; this is a recorded plan. Facts at the time: `main` is the full gateway
+  with the live bot; `core-slim` is the downstream slim kernel; `origin/core-slim` is at `6f80c392` and the
+  docs commits after it are local. What a selective merge must preserve: gateway, channels, WebUI, cron,
+  pairing and the `message` tool stay from `main`; the kernel (`nanobot/kernel/`, `nanobot/core/`, the `moeka`
+  package, `nanobot/llm_usage/`) and the `.agent/` design docs come from `core-slim`; the kernel must keep
+  I1-I6 and the import boundary (`tests/core/test_import_boundary.py`) with the gateway importing the kernel, never
+  the reverse. A plain merge of `core-slim` into `main` is wrong (it deletes the gateway). Constraints until it is
+  done: never rebase `core-slim` (the harness and awork pin it; pin decided `6f80c392`, then `main`), and
+  `moeka.service` runs whatever is checked out in `~/projects/moeka`, so use worktrees. Open sub-questions: how
+  the gateway moves onto `moeka.Kernel` (today it uses the legacy loop path), and the order of steps.
 - `Paths` derivation. Default: two host attributes; `sessions_root`, `data_dir` and `logs_dir` are
   subdirectories of `state_dir`; `media_dir` sits under `work_dir`, because agent-visible attachments and
   generated media must be reachable by the agent. Owner may veto.
@@ -991,6 +1148,7 @@ measurement exists and is cited; it does not mean the proxy is a good one. Tests
 | K8 | Mutating tier-1 files (skills, prompts, tool descriptions) transfers from the eval tasks to real use. | UNPROVEN, no experiment yet. |
 | K9 | The default epistemic classifier (equal after whitespace collapse and `casefold` is minor, else semantic) is a good split for what needs a question. | PROVEN as behaviour (`test_clarify.py`); UNPROVEN on real divergences. It asks a question for every non-identical value, which over-asks. |
 | K10 | The cost ledger is ground truth for cost. | PARTLY: per-call events carry tokens and cost, but an estimate is flagged (`cost_is_billed` False), cache-write premiums and hidden reasoning tokens are not priced, and the SQLite ledger can be forged by an exec-capable agent (I3 note). |
+| K11 | Section 3b usage and waste accounting will be good enough to justify better or paid models ("not a token wasted"). | UNPROVEN: requirements U1-U12 are not implemented (gaps G1-G12); waste is not measurable today. |
 
 **Risks**
 
@@ -1022,9 +1180,10 @@ measurement exists and is cited; it does not mean the proxy is a good one. Tests
   `kernel.memory(path=)`, `ResponseCache`, trace spans) is `docs/migration-moeka-api.md`.
 - The live gateway: Telegram and Discord bot on `main`, run by `moeka.service` from `~/projects/moeka`. It uses
   the legacy loop path, not `moeka.Kernel`, and passes no plugin registry.
-- The RSI harness (`.agent/rsi-harness-design.md`, branch `rsi-harness-spec`): a separate repo pinning a
-  `core-slim` commit as a submodule; it drives `moeka.Kernel` with `Variant`s and scores from the trace stream.
+- The RSI harness (`.agent/rsi-harness-design.md`, branch `rsi-harness-spec`): a separate repo pinning `core-slim`
+  commit `6f80c392` as a submodule (decided 2026-09-30); it drives `moeka.Kernel` with `Variant`s and scores from the trace stream.
 - awork-resume is explicitly NOT a consumer (owner decision 2026-09-30): it has its own `awr.llm` and depends
   on no moeka code. Kernel invariants do not bind it, and kernel changes need not consider it.
-- Direction (owner, 2026-09-30): moeka should change to serve awork and similar consumer projects better; see
-  the consolidation item in section 12. This is a plan, not built.
+- Direction (owner, 2026-09-30): moeka should serve awork and similar consumers better; awork derives its usage
+  figures from moeka (section 3b, requirement, gaps listed there). Consolidation is chosen, not executed
+  (section 12).
