@@ -338,3 +338,40 @@ def test_restart_of_a_unit_managed_instance_uses_the_unit(h: Harness) -> None:
     assert result.returncode == 0
     assert "--user restart moeka@ru.service" in h.systemctl_calls()
     assert not (h.nanobot_log / "pids").exists()
+
+
+def test_stop_matches_a_config_path_inside_one_argument(h: Harness) -> None:
+    root = h.new("w")
+    cfg = root / "config.json"
+    proc = subprocess.Popen(
+        ["bash", "-c", f"trap 'exit 0' TERM; while :; do sleep 0.05; done # --config={cfg}",
+         f"gateway --config {cfg}"],
+    )
+    try:
+        (root / "moeka.pid").write_text(f"  {proc.pid}\n")
+        info = json.loads(h.run(*_ws(root), "status", "--json").stdout)
+        assert info["running"] is True and info["pid"] == proc.pid
+        assert h.run(*_ws(root), "stop").returncode == 0
+        proc.wait(10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_pid_file_with_two_numbers_is_stale(h: Harness) -> None:
+    root = h.new("t2")
+    (root / "moeka.pid").write_text("12 34\n")
+    assert h.run(*_ws(root), "stop").returncode == 0
+    assert not (root / "moeka.pid").exists()
+
+
+def test_default_instance_disable_names_moeka_service_only(h: Harness) -> None:
+    default = h.home / ".nanobot"
+    default.mkdir()
+    (default / "config.json").write_text("{}")
+    h.set_unit_active("moeka.service")
+    assert h.run("disable").returncode == 0
+    calls = [c for c in h.systemctl_calls() if not c.startswith("loginctl")]
+    named = [c for c in calls if c.split()[-1] not in ("daemon-reload",)]
+    assert named and all(c.split()[-1] == "moeka.service" for c in named), calls

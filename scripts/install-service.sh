@@ -80,10 +80,10 @@ install_default() {
     cp "$SCRIPT_DIR/moeka.service" "$SERVICE_DIR/moeka.service"
 
     _systemctl --user daemon-reload
-    _systemctl --user enable moeka
+    _systemctl --user enable moeka.service
     # Use restart so repeated `enable` calls always land on the latest binary/config;
     # systemctl restart starts the service if it isn't running yet.
-    _systemctl --user restart moeka
+    _systemctl --user restart moeka.service
 
     # Enable user lingering — without this, the user manager exits at logout and
     # moeka.service will NOT start on boot when no one is logged in (headless boxes).

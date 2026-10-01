@@ -340,3 +340,66 @@ def test_sigkilled_holder_reservation_is_charged_after_the_lease(tmp_path: Path)
 
 def test_cap_budget_docstring_says_per_process() -> None:
     assert "per process" in (CapBudget.__doc__ or "")
+
+
+def test_budget_built_while_the_database_is_locked_fails_closed_at_admission(
+    tmp_path: Path,
+) -> None:
+    SharedCapBudget(tmp_path, "existing", limit_usd=1.0)  # the database exists
+    blocker = sqlite3.connect(tmp_path / "llm_usage.sqlite3", isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        budget = SharedCapBudget(tmp_path, "job", limit_usd=0.5, lock_timeout_s=0.2)
+        with pytest.raises(ValueError):
+            SharedCapBudget(tmp_path, "existing", limit_usd=2.0, lock_timeout_s=0.2)
+        started = time.monotonic()
+        with pytest.raises(BudgetExceeded) as info:
+            budget.admit(_estimate(0.1))
+        assert info.value.reason_code == "budget_unavailable"
+        assert time.monotonic() - started < 2
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+    res = budget.admit(_estimate(0.1))  # caps are written with the first admission
+    assert budget.snapshot()["cap_usd"] == 0.5
+    with pytest.raises(ValueError):
+        SharedCapBudget(tmp_path, "job", limit_usd=0.6)
+    budget.release(res)
+
+
+def test_pending_settle_is_written_at_kernel_close(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    budget = SharedCapBudget(data, "job", limit_usd=1.0, lock_timeout_s=0.3)
+    kernel = Kernel(_env(tmp_path, "s", data=data), budget=budget)
+    res = budget.admit(_estimate(0.2))
+    blocker = sqlite3.connect(data / "llm_usage.sqlite3", isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        budget.settle(res, _event(_estimate(0.2), 0.05))
+        budget.release(res)
+        assert budget.pending_writes == 2
+        assert budget.reserved_usd == pytest.approx(0.2)  # still counted while unwritten
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+    kernel.close()
+    assert budget.pending_writes == 0
+    other = SharedCapBudget(data, "job", limit_usd=1.0)
+    assert other.spent_usd == pytest.approx(0.05) and other.reserved_usd == 0.0
+
+
+def test_replay_does_not_delay_a_refusal(tmp_path: Path) -> None:
+    budget = SharedCapBudget(tmp_path, "job", limit_usd=1.0, lock_timeout_s=0.3)
+    res = budget.admit(_estimate(0.1))
+    blocker = sqlite3.connect(tmp_path / "llm_usage.sqlite3", isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        for _ in range(5):
+            budget.settle(res, _event(_estimate(0.1), 0.01))
+        started = time.monotonic()
+        with pytest.raises(BudgetExceeded):
+            budget.admit(_estimate(0.1))
+        assert time.monotonic() - started < 0.3 + 1.0
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()

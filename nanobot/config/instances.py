@@ -288,11 +288,16 @@ def _cmdline(pid: int) -> list[str]:
 
 
 def pid_matches(pid: int, config: str | Path) -> bool:
-    """True when ``/proc/<pid>/cmdline`` names *config* (as one argument or ``--config=``)."""
-    wanted = str(config)
+    """True when ``/proc/<pid>/cmdline`` contains *config* (FR-004b).
+
+    As an argument, after ``=`` (``--config=PATH``), or as a word inside one argument;
+    the symlink-resolved path counts too.
+    """
+    wanted = {str(config), os.path.realpath(str(config))}
     for arg in _cmdline(pid):
-        if arg == wanted or arg == f"--config={wanted}":
-            return True
+        for path in wanted:
+            if arg == path or arg.endswith("=" + path) or path in arg.replace("=", " ").split():
+                return True
     return False
 
 

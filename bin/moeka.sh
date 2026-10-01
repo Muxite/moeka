@@ -181,6 +181,7 @@ else
     CFG="${ROOT}/config.json"
 fi
 readonly CFG
+CFG_REAL="$(realpath -m -- "$CFG" 2>/dev/null || printf '%s' "$CFG")"
 
 # ---------- runtime paths ---------------------------------------------------
 PID_FILE="${ROOT}/moeka.pid"
@@ -252,20 +253,28 @@ _unit_active() {
 _pid_from_file() {
     [[ -f "$PID_FILE" ]] || return 1
     local p
-    p="$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)"
+    p="$(cat "$PID_FILE" 2>/dev/null || true)"
+    p="${p#"${p%%[![:space:]]*}"}"   # trim leading whitespace
+    p="${p%"${p##*[![:space:]]}"}"   # trim trailing whitespace
     [[ "$p" =~ ^[0-9]+$ ]] || return 1
     (( 10#$p > 0 )) || return 1
     printf '%s' "$((10#$p))"
 }
 
 _pid_is_ours() {
-    # True when /proc/<pid>/cmdline names this instance's config (FR-004b).
-    local pid="$1" arg
+    # True when /proc/<pid>/cmdline contains this instance's absolute config path
+    # (FR-004b): as an argument, after "=", or as a word inside one argument; the
+    # symlink-resolved path counts too.
+    local pid="$1" arg c
     [[ -r "/proc/$pid/cmdline" ]] || return 1
+    local -a cfgs=("$CFG")
+    [[ -n "$CFG_REAL" && "$CFG_REAL" != "$CFG" ]] && cfgs+=("$CFG_REAL")
     while IFS= read -r -d '' arg; do
-        if [[ "$arg" == "$CFG" || "$arg" == "--config=$CFG" ]]; then
-            return 0
-        fi
+        for c in "${cfgs[@]}"; do
+            if [[ "$arg" == "$c" || "$arg" == *"=$c" || " $arg " == *[[:space:]=]"$c"[[:space:]]* ]]; then
+                return 0
+            fi
+        done
     done < "/proc/$pid/cmdline" 2>/dev/null
     return 1
 }
@@ -601,12 +610,12 @@ cmd_disable() {
     esac
     # Default instance: today's behaviour (stop, disable, remove moeka.service).
     local state
-    state="$(_systemctl --user is-active moeka 2>/dev/null || true)"
+    state="$(_systemctl --user is-active "$UNIT" 2>/dev/null || true)"
     if [[ "$state" == "active" || "$state" == "activating" ]]; then
-        info "stopping moeka service..."
-        _systemctl --user stop moeka || true
+        info "stopping $UNIT..."
+        _systemctl --user stop "$UNIT" || true
     fi
-    _systemctl --user disable moeka 2>/dev/null || true
+    _systemctl --user disable "$UNIT" 2>/dev/null || true
     local unit_file="$HOME/.config/systemd/user/moeka.service"
     if [[ -f "$unit_file" ]]; then
         rm -f "$unit_file"

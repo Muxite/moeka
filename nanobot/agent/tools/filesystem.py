@@ -31,6 +31,7 @@ from nanobot.security.protected_paths import (
     ProtectedPathError,
     default_config_files,
     default_data_dirs,
+    default_other_instance_roots,
 )
 from nanobot.security.untrusted import mark_untrusted
 from nanobot.security.workspace_access import current_tool_workspace
@@ -215,13 +216,20 @@ class _FsTool(Tool):
             from nanobot.kernel.legacy import legacy_floor_extras
 
             extra_dirs, config_files = legacy_floor_extras() if self._legacy_floor else ([], [])
+            others = (
+                default_other_instance_roots(self._paths.work_dir, extra_dirs)
+                if self._legacy_floor else []
+            )
             return ProtectedFloor.from_paths(
                 self._paths, extra_data_dirs=extra_dirs, config_files=config_files,
+                other_instance_roots=others,
             )
+        data_dirs = default_data_dirs()
         return ProtectedFloor(
-            data_dir=default_data_dirs(),
+            data_dir=data_dirs,
             workspace=self._workspace,
             config_files=default_config_files(),
+            other_instance_roots=default_other_instance_roots(self._workspace, data_dirs),
         )
 
     def _check_floor(self, resolved: Path, *, write: bool) -> Path:

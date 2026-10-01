@@ -176,6 +176,18 @@ def _match(
     return False
 
 
+def _contains_own(root: Path, workspace: Path | None) -> bool:
+    if workspace is None:
+        return False
+    own = _safe_resolve(Path(workspace))
+    if own is None:
+        return False
+    for candidate in (Path(os.path.abspath(Path(root).expanduser())), _safe_resolve(Path(root))):
+        if candidate is not None and _is_within(own, candidate):
+            return True
+    return False
+
+
 def _instance_roots_extras(
     own_roots: Sequence[Path], other_roots: Sequence[Path],
 ) -> tuple[list[Path], list[Path]]:
@@ -231,7 +243,13 @@ class ProtectedFloor:
             else:
                 bases = list(data_dir)
             instance_roots = [*bases, *([workspace] if workspace is not None else [])]
-        deny, write_only = _instance_roots_extras(instance_roots, other_instance_roots)
+        # "Other" means a root that neither equals nor contains the agent's own work dir:
+        # a host passing every discovered root never locks the agent out of its own.
+        others = [
+            root for root in other_instance_roots
+            if not _contains_own(root, workspace)
+        ]
+        deny, write_only = _instance_roots_extras(instance_roots, others)
         for root in deny:
             if root not in self._roots:
                 self._roots.append(root)

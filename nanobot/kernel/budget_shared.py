@@ -160,7 +160,17 @@ class SharedCapBudget:
         self._pending: list[_Op] = []
         self._sinks: list[TraceSink] = []
         self._holder = f"{socket.gethostname()}:{os.getpid()}:{_now_ms()}"
-        self._store_caps(reset_caps)
+        # Caps not yet written because the database was locked at construction: the
+        # next admission writes them inside its own transaction (FR-048: fail closed
+        # there, never at construction).
+        self._caps_pending: bool | None = None
+        try:
+            self._store_caps(reset_caps)
+        except sqlite3.OperationalError as exc:
+            if not _is_locked(exc):
+                raise
+            self._check_caps_readonly(reset_caps)
+            self._caps_pending = reset_caps
 
     # -- plumbing ---------------------------------------------------------------
 
@@ -186,10 +196,60 @@ class SharedCapBudget:
         self._conn_pid = pid
         return conn
 
-    def _begin(self) -> sqlite3.Connection:
+    def _begin(self, busy_ms: int | None = None) -> sqlite3.Connection:
         conn = self._connection()
-        conn.execute("BEGIN IMMEDIATE")
+        full = int(self.lock_timeout_s * 1000)
+        conn.execute(f"PRAGMA busy_timeout = {full if busy_ms is None else busy_ms}")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        finally:
+            if busy_ms is not None:
+                conn.execute(f"PRAGMA busy_timeout = {full}")
         return conn
+
+    def _caps_tuple(self) -> tuple[Any, ...]:
+        per_tag = json.dumps(dict(sorted(self.per_tag.items())))
+        return (self.limit_usd, self.limit_tokens, per_tag, self.allow_unpriced)
+
+    def _check_caps_readonly(self, reset: bool) -> None:
+        """Compare with the stored caps without the write lock (WAL readers never block)."""
+        if reset:
+            return
+        try:
+            row = self._connection().execute(
+                "SELECT limit_usd, limit_tokens, per_tag, allow_unpriced FROM budget_caps "
+                "WHERE budget_id = ?", (self.budget_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return
+        if row is None:
+            return
+        stored = (
+            row["limit_usd"], row["limit_tokens"],
+            json.dumps(dict(sorted(json.loads(row["per_tag"] or "{}").items()))),
+            bool(row["allow_unpriced"]),
+        )
+        if stored != self._caps_tuple():
+            raise ValueError(
+                f"budget_id {self.budget_id!r} already has different caps in {self.path}; "
+                "pass reset_caps=True to replace them"
+            )
+
+    def _write_pending_caps(self, conn: sqlite3.Connection) -> None:
+        if self._caps_pending is None:
+            return
+        limit_usd, limit_tokens, per_tag, allow = self._caps_tuple()
+        conflict = (
+            "DO UPDATE SET limit_usd = excluded.limit_usd, limit_tokens = excluded.limit_tokens, "
+            "per_tag = excluded.per_tag, allow_unpriced = excluded.allow_unpriced, "
+            "updated_ms = excluded.updated_ms" if self._caps_pending else "DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO budget_caps (budget_id, limit_usd, limit_tokens, per_tag, "
+            "allow_unpriced, updated_ms) VALUES (?, ?, ?, ?, ?, ?) "
+            f"ON CONFLICT(budget_id) {conflict}",
+            (self.budget_id, limit_usd, limit_tokens, per_tag, int(allow), _now_ms()),
+        )
 
     def _store_caps(self, reset: bool) -> None:
         per_tag = json.dumps(dict(sorted(self.per_tag.items())))
@@ -359,7 +419,9 @@ class SharedCapBudget:
             self._pending.pop(0)
 
     def _apply(self, op: _Op) -> None:
-        conn = self._begin()
+        # Replays wait only briefly: an admission behind them still gets its full
+        # lock_timeout_s, and a still-locked database leaves the write queued.
+        conn = self._begin(busy_ms=min(int(self.lock_timeout_s * 1000), 50))
         events: list[dict[str, Any]] = []
         try:
             events = self._expire(conn, _now_ms())
@@ -462,6 +524,7 @@ class SharedCapBudget:
                 raise self._unavailable(estimate, exc) from exc
             events: list[dict[str, Any]] = []
             try:
+                self._write_pending_caps(conn)
                 events = self._expire(conn, now)
                 limit_usd, limit_tokens, per_tag, allow_unpriced = self._caps(conn)
                 spent_usd, spent_tokens, reserved_usd, reserved_tokens = self._totals(conn, now)
@@ -485,10 +548,12 @@ class SharedCapBudget:
                      self._holder, now, now + int(self.lease_s * 1000)),
                 )
                 conn.execute("COMMIT")
+                self._caps_pending = None
             except BudgetExceeded:
                 # Refused: keep the expiry marks (they are facts), add no reservation.
                 try:
                     conn.execute("COMMIT")
+                    self._caps_pending = None
                 except sqlite3.Error:
                     conn.execute("ROLLBACK")
                     events = []

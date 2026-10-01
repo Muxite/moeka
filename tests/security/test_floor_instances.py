@@ -117,3 +117,35 @@ def test_symlink_into_another_instance_is_denied(world: dict[str, Path]) -> None
     link.symlink_to(world["b"])
     with pytest.raises(ProtectedPathError):
         check_protected(link / "SOUL.md", write=False, workspace=a)
+
+
+def test_floor_drops_passed_roots_that_contain_the_own_work_dir(world: dict[str, Path]) -> None:
+    a, b = world["a"], world["b"]
+    paths = Paths(work_dir=a / "projects", state_dir=world["tmp"] / "state")
+    floor = ProtectedFloor.from_paths(paths, other_instance_roots=[a, b, world["default"]])
+    assert not floor.matches(a / "projects" / "x.py", write=True)
+    assert not floor.matches(a / "SOUL.md", write=False)
+    assert floor.matches(b / "SOUL.md", write=False)
+    assert floor.matches(world["default"] / "SOUL.md", write=True)
+
+
+@pytest.mark.parametrize("legacy_env", [False, True])
+def test_legacy_file_tools_include_discovered_instances(
+    world: dict[str, Path], legacy_env: bool,
+) -> None:
+    from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool
+    from nanobot.config.schema import Config
+    from nanobot.kernel.legacy import LegacyEnvironment
+
+    a = world["a"]
+    kwargs = {}
+    if legacy_env:
+        config = Config.model_validate({"agents": {"defaults": {"workspace": str(a)}}})
+        kwargs = {"paths": LegacyEnvironment.from_config(config).paths, "legacy_floor": True}
+    for cls in (ReadFileTool, WriteFileTool):
+        tool = cls(workspace=a, **kwargs)
+        floor = tool._protected_floor()
+        assert floor.matches(world["b"] / "SOUL.md", write=False)
+        assert floor.matches(world["home"] / ".moeka-b-sessions" / "x", write=True)
+        assert floor.matches(world["custom"] / "config.json", write=False)
+        assert not floor.matches(a / "SOUL.md", write=False)

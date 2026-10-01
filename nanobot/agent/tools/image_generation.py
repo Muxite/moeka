@@ -167,14 +167,24 @@ class ImageGenerationTool(Tool):
         return self._paths.media_dir if self._paths is not None else _legacy_media_dir()
 
     def _protected_floor(self) -> ProtectedFloor:
+        from nanobot.security.protected_paths import default_other_instance_roots
+
         if self._paths is None:
-            return ProtectedFloor(data_dir=default_data_dirs(), workspace=self.workspace)
+            data_dirs = default_data_dirs()
+            return ProtectedFloor(
+                data_dir=data_dirs, workspace=self.workspace,
+                other_instance_roots=default_other_instance_roots(self.workspace, data_dirs),
+            )
         extra_dirs: list[Path] = []
+        others: list[Path] = []
         if self._legacy_floor:
             from nanobot.kernel.legacy import legacy_floor_extras
 
             extra_dirs = legacy_floor_extras()[0]
-        return ProtectedFloor.from_paths(self._paths, extra_data_dirs=extra_dirs)
+            others = default_other_instance_roots(self._paths.work_dir, extra_dirs)
+        return ProtectedFloor.from_paths(
+            self._paths, extra_data_dirs=extra_dirs, other_instance_roots=others,
+        )
 
     def _resolve_reference_image(self, value: str) -> str:
         access = current_tool_workspace(self.workspace, restrict_to_workspace=True)
