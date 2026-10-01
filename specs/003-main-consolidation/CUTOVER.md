@@ -297,3 +297,11 @@ can stay. Restore DBs from `20261001T061114Z` only if the old code errors on a f
   that processes history, and the 48 h mark.
 - 2026-10-01 22:03:27Z: owner ran `/new` on Telegram; processed, no ERROR or Traceback after it. `llm_calls` 6.
   Still owed: a rewind, a Dream run that processes history (next due 22:12Z), and the 48 h mark.
+- Rewind: not reachable from chat (no command; only `moeka.Kernel` `session.rewind` -> `SessionManager.truncate`,
+  and the live gateway holds the instance lock). Rehearsed instead, 2026-10-01 ~22:08Z: backup-API copy of the
+  live `sessions.db` (`check` ok), live code (`~/projects/moeka` venv, `d3524a79`), `SessionManager.truncate` on
+  `telegram:8389948559` 5 -> 3 messages, persisted across a fresh manager; live DB counts unchanged (19 sessions,
+  25 messages). `/new` archived to `memory/history.jsonl` and `.cursor` at 22:03:35Z (the drop from 1742 messages
+  at G3 is the cleared session). `.dream_cursor` unchanged since 2026-07-05: watch whether the 22:12Z Dream
+  processes the new archive entries.
+
