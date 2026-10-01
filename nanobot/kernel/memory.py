@@ -149,8 +149,10 @@ class DocStore:
         log_retrievals: bool = False,
         scope: str | None = None,
         _registry: _MemoryRegistry | None = None,
+        read_only: bool = False,
     ) -> None:
         self._path = Path(path)
+        self._read_only = read_only
         self._scope = scope
         self._embedder = embedder
         self._log_retrievals = log_retrievals
@@ -179,6 +181,9 @@ class DocStore:
             kwargs: dict[str, Any] = {"log_retrievals": self._log_retrievals}
             if self._embedder is not None:
                 kwargs["embedder"] = self._embedder
+            if self._read_only:
+                kwargs["read_only"] = True
+                kwargs["log_retrievals"] = False
             vec = VecStore(self._path, **kwargs)
             if vec.init_error is not None:
                 # Neither backend can work on a file that never opened: fail loudly
@@ -189,6 +194,14 @@ class DocStore:
                 ) from vec.init_error
             self._vec = vec
         return self._vec
+
+    def _refuse_write(self, what: str) -> None:
+        if self._read_only:
+            from nanobot.kernel.instance_lock import ReadOnlyKernelError
+
+            raise ReadOnlyKernelError(
+                f"memory {what} is not allowed on a read-only Kernel ({self._path})"
+            )
 
     def _run(self, fn: Callable[[VecStore], _T]) -> _T:
         with self._lock:
@@ -256,6 +269,7 @@ class DocStore:
 
         Returns 0 for blank text or when neither retrieval backend is usable.
         """
+        self._refuse_write("add")
         if not isinstance(text, str):
             raise TypeError(f"text must be a str, got {type(text).__name__}")
         tag_list = _tags(tags)
@@ -311,6 +325,7 @@ class DocStore:
         """Delete chunks of *collection* (``"default"``, like ``add``/``search``),
         optionally only those of one *source*. ``collection=None`` deletes across every
         collection (with no *source*: the whole file); it must be passed explicitly."""
+        self._refuse_write("clear")
         self._run(lambda v: v.clear_documents(collection=collection, source=source))
 
     def get_meta(self, key: str) -> str | None:
@@ -318,6 +333,7 @@ class DocStore:
         return self._run(lambda v: v.get_meta(key))
 
     def set_meta(self, key: str, value: str) -> None:
+        self._refuse_write("set_meta")
         if not isinstance(value, str):
             raise TypeError(f"meta values are strings, got {type(value).__name__}")
         self._run(lambda v: v.set_meta(key, value))
@@ -364,8 +380,10 @@ class _MemoryRegistry:
         embedding_model: str,
         log_retrievals: bool = False,
         capacity: int = DEFAULT_MAX_OPEN,
+        read_only: bool = False,
     ) -> None:
         self._root = Path(state_dir) / MEMORY_DIRNAME
+        self._read_only = read_only
         self._embedding_model = embedding_model
         self._log_retrievals = log_retrievals
         self.capacity = capacity
@@ -398,6 +416,12 @@ class _MemoryRegistry:
         else:
             name = DEFAULT_SCOPE if scope is None else validate_scope(scope)
             file = self._root / scope_filename(name)
+        if self._read_only and not file.is_file():
+            from nanobot.kernel.instance_lock import ReadOnlyKernelError
+
+            raise ReadOnlyKernelError(
+                f"memory store {file} does not exist; a read-only Kernel cannot create it"
+            )
         with self._lock:
             if self._closed:
                 raise RuntimeError("kernel is closed")
@@ -406,6 +430,7 @@ class _MemoryRegistry:
                 store = DocStore(
                     file, embedder=self._embedder_locked(),
                     log_retrievals=self._log_retrievals, scope=name, _registry=self,
+                    read_only=self._read_only,
                 )
                 self._handles[file] = store
             return store

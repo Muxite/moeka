@@ -22,7 +22,10 @@ SURFACE: dict[str, list[str]] = {
         "Agent", "AgentSpec", "AgentStream", "AskUser", "RunLimits", "RunResult",
         "StopReason", "StreamEvent", "StreamEventType", "SyncAgentStream", "ToolInfo",
     ],
-    "moeka.budget": ["Budget", "CallEstimate", "CapBudget", "ModelCallEvent", "ResponseCache"],
+    "moeka.budget": [
+        "Budget", "CallEstimate", "CapBudget", "ModelCallEvent", "ResponseCache",
+        "SharedCapBudget",
+    ],
     "moeka.epistemics": [
         "ArtifactError",
         "ArtifactIncompleteError",
@@ -42,12 +45,14 @@ SURFACE: dict[str, list[str]] = {
         "AuthError",
         "BudgetExceeded",
         "ContentFilterError",
+        "InstanceLockedError",
         "LLMError",
         "LLMTimeoutError",
         "ModelNotFound",
         "ParseError",
         "QuotaError",
         "RateLimitError",
+        "ReadOnlyKernelError",
         "TransientError",
         "TruncatedError",
         "UnsupportedRequestError",
@@ -141,9 +146,11 @@ def test_reexports_are_the_implementation_objects() -> None:
 
 def test_errors_are_the_implementation_classes() -> None:
     import moeka.errors
-    from nanobot.kernel import llm_errors
+    from nanobot.kernel import instance_lock, llm_errors
 
     for name in moeka.errors.__all__:
-        assert getattr(moeka.errors, name) is getattr(llm_errors, name)
+        impl = instance_lock if name in ("InstanceLockedError", "ReadOnlyKernelError") \
+            else llm_errors
+        assert getattr(moeka.errors, name) is getattr(impl, name)
     assert not hasattr(moeka.errors, "classify")
     assert issubclass(moeka.errors.LLMTimeoutError, TimeoutError)

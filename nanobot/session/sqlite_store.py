@@ -1057,3 +1057,142 @@ def build_default_session_manager(
     )
     store = SqliteSessionStore(resolved_workspace, sessions_root=resolved_root)
     return SessionManager(resolved_workspace, sessions_root=resolved_root, store=store)
+
+
+# ---------------------------------------------------------------------------
+# Read-only attach (spec 005 FR-037/FR-038)
+# ---------------------------------------------------------------------------
+
+
+def _find_existing_sessions_db(workspace: Path, root: Path) -> Path | None:
+    """The workspace's ``sessions.db`` if it already exists; never creates anything."""
+    workspace_id: str | None = None
+    marker = workspace / ".nanobot" / "workspace-id"
+    if marker.is_file() and not marker.is_symlink():
+        try:
+            workspace_id = JsonlSessionStore._read_workspace_id(marker)  # noqa: SLF001
+        except (OSError, RuntimeError, ValueError):
+            workspace_id = None
+    if workspace_id is None and root.is_dir():
+        try:
+            workspace_id = JsonlSessionStore._find_workspace_namespace(  # noqa: SLF001
+                workspace, root,
+            )
+        except (OSError, RuntimeError):
+            workspace_id = None
+    if workspace_id is None:
+        return None
+    db = root / workspace_id / "sessions.db"
+    return db if db.is_file() else None
+
+
+class ReadOnlySqliteSessionStore(SqliteSessionStore):
+    """``SqliteSessionStore`` reads over an existing ``sessions.db`` opened ``mode=ro``.
+
+    Construction creates nothing (no directory, marker, schema or import); a missing
+    database reads as an empty store. Every write raises ``ReadOnlyKernelError``.
+    """
+
+    def __init__(self, workspace: Path, *, sessions_root: Path | None = None):
+        canonical_workspace = Path(workspace).expanduser().resolve(strict=False)
+        root = (
+            Path(sessions_root).expanduser().resolve(strict=False)
+            if sessions_root is not None
+            else default_sessions_root(canonical_workspace)
+        )
+        self.workspace = canonical_workspace
+        db = _find_existing_sessions_db(canonical_workspace, root)
+        self.db_path = db if db is not None else root / "sessions.db"
+        self.sessions_dir = self.db_path.parent
+        self._exists = db is not None
+        self._conn_obj: sqlite3.Connection | None = None
+        self._write_lock = threading.Lock()
+
+    def _conn(self) -> sqlite3.Connection:
+        if self._conn_obj is None:
+            if not self._exists:
+                conn = sqlite3.connect(":memory:", check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.executescript(
+                    "CREATE TABLE sessions (key TEXT PRIMARY KEY, created_at TEXT NOT NULL,"
+                    " updated_at TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',"
+                    " last_consolidated INTEGER NOT NULL DEFAULT 0);"
+                    "CREATE TABLE messages (session_key TEXT NOT NULL, seq INTEGER NOT NULL,"
+                    " role TEXT, created_at TEXT, data TEXT NOT NULL,"
+                    " PRIMARY KEY (session_key, seq));"
+                )
+            else:
+                from urllib.parse import quote
+
+                conn = sqlite3.connect(
+                    f"file:{quote(str(self.db_path))}?mode=ro", uri=True,
+                    check_same_thread=False, timeout=30.0,
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=10000")
+                conn.execute("PRAGMA query_only=ON")
+            self._conn_obj = conn
+        return self._conn_obj
+
+    def close(self) -> None:
+        conn, self._conn_obj = self._conn_obj, None
+        if conn is not None:
+            with suppress(sqlite3.Error):
+                conn.close()
+
+    @staticmethod
+    def _refuse(what: str) -> None:
+        from nanobot.kernel.instance_lock import ReadOnlyKernelError
+
+        raise ReadOnlyKernelError(f"{what} is not allowed on a read-only session store")
+
+    def save(self, session: Session, *, fsync: bool = False) -> None:
+        self._refuse("saving a session")
+
+    def delete(self, key: str) -> bool:
+        self._refuse("deleting a session")
+        return False
+
+    def update_metadata(self, key: str, updates: dict[str, Any], *, fsync: bool = False) -> bool:
+        self._refuse("updating session metadata")
+        return False
+
+
+class ReadOnlySessionManager:
+    """The read side of ``SessionManager`` for a read-only Kernel (nothing is cached).
+
+    Each read loads fresh rows, so a writer in another process stays visible.
+    """
+
+    def __init__(self, workspace: Path, *, sessions_root: Path | None = None) -> None:
+        self.workspace = workspace
+        self._store = ReadOnlySqliteSessionStore(workspace, sessions_root=sessions_root)
+
+    def get_cached(self, key: str) -> Session | None:
+        return None
+
+    def get_or_create(self, key: str) -> Session:
+        session = self._store.load(key)
+        if session is None:
+            from nanobot.kernel.instance_lock import ReadOnlyKernelError
+
+            raise ReadOnlyKernelError(f"session {key!r} does not exist (read-only attach)")
+        return session
+
+    def read_session_snapshot(self, key: str) -> Session | None:
+        return self._store.load(key)
+
+    def read_session_metadata(self, key: str) -> dict[str, Any] | None:
+        return cast(dict[str, Any] | None, self._store.read_metadata(key))
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], self._store.list_sessions())
+
+    def add_history_reset_observer(self, observer: Any) -> None:
+        return None
+
+    def invalidate(self, key: str) -> None:
+        return None
+
+    def close(self) -> None:
+        self._store.close()

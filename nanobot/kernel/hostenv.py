@@ -25,6 +25,7 @@ from nanobot.kernel.env import (
     CoreEnvironment,
     CredentialResolver,
     Paths,
+    PathsOverlapError,
     StaticCredentialResolver,
 )
 from nanobot.kernel.frozen import FrozenMap, thaw
@@ -195,10 +196,27 @@ def _preset_dict(spec: ModelSpec) -> dict[str, Any]:
     return preset
 
 
-def _make_paths(work_dir: Path | str, state_dir: Path | str, strict: bool) -> Paths:
+def _make_paths(
+    work_dir: Path | str,
+    state_dir: Path | str,
+    strict: bool,
+    data_dir: Path | str | None = None,
+) -> Paths:
     # Strict: Paths itself raises PathsOverlapError on overlap (I2). Non-strict
     # hosts may share one directory (the legacy flat layout).
-    return Paths(work_dir=Path(work_dir), state_dir=Path(state_dir), overlap_ok=not strict)
+    if data_dir is None:
+        return Paths(work_dir=Path(work_dir), state_dir=Path(state_dir), overlap_ok=not strict)
+    data = Path(data_dir).resolve()
+    work = Path(work_dir).resolve()
+    if strict and (data == work or data.is_relative_to(work)):
+        raise PathsOverlapError(
+            f"data_dir {data} is inside work_dir {work}: the agent's file tools could reach "
+            "the usage ledger and budget (spec 005 FR-053)"
+        )
+    return Paths(
+        work_dir=Path(work_dir), state_dir=Path(state_dir), overlap_ok=not strict,
+        data_dir_override=data,
+    )
 
 
 class Environment:
@@ -235,6 +253,7 @@ class Environment:
         providers: Iterable[ProviderSpec],
         models: Iterable[ModelSpec],
         default_model: str,
+        data_dir: Path | str | None = None,
         trace: TraceSink | None = None,
         tools: Mapping[str, Any] | None = None,
         exec_base_env: Mapping[str, str] | None = None,
@@ -242,6 +261,12 @@ class Environment:
         offline: bool = False,
     ) -> Environment:
         """Build an environment from explicit host inputs only (zero ambient reads).
+
+        ``data_dir`` (spec 005) places the usage store (``<data_dir>/llm_usage.sqlite3``)
+        and so the shared usage ledger and ``SharedCapBudget`` state: many Kernels on
+        different state dirs may share one. Omitted, it is ``<state_dir>/data``. Under
+        ``strict`` a ``data_dir`` equal to or inside ``work_dir`` raises
+        ``PathsOverlapError``.
 
         Raises ``ValueError`` for duplicate names, a ``ModelSpec`` naming an
         unknown provider, or a ``default_model`` that names no ``ModelSpec``;
@@ -272,7 +297,7 @@ class Environment:
                 f"known models: {sorted(by_name)}"
             )
 
-        paths = _make_paths(work_dir, state_dir, strict)
+        paths = _make_paths(work_dir, state_dir, strict, data_dir)
         default = by_name[default_model]
         defaults: dict[str, Any] = {
             "workspace": str(paths.work_dir),
