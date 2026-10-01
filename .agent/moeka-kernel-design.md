@@ -1,3 +1,8 @@
+> Spec-kit artifacts: the principles, per-feature requirements, plans and open owner questions are in
+> `.specify/memory/constitution.md` and `specs/` (`001-consumer-usage-surface`, `002-kernel-api-for-consumers`,
+> `003-main-consolidation`, `004-rsi-harness`, `CLARIFY-LOG.md`). This file stays the detailed design and the
+> source for mechanics, status and proofs; the specs do not duplicate it.
+
 # moeka kernel: design
 
 Naming: the host-facing API is the `moeka` package (`moeka.Kernel`, section 3a). `MoekaKernel` / `MoekaCore`
