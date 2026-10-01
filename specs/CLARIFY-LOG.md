@@ -154,6 +154,22 @@ the owner may veto any of them.
 - Options: add enumerate/export; or keep the documented one-off script path. Recommended: add it (consumers
   must not read store tables; constitution IX in spirit), or drop the FR if awork prefers re-ingesting.
 
+### Q14. Where does the live service run from after consolidation? (review D-M1)
+- Spec: `003`. Options: A. the live checkout stays on `main`; B. a dedicated deploy worktree on a `live` branch
+  that only the owner moves. Recommended: B, after the first cutover (removes contract risk R6).
+
+### Q15. Cutover gates and publish timing (review D-M2, D-M3, D-M4)
+- Spec: `003` FR-012 to FR-016. Questions: drop the dependency sync from the runbook (recommended: yes); require a
+  canary and a 48 hour soak before the public push (recommended: yes); enable `moeka.service` at boot and have a
+  verified backup target before cutover (recommended: yes to both).
+- Answered 2026-10-01 (owner via master plan M2): drop the dependency sync (done in `CUTOVER.md`); canary and
+  48 hour soak before the push: yes (gates G4, G7). The owner keeps `moeka.service` DISABLED at boot; a verified
+  backup exists (`/mnt/arteta/backups/moeka-workspace/20261001T025034Z`, `~/quarantine/moeka-backup-20261001T025034Z`).
+
+### Q16. CI as a gate (review D-M5)
+- Context: floor 5400 against about 9600 tests; strict type check reports 791 errors. Recommended: raise the floor
+  and scope the type check to kernel packages.
+
 ## Inconsistencies found while writing the specs (verified 2026-09-30; none edited)
 
 - Content-free versus replay: U3 says events carry no prompt or response text; U11 needs recorded responses.
