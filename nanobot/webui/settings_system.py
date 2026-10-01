@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import asyncio
 import inspect
 import json
@@ -108,6 +109,8 @@ def system_settings_payload(
     sandbox_status = workspace_sandbox_status(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         workspace=config.workspace_path,
+        # Host (WebUI) reads the process env; the security layer no longer does.
+        environ=os.environ,
     )
     return {
         "runtime_config": runtime_config_payload(config),

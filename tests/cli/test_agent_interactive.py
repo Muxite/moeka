@@ -53,6 +53,8 @@ def test_interactive_agent_routes_a_complete_user_turn(
             return None
 
     class _AgentLoop:
+        channels_config = None
+
         @classmethod
         def from_config(cls, _config, bus, **_kwargs):
             instance = cls(bus)
@@ -102,6 +104,7 @@ def test_interactive_agent_routes_a_complete_user_turn(
     print_response = MagicMock()
     monkeypatch.setattr("nanobot.cli.agent._load_runtime_config", lambda *_args: config)
     monkeypatch.setattr("nanobot.cli.agent.sync_workspace_templates", lambda *_args: None)
+    monkeypatch.setattr("nanobot.cli.agent.is_default_workspace", lambda *_args: False)
     monkeypatch.setattr("nanobot.cli.agent._set_nanobot_logs", lambda *_args: None)
     monkeypatch.setattr("nanobot.cli.agent._model_display", lambda *_args: ("test-model", ""))
     monkeypatch.setattr("nanobot.cli.agent.consume_restart_notice_from_env", lambda: None)
@@ -112,6 +115,7 @@ def test_interactive_agent_routes_a_complete_user_turn(
         "nanobot.providers.image_generation.image_gen_provider_configs",
         lambda *_args: [],
     )
+    monkeypatch.setattr("nanobot.cron.service.CronService", lambda *_args: object())
     monkeypatch.setattr("nanobot.cli.agent.signal.signal", lambda *_args: None)
     monkeypatch.setattr("nanobot.cli.terminal._init_prompt_session", lambda: None)
     monkeypatch.setattr("nanobot.cli.terminal._flush_pending_tty_input", lambda: None)
@@ -119,7 +123,7 @@ def test_interactive_agent_routes_a_complete_user_turn(
     monkeypatch.setattr("nanobot.cli.terminal._read_interactive_input_async", read_input)
     monkeypatch.setattr("nanobot.cli.terminal._print_agent_response", print_response)
 
-    result = runner.invoke(app, ["agent", "--session", "cli:journey"])
+    result = runner.invoke(app, ["agent", "--classic", "--session", "cli:journey"])
 
     assert result.exit_code == 0, result.output
     inbound = seen["inbound"]

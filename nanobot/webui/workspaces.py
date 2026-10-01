@@ -144,7 +144,9 @@ def default_scope_for_webui(
             default_restrict_to_workspace,
             source_channel=_WEBUI_SCOPE_CHANNEL,
         )
-    return build_workspace_scope(default_workspace, mode, source_channel=_WEBUI_SCOPE_CHANNEL)
+    return build_workspace_scope(
+        default_workspace, mode, source_channel=_WEBUI_SCOPE_CHANNEL, sandbox_env=os.environ,
+    )
 
 
 def workspaces_payload(
@@ -163,7 +165,10 @@ def workspaces_payload(
             source_channel=_WEBUI_SCOPE_CHANNEL,
         )
         if default_access_mode == "default"
-        else build_workspace_scope(default_workspace, default_access_mode, source_channel=_WEBUI_SCOPE_CHANNEL)
+        else build_workspace_scope(
+            default_workspace, default_access_mode,
+            source_channel=_WEBUI_SCOPE_CHANNEL, sandbox_env=os.environ,
+        )
     )
     return {
         "schema_version": WEBUI_WORKSPACE_STATE_SCHEMA_VERSION,
@@ -204,6 +209,7 @@ class WebUIWorkspaceController:
             self._default_workspace,
             "restricted",
             source_channel=_WEBUI_SCOPE_CHANNEL,
+            sandbox_env=os.environ,
         )
 
     def _scope_from_metadata_value(

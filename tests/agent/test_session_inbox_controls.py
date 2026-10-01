@@ -31,6 +31,7 @@ async def loop(tmp_path):
     provider.estimate_prompt_tokens.return_value = (100, "test")
     agent = AgentLoop(
         bus=MessageBus(), provider=provider, workspace=tmp_path, model="test-model",
+        host_tools=True,
     )
     agent.tools.get_definitions = MagicMock(return_value=[])
     try:

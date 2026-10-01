@@ -1,4 +1,8 @@
-"""The builtin router registers exactly the expected slash commands."""
+"""The builtin router registers exactly the expected slash commands.
+
+/evaluator-prompt, /pairing and /trigger are gateway-owned commands carried over from main
+(003 consolidation); they still register for kernel loops (open item: gate behind host_tools).
+"""
 
 from __future__ import annotations
 
@@ -7,11 +11,12 @@ from nanobot.command.router import CommandRouter
 
 EXACT = [
     "/__shell", "/compact", "/dream", "/dream-log", "/dream-prompt", "/dream-restore",
-    "/goal", "/help", "/history", "/model", "/new", "/skill", "/status",
+    "/evaluator-prompt", "/goal", "/help", "/history", "/model", "/new", "/pairing",
+    "/skill", "/status", "/trigger",
 ]
 PREFIX = [
     "/__shell ", "/dream-log ", "/dream-prompt ", "/dream-restore ",
-    "/goal ", "/history ", "/model ",
+    "/evaluator-prompt ", "/goal ", "/history ", "/model ", "/pairing ", "/trigger ",
 ]
 
 

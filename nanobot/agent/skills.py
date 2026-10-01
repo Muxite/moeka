@@ -94,6 +94,21 @@ class SkillsLoader:
             return skill.get(key, default)
         return getattr(skill, key, default)
 
+    def _skill_aliases(self) -> dict[str, str]:
+        """Return compatibility aliases owned by installed CLI Apps (gateway host).
+
+        CLI Apps are a host feature that resolves its state from ambient locations,
+        so a strict kernel-native env never consults them (``{}``).
+        """
+        if self._env is not None and getattr(self._env, "strict", False):
+            return {}
+        from nanobot.apps.cli import CliAppManager
+
+        try:
+            return CliAppManager(workspace=self.workspace).installed_skill_aliases()
+        except OSError:
+            return {}
+
     def _skill_entries_from_dir(self, base: Path, source: str, *, skip_names: set[str] | None = None) -> list[dict[str, str]]:
         if not base.exists():
             return []
@@ -156,6 +171,9 @@ class SkillsLoader:
 
         if self.disabled_skills:
             disabled = set(self.disabled_skills)
+            for legacy, canonical in self._skill_aliases().items():
+                if legacy in disabled or canonical in disabled:
+                    disabled.update((legacy, canonical))
             skills = [s for s in skills if s["name"] not in disabled]
 
         if filter_unavailable:
@@ -176,7 +194,8 @@ class SkillsLoader:
         if inline is not None:
             return str(self._inline_field(inline, "content", "") or "")
         skills = self.list_skills(filter_unavailable=False)
-        resolved = name
+        available = {skill["name"] for skill in skills}
+        resolved = name if name in available else self._skill_aliases().get(name, name)
         entry = next((skill for skill in skills if skill["name"] == resolved), None)
         if entry is None:
             return None
@@ -210,11 +229,13 @@ class SkillsLoader:
             entry["name"]
             for entry in self.list_skills(filter_unavailable=True)
         }
+        aliases = self._skill_aliases()
         invoked: list[str] = []
         for match in _SKILL_REFERENCE.finditer(text):
             requested = match.group(1)
-            if requested in available and requested not in invoked:
-                invoked.append(requested)
+            name = requested if requested in available else aliases.get(requested, requested)
+            if name in available and name not in invoked:
+                invoked.append(name)
         return invoked
 
     def build_explicit_skill_runtime_context(

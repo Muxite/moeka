@@ -294,4 +294,4 @@ def test_config_validation_matches_model_validate_and_keeps_cross_checks(monkeyp
     with pytest.raises(ValueError, match="not found in model_presets"):
         _validate_config({"agents": {"defaults": {"model_preset": "nope"}}})
     with pytest.raises(ValueError, match="unknown config section"):
-        _validate_config({"channels": {}})
+        _validate_config({"no_such_section": {}})
