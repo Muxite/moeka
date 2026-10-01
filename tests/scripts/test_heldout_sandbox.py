@@ -671,7 +671,7 @@ def test_hostile_tree_cannot_exfiltrate(h):
     try:
         h.tree({"evil.py": EVIL,
                 # judge-side code: copies the suite wherever it can write
-                "sitecustomize.py": f"""
+                "sitecustomize.py": """
                     import glob, os
                     blob = b""
                     for p in glob.glob("/suite/*.py"):
@@ -765,3 +765,138 @@ def test_small_suite_overhead_is_bounded(h):
     t0 = time.monotonic()
     h.run_wt("--no-count")
     assert time.monotonic() - t0 < plain + 60
+
+
+# -- honest suites with unusual outcomes are never "tampered" ---------------------------------
+
+TRICKY_SUITE = {
+    "test_tricky.py": """
+        import pytest
+
+        @pytest.fixture
+        def bad_teardown():
+            yield
+            raise RuntimeError("teardown boom")
+
+        @pytest.mark.fr("FR-001")
+        def test_pass():
+            pass
+
+        @pytest.mark.fr("FR-001")
+        def test_fail_then_teardown_error(bad_teardown):
+            assert False
+
+        @pytest.mark.fr("FR-002")
+        def test_pass_then_teardown_error(bad_teardown):
+            pass
+
+        @pytest.mark.fr("FR-002")
+        @pytest.mark.skip(reason="skipped")
+        def test_skip():
+            pass
+
+        @pytest.mark.fr("FR-003")
+        @pytest.mark.xfail(reason="known")
+        def test_xfail():
+            assert False
+
+        @pytest.mark.fr("FR-003")
+        @pytest.mark.xfail(strict=True, reason="x")
+        def test_xpass_strict():
+            pass
+
+        @pytest.mark.fr("FR-003")
+        @pytest.mark.xfail(reason="x")
+        def test_xpass():
+            pass
+
+        @pytest.fixture
+        def bad_setup():
+            raise RuntimeError("setup boom")
+
+        @pytest.mark.fr("FR-004")
+        def test_setup_error(bad_setup):
+            pass
+
+        @pytest.mark.fr("FR-004")
+        @pytest.mark.parametrize("v", ["a::b", "x/y", "[z]"])
+        def test_odd_params(v):
+            assert v
+    """,
+    "test_modskip.py": """
+        import pytest
+        pytest.skip("whole module", allow_module_level=True)
+
+        def test_never():
+            pass
+    """,
+    "sub/test_nested.py": """
+        import pytest
+
+        class TestK:
+            @pytest.mark.fr("FR-005")
+            def test_m(self):
+                assert 1 == 2
+    """,
+}
+
+
+@docker
+@pytest.mark.parametrize("extra", [[], ["--pytest-arg=-x"], ["--pytest-arg=-k", "--pytest-arg=pass"],
+                                   ["--pytest-arg=-m", "--pytest-arg=not docker"]])
+def test_tricky_honest_suite_matches_unsandboxed(h, extra):
+    for name, body in TRICKY_SUITE.items():
+        (h.root / "demo" / FEATURE / name).parent.mkdir(parents=True, exist_ok=True)
+    h.suite(TRICKY_SUITE)
+    plain = h.run_wt("--no-count", *extra, sandbox=False)
+    boxed = h.run_wt("--no-count", *extra)
+    assert "tampered" not in boxed.stdout, h.last_report()["meta"].get("tamper_reasons")
+    assert (boxed.returncode, boxed.stdout, boxed.stderr) == (
+        plain.returncode, plain.stdout, plain.stderr)
+
+
+@docker
+def test_custom_python_files_still_runs_canaries(h):
+    h.suite({"pytest.ini": "[pytest]\npython_files = check_*.py\n",
+             "check_a.py": "import pytest\n\n@pytest.mark.fr('FR-001')\ndef test_a():\n    pass\n"})
+    p = h.run_wt()
+    assert p.returncode == 0, (p.stdout, h.report()["meta"].get("tamper_reasons"))
+    assert {c["outcome"] for c in h.report()["canaries"]} == {"failed", "passed"}
+
+
+@docker
+def test_sigint_during_sandboxed_run_cleans_up(h):
+    h.suite(HANG_SUITE)
+    proc = subprocess.Popen([sys.executable, str(RUNNER), "run", "--profile", "generic",
+                             "--repo-name", "demo", "--feature", FEATURE, "--worktree",
+                             str(h.repo), "--sandbox", "docker"], env=h.env(),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 120
+    try:
+        _wait_and_interrupt(h, proc, deadline)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def _wait_and_interrupt(h, proc, deadline):
+    import signal as _signal
+
+    run_id = None
+    while time.monotonic() < deadline and run_id is None:
+        out = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True,
+                             text=True).stdout
+        for name in out.split():
+            if name.startswith("heldout-") and name.endswith("-test"):
+                logs = list(h.report_root.glob("*/sandbox.log"))
+                if logs and name in logs[0].read_text():
+                    run_id = name[len("heldout-"):-len("-test")]
+        time.sleep(0.5)
+    assert run_id
+    time.sleep(3)
+    proc.send_signal(_signal.SIGINT)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 3 and err == "heldout-run: error E_SYNC\n"
+    assert _docker_leftovers(run_id) == []
+    assert list(h.tmpdir.iterdir()) == []

@@ -56,18 +56,19 @@ import argparse
 import ast
 import datetime
 import fcntl
+import fnmatch
 import hashlib
 import io
 import json
 import os
+import queue
 import re
+import secrets
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
-import queue
-import secrets
-import shlex
 import tarfile
 import tempfile
 import threading
@@ -1638,7 +1639,10 @@ class _Docker:
         return dk
 
     def _log(self):
-        fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        except OSError:  # the report directory is gone: cleanup must still run
+            fd = os.open(os.devnull, os.O_WRONLY)
         return os.fdopen(fd, "ab")
 
     def run(self, args, *, timeout=300.0, capture=False, data: bytes | None = None,
@@ -1661,10 +1665,19 @@ class _Docker:
         return subprocess.Popen([self.exe, *args], start_new_session=True, **kw)
 
     def cleanup(self) -> None:
+        """Remove every container, then every volume of the run (never raises)."""
         while self.containers:
-            self.run(["rm", "-f", "-v", self.containers.pop()], timeout=120)
+            name = self.containers.pop()
+            try:
+                self.run(["rm", "-f", "-v", name], timeout=120)
+            except Exception:  # noqa: BLE001
+                pass
         while self.volumes:
-            self.run(["volume", "rm", "-f", self.volumes.pop()], timeout=120)
+            name = self.volumes.pop()
+            try:
+                self.run(["volume", "rm", "-f", name], timeout=120)
+            except Exception:  # noqa: BLE001
+                pass
 
     def ensure_image(self, image: str, scratch_dir: str, *, build: bool) -> None:
         p = self.run(["image", "inspect", "--format", "{{.Id}}", image], timeout=60, capture=True)
@@ -1757,14 +1770,20 @@ def _tar_dir(tf: tarfile.TarFile, name: str, uid: int, mode: int = 0o700) -> Non
 
 
 def _make_canaries() -> list[dict]:
-    """Two canaries with random test and file names (>= 64 random bits each, FR-014)."""
+    """Two canaries with random test and file names (>= 64 random bits each, FR-014).
+
+    They sit at the root of the suite copy; the plugin collects them even when the suite's
+    ``python_files`` would not, and runs them last, the passing one (smaller file name) first,
+    so ``-x`` still runs every real test before a canary can stop the session.
+    """
     out = []
-    for expect in ("failed", "passed"):
+    files = sorted("test_" + secrets.token_hex(12) + ".py" for _ in range(2))
+    for expect, fname in (("passed", files[0]), ("failed", files[1])):
         name = "test_" + secrets.token_hex(12)
         body = "assert False" if expect == "failed" else "pass"
         out.append({
             "name": name,
-            "file": "test_" + secrets.token_hex(12) + ".py",
+            "file": fname,
             "expect": expect,
             "source": f"import pytest\n\n\n@pytest.mark.fr({CANARY_LABEL!r})\n"
                       f"def {name}():\n    {body}\n",
@@ -1889,7 +1908,7 @@ def _run_sandboxed(a, dk: _Docker, *, state, profile_name, copy, suite, plugin_d
     dk.tar_into(test, "/out", fill_out)
 
     launcher = list(sbx["launcher"])
-    targets = ["/suite"] + [f"/suite/{c['file']}" for c in canaries]
+    targets = ["/suite"]
     plugin_args = ["-p", "no:cacheprovider", "-p", "heldout_run"]
     main_cmd = launcher + targets + ["-q", *plugin_args, "--junitxml=/out/junit.xml"]
     main_cmd += list(a.pytest_arg)
@@ -2017,6 +2036,13 @@ def _final_outcomes(records_path: str) -> dict[str, str]:
     return out
 
 
+def _collapse(outcomes: set) -> str:
+    for word in ("failed", "passed", "skipped"):
+        if word in outcomes:
+            return word
+    return "missing"
+
+
 def _tamper_reasons(a, *, report_dir, canaries, rcs) -> list[str]:
     """The FR-016 checks (plus exit-status consistency); an empty list means none fired."""
     reasons = []
@@ -2036,12 +2062,15 @@ def _tamper_reasons(a, *, report_dir, canaries, rcs) -> list[str]:
     ):
         reasons.append(f"{len(finals)} results recorded, {expected} collected")
     narrowed = _narrows_selection(a.pytest_arg)
+    canary_ids = {n for n in finals for c in canaries if n.endswith("::" + c["name"])}
+    stopped = _stops_early(a.pytest_arg) and any(
+        o == "failed" for n, o in finals.items() if n not in canary_ids)
     for c in canaries:
         nodeids = [n for n in finals if n.endswith("::" + c["name"])]
         outcome = finals[nodeids[0]] if nodeids else "missing"
         c["outcome"] = outcome
         in_collect = any(n.endswith("::" + c["name"]) for n in c_collected)
-        if not in_collect and narrowed:
+        if (not in_collect and narrowed) or (stopped and outcome == "missing"):
             continue
         if c["expect"] == "failed" and outcome in ("passed", "missing"):
             reasons.append("failing canary " + outcome)
@@ -2053,15 +2082,16 @@ def _tamper_reasons(a, *, report_dir, canaries, rcs) -> list[str]:
     if junit is None:
         reasons.append("junit file missing or unreadable")
     else:
+        # One outcome per test: junit may list a test twice (a failure, then a teardown error).
         mine: dict = {}
         for nodeid, outcome in finals.items():
-            mine.setdefault(_junit_key(nodeid), []).append(outcome)
+            mine.setdefault(_junit_key(nodeid), set()).add(outcome)
         theirs: dict = {}
         for key, outcome in junit:
             if outcome == "skipped" and key not in mine:
                 continue  # a collection-level skip: junit lists it, the plugin does not
-            theirs.setdefault(key, []).append(outcome)
-        if {k: sorted(v) for k, v in mine.items()} != {k: sorted(v) for k, v in theirs.items()}:
+            theirs.setdefault(key, set()).add(outcome)
+        if {k: _collapse(v) for k, v in mine.items()} != {k: _collapse(v) for k, v in theirs.items()}:
             reasons.append("junit and records disagree")
     return reasons
 
@@ -2631,6 +2661,34 @@ def _flatten_marks(args) -> list[str]:
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "fr(*ids): requirement ids this held-out test proves")
+
+
+_CANARY_FILE_RX = re.compile(r"test_[0-9a-f]{24}\.py")
+
+
+def pytest_collect_file(file_path, parent):
+    """Sandboxed runs only: collect a root canary file the suite's ``python_files`` would skip."""
+    if not (os.environ.get(IMPL_ENV) and os.environ.get(RECORDS_ENV)):
+        return None
+    if str(file_path.parent) != "/suite" or not _CANARY_FILE_RX.fullmatch(file_path.name):
+        return None
+    patterns = parent.config.getini("python_files") or []
+    if any(fnmatch.fnmatch(file_path.name, pat) for pat in patterns):
+        return None  # pytest's own collector takes it
+    return sys.modules["pytest"].Module.from_parent(parent, path=file_path)
+
+
+def pytest_collection_modifyitems(session, config, items):
+    """Sandboxed runs only: run the CANARY tests last, in file-name order (spec 008 FR-014)."""
+    if not (os.environ.get(IMPL_ENV) and os.environ.get(RECORDS_ENV)):
+        return
+
+    def is_canary(item):
+        return any(CANARY_LABEL in _flatten_marks(m.args) for m in item.iter_markers("fr"))
+
+    canaries = sorted((i for i in items if is_canary(i)), key=lambda i: i.nodeid)
+    if canaries:
+        items[:] = [i for i in items if not is_canary(i)] + canaries
 
 
 def pytest_collection_finish(session):
