@@ -68,11 +68,15 @@ from nanobot.kernel.budget import (
 from nanobot.kernel.frozen import FrozenMap, thaw
 from nanobot.kernel.hostenv import ModelSpec
 from nanobot.kernel.ledger import (
+    SCHEMA_VERSION,
+    UNATTRIBUTED,
+    Attribution,
     CallAttribution,
     ModelPricing,
     UsageSource,
     call_attribution,
     compute_cost,
+    current_attribution,
 )
 from nanobot.kernel.llm_errors import (
     AuthError,
@@ -118,6 +122,12 @@ class GenerateOptions:
       the active trace span's tags; these win).
     - ``on_unsupported``: ``"drop"`` (report and omit) or ``"raise"`` for request
       fields the provider cannot honour.
+    - ``attribution``: typed ``consumer``/``agent``/``session``/``role``/``purpose`` of the
+      call (unset fields fall back to the ambient :func:`bind_attribution`, then to the
+      kernel's ``consumer``). Never part of the cache key.
+    - ``prompt_version``: the caller's version label of the prompt template; part of the
+      cache key when set (so a template change never serves a stale answer) and carried
+      on the usage record.
     """
 
     model: str | None = None
@@ -130,6 +140,8 @@ class GenerateOptions:
     affinity_key: str | None = None
     tags: Mapping[str, Any] = field(default_factory=FrozenMap)
     on_unsupported: Literal["drop", "raise"] = "drop"
+    attribution: Attribution | None = None
+    prompt_version: str | None = None
 
     def __post_init__(self) -> None:
         if self.sampling is None:
@@ -800,6 +812,20 @@ class LLM:
                 logger.exception("pricing lookup failed for {}", model)
         return None
 
+    def _who(self, opts: GenerateOptions) -> Attribution:
+        """The call's attribution: ``opts``, then the ambient binding, then the kernel."""
+        who = (opts.attribution or Attribution()).over(current_attribution())
+        return who.over(Attribution(consumer=self._kernel.consumer))
+
+    def _call_attribution(
+        self, plan: _Plan, call_id: str, key: str | None, settle: Any,
+    ) -> CallAttribution:
+        return CallAttribution(
+            call_id=call_id, alias=plan.route.alias, tags=plan.opts.tags, on_event=settle,
+            attribution=self._who(plan.opts), request_key=key,
+            prompt_version=plan.opts.prompt_version,
+        )
+
     def _estimate_plan(self, plan: _Plan, call_id: str) -> CallEstimate:
         route = plan.route
         max_tokens = self._merged_sampling(route, plan.opts).max_tokens
@@ -816,6 +842,7 @@ class LLM:
             reprompts=plan.retries if plan.kind == "json" else 0,
             pricing=self._pricing_for(route.spec, route.provider, route.model),
             tags=plan.opts.tags,
+            attribution=self._who(plan.opts),
         )
 
     def _direct_estimator(self, alias: str, provider: LLMProvider) -> Estimator:
@@ -861,6 +888,8 @@ class LLM:
             "model_cls": f"{cls.__module__}.{cls.__qualname__}" if cls is not None else None,
             "retries": plan.retries,
         }
+        if plan.opts.prompt_version is not None:  # absent when unset: older keys unchanged
+            payload["prompt_version"] = plan.opts.prompt_version
         return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
     def estimate(self, request: Request) -> CallEstimate:
@@ -914,13 +943,43 @@ class LLM:
                 logger.warning("response cache entry {} is not valid JSON for this call; "
                                "ignored", key[:16])
                 return key, None
+        who = self._who(plan.opts)
+        saved_in, saved_out = hit.usage.input_tokens, hit.usage.output_tokens
+        original_cost = hit.cost_usd
         safe_emit(self._kernel.trace, {
             "event": "cache.hit",
+            # usage-record.v1 (kind cache_hit): billed figures are zero, saved_* say what
+            # the hit avoided (the original call's usage and cost).
+            "schema_version": SCHEMA_VERSION,
+            "record_id": f"{call_id}:0",
+            "kind": "cache_hit",
             "call_id": call_id,
+            "attempt": 0,
+            "consumer": who.consumer or UNATTRIBUTED,
+            "agent": who.agent,
+            "session": who.session,
+            "role": who.role,
+            "purpose": who.purpose,
             "key": key[:16],
+            "request_key": key,
+            "prompt_version": plan.opts.prompt_version,
             "alias": plan.route.alias,
             "model": hit.model,
+            "provider": plan.route.provider.provider_name,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "usage_source": "none",
+            "cost_usd": 0.0,
+            "cost_billed": True,
+            "price_source": "cache",
+            "cache_hit": True,
+            "cached": True,
+            "saved_tokens_in": saved_in,
+            "saved_tokens_out": saved_out,
+            "saved_cost_usd": original_cost,
+            "outcome": "ok",
             "tags": thaw(plan.opts.tags),
+            "producer": {"name": "moeka", "version": None},
         })
         return key, replace(
             hit,
@@ -968,9 +1027,7 @@ class LLM:
             return hit
         estimate = self._estimate_plan(plan, call_id)
         with self._admitted(estimate) as settle:
-            attribution = CallAttribution(
-                call_id=call_id, alias=plan.route.alias, tags=plan.opts.tags, on_event=settle,
-            )
+            attribution = self._call_attribution(plan, call_id, key, settle)
             if plan.kind == "json":
                 completion = await self._json_call(plan, attribution, started)
             else:
@@ -996,6 +1053,7 @@ class LLM:
         if attribution is None:
             attribution = CallAttribution(
                 call_id=_new_call_id(), alias=route.alias, tags=opts.tags,
+                attribution=self._who(opts), prompt_version=opts.prompt_version,
             )
         context = self._context(route, opts, opts.response_format)
         started = time.monotonic()
@@ -1299,9 +1357,7 @@ class LLM:
             return
         estimate = self._estimate_plan(plan, call_id)
         with self._admitted(estimate) as settle:
-            attribution = CallAttribution(
-                call_id=call_id, alias=route.alias, tags=plan.opts.tags, on_event=settle,
-            )
+            attribution = self._call_attribution(plan, call_id, key, settle)
             context = self._context(route, opts, opts.response_format)
             queue: asyncio.Queue[Any] = asyncio.Queue()
             done = object()

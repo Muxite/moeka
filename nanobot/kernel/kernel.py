@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from nanobot.kernel.registry import PluginRegistry
     from nanobot.kernel.sessions import Sessions
     from nanobot.kernel.solvers import SolverRegistry
+    from nanobot.kernel.usage import UsageView
     from nanobot.kernel.variants import Variant
     from nanobot.session.manager import SessionManager
 
@@ -94,6 +95,7 @@ class Kernel:
         solvers: SolverRegistry | None = None,
         baselines: BaselineRegistry | None = None,
         action_workers: int = 8,
+        consumer: str | None = None,
     ) -> None:
         if not isinstance(env, Environment):
             raise TypeError(
@@ -134,6 +136,9 @@ class Kernel:
         if isinstance(action_workers, bool) or not isinstance(action_workers, int) \
                 or action_workers < 1:
             raise ValueError(f"action_workers must be a positive int, got {action_workers!r}")
+        if consumer is not None and (not isinstance(consumer, str) or not consumer.strip()):
+            raise ValueError(f"consumer must be a non-empty string, got {consumer!r}")
+        self._consumer = consumer
         self._env = env
         self._tracer = Tracer(env.trace)
         # The cost ledger's usage store, shared with other kernels on this state_dir:
@@ -178,10 +183,23 @@ class Kernel:
         from nanobot.kernel.llm import LLM
 
         self._llm: LLM = LLM(self)
+        from nanobot.kernel.usage import UsageView
+
+        self._usage = UsageView(self)
 
     @property
     def env(self) -> Environment:
         return self._env
+
+    @property
+    def consumer(self) -> str | None:
+        """The default ``consumer`` of every call this kernel makes (``None`` = unattributed)."""
+        return self._consumer
+
+    @property
+    def usage(self) -> UsageView:
+        """Usage, spend and budget for this kernel's calls (see :mod:`nanobot.kernel.usage`)."""
+        return self._usage
 
     @property
     def trace(self) -> Tracer:
@@ -409,6 +427,7 @@ class Kernel:
             with self._agents_lock:
                 self._closing = True
             self._close_agents()
+            self._usage._close()  # noqa: SLF001
             self._close_action_pool()
             self._close_stores()
             self._close_llm()

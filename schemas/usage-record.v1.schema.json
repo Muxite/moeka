@@ -57,8 +57,8 @@
     "cost_usd": {"type": ["number", "null"], "minimum": 0, "description": "USD cost of this record; null = unknown (never free by default). 0 on a cache hit."},
     "cost_billed": {"type": "boolean", "description": "True when cost_usd is ground truth (provider-reported usage at a known price, or the local-zero convention)."},
     "price_source": {
-      "enum": ["provider_reported", "price_table", "local_zero", "none"],
-      "description": "provider_reported: the provider returned the cost. price_table: tokens times the producer's price table. local_zero: local tier convention. none: no price known (cost_usd null)."
+      "enum": ["provider_reported", "price_table", "local_zero", "cache", "none"],
+      "description": "cache: a response cache answered, cost is zero by construction. provider_reported: the provider returned the cost. price_table: tokens times the producer's price table. local_zero: local tier convention. none: no price known (cost_usd null)."
     },
 
     "cache_hit": {"type": "boolean", "description": "A response cache answered; no provider call was made."},

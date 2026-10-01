@@ -89,6 +89,7 @@ from loguru import logger
 
 from nanobot.agent.hook import AgentHookContext, AgentRunHookContext, SDKCaptureHook
 from nanobot.core.function_tool import ACTION_EXECUTOR
+from nanobot.kernel.ledger import Attribution, bind_attribution
 from nanobot.kernel.frozen import FrozenMap, freeze, thaw
 from nanobot.kernel.llm import Usage
 from nanobot.kernel.llm_errors import BudgetExceeded, LLMError, classify
@@ -1314,7 +1315,13 @@ class Agent:
             hooks.append(stream.hook)
             stream_kwargs = stream.process_kwargs()
         try:
-            with run_span, turn_request_extras(self._request_extras(sampling)):
+            with (
+                run_span,
+                bind_attribution(Attribution(
+                    consumer=self._kernel.consumer, agent=spec.name, session=session_key,
+                )),
+                turn_request_extras(self._request_extras(sampling)),
+            ):
                 token = _ACTIVE_RUN.set(cost)
                 pool_token = ACTION_EXECUTOR.set(self._kernel._action_executor())
                 try:

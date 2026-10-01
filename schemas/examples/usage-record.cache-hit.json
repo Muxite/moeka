@@ -18,7 +18,7 @@
   "usage_source": "none",
   "cost_usd": 0,
   "cost_billed": true,
-  "price_source": "local_zero",
+  "price_source": "cache",
   "cache_hit": true,
   "saved_tokens_in": 2100,
   "saved_tokens_out": 180,

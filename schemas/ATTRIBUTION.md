@@ -55,7 +55,7 @@ Set by the caller through typed fields, never parsed out of `tags`.
   `mixed`, `none`. An estimated count is never presented as billed.
 - `cost_usd`: `null` = unknown, never free. `cost_billed` is true only for provider-reported usage at a known
   price, or the local-zero convention. `price_source`: `provider_reported` (the provider returned the cost,
-  e.g. OpenRouter), `price_table` (tokens times the producer's table), `local_zero` (local tier), `none`.
+  e.g. OpenRouter), `price_table` (tokens times the producer's table), `local_zero` (local tier), `cache` (a cache hit, zero by construction), `none`.
 
 ## Cache hits
 

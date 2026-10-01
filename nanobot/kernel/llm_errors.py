@@ -12,7 +12,7 @@ providers without structured metadata).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMResponse
@@ -117,9 +117,16 @@ class TruncatedError(LLMError):
 
 
 class BudgetExceeded(LLMError):  # noqa: N818 - public contract name
-    """A budget refused the call before it was sent."""
+    """A budget refused the call before it was sent.
+
+    ``reason_code`` is the ``budget-event.v1`` refusal code (``cap_usd``, ``cap_tokens``,
+    ``cap_tag``, ``unpriced_model``, ``paid_disabled``, ``policy``, ``other``); ``scope`` is
+    the binding ``(kind, key, value)`` when the budget knows it.
+    """
 
     kind = "budget"
+    reason_code: str = "other"
+    scope: tuple[str, str | None, Any] | None = None
 
 
 class ModelNotFound(LLMError):  # noqa: N818 - public contract name
