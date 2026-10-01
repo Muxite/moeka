@@ -70,6 +70,11 @@ class ModelSpec:
     ``tier="local"`` with no prices, which is the cost-0 convention.
     ``native_json`` records whether the endpoint honours ``response_format``
     natively (``None`` = unknown); it is host metadata, not config.
+    ``unsupported_sampling`` names ``Sampling`` fields the host knows the backend
+    ignores (for example a local server that accepts ``seed`` and ignores it): they
+    are treated as unsupported whatever the provider declares, for agent runs and
+    ``kernel.llm`` alike (dropped and reported under ``on_unsupported="drop"``,
+    raised on under ``"raise"``; dropped quietly as model defaults).
     """
 
     name: str
@@ -83,6 +88,26 @@ class ModelSpec:
     price_out: float | None = None
     price_cache_read: float | None = None
     native_json: bool | None = None
+    unsupported_sampling: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        from dataclasses import fields as dc_fields
+
+        value = self.unsupported_sampling
+        if isinstance(value, str) or not isinstance(value, (tuple, list, frozenset, set)):
+            raise ValueError(
+                "ModelSpec.unsupported_sampling must be a tuple of Sampling field names, "
+                f"got {value!r}"
+            )
+        names = tuple(sorted(value)) if isinstance(value, (set, frozenset)) else tuple(value)
+        known = {f.name for f in dc_fields(Sampling)}
+        for name in names:
+            if not isinstance(name, str) or name not in known:
+                raise ValueError(
+                    f"ModelSpec.unsupported_sampling: {name!r} is not a Sampling field "
+                    f"(one of {sorted(known)})"
+                )
+        object.__setattr__(self, "unsupported_sampling", names)
 
 
 def _provider_ref(name: str) -> str:

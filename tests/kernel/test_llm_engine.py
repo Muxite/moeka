@@ -681,3 +681,83 @@ async def test_fallback_candidates_keep_their_own_settings(tmp_path, monkeypatch
     assert sent.kwargs.get("reasoning_effort") is None
     assert sent.provider_context.request.sampling is None
     assert not [e for e in sink.events if e.get("event") == "sampling.dropped"]
+
+
+# -- strict sampling (spec 006 K5) -----------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["drop", "raise"])
+async def test_model_spec_unsupported_sampling_on_llm_calls(kernel, sink, mode) -> None:
+    fake = FakeProvider(default="ok")  # declares every field
+    spec = ModelSpec(name="main", model="fake-main", provider="openai",
+                     unsupported_sampling=("seed",), sampling=Sampling(seed=9, top_p=0.5))
+    kernel.llm.register_provider("main", fake, spec)
+    # A host-declared default is dropped quietly under both modes.
+    await kernel.llm.complete("q", opts=GenerateOptions(on_unsupported=mode))
+    assert fake.calls[0].provider_context.request.sampling == Sampling(top_p=0.5)
+    assert not [e for e in sink.events if e.get("event") == "sampling.dropped"]
+    explicit = GenerateOptions(sampling=Sampling(seed=4, top_k=3), on_unsupported=mode)
+    if mode == "raise":
+        with pytest.raises(UnsupportedRequestError) as info:
+            await kernel.llm.complete("q", opts=explicit)
+        assert info.value.fields == ("seed",) and len(fake.calls) == 1
+    else:
+        await kernel.llm.complete("q", opts=explicit)
+        sent = fake.calls[1].provider_context.request.sampling
+        assert sent.seed is None and sent.top_k == 3
+        dropped = [e for e in sink.events if e.get("event") == "sampling.dropped"]
+        assert [e["fields"] for e in dropped] == [["seed"]]
+
+
+async def test_pass_through_provider_fails_closed_under_raise_only(kernel, sink) -> None:
+    fake = FakeProvider(default="ok")
+    fake.supported_sampling_fields = None  # type: ignore[assignment]
+    kernel.llm.register_provider("main", fake, MAIN)
+    with pytest.raises(UnsupportedRequestError) as info:
+        await kernel.llm.complete("q", opts=GenerateOptions(
+            sampling=Sampling(temperature=0.1, seed=4), on_unsupported="raise",
+        ))
+    assert info.value.fields == ("temperature", "seed") and fake.calls == []
+    await kernel.llm.complete("q", opts=GenerateOptions(sampling=Sampling(seed=4)))
+    assert fake.calls[0].provider_context.request.sampling.seed == 4
+    assert not [e for e in sink.events if e.get("event") == "sampling.dropped"]
+
+
+async def test_strict_fallback_decides_on_the_primary(tmp_path) -> None:
+    from nanobot.providers.fallback_provider import FallbackProvider
+
+    sink = RecordingSink()
+    config = {
+        "agents": {"defaults": {"model_preset": "main", "fallback_models": ["fb"]}},
+        "providers": {"openai": {"api_key": "sk-test"}},
+        "model_presets": {
+            "main": {"model": "gpt-4.1", "provider": "openai"},
+            "fb": {"model": "gpt-4.1-mini", "provider": "openai"},
+        },
+    }
+    env = Environment.from_config(
+        config, state_dir=tmp_path / "s", work_dir=tmp_path / "w", trace=sink,
+    )
+    primary = FakeProvider(default=error(503, "primary down"))  # supports seed
+    candidate = FakeProvider(default="from fallback")
+    candidate.supported_sampling_fields = frozenset({"temperature", "max_tokens"})
+    async with Kernel(env) as kernel:
+        wrapper = kernel.llm._route("main").provider
+        assert isinstance(wrapper, FallbackProvider)
+        wrapper._primary = primary
+        wrapper._provider_factory = lambda preset: candidate
+        completion = await kernel.llm.complete("q", opts=GenerateOptions(
+            attempts=1, sampling=Sampling(seed=5), on_unsupported="raise",
+        ))
+        assert completion.text == "from fallback"
+        assert primary.calls[0].provider_context.request.sampling.seed == 5
+        sent = candidate.calls[0].provider_context.request.sampling
+        assert sent is None or sent.seed is None
+        # The primary not supporting seed raises before anything is sent.
+        primary.supported_sampling_fields = frozenset({"temperature", "max_tokens"})
+        before = len(primary.calls), len(candidate.calls)
+        with pytest.raises(UnsupportedRequestError):
+            await kernel.llm.complete("q", opts=GenerateOptions(
+                attempts=1, sampling=Sampling(seed=5), on_unsupported="raise",
+            ))
+        assert (len(primary.calls), len(candidate.calls)) == before

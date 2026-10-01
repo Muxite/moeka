@@ -56,6 +56,7 @@ SURFACE: dict[str, list[str]] = {
         "TransientError",
         "TruncatedError",
         "UnsupportedRequestError",
+        "VariantError",
     ],
     "moeka.llm": [
         "BatchResult",
@@ -93,14 +94,14 @@ SURFACE: dict[str, list[str]] = {
     ],
     "moeka.trace": [
         "EVENTS", "FanoutSink", "JsonlTraceSink", "LoguruTraceSink", "MemoryTraceSink",
-        "NullTraceSink", "TraceSink", "Tracer",
+        "NullTraceSink", "TraceSink", "Tracer", "args_digest",
     ],
     "moeka.usage": [
         "Attribution", "SCHEMA_VERSION", "SUPPORTED_SCHEMA_VERSIONS", "Subscription",
         "UNATTRIBUTED", "USAGE_EVENTS", "UsageFilter", "UsageTotals", "UsageView",
         "WASTE_LABELS", "bind_attribution", "current_attribution",
     ],
-    "moeka.variants": ["Fingerprint", "Variant"],
+    "moeka.variants": ["Fingerprint", "Variant", "VariantError"],
 }
 
 
@@ -146,11 +147,12 @@ def test_reexports_are_the_implementation_objects() -> None:
 
 def test_errors_are_the_implementation_classes() -> None:
     import moeka.errors
-    from nanobot.kernel import instance_lock, llm_errors
+    from nanobot.kernel import instance_lock, llm_errors, variants
 
     for name in moeka.errors.__all__:
         impl = instance_lock if name in ("InstanceLockedError", "ReadOnlyKernelError") \
-            else llm_errors
+            else variants if name == "VariantError" else llm_errors
         assert getattr(moeka.errors, name) is getattr(impl, name)
+    assert issubclass(moeka.errors.VariantError, ValueError)
     assert not hasattr(moeka.errors, "classify")
     assert issubclass(moeka.errors.LLMTimeoutError, TimeoutError)

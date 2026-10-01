@@ -134,10 +134,153 @@ def test_from_profile_maps_fields(tmp_path: Path) -> None:
         AgentSpec.from_profile(AgentProfileConfig(planning=True))
 
 
-def test_max_tool_errors_not_implemented(make_kernel) -> None:
+# -- max_tool_errors (spec 006 K4) -----------------------------------------------------
+
+
+GHOST = tool_call("ghost_tool", {"a": 1})
+
+
+def _calls(*calls: tuple[str, dict[str, Any]]) -> LLMResponse:
+    return LLMResponse(
+        content="",
+        tool_calls=[ToolCallRequest(id=f"c{i}", name=n, arguments=a)
+                    for i, (n, a) in enumerate(calls)],
+        finish_reason="tool_calls",
+        usage=LLMUsage.reported(input_tokens=10, output_tokens=5),
+    )
+
+
+@pytest.mark.parametrize("n", [1, 2, 7, 1000])
+def test_max_tool_errors_builds_for_positive_ints(make_kernel, n) -> None:
     kernel = make_kernel(FakeProvider())
-    with pytest.raises(NotImplementedError):
-        kernel.agent(AgentSpec(name="x", limits=RunLimits(max_tool_errors=3)))
+    agent = kernel.agent(AgentSpec(name=f"x{n}", limits=RunLimits(max_tool_errors=n)))
+    assert agent.tools  # builds the loop without NotImplementedError
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, False, 1.5, "3"])
+def test_max_tool_errors_validation(bad) -> None:
+    with pytest.raises(ValueError):
+        RunLimits(max_tool_errors=bad)
+
+
+async def test_tool_error_ceiling_stops_the_run(make_kernel, sink) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="te", limits=RunLimits(max_tool_errors=3, max_iterations=20))
+    result = await kernel.agent(spec).run("go")
+    assert len(fake.calls) == 3
+    assert result.stop_reason == "tool_error"
+    assert result.iterations == 3
+    assert result.error == "max_tool_errors: 3 tool errors (limit 3)"
+    events = _for_trace(sink, result.trace_id)
+    [done] = [e for e in events if e["event"] == "run.completed"]
+    assert done["stop_reason"] == "tool_error"
+    failed = [e for e in events if e["event"] == "tool.call" and not e["ok"]]
+    assert len(failed) == 3
+
+
+async def test_tool_error_ceiling_runs_every_call_of_the_response(make_kernel, sink) -> None:
+    fake = FakeProvider(default=_calls(
+        ("ghost", {}), ("ghost", {"b": 1}), ("ghost", {"c": 1}), ("list_dir", {"path": "."}),
+    ))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="all", limits=RunLimits(max_tool_errors=2))
+    result = await kernel.agent(spec).run("go")
+    assert len(fake.calls) == 1
+    assert result.stop_reason == "tool_error"
+    assert result.error == "max_tool_errors: 3 tool errors (limit 2)"
+    calls = [e for e in _for_trace(sink, result.trace_id) if e["event"] == "tool.call"]
+    assert len(calls) == 4 and sum(1 for e in calls if e["ok"]) == 1
+
+
+async def test_tool_errors_counted_across_iterations_and_kinds(make_kernel) -> None:
+    # read_file of a missing file is an error result; an unknown tool is invalid_args.
+    fake = FakeProvider([
+        tool_call("read_file", {"path": "missing.txt"}),
+        tool_call("list_dir", {"path": "."}),
+        GHOST,
+        "unused",
+    ])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="k", limits=RunLimits(max_tool_errors=2))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "tool_error"
+    assert len(fake.calls) == 3 and result.iterations == 3
+
+
+async def test_tool_errors_below_the_ceiling_complete(make_kernel) -> None:
+    fake = FakeProvider([GHOST, GHOST, "done"])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="ok", limits=RunLimits(max_tool_errors=3))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "completed" and result.content == "done"
+
+
+async def test_tool_error_count_is_per_run(make_kernel) -> None:
+    fake = FakeProvider([GHOST, "first", GHOST, "second"])
+    kernel = make_kernel(fake)
+    agent = kernel.agent(AgentSpec(name="pr", limits=RunLimits(max_tool_errors=2)))
+    assert (await agent.run("one")).stop_reason == "completed"
+    assert (await agent.run("two")).stop_reason == "completed"
+
+
+async def test_no_ceiling_by_default(make_kernel) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    result = await kernel.agent(
+        AgentSpec(name="none", limits=RunLimits(max_iterations=5)),
+    ).run("go")
+    assert result.stop_reason == "max_iterations"
+
+
+async def test_tool_error_wins_over_max_iterations(make_kernel) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="last", limits=RunLimits(max_tool_errors=2, max_iterations=2))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "tool_error" and len(fake.calls) == 2
+
+
+async def test_ask_user_wins_and_is_not_counted(make_kernel) -> None:
+    fake = FakeProvider([_calls(("ghost", {}), ("ask_user", {"question": "Which?"}))])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="au", limits=RunLimits(max_tool_errors=1))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "ask_user"
+
+
+async def test_ask_user_interrupt_not_counted(make_kernel) -> None:
+    fake = FakeProvider([
+        _calls(("ghost", {})),
+        _calls(("ask_user", {"question": "Which?"})),
+    ])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="au2", limits=RunLimits(max_tool_errors=2))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "ask_user"
+
+
+async def test_policy_denials_win_over_tool_error(make_kernel) -> None:
+    fake = FakeProvider(default=_calls(("list_dir", {"path": "."}), ("ghost", {})))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(
+        name="pd", policy=_DenyAll(),
+        limits=RunLimits(max_policy_denials=1, max_tool_errors=1),
+    )
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "policy_denials"
+
+
+def test_tool_error_stream_ends_with_run_failed(make_kernel) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    agent = kernel.agent(AgentSpec(name="st", limits=RunLimits(max_tool_errors=1)))
+    with agent.stream_sync("go") as stream:
+        events = list(stream)
+        result = stream.result()
+    assert events[-1].type == "run.failed"
+    assert events[-1].metadata["stop_reason"] == "tool_error"
+    assert result.stop_reason == "tool_error"
 
 
 def test_kernel_agent_caches_per_spec(make_kernel) -> None:
@@ -628,3 +771,127 @@ async def test_same_session_key_serialised_across_agents(make_kernel) -> None:
     assert len(turns) == 4
     assert [role for role, _ in turns] == ["user", "assistant", "user", "assistant"]
     assert {turns[0][1], turns[2][1]} == {"from a", "from b"}
+
+
+# -- strict sampling (spec 006 K5) -----------------------------------------------------
+
+
+def _no_seed(fake: FakeProvider) -> FakeProvider:
+    fake.supported_sampling_fields = frozenset({"temperature", "max_tokens", "reasoning_effort"})
+    return fake
+
+
+def test_on_unsupported_validation() -> None:
+    assert AgentSpec(name="a").on_unsupported == "drop"
+    assert AgentSpec(name="a", on_unsupported="raise") != AgentSpec(name="a")
+    assert hash(AgentSpec(name="a", on_unsupported="raise")) == hash(
+        AgentSpec(name="a", on_unsupported="raise")
+    )
+    for bad in ("strict", "", None, 1):
+        with pytest.raises(ValueError):
+            AgentSpec(name="a", on_unsupported=bad)  # type: ignore[arg-type]
+
+
+async def test_strict_sampling_raises_before_any_call(make_kernel, sink) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = _no_seed(FakeProvider(["never"]))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="s", on_unsupported="raise",
+                     sampling=Sampling(top_p=0.5, seed=7, temperature=0.1))
+    result = await kernel.agent(spec).run("go")
+    assert fake.calls == []
+    assert result.stop_reason == "error"
+    assert isinstance(result.error, UnsupportedRequestError)
+    assert result.error.fields == ("top_p", "seed")
+    events = _for_trace(sink, result.trace_id)
+    assert not [e for e in events if e["event"] == "sampling.dropped"]
+    [done] = [e for e in events if e["event"] == "run.completed"]
+    assert done["stop_reason"] == "error"
+
+
+async def test_strict_sampling_run_argument_is_explicit(make_kernel) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = _no_seed(FakeProvider(["never"]))
+    kernel = make_kernel(fake)
+    agent = kernel.agent(AgentSpec(name="s2", on_unsupported="raise"))
+    result = await agent.run("go", sampling=Sampling(seed=7))
+    assert fake.calls == [] and isinstance(result.error, UnsupportedRequestError)
+    assert result.error.fields == ("seed",)
+
+
+async def test_drop_sampling_sends_without_the_field(make_kernel, sink) -> None:
+    fake = _no_seed(FakeProvider(["ok"]))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="d", sampling=Sampling(seed=7))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "completed" and len(fake.calls) == 1
+    request = fake.calls[0].provider_context.request
+    assert request.sampling is None or request.sampling.seed is None
+    dropped = [e for e in _for_trace(sink, result.trace_id)
+               if e["event"] == "sampling.dropped"]
+    assert len(dropped) == 1 and dropped[0]["fields"] == ["seed"]
+
+
+async def test_strict_model_defaults_are_dropped_quietly(make_kernel, sink, tmp_path) -> None:
+    fake = _no_seed(FakeProvider(["ok"]))
+    kernel = make_kernel()
+    kernel.llm.register_provider("main", fake, ModelSpec(
+        name="main", model="fake-main", provider="openai", sampling=Sampling(seed=3),
+    ))
+    result = await kernel.agent(AgentSpec(name="q", on_unsupported="raise")).run("go")
+    assert result.stop_reason == "completed" and len(fake.calls) == 1
+    assert not sink.of("sampling.dropped")
+
+
+async def test_strict_pass_through_provider_fails_closed(make_kernel) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = FakeProvider(["ok", "ok"])
+    fake.supported_sampling_fields = None  # type: ignore[assignment]
+    kernel = make_kernel(fake)
+    strict = await kernel.agent(
+        AgentSpec(name="p1", on_unsupported="raise", sampling=Sampling(seed=1)),
+    ).run("go")
+    assert isinstance(strict.error, UnsupportedRequestError) and fake.calls == []
+    lax = await kernel.agent(AgentSpec(name="p2", sampling=Sampling(seed=1))).run("go")
+    assert lax.stop_reason == "completed" and len(fake.calls) == 1
+    assert fake.calls[0].provider_context.request.sampling.seed == 1
+
+
+async def test_model_spec_unsupported_sampling_on_agent_runs(make_kernel, sink) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = FakeProvider(["ok"])  # declares seed support
+    kernel = make_kernel()
+    kernel.llm.register_provider("main", fake, ModelSpec(
+        name="main", model="fake-main", provider="openai", unsupported_sampling=("seed",),
+    ))
+    strict = await kernel.agent(
+        AgentSpec(name="h1", on_unsupported="raise", sampling=Sampling(seed=1)),
+    ).run("go")
+    assert isinstance(strict.error, UnsupportedRequestError)
+    assert strict.error.fields == ("seed",) and fake.calls == []
+    lax = await kernel.agent(AgentSpec(name="h2", sampling=Sampling(seed=1))).run("go")
+    assert lax.stop_reason == "completed"
+    sent = fake.calls[0].provider_context.request.sampling
+    assert sent is None or sent.seed is None
+    dropped = [e for e in _for_trace(sink, lax.trace_id) if e["event"] == "sampling.dropped"]
+    assert [e["fields"] for e in dropped] == [["seed"]]
+
+
+def test_model_spec_unsupported_sampling_validation() -> None:
+    assert ModelSpec(name="m", model="m", provider="p").unsupported_sampling == ()
+    spec = ModelSpec(name="m", model="m", provider="p", unsupported_sampling=["seed", "top_k"])
+    assert spec.unsupported_sampling == ("seed", "top_k")
+    hash(spec)
+    for bad in (("bogus",), ("extra_body",), "seed", (1,)):
+        with pytest.raises(ValueError):
+            ModelSpec(name="m", model="m", provider="p", unsupported_sampling=bad)
+
+
+def test_no_event_claims_a_field_was_honoured() -> None:
+    from moeka.trace import EVENTS
+
+    assert not [name for name in EVENTS if "honour" in name or "honor" in name]

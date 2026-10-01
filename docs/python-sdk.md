@@ -128,13 +128,21 @@ Environment.for_host(
     key needs neither.
 - `models`: one `ModelSpec` per model alias; calls and agents name aliases.
   - `ModelSpec(name, model, provider, tier=None, context_window=None, max_tokens=None,
-    sampling=None, price_in=None, price_out=None, price_cache_read=None, native_json=None)`.
+    sampling=None, price_in=None, price_out=None, price_cache_read=None, native_json=None,
+    unsupported_sampling=())`.
   - `tier` is one of `local`, `fast`, `standard`, `frontier`.
   - Prices are USD per million tokens. No price means unknown cost (never free),
     except `tier="local"` with no prices, which costs 0.
   - `sampling` holds the model's default `Sampling`; set fields of a call's own
     sampling win.
   - `native_json=False` skips the native `response_format` round in `complete_json`.
+  - `unsupported_sampling`: `Sampling` field names the host knows this backend
+    ignores (for example `("seed",)` for a local server that accepts a seed and
+    never applies it). They count as unsupported whatever the provider declares,
+    for agent runs and `kernel.llm` calls alike: dropped and reported
+    (`sampling.dropped`) under `on_unsupported="drop"`, `UnsupportedRequestError`
+    under `"raise"`, dropped quietly when they come from `sampling` defaults. A
+    name that is not a `Sampling` field raises `ValueError`.
   - The name `default` is reserved.
 - `trace`: the host's `TraceSink` (see [Tracing](#tracing)); default discards.
 - `tools`: the `tools` config section as a dict (web search keys, exec settings).
@@ -245,7 +253,17 @@ async with kernel.llm.stream(msgs) as stream:
   events and its budget estimate, merged over the active span's tags (these win).
 - `on_unsupported`: `"drop"` (default: omit fields the provider cannot honour
   and emit `sampling.dropped`) or `"raise"` (`UnsupportedRequestError` before
-  anything is sent). Rollouts that must be reproducible use `"raise"`.
+  anything is sent). Rollouts that must be reproducible use `"raise"`. Under
+  `"raise"` a provider that declares no field support at all (pass-through)
+  fails closed: every explicit sampling field is unsupported. A fallback
+  provider decides against its primary; fallback candidates still drop what
+  they cannot send. Model defaults (`ModelSpec.sampling`) are never strict: an
+  unsupported default is dropped quietly under both modes.
+  - Stated limit: a backend that accepts a field on the wire and ignores it,
+    when neither the provider nor `ModelSpec.unsupported_sampling` declares it
+    unsupported, cannot be detected in-process. No event or field ever claims a
+    seed (or any field) was honoured; declare such fields in
+    `ModelSpec.unsupported_sampling`.
 
 `Sampling(temperature, top_p, top_k, min_p, presence_penalty, frequency_penalty,
 repetition_penalty, logit_bias, seed, stop, max_tokens, reasoning_effort)`: every
@@ -410,6 +428,24 @@ sink.close()
   `iteration` / `tool.call` / `run.completed` for agents, `skill.listed` /
   `skill.read`, `policy.decision`, `tool.invalid`, `mcp.error`, `fact.recorded`,
   `artifact.proposed` / `artifact.rejected`.
+- `tool.call` carries `args_digest`: the sha256 hex of the canonical JSON
+  (sorted keys, `(",", ":")` separators, `ensure_ascii=False`,
+  `allow_nan=False`) of the arguments as the model produced them (`None` counts
+  as `{}`; a string is parsed as JSON when it parses, else digested as a JSON
+  string). `None` when the arguments cannot be canonicalised (`NaN`, a
+  non-JSON value). No numeric normalisation: `1` and `1.0` differ. Equal
+  digests mean repeated calls; the raw arguments are never on the event.
+  `moeka.trace.args_digest(arguments)` is the same function.
+- `skill.read` (`skill`, `path`, `via`, `call_id`) fires once per tool call and
+  skill file (`.../skills/<name>/SKILL.md`, or a `SKILL.md` directly under the
+  variant's `builtin_skills_dir`) whose successful result returned that file's
+  content: `read_file` (any successful read, ranges included) and `grep` with
+  `output_mode="content"` (one per distinct skill file with a returned line).
+  `via` is the tool name; `call_id` joins `tool.call.call_id` (`None` outside a
+  runner); it is emitted before that call's `tool.call`. Failed calls,
+  `files_with_matches` / `count` greps, other files and fingerprinting emit
+  none. It is a lower bound: reads through `exec`, `exec_session`, MCP or other
+  tools are not seen.
 - `span(name, **tags)` is a sync and async context manager. A root span mints a
   fresh `trace_id`; a nested span keeps it, extends the path and merges its tags
   over the outer ones. Events outside any span have `trace_id` `None`.
@@ -457,7 +493,8 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
 - `AgentSpec(name, system_prompt=None, bootstrap={}, model=None, sampling=None,
   tools_allow=None, tools_deny=(), actions=(), mcp_servers={}, skills_include=None,
   skills_exclude=(), inline_skills=(), memory=False, doc_scopes=(),
-  limits=RunLimits(), policy=None, offline=False)` is frozen and hashable.
+  limits=RunLimits(), policy=None, offline=False, memory_key=None,
+  on_unsupported="drop")` is frozen and hashable.
   - `system_prompt` becomes the agent's `AGENTS.md` persona unless `bootstrap`
     supplies one; `bootstrap` maps section names (`AGENTS.md`, `SOUL.md`,
     `USER.md`, or any other name, appended) to text. Nothing is written to disk.
@@ -478,6 +515,18 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
     raises `ValueError`. `exec` follows moeka's permissive posture (strict mode
     requires a sandbox); deny it with `tools_deny=("exec", "exec_session")` or
     leave it out of `tools_allow` when the agent must not run commands.
+  - `on_unsupported` (`"drop"` or `"raise"`, anything else `ValueError`) is the
+    strictness of the run's explicit sampling: the run's `sampling=` argument,
+    else `AgentSpec.sampling` (`ModelSpec.sampling` defaults are never strict).
+    `"drop"` removes a field that is unsupported for a model call from that
+    request and emits one `sampling.dropped` per affected call. `"raise"` sends
+    nothing: the run ends with `stop_reason="error"`, `result.error` an
+    `UnsupportedRequestError` whose `fields` are the unsupported explicit fields
+    in `Sampling` field order, no `sampling.dropped`, and zero provider calls.
+    Unsupported means what the `kernel.llm` `on_unsupported` section says
+    (provider declaration, pass-through fails closed, `ModelSpec.unsupported_sampling`).
+    The same stated limit applies: a backend that silently ignores a field
+    nobody declared cannot be detected.
   - `inline_skills` are `InlineSkillConfig` values or dicts
     (`{"name", "content", "description"}`).
   - Every kernel agent keeps its memory files (`MEMORY.md`, the archived
@@ -504,8 +553,19 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
     True, so a converted spec opens semantic memory unless the profile says
     otherwise.
 - `RunLimits(max_iterations=None, max_policy_denials=6, max_tool_errors=None,
-  deadline_s=None)`. `max_tool_errors` is not implemented yet (`kernel.agent`
-  raises `NotImplementedError` when it is set).
+  deadline_s=None)`. Every limit is a positive int (or `None`); `0`, negatives,
+  bools and non-ints raise `ValueError`.
+  - `max_tool_errors=N` ends the run with `stop_reason="tool_error"` once `N`
+    tool calls of that run failed (every `tool.call` event with `ok=False`:
+    unknown tool or invalid arguments, a raised exception, an error result, a
+    result that failed its output schema, exec-guard refusals included; an
+    `ask_user` interruption and capability-gate denials are not counted). The
+    count starts at 0 for every run. It is checked after all tool calls of a
+    model response ran (none is cancelled mid-response), after the `ask_user`
+    and `policy_denials` stops and before the iteration budget, and no further
+    model call is made. `result.error` is
+    `"max_tool_errors: {count} tool errors (limit {N})"`. `None` (default): tool
+    errors never end a run by themselves.
 - `run(message, *, session=None, media=(), sampling=None, deadline_s=None,
   tags=None) -> RunResult`:
   - `session` is a key or a `kernel.sessions` handle; default `"agent:<name>"`.
@@ -533,7 +593,7 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
 | `max_iterations` | `RunLimits.max_iterations` (or the config default) was reached. |
 | `policy_denials` | `max_policy_denials` policy denials in one run (I5). |
 | `empty_final_response` | The model ended with no text. |
-| `tool_error` | A tool raised a fatal error and the run ended. |
+| `tool_error` | A tool raised a fatal error, or `max_tool_errors` was reached. |
 | `error` | A provider error; `result.error` is the typed `LLMError`. |
 | `budget` | The budget refused a call; `result.error` is the `BudgetExceeded`. |
 | `deadline` | `deadline_s` expired. |
@@ -558,8 +618,8 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
       result = await events.result()
   ```
 
-- `agent.tools` lists `ToolInfo(name, description, read_only, parameters)` as the
-  model sees them; `agent.fingerprint()` digests what the model sees (see
+- `agent.tools` (or `agent.tools()`: the list is also callable) lists
+  `ToolInfo(name, description, read_only, parameters)` as the model sees them; `agent.fingerprint()` digests what the model sees (see
   [Variants](#variants-and-fingerprints)); `await agent.aclose()` cancels in-flight
   runs and closes the loop (the kernel closes all agents on `close`).
 
@@ -783,15 +843,44 @@ with Kernel(env, variant=variant) as kernel:
 ```
 
 - `Variant(name="base", tool_descriptions_dir=None, tool_descriptions={},
-  templates_dir=None, builtin_skills_dir=None, bootstrap={})`. Two kernels with
-  different variants in one process never see each other's overrides.
-  `Variant()` and `None` both mean the built-in text.
+  templates_dir=None, builtin_skills_dir=None, bootstrap={},
+  tool_param_descriptions={})`. Two kernels with different variants in one
+  process never see each other's overrides. `Variant()` and `None` both mean
+  the built-in text.
 - Tool description overrides apply to tools the loader builds; MCP tools and
-  host actions keep their own descriptions. Templates cover the main system
+  host actions keep their own descriptions.
+- `tool_param_descriptions` maps a tool name to `{parameter path: description}`
+  and replaces (or adds) that parameter's `description` in the schema the model
+  sees (`agent.tools`, the provider request, the `tools` fingerprint component),
+  with the same coverage as `tool_descriptions`. A path is
+  `segment ("." segment)*` with `segment = name ("[]")*`: a name descends into
+  `properties`, each `[]` into `items`, e.g. `"path"`, `"edits[].old_text"`,
+  `"grid[][]"`. Only `description` keys change; types, constraints and
+  `required` stay the tool's own, and argument validation still uses the base
+  schema. A malformed value raises `TypeError`, a malformed path `ValueError`
+  at construction. An entry for a tool the agent does not load is ignored; a
+  path that does not resolve for a loaded tool makes the agent's build (the
+  first `agent.tools`, `agent.fingerprint()` or run) raise
+  `moeka.errors.VariantError` (a `ValueError` with `variant`, `tool`, `path`). Templates cover the main system
   prompt and sub-agent prompts; memory and runner templates stay built-in.
 - `Fingerprint(digest, components)`: sha256 over the rendered system prompt,
-  the tool definitions, the model and the sampling (`components` holds each
-  part's hash). Workspace and skills paths are normalised and memory is
+  the tool definitions, the model, the sampling and the skills (`components`
+  holds each part's hash under `system_prompt`, `tools`, `model`, `sampling`,
+  `skills`; `digest` is the sha256 of the sorted `name=hex` lines joined by
+  newlines).
+- `components["skills"]` covers every byte of the agent's effective skill set:
+  inline, workspace, plugin and built-in skills after shadowing and
+  `skills_include` / `skills_exclude`, always-on and unavailable skills
+  included. Each file-based skill `N` contributes one record per regular file
+  under its directory (symlinks to files followed; `__pycache__`, dot paths and
+  `*.pyc` skipped): key `file:N/<relative path>`, value the file's sha256. Each
+  inline skill contributes `inline:N` with the sha256 of the canonical JSON of
+  its `name`, `description`, `content` and `metadata`. The component is the
+  sha256 of `key\nvalue\n` over the records sorted by key (the empty set
+  hashes the empty string). It never depends on absolute paths, mtimes or
+  directory order, so a copied tree gives the same value and editing any
+  counted byte changes it. `fingerprint()` reads the files at call time, emits
+  no `skill.read`, and raises `OSError` when a counted file cannot be read. Workspace and skills paths are normalised and memory is
   excluded (the long-term memory and "Recent History" sections are left out even
   for a `memory=True` agent), so the digest is stable across rollouts of one
   variant. `fingerprint()` connects the agent's MCP servers first, so their tools

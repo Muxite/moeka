@@ -34,6 +34,28 @@ def file_read_context(
         _current_file_read.reset(token)
 
 
+# The model's tool-call id of the tool call executing in this context (spec 006 K6):
+# set by the runner around every tool execution, ``None`` outside a runner.
+_current_tool_call_id: ContextVar[str | None] = ContextVar(
+    "nanobot_tool_call_id", default=None,
+)
+
+
+@contextmanager
+def tool_call_context(call_id: str | None) -> Generator[None]:
+    """Bind *call_id* as the current tool call's id (see :func:`current_tool_call_id`)."""
+    token = _current_tool_call_id.set(call_id)
+    try:
+        yield
+    finally:
+        _current_tool_call_id.reset(token)
+
+
+def current_tool_call_id() -> str | None:
+    """The id of the tool call executing now (``None`` outside a runner)."""
+    return _current_tool_call_id.get()
+
+
 @dataclass(slots=True)
 class ReadState:
     offset: int

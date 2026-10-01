@@ -220,7 +220,11 @@ class ToolLoader:
                         builtin_names.add(tool.name)
                 except LoadError:
                     raise  # a broken variant file fails the load, never drops a tool
-                except Exception:
+                except Exception as exc:
+                    from nanobot.kernel.variants import VariantError  # lazy: import cycle
+
+                    if isinstance(exc, VariantError):
+                        raise  # a variant path that does not resolve fails the build
                     logger.exception("Failed to register tool: %s", cls_label)
         if self._plugin_registry is not None:
             registered.extend(
@@ -457,7 +461,11 @@ def _capability_grant(
 
 
 def _apply_variant(ctx: ToolContext, tool: Tool) -> str | None:
-    """Set the variant's description override on *tool* (this instance); return it."""
+    """Set the variant's description and parameter-description overrides on *tool*
+    (this instance); return the description override.
+
+    A parameter path that does not resolve raises ``VariantError`` (the build fails).
+    """
     variant = getattr(ctx, "variant", None)
     if variant is None:
         return None
@@ -467,7 +475,20 @@ def _apply_variant(ctx: ToolContext, tool: Tool) -> str | None:
         raise LoadError(f"variant {variant.name!r}: {exc}") from exc
     if text is not None:
         tool.set_description_override(text)
+    apply_variant_parameters(variant, tool)
     return text
+
+
+def apply_variant_parameters(variant: Any, tool: Tool) -> None:
+    """Set *variant*'s parameter descriptions for *tool* on this instance (if any)."""
+    parameters_for = getattr(variant, "parameters_for", None)
+    if not callable(parameters_for):
+        return
+    if not getattr(variant, "tool_param_descriptions", {}).get(tool.name):
+        return  # never touch a tool's schema without an override for it
+    schema = parameters_for(tool.name, tool.parameters or {})
+    if schema is not None:
+        tool.set_parameters_override(schema)
 
 
 def _emit(ctx: ToolContext, event: dict[str, Any]) -> None:

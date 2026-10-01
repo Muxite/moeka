@@ -274,6 +274,13 @@ class RequestExtras:
     * ``max_attempts``: caps the standard retry loop's physical attempts for this
       request (``1`` = no retry); ``None`` keeps the provider's retry schedule.
       Each fallback candidate gets the same cap. Ignored in persistent mode.
+      Under ``"raise"`` a provider that declares no support information
+      (``_sampling_support() is None``, pass-through) fails closed: every explicit
+      sampling field counts as unsupported (spec 006 FR-032).
+    * ``unsupported_sampling``: sampling fields the host declared the backend
+      ignores (``ModelSpec.unsupported_sampling``); they count as unsupported
+      whatever the provider declares (dropped and reported, or raised on, when
+      explicit; dropped quietly as defaults).
     * ``default_sampling``: the model's own sampling defaults (a ``ModelSpec``),
       applied under ``sampling``. Fields the provider cannot honour are dropped
       quietly (debug log only): ``on_unsupported`` governs only what the caller
@@ -289,6 +296,7 @@ class RequestExtras:
     on_unsupported: Literal["drop", "raise"] = "drop"
     max_attempts: int | None = None
     default_sampling: Sampling | None = None
+    unsupported_sampling: tuple[str, ...] = ()
 
 
 def plain_request_body(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -324,6 +332,15 @@ def _overlay_sampling(base: Sampling | None, top: Sampling | None) -> Sampling |
 CORE_SAMPLING_FIELDS: frozenset[str] = frozenset({"temperature", "max_tokens", "reasoning_effort"})
 # Pseudo-field for ``RequestExtras.extra_body`` in the supported-field sets.
 EXTRA_BODY_FIELD = "extra_body"
+
+
+def all_sampling_fields() -> frozenset[str]:
+    """Every ``Sampling`` field name (a pass-through provider's support)."""
+    from dataclasses import fields
+
+    from nanobot.kernel.sampling import Sampling
+
+    return frozenset(f.name for f in fields(Sampling))
 
 
 @dataclass(frozen=True)
@@ -1566,7 +1583,22 @@ class LLMProvider(ABC):
             if source is not None and source.reasoning_effort is not None:
                 effort = source.reasoning_effort
         model = kw.get("model")
-        supported = self._sampling_support(model, effort, sampling)
+        host_unsupported = frozenset(extras.unsupported_sampling)
+        strict = extras.on_unsupported == "raise"
+
+        def support(candidate: Sampling | None) -> frozenset[str] | None:
+            declared = self._sampling_support(model, effort, candidate)
+            if declared is None:
+                if not strict and not host_unsupported:
+                    return None
+                # Pass-through: everything, or (raise) no sampling field at all.
+                declared = (
+                    frozenset({EXTRA_BODY_FIELD}) if strict
+                    else all_sampling_fields() | {EXTRA_BODY_FIELD}
+                )
+            return declared - host_unsupported
+
+        supported = support(sampling)
         if supported is None:
             if defaults is not None:
                 sampling = _overlay_sampling(defaults, sampling)
@@ -1595,7 +1627,9 @@ class LLMProvider(ABC):
                 extras = replace(extras, extra_body=None)
 
         if defaults is not None:
-            sampling = self._merge_default_sampling(model, effort, defaults, sampling, model_name)
+            sampling = self._merge_default_sampling(
+                model, effort, defaults, sampling, model_name, support=support,
+            )
         self._apply_core_sampling(kw, sampling)
         kw["provider_context"] = replace(
             context,
@@ -1611,16 +1645,25 @@ class LLMProvider(ABC):
         defaults: Sampling,
         explicit: Sampling | None,
         model_name: str,
+        support: Callable[[Sampling | None], frozenset[str] | None] | None = None,
     ) -> Sampling | None:
-        """Layer *defaults* under *explicit*, quietly dropping what cannot be sent."""
+        """Layer *defaults* under *explicit*, quietly dropping what cannot be sent.
+
+        *support* answers the supported fields for a candidate sampling (default:
+        ``_sampling_support`` for this model and effort).
+        """
+        if support is None:
+            def support(candidate: Sampling | None) -> frozenset[str] | None:
+                return self._sampling_support(model, effort, candidate)
+
         explicit_fields = set(explicit.set_fields()) if explicit is not None else set()
         merged = _overlay_sampling(defaults, explicit)
         if merged is None:
             return None
 
         def _explicit_ok(candidate: Sampling) -> bool:
-            support = self._sampling_support(model, effort, candidate)
-            return support is None or explicit_fields <= support
+            supported = support(candidate)
+            return supported is None or explicit_fields <= supported
 
         if not _explicit_ok(merged):
             # A default conflicts with an explicit field: drop the (first) default
@@ -1633,10 +1676,12 @@ class LLMProvider(ABC):
                     break
             else:
                 merged = _clear_sampling(merged, default_only)
-        support = self._sampling_support(model, effort, merged)
-        if support is None:
+        supported = support(merged)
+        if supported is None:
             return merged
-        quiet = [n for n in merged.set_fields() if n not in support and n not in explicit_fields]
+        quiet = [
+            n for n in merged.set_fields() if n not in supported and n not in explicit_fields
+        ]
         if quiet:
             logger.debug(
                 "model defaults not supported by {}/{}; dropped: {}",

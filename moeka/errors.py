@@ -1,5 +1,6 @@
 """Typed errors raised by model calls (``kind`` is the stable category), plus the
-instance-lock errors of ``Kernel(env, attach=...)`` (spec 005)."""
+instance-lock errors of ``Kernel(env, attach=...)`` (spec 005) and ``VariantError``
+(a variant override that does not fit an agent's tools, spec 006)."""
 
 from nanobot.kernel.instance_lock import InstanceLockedError, ReadOnlyKernelError
 from nanobot.kernel.llm_errors import (
@@ -16,6 +17,7 @@ from nanobot.kernel.llm_errors import (
     TruncatedError,
     UnsupportedRequestError,
 )
+from nanobot.kernel.variants import VariantError
 
 __all__ = [
     "AuthError",
@@ -32,4 +34,5 @@ __all__ = [
     "TransientError",
     "TruncatedError",
     "UnsupportedRequestError",
+    "VariantError",
 ]

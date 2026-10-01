@@ -405,12 +405,19 @@ EVENTS: Mapping[str, str] = MappingProxyType({
     "iteration": "session_key, iteration, tool_calls, finish_reason, usage (this "
                  "iteration's token delta)",
     "tool.call": "session_key, iteration, tool, call_id, ok, args_valid (False for "
-                 "invalid arguments / unknown tool), error_kind, error, duration_ms",
+                 "invalid arguments / unknown tool), error_kind, error, duration_ms, "
+                 "args_digest (sha256 hex of the canonical JSON of the arguments as the "
+                 "model produced them, None when not canonicalisable; never raw arguments)",
     "run.completed": "session_key, model, stop_reason, iterations, usage (totals), "
                      "tools_used, error",
     "skill.listed": "skills (names rendered into the system prompt), active (always-on "
                     "skills loaded in full)",
-    "skill.read": "skill, path (read_file read a skills/<name>/SKILL.md)",
+    "skill.read": "skill, path (resolved), via (the tool: read_file or grep), call_id "
+                  "(the model's tool-call id; joins tool.call.call_id; None outside a "
+                  "runner). One per (tool call, skill file) whose successful result returned "
+                  "SKILL.md content: read_file (any successful read) and grep in "
+                  "output_mode=content; emitted before that call's tool.call. A lower bound: "
+                  "reads through exec, exec_session, MCP or other tools are not seen",
     "mcp.error": "agent, server, error (an agent's MCP server failed to connect; the "
                  "agent runs without its tools)",
 })

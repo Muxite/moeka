@@ -271,7 +271,7 @@ def test_fingerprint_stable_across_builds_and_workspaces(tmp_path) -> None:
     a = _fp(_loop(tmp_path / "a", variant), sampling=Sampling(temperature=0.2))
     b = _fp(_loop(tmp_path / "elsewhere" / "b", variant), sampling=Sampling(temperature=0.2))
     assert a == b
-    assert set(a.components) == {"system_prompt", "tools", "model", "sampling"}
+    assert set(a.components) == {"system_prompt", "tools", "model", "sampling", "skills"}
     assert len(a.digest) == 64
 
 
@@ -357,3 +357,368 @@ async def test_router_accepts_a_solver_registry() -> None:
     mine.register("t", lambda p: solvers_mod.Solved(42, "const"))
     result = await route("slot", "t", {"prompt": "x"}, solvers=mine, config=object())
     assert result.value == 42 and result.solved_by == "const"
+
+
+# -- skills in the fingerprint (spec 006 K1) --------------------------------------------
+
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import shutil  # noqa: E402
+
+from moeka.agents import AgentSpec  # noqa: E402
+from moeka.testing import FakeProvider  # noqa: E402
+from moeka.trace import MemoryTraceSink  # noqa: E402
+
+
+def _h(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _skills_tree(root: Path) -> Path:
+    _write_skill(root, "alpha", "Alpha skill.")
+    (root / "alpha" / "scripts").mkdir()
+    (root / "alpha" / "scripts" / "run.sh").write_text("echo alpha\n", encoding="utf-8")
+    _write_skill(root, "beta", "Beta skill.")
+    return root
+
+
+def _kernel_fp(tmp_path: Path, skills: Path, name: str = "k", **spec_kwargs):
+    sink = MemoryTraceSink()
+    env = Environment.for_host(
+        state_dir=tmp_path / f"state-{name}", work_dir=tmp_path / f"work-{name}",
+        credentials={},
+        providers=[ProviderSpec(name="vllm", api_base="http://127.0.0.1:9/v1")],
+        models=[ModelSpec(name="m", model="qwen", provider="vllm")],
+        default_model="m", trace=sink,
+    )
+    kernel = Kernel(env, variant=Variant(builtin_skills_dir=skills))
+    kernel.llm.register_provider("m", FakeProvider(), ModelSpec(
+        name="m", model="qwen", provider="vllm"))
+    agent = kernel.agent(AgentSpec(name="a", tools_allow=("read_file",), **spec_kwargs))
+    return kernel, agent, sink
+
+
+def test_skills_component_exact_records(tmp_path) -> None:
+    skills = _skills_tree(tmp_path / "skills")
+    (skills / "alpha" / "__pycache__").mkdir()
+    (skills / "alpha" / "__pycache__" / "x.pyc").write_bytes(b"junk")
+    (skills / "alpha" / ".hidden").write_text("dot", encoding="utf-8")
+    (skills / "alpha" / "mod.pyc").write_bytes(b"junk")
+    kernel, agent, sink = _kernel_fp(tmp_path, skills)
+    with kernel:
+        fp = agent.fingerprint()
+        records = sorted([
+            ("file:alpha/SKILL.md", _h((skills / "alpha" / "SKILL.md").read_bytes())),
+            ("file:alpha/scripts/run.sh", _h(b"echo alpha\n")),
+            ("file:beta/SKILL.md", _h((skills / "beta" / "SKILL.md").read_bytes())),
+        ])
+        expected = _h("".join(f"{k}\n{v}\n" for k, v in records).encode("utf-8"))
+        assert fp.components["skills"] == expected
+        assert set(fp.components) == {"system_prompt", "tools", "model", "sampling", "skills"}
+        lines = "\n".join(f"{k}={v}" for k, v in sorted(fp.components.items()))
+        assert fp.digest == _h(lines.encode("utf-8"))
+        assert not sink.of("skill.read")
+
+
+def test_skill_edit_changes_only_the_skills_component(tmp_path) -> None:
+    skills = _skills_tree(tmp_path / "skills")
+    kernel, agent, _ = _kernel_fp(tmp_path, skills)
+    with kernel:
+        before = agent.fingerprint()
+        path = skills / "alpha" / "SKILL.md"
+        path.write_bytes(path.read_bytes() + b"x")
+        after = agent.fingerprint()
+        assert after.digest != before.digest
+        changed = {k for k in before.components if before.components[k] != after.components[k]}
+        assert changed == {"skills"}
+        # adding and removing a supporting file are both seen
+        extra = skills / "alpha" / "notes.txt"
+        extra.write_text("n", encoding="utf-8")
+        added = agent.fingerprint().components["skills"]
+        extra.unlink()
+        assert added != after.components["skills"]
+        assert agent.fingerprint().components["skills"] == after.components["skills"]
+        # dot paths and __pycache__ do not count
+        (skills / "alpha" / ".git").mkdir()
+        (skills / "alpha" / ".git" / "HEAD").write_text("ref", encoding="utf-8")
+        (skills / "alpha" / "__pycache__").mkdir()
+        (skills / "alpha" / "__pycache__" / "m.cpython.pyc").write_bytes(b"1")
+        assert agent.fingerprint().components["skills"] == after.components["skills"]
+
+
+def test_skills_component_is_location_independent(tmp_path) -> None:
+    one = _skills_tree(tmp_path / "one" / "skills")
+    two = tmp_path / "elsewhere" / "deep" / "tree"
+    shutil.copytree(one, two)
+    os.utime(two / "alpha" / "SKILL.md", (1, 1))
+    k1, a1, _ = _kernel_fp(tmp_path, one, name="one")
+    k2, a2, _ = _kernel_fp(tmp_path, two, name="two")
+    with k1, k2:
+        assert a1.fingerprint().components["skills"] == a2.fingerprint().components["skills"]
+
+
+def test_excluded_skills_do_not_count(tmp_path) -> None:
+    skills = _skills_tree(tmp_path / "skills")
+    kernel, agent, _ = _kernel_fp(tmp_path, skills, skills_exclude=("alpha",))
+    with kernel:
+        before = agent.fingerprint().components["skills"]
+        (skills / "alpha" / "SKILL.md").write_text("changed", encoding="utf-8")
+        assert agent.fingerprint().components["skills"] == before
+        (skills / "beta" / "SKILL.md").write_text("changed", encoding="utf-8")
+        assert agent.fingerprint().components["skills"] != before
+
+
+def test_skills_include_limits_the_set(tmp_path) -> None:
+    skills = _skills_tree(tmp_path / "skills")
+    kernel, agent, _ = _kernel_fp(tmp_path, skills, skills_include=("beta",))
+    with kernel:
+        before = agent.fingerprint().components["skills"]
+        (skills / "alpha" / "SKILL.md").write_text("changed", encoding="utf-8")
+        assert agent.fingerprint().components["skills"] == before
+        expected = _h(
+            f"file:beta/SKILL.md\n{_h((skills / 'beta' / 'SKILL.md').read_bytes())}\n"
+            .encode("utf-8")
+        )
+        assert before == expected
+
+
+def test_inline_and_workspace_skills_count(tmp_path) -> None:
+    skills = tmp_path / "empty-skills"
+    skills.mkdir()
+    inline = {"name": "inl", "content": "Inline body", "description": "d",
+              "metadata": {"always": True}}
+    kernel, agent, _ = _kernel_fp(tmp_path, skills, inline_skills=(inline,))
+    with kernel:
+        fp = agent.fingerprint()
+        value = _h(json.dumps(
+            {"name": "inl", "description": "d", "content": "Inline body",
+             "metadata": {"always": True}},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8"))
+        assert fp.components["skills"] == _h(f"inline:inl\n{value}\n".encode("utf-8"))
+        work_skills = kernel.env.paths.work_dir / "skills"
+        _write_skill(work_skills, "ws", "Workspace skill.")
+        assert agent.fingerprint().components["skills"] != fp.components["skills"]
+
+
+def test_empty_skill_set_hashes_the_empty_string(tmp_path) -> None:
+    skills = tmp_path / "empty-skills"
+    skills.mkdir()
+    kernel, agent, _ = _kernel_fp(tmp_path, skills)
+    with kernel:
+        assert agent.fingerprint().components["skills"] == _h(b"")
+
+
+def test_unreadable_skill_file_raises(tmp_path) -> None:
+    skills = _skills_tree(tmp_path / "skills")
+    target = skills / "alpha" / "scripts" / "run.sh"
+    kernel, agent, _ = _kernel_fp(tmp_path, skills)
+    with kernel:
+        agent.fingerprint()
+        target.unlink()
+        target.mkdir()  # was a file the skill counted; a directory with an unreadable file
+        (target / "inner").write_text("x", encoding="utf-8")
+        import nanobot.kernel.variants as variants_mod
+
+        real_open = open
+
+        def failing_open(path, *args, **kwargs):
+            if str(path).endswith("inner"):
+                raise PermissionError(13, "denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        variants_mod.open = failing_open  # type: ignore[attr-defined]
+        try:
+            with pytest.raises(OSError):
+                agent.fingerprint()
+        finally:
+            del variants_mod.open  # type: ignore[attr-defined]
+
+
+def test_symlinked_files_are_followed(tmp_path) -> None:
+    skills = _skills_tree(tmp_path / "skills")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("v1", encoding="utf-8")
+    (skills / "beta" / "link.txt").symlink_to(outside)
+    (skills / "beta" / "dangling").symlink_to(tmp_path / "missing")
+    kernel, agent, _ = _kernel_fp(tmp_path, skills)
+    with kernel:
+        before = agent.fingerprint().components["skills"]
+        outside.write_text("v2", encoding="utf-8")
+        assert agent.fingerprint().components["skills"] != before
+
+
+# -- tool parameter descriptions (spec 006 K2) ------------------------------------------
+
+
+from moeka.errors import VariantError  # noqa: E402
+from moeka.testing import reply  # noqa: E402
+
+
+def _strip_descriptions(node, paths_seen=None):
+    if isinstance(node, dict):
+        return {k: _strip_descriptions(v) for k, v in node.items() if k != "description"}
+    if isinstance(node, list):
+        return [_strip_descriptions(v) for v in node]
+    return node
+
+
+@pytest.mark.parametrize("path", ["path", "edits[].old_text", "grid[][]", "a.b.c", "x y"])
+def test_param_path_grammar_valid(path) -> None:
+    v = Variant(tool_param_descriptions={"t": {path: "d"}})
+    assert v.tool_param_descriptions["t"][path] == "d"
+
+
+@pytest.mark.parametrize("path", ["", ".a", "a.", "a..b", "[]", "a[", "a[0]", "a]", "a[]b"])
+def test_param_path_grammar_invalid(path) -> None:
+    with pytest.raises(ValueError):
+        Variant(tool_param_descriptions={"t": {path: "d"}})
+
+
+@pytest.mark.parametrize("bad", [
+    [("t", {"p": "d"})], {"": {"p": "d"}}, {1: {"p": "d"}}, {"t": "p"}, {"t": {"p": 1}},
+    {"t": {1: "d"}}, "x",
+])
+def test_param_descriptions_type_errors(bad) -> None:
+    with pytest.raises(TypeError):
+        Variant(tool_param_descriptions=bad)
+
+
+def test_param_descriptions_frozen_hashable_equal() -> None:
+    a = Variant(tool_param_descriptions={"read_file": {"path": "X"}})
+    b = Variant(tool_param_descriptions={"read_file": {"path": "X"}})
+    assert a == b and hash(a) == hash(b)
+    assert Variant() == Variant(tool_param_descriptions={})
+    assert hash(Variant()) == hash(Variant(tool_param_descriptions={}))
+    with pytest.raises(TypeError):
+        a.tool_param_descriptions["read_file"]["path"] = "Y"  # type: ignore[index]
+
+
+def _pd_kernel(tmp_path: Path, variant: Variant | None, name: str = "k", script=()):
+    env = Environment.for_host(
+        state_dir=tmp_path / f"state-{name}", work_dir=tmp_path / f"work-{name}",
+        credentials={},
+        providers=[ProviderSpec(name="vllm", api_base="http://127.0.0.1:9/v1")],
+        models=[ModelSpec(name="m", model="qwen", provider="vllm")],
+        default_model="m",
+    )
+    kernel = Kernel(env, variant=variant)
+    fake = FakeProvider(script, default=reply("ok"))
+    kernel.llm.register_provider("m", fake, ModelSpec(name="m", model="qwen", provider="vllm"))
+    return kernel, fake
+
+
+def _info(agent, name: str):
+    return next(t for t in agent.tools() if t.name == name)
+
+
+def test_param_description_is_visible_and_only_descriptions_change(tmp_path) -> None:
+    variant = Variant(tool_param_descriptions={
+        "read_file": {"path": "X"},
+        "apply_patch": {"edits[].old_text": "OLD", "edits": "EDITS"},
+        "not_loaded_tool": {"anything.here": "ignored"},
+    })
+    base_kernel, _ = _pd_kernel(tmp_path, None, name="base")
+    kernel, fake = _pd_kernel(tmp_path, variant)
+    with base_kernel, kernel:
+        spec = AgentSpec(name="a", tools_allow=("read_file", "apply_patch"))
+        base = base_kernel.agent(spec)
+        agent = kernel.agent(spec)
+        params = _info(agent, "read_file").parameters
+        assert params["properties"]["path"]["description"] == "X"
+        base_params = _info(base, "read_file").parameters
+        assert _strip_descriptions(thaw_(params)) == _strip_descriptions(thaw_(base_params))
+        patch = _info(agent, "apply_patch").parameters
+        assert patch["properties"]["edits"]["items"]["properties"]["old_text"][
+            "description"] == "OLD"
+        assert patch["properties"]["edits"]["description"] == "EDITS"
+        assert _strip_descriptions(thaw_(patch)) == _strip_descriptions(
+            thaw_(_info(base, "apply_patch").parameters))
+        assert agent.fingerprint().components["tools"] != base.fingerprint().components["tools"]
+        agent.run_sync("hi")
+        sent = {t["function"]["name"]: t for t in fake.calls[0].kwargs["tools"]}
+        assert sent["read_file"]["function"]["parameters"]["properties"]["path"][
+            "description"] == "X"
+        # the base tool class is untouched
+        from nanobot.agent.tools.filesystem import ReadFileTool
+
+        fresh = ReadFileTool.__new__(ReadFileTool)
+        assert fresh.parameters["properties"]["path"]["description"] != "X"
+
+
+def thaw_(value):
+    from nanobot.kernel.frozen import thaw
+
+    return thaw(value)
+
+
+def test_description_added_when_absent(tmp_path) -> None:
+    from nanobot.kernel.variants import apply_param_descriptions
+
+    base = {"type": "object", "properties": {"grid": {"type": "array", "items": {
+        "type": "array", "items": {"type": "integer"}}}}, "required": ["grid"]}
+    out = apply_param_descriptions(base, {"grid[][]": "cell"}, variant="v", tool="t")
+    assert out["properties"]["grid"]["items"]["items"] == {"type": "integer",
+                                                           "description": "cell"}
+    assert "description" not in base["properties"]["grid"]["items"]["items"]
+
+
+@pytest.mark.parametrize("path", ["nonexistent", "path.inner", "path[]", "edits[].nope"])
+def test_unresolved_path_fails_the_build(tmp_path, path) -> None:
+    tool = "apply_patch" if path.startswith("edits") else "read_file"
+    variant = Variant(name="bad", tool_param_descriptions={tool: {path: "X"}})
+    kernel, _ = _pd_kernel(tmp_path, variant)
+    with kernel:
+        agent = kernel.agent(AgentSpec(name="a", tools_allow=("read_file", "apply_patch")))
+        with pytest.raises(VariantError) as info:
+            agent.tools()
+        assert isinstance(info.value, ValueError)
+        assert (info.value.variant, info.value.tool, info.value.path) == ("bad", tool, path)
+        with pytest.raises(VariantError):
+            agent.fingerprint()
+        with pytest.raises(VariantError):
+            agent.run_sync("hi")
+
+
+def test_two_kernels_see_only_their_own_override(tmp_path) -> None:
+    k1, _ = _pd_kernel(tmp_path, Variant(tool_param_descriptions={"read_file": {"path": "ONE"}}),
+                       name="one")
+    k2, _ = _pd_kernel(tmp_path, Variant(tool_param_descriptions={"read_file": {"path": "TWO"}}),
+                       name="two")
+    with k1, k2:
+        spec = AgentSpec(name="a", tools_allow=("read_file",))
+        p1 = _info(k1.agent(spec), "read_file").parameters["properties"]["path"]["description"]
+        p2 = _info(k2.agent(spec), "read_file").parameters["properties"]["path"]["description"]
+        assert (p1, p2) == ("ONE", "TWO")
+
+
+def test_actions_are_not_overridden(tmp_path) -> None:
+    def lookup(company: str) -> str:
+        """Look a company up."""
+        return company
+
+    variant = Variant(tool_param_descriptions={"lookup": {"company": "X"},
+                                               "read_file": {"path": "X"}})
+    kernel, _ = _pd_kernel(tmp_path, variant)
+    with kernel:
+        agent = kernel.agent(AgentSpec(name="a", tools_allow=("read_file", "lookup"),
+                                       actions=(lookup,)))
+        props = _info(agent, "lookup").parameters["properties"]["company"]
+        assert props.get("description") != "X"
+
+
+async def test_validation_uses_the_base_schema(tmp_path) -> None:
+    from nanobot.agent.tools.filesystem import ReadFileTool
+    from nanobot.kernel.variants import apply_param_descriptions
+
+    tool = ReadFileTool.__new__(ReadFileTool)
+    base_errors = tool.validate_params({"path": 3, "offset": 0})
+    tool.set_parameters_override(apply_param_descriptions(
+        tool.parameters, {"path": "X", "offset": "Y"}, variant="v", tool="read_file",
+    ))
+    assert tool.to_schema()["function"]["parameters"]["properties"]["path"][
+        "description"] == "X"
+    assert tool.validate_params({"path": 3, "offset": 0}) == base_errors
+    assert tool.validate_params({"path": "a"}) == []

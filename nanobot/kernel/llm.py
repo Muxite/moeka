@@ -692,6 +692,9 @@ class LLM:
                 extra_body=thaw(opts.extra_body) if opts.extra_body else None,
                 on_unsupported=opts.on_unsupported,
                 max_attempts=opts.attempts,
+                unsupported_sampling=(
+                    route.spec.unsupported_sampling if route.spec is not None else ()
+                ),
             ),
         )
 

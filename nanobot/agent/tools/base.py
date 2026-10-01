@@ -508,6 +508,10 @@ class Tool(ABC):
     # A variant's description for THIS instance (Task 8, ``set_description_override``).
     # ``to_schema`` uses it for every tool; ``.description`` shows it for data-file tools.
     _description_override: str | None = None
+    # A variant's parameter descriptions for THIS instance (spec 006 K2,
+    # ``set_parameters_override``): the schema the model sees in ``to_schema``. The
+    # base ``parameters`` (and so argument validation) are never changed.
+    _parameters_override: dict[str, Any] | None = None
 
     @classmethod
     def config_cls(cls) -> type[BaseModel] | None:
@@ -662,15 +666,26 @@ class Tool(ABC):
         """Replace the description the model sees for this instance only (``None`` clears)."""
         self._description_override = text
 
+    def set_parameters_override(self, schema: dict[str, Any] | None) -> None:
+        """Replace the parameters schema the model sees for this instance only.
+
+        Validation and casting keep using ``parameters``; ``None`` clears.
+        """
+        self._parameters_override = deepcopy(schema) if schema is not None else None
+
     def to_schema(self) -> dict[str, Any]:
         """OpenAI function schema."""
         override = self._description_override
+        params_override = self._parameters_override
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": override if override is not None else self.description,
-                "parameters": self.parameters,
+                "parameters": (
+                    deepcopy(params_override) if params_override is not None
+                    else self.parameters
+                ),
             },
         }
 

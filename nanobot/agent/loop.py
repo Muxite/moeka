@@ -353,6 +353,7 @@ class AgentLoop:
         policy: PermissionPolicy | None = None,
         variant: Variant | None = None,
         max_policy_denials: int | None = None,
+        max_tool_errors: int | None = None,
         plugin_registry: PluginRegistry | None = None,
         memory_dir: Path | None = None,
         inject_memory: bool = True,
@@ -374,6 +375,8 @@ class AgentLoop:
         self.policy: PermissionPolicy = policy if policy is not None else DefaultPolicy()
         # I5 ceiling per turn (``None`` = the runner default, DEFAULT_MAX_POLICY_DENIALS).
         self.max_policy_denials = max_policy_denials
+        # Tool-error ceiling per turn (``None`` = no ceiling; spec 006 K4).
+        self.max_tool_errors = max_tool_errors
         self.principal = AGENT_PRINCIPAL
         self._recovery_admission = recovery_admission
         if turn_delivery_factory is not None:
@@ -822,6 +825,9 @@ class AgentLoop:
             )
             if self.variant is not None:
                 my_tool.set_description_override(self.variant.description_for("my"))
+                from nanobot.agent.tools.loader import apply_variant_parameters
+
+                apply_variant_parameters(self.variant, my_tool)
             self.tools.register(my_tool)
             registered.append("my")
 
@@ -1451,6 +1457,7 @@ class AgentLoop:
                     {"max_policy_denials": self.max_policy_denials}
                     if self.max_policy_denials is not None else {}
                 ),
+                max_tool_errors=self.max_tool_errors,
             ))
         finally:
             turn_scope_stack.close()

@@ -30,7 +30,7 @@ from nanobot.agent.context_governance import (
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
 from nanobot.agent.tools.base import ToolResult
-from nanobot.agent.tools.file_state import file_read_context
+from nanobot.agent.tools.file_state import file_read_context, tool_call_context
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.events import NO_EVENTS, EventSink
 from nanobot.llm_usage.context import (
@@ -200,6 +200,29 @@ class PolicyDenialBudget:
 
 
 @dataclass(slots=True)
+class ToolErrorCount:
+    """Per-run count of tool errors against ``AgentRunSpec.max_tool_errors`` (spec 006 K4).
+
+    - One instance per ``AgentRunner.run`` call (history from earlier runs never counts).
+    - ``record`` is called exactly where the runner reports a failed call to the hook
+      (``on_tool_invalid`` / ``on_execute_tool_error``), except an ``ask_user``
+      interruption, so the count equals the run's ``tool.call`` events with ``ok=False``.
+    - The ceiling is checked only after a whole tool batch finished: no call of a model
+      response is cancelled because the ceiling was reached mid-response.
+    """
+
+    limit: int | None = None
+    count: int = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.limit is not None and self.count >= self.limit
+
+    def record(self) -> None:
+        self.count += 1
+
+
+@dataclass(slots=True)
 class AgentRunSpec:
     """Configuration for a single agent execution."""
 
@@ -236,6 +259,10 @@ class AgentRunSpec:
     # I5 ceiling: the turn ends (stop_reason "policy_denials") once this many calls
     # were denied by ``policy``. Values below 1 are treated as 1.
     max_policy_denials: int = DEFAULT_MAX_POLICY_DENIALS
+    # Tool-error ceiling (spec 006 K4): once this many tool calls of the turn failed
+    # (``tool.call`` ``ok=False``, ask_user excluded), the turn ends after the current
+    # tool batch with stop_reason "tool_error" and no further model call. ``None`` = off.
+    max_tool_errors: int | None = None
 
 
 @dataclass(slots=True)
@@ -494,6 +521,7 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int] = {}
         # I5 hard ceiling on permission-policy denials; separate from the throttle above.
         policy_denials = PolicyDenialBudget(limit=max(1, spec.max_policy_denials))
+        tool_errors = ToolErrorCount(limit=spec.max_tool_errors)
         empty_content_retries = 0
         # Segments from one uninterrupted length-recovery chain. Tool work or
         # injected user input starts a new logical answer and clears the chain.
@@ -657,6 +685,7 @@ class AgentRunner:
                     model_messages=messages_for_model,
                     compacted_tool_results=request_state.compacted_tool_results,
                     policy_denials=policy_denials,
+                    tool_errors=tool_errors,
                 )
                 tool_events.extend(new_events)
                 tools_used.extend(
@@ -772,6 +801,23 @@ class AgentRunner:
                         spec.session_key or "default",
                         policy_denials.count,
                         policy_denials.limit,
+                    )
+                    await hook.after_iteration(context)
+                    break
+                if tool_errors.exhausted:
+                    # Spec 006 K4: the declared tool-error ceiling. Decided after the
+                    # ask_user and policy_denials stops and before the iteration budget;
+                    # ends the turn without another model call (no budget finalization).
+                    assert tool_errors.limit is not None
+                    stop_reason = "tool_error"
+                    error = (
+                        f"max_tool_errors: {tool_errors.count} tool errors "
+                        f"(limit {tool_errors.limit})"
+                    )
+                    context.error = error
+                    context.stop_reason = stop_reason
+                    logger.warning(
+                        "Stopping turn for {}: {}", spec.session_key or "default", error,
                     )
                     await hook.after_iteration(context)
                     break
@@ -1616,6 +1662,7 @@ class AgentRunner:
         compacted_tool_results: set[str] | None = None,
         *,
         policy_denials: PolicyDenialBudget | None = None,
+        tool_errors: ToolErrorCount | None = None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
@@ -1646,6 +1693,7 @@ class AgentRunner:
                         context,
                         read_results,
                         policy_denials=policy_denials,
+                        tool_errors=tool_errors,
                     )
                     for tool_call in batch
                 ))
@@ -1662,6 +1710,7 @@ class AgentRunner:
                         context,
                         read_results,
                         policy_denials=policy_denials,
+                        tool_errors=tool_errors,
                     )
                     tool_results.append(result)
                     batch_results.append(result)
@@ -1691,6 +1740,7 @@ class AgentRunner:
         read_results: Callable[[], dict[str, str]] | None = None,
         *,
         policy_denials: PolicyDenialBudget | None = None,
+        tool_errors: ToolErrorCount | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
         # Everything up to the gate verdict (and its policy_denials.record()) is
         # synchronous: no await may be added before the gate, or concurrent batches
@@ -1731,6 +1781,8 @@ class AgentRunner:
             )
             # No gate runs for this call, so awaiting here cannot split a gate verdict.
             await hook.on_tool_invalid(context, tool_call, prep_error)
+            if tool_errors is not None:
+                tool_errors.record()
             event = {
                 "name": tool_call.name,
                 "status": "error",
@@ -1783,9 +1835,10 @@ class AgentRunner:
         await hook.before_execute_tool(context, tool_call, tool, params)
         try:
             with (
+                tool_call_context(tool_call.id),
                 file_read_context(tool_call.id, read_results)
                 if tool_call.name == "read_file" and read_results is not None
-                else nullcontext()
+                else nullcontext(),
             ):
                 if tool is not None:
                     result = await tool.execute(**params)
@@ -1804,6 +1857,8 @@ class AgentRunner:
             # AskUserInterrupt is a BaseException (so generic handlers let it through);
             # it must be caught here to become the "ask_user" stop.
             await hook.on_execute_tool_error(context, tool_call, tool, params, exc)
+            if tool_errors is not None and not isinstance(exc, AskUserInterrupt):
+                tool_errors.record()
             event = {
                 "name": tool_call.name,
                 "status": "error",
@@ -1830,6 +1885,8 @@ class AgentRunner:
 
         if is_tool_error_result(result):
             await hook.on_execute_tool_error(context, tool_call, tool, params, result)
+            if tool_errors is not None:
+                tool_errors.record()
             event = {
                 "name": tool_call.name,
                 "status": "error",
