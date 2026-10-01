@@ -115,9 +115,31 @@ def _load_config_for_cli(
         raise typer.Exit(1) from exc
 
 
+def _require_expanded_state_home() -> None:
+    """Exit 2 when ``MOEKA_WORKSPACE`` (or a legacy alias) is itself an unexpanded ``${VAR}``.
+
+    The state home is the default instance root and config location; guessing it from
+    a literal ``${...}`` would create that directory (spec 005 US1-3).
+    """
+    import os
+    import sys
+
+    for name in ("MOEKA_WORKSPACE", "MOEKA_STATE", "NANOBOT_HOME"):
+        value = os.environ.get(name)
+        if value and "${" in value:
+            print(
+                f"Error: {name} has an unexpanded variable ({value!r}); set MOEKA_WORKSPACE "
+                "to the instance root or pass --workspace and --config explicitly",
+                file=sys.stderr,
+            )
+            raise typer.Exit(2)
+
+
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import set_config_path
+
+    _require_expanded_state_home()
 
     config_path = None
     if config:

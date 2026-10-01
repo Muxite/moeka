@@ -476,6 +476,12 @@ cmd_stop() {
 }
 
 cmd_restart() {
+    # A unit-managed instance restarts through its own unit only (FR-012).
+    if _unit_active; then
+        info "restarting unit $UNIT"
+        _systemctl --user restart "$UNIT"
+        return $?
+    fi
     cmd_stop || true
     cmd_start "$@"
 }

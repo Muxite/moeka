@@ -329,3 +329,12 @@ def test_works_without_procps(h: Harness, tmp_path: Path) -> None:
     assert h.run(*_ws(root), "stop", env=env).returncode == 0
     assert wait_for(lambda: not alive(pid), 10)
     assert h.run(*_ws(root), "status", env=env).returncode == 3
+
+
+def test_restart_of_a_unit_managed_instance_uses_the_unit(h: Harness) -> None:
+    root = h.new("ru")
+    h.set_unit_active("moeka@ru.service")
+    result = h.run(*_ws(root), "restart")
+    assert result.returncode == 0
+    assert "--user restart moeka@ru.service" in h.systemctl_calls()
+    assert not (h.nanobot_log / "pids").exists()

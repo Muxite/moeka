@@ -120,3 +120,14 @@ def test_workspace_override_makes_the_config_work(tmp_path: Path) -> None:
     # Past the workspace check (no provider is configured, so it fails later, not with 2).
     assert result.returncode not in (2, 3), result.stderr
     assert "unexpanded" not in result.stderr
+
+
+def test_unexpanded_state_home_variable_exits_2(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    result = _nanobot(home, "gateway", cwd=cwd, MOEKA_WORKSPACE="${MOEKA_WORKSPACE}")
+    assert result.returncode == 2, result.stdout
+    assert "MOEKA_WORKSPACE" in result.stderr
+    assert list(cwd.iterdir()) == [] and not (home / ".nanobot").exists()
