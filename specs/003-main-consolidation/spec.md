@@ -2,7 +2,10 @@
 
 **Feature Branch**: `003-main-consolidation`
 **Created**: 2026-09-30
-**Status**: Draft (decided by the owner 2026-09-30; NOT executed; nothing merged or renamed)
+**Status**: Draft (decided by the owner 2026-09-30; NOT executed; nothing merged or renamed).
+Update 2026-10-01 (review/arch): a candidate branch `consolidate/new-main` was built in a worktree with a
+consolidation record and a cutover runbook; the cutover is still not executed. Review findings and the
+stricter go/no-go gates: `docs/reviews/2026-10-01-architecture-review.md`.
 **Input**: Owner decision 2026-09-30: the kernel lives inside moeka `main`, and the gateway (channels, WebUI,
 Telegram and Discord bot) sits on top as one consumer of it. Source: `.agent/moeka-kernel-design.md` section 12
 ("Branch consolidation") and section 14 risks; system contract section 9.
@@ -84,6 +87,9 @@ after).
   gateway needs it back behind a seam, not in the kernel.
 - A plain merge of `core-slim` into `main`: wrong; it deletes the gateway.
 - Config files shared between a `main` deployment and a slim tool (retired sections are dropped at load).
+- The consolidated gateway still runs the legacy loop path through the legacy environment adapter, which allows
+  the work and state areas to overlap: invariants I1-I6 are proven for kernel hosts, not for the gateway, until
+  FR-009 stage 2. Docs MUST NOT claim otherwise.
 
 ## Requirements *(mandatory)*
 
@@ -116,6 +122,22 @@ after).
   completion module is removed under `002-kernel-api-for-consumers`.
 - **FR-011**: a consolidation record MUST list, for each top-level path, which branch it came from and why,
   so a reviewer can audit the selection.
+- **FR-012**: before the live checkout or service changes, a verified backup of live state MUST exist on two
+  physically separate disks: the session database (made with the SQLite backup API, not a file copy), the memory
+  files, the cron store, the config and the usage database. Verified means each copy opens, passes an integrity
+  check and has the same session and message counts as the live file. An offline or unmounted backup tier does
+  not count.
+- **FR-013**: before cutover, a parity check MUST compare the old and the candidate tree on the live config: the
+  config validates, the registered tool set (differences listed and approved), the exec child-environment keys,
+  the channel plugin list and the provider request. Any unlisted difference blocks the cutover.
+- **FR-014**: a canary on a throwaway chat-channel credential and a copy of the workspace MUST handle real turns
+  (one needing history, one tool call, one scheduled heartbeat) before the live service is switched. The live
+  credential is never used by two processes.
+- **FR-015**: the cutover MUST NOT run a dependency sync when the lock file is unchanged; if one is run, the
+  channel runtime dependencies are re-enabled and import-checked before the service starts.
+- **FR-016**: publishing the consolidated `main` to a public remote MUST wait for a soak period after cutover and
+  an owner approval; a rollback after a public push needs a force push and is therefore not part of the rollback
+  plan.
 
 ### Key Entities
 
@@ -136,6 +158,11 @@ after).
 - **SC-004**: both pinned branches resolve to their original commits after the work (0 rewritten commits).
 - **SC-005**: awork and the harness suites pass on the new pin.
 - **SC-006**: every top-level path has an entry in the consolidation record.
+- **SC-007**: two verified backup copies of the session database exist on different disks before the first
+  change to the live checkout (FR-012).
+- **SC-008**: the parity check reports 0 unapproved differences (FR-013); the only approved tool-set addition is
+  recorded by name.
+- **SC-009**: the rollback is rehearsed on a copy and completes in under 5 minutes before the cutover.
 
 ## Assumptions
 

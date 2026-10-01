@@ -94,6 +94,13 @@ invariant, number or decision may rest on a citation alone. Invented or unchecke
   progressively stricter; policy and the evaluator are never self-editable (design section 9).
 - **Live service protection.** The live gateway runs from a working tree; work on other branches uses
   worktrees, never a checkout in the live directory.
+- **Cutover gates.** Changing what the live service runs requires, before the change: a verified backup of its
+  state on two physically separate disks (an offline or unmounted tier does not count), a parity check of the
+  old and new trees on the live config, a rehearsed rollback, and a canary on a throwaway credential. A
+  publish to a public remote is a separate step after a soak and is not part of the rollback plan.
+- **Pins resolve from origin.** A commit that another repository pins or vendors from (a submodule pin, a
+  vendored schema `VERSION`) MUST exist on `origin`. A pin to a local-only commit is an unrecoverable
+  reference; push the branch (or the bundle plan in the review) before a consumer records it.
 
 ## Development Workflow
 
@@ -124,4 +131,4 @@ invariant, number or decision may rest on a citation alone. Invented or unchecke
   file.
 - Open owner questions live in `specs/CLARIFY-LOG.md` until answered, then are encoded into the owning spec.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-30 | **Last Amended**: 2026-09-30
+**Version**: 1.1.0 | **Ratified**: 2026-09-30 | **Last Amended**: 2026-10-01 (MINOR: cutover gates, pins resolve from origin; reason: `docs/reviews/2026-10-01-architecture-review.md`; affects specs 003 and 001)

@@ -43,6 +43,16 @@ description: "Task list for main consolidation (not executed)"
 
 - [ ] T018 [US4] After owner approval only: deploy per `.agent/deploy-runbook.md`; verify the live checkout state before and after (SC-003)
 
+## Phase 7: Cutover gates (added by review 2026-10-01; see docs/reviews/2026-10-01-architecture-review.md)
+
+- [ ] T019 Verified two-disk backup of live state with the service stopped; counts and integrity recorded (FR-012, SC-007)
+- [ ] T020 Re-run the parity probes (`docs/reviews/2026-10-01-parity/`) on the exact tip to be cut; list approved differences (FR-013, SC-008)
+- [ ] T021 Canary on a throwaway bot credential and a workspace copy: history turn, tool call, heartbeat (FR-014)
+- [ ] T022 Rehearse rollback on a copy; record the time (SC-009)
+- [ ] T023 Add a gateway test asserting the exact registered tool set (guards the `host_tools` default)
+- [ ] T024 Fix `CUTOVER.md`: add session DB and memory to the backup, replace the `sqlite3` command-line calls, drop the dependency sync (FR-015)
+- [ ] T025 After a 48 hour soak and owner approval only: publish `main` (FR-016)
+
 ## Dependencies
 
-- T003 blocks T014. T005 precedes T007. T011 precedes T015 and T016. T018 requires explicit owner approval.
+- T003 blocks T014. T005 precedes T007. T011 precedes T015 and T016. T018 requires explicit owner approval. T019-T022 precede T018; T025 follows T018 by the soak period.
