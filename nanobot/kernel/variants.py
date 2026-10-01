@@ -119,8 +119,21 @@ class Variant:
 class Fingerprint:
     """``digest`` (sha256 hex) over ``components`` (name -> sha256 hex of that part).
 
-    Components: ``system_prompt``, ``tools``, ``model``, ``sampling``. ``digest`` is
-    the sha256 of the sorted ``name=hex`` lines, one per component.
+    Components: ``system_prompt``, ``tools``, ``model``, ``sampling``, ``skills``.
+    ``digest`` is the sha256 of the sorted ``name=hex`` lines, one per component,
+    joined by ``"\n"``.
+
+    ``skills`` covers every byte of the agent's effective skill set (inline,
+    workspace, plugin and built-in skills after shadowing and
+    ``skills_include``/``skills_exclude``, unavailable and always-on ones included):
+    one record per counted file of a file-based skill ``N`` (key
+    ``file:N/<path relative to the skill dir>``, value the file's sha256; every
+    regular file under the skill directory, symlinks to regular files followed,
+    ``__pycache__``, dot paths and ``*.pyc`` skipped) and one per inline skill
+    (key ``inline:N``, value the sha256 of the canonical JSON of its ``name``,
+    ``description``, ``content`` and ``metadata``). The component is the sha256 of
+    ``key + "\n" + value + "\n"`` over the records sorted by key; it never depends
+    on absolute paths, modification times or directory order.
     """
 
     digest: str
@@ -175,6 +188,64 @@ def _normalise(text: str, pairs: list[tuple[str, str]]) -> str:
     return text
 
 
+def _skill_file_records(name: str, skill_dir: Path) -> list[tuple[str, str]]:
+    """``(file:<name>/<rel>, sha256)`` for every counted file under *skill_dir*.
+
+    Raises ``OSError`` when a counted file cannot be read (never a partial digest).
+    """
+    import os
+
+    records: list[tuple[str, str]] = []
+    for root, dirs, files in os.walk(skill_dir, onerror=_raise):
+        dirs[:] = [d for d in dirs if d != "__pycache__" and not d.startswith(".")]
+        for filename in files:
+            if filename.startswith(".") or filename.endswith(".pyc"):
+                continue
+            path = Path(root) / filename
+            if not path.is_file():  # broken symlink, fifo, socket: not a regular file
+                continue
+            rel = path.relative_to(skill_dir).as_posix()
+            with open(path, "rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            records.append((f"file:{name}/{rel}", digest))
+    return records
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def _inline_skill_value(loader: Any, skill: Any) -> str:
+    def get(key: str) -> Any:
+        value = loader._inline_field(skill, key)
+        return thaw(value) if isinstance(value, Mapping) else value
+
+    payload = {key: get(key) for key in ("name", "description", "content", "metadata")}
+    return _sha(_canonical(payload))
+
+
+def skills_component(loop: Any) -> str:
+    """The ``skills`` fingerprint component of *loop* (see :class:`Fingerprint`).
+
+    Reads the skill files now (an edit between two calls is reflected); emits no
+    ``skill.read``. ``OSError`` when a counted file cannot be read.
+    """
+    loader = getattr(getattr(loop, "context", None), "skills", None)
+    records: list[tuple[str, str]] = []
+    if loader is not None:
+        for entry in loader.list_skills(filter_unavailable=False):
+            name = entry["name"]
+            if entry.get("source") == "inline":
+                skill = loader.inline_skills.get(name)
+                if skill is not None:
+                    records.append((f"inline:{name}", _inline_skill_value(loader, skill)))
+                continue
+            skill_dir = Path(entry["path"]).parent
+            records.extend(_skill_file_records(name, skill_dir))
+    records.sort(key=lambda record: record[0])
+    return _sha("".join(f"{key}\n{value}\n" for key, value in records))
+
+
 def fingerprint(loop: Any, *, model: str, sampling: Sampling | None) -> Fingerprint:
     """Digest of what *loop*'s model sees: system prompt, tools, model and sampling.
 
@@ -194,7 +265,9 @@ def fingerprint(loop: Any, *, model: str, sampling: Sampling | None) -> Fingerpr
 
     ``tools`` is ``loop.tools.get_definitions()`` as canonical JSON (sorted keys);
     ``sampling`` is the canonical JSON of its set fields (``None`` is ``null``, which
-    differs from ``Sampling()`` because ``None`` means "the model's default").
+    differs from ``Sampling()`` because ``None`` means "the model's default");
+    ``skills`` is :func:`skills_component` (every byte of the effective skill set,
+    read at call time; ``OSError`` when a counted file cannot be read).
     """
     pairs = _normaliser(loop)
     prompt = loop.context.build_system_prompt(
@@ -206,9 +279,10 @@ def fingerprint(loop: Any, *, model: str, sampling: Sampling | None) -> Fingerpr
         "tools": _sha(_normalise(tools, pairs)),
         "model": _sha(str(model)),
         "sampling": _sha(_sampling_json(sampling)),
+        "skills": skills_component(loop),
     }
     digest = _sha("\n".join(f"{name}={hexd}" for name, hexd in sorted(components.items())))
     return Fingerprint(digest=digest, components=components)
 
 
-__all__ = ["Fingerprint", "Variant", "fingerprint"]
+__all__ = ["Fingerprint", "Variant", "fingerprint", "skills_component"]
