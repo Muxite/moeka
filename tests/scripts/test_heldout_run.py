@@ -151,7 +151,7 @@ PASS_SUITE = {
 
 
 @pytest.fixture
-def E(tmp_path: Path) -> Env:
+def h(tmp_path: Path) -> Env:
     return Env(tmp_path)
 
 
@@ -165,8 +165,8 @@ def _tree_state(root: Path) -> dict[str, bytes]:
     return out
 
 
-def _report(E: Env, name: str = "round-01") -> dict:
-    return json.loads((E.report_root / name / "report.json").read_text())
+def _report(h: Env, name: str = "round-01") -> dict:
+    return json.loads((h.report_root / name / "report.json").read_text())
 
 
 # -- FR-001 / FR-002 packaging -------------------------------------------------------------------
@@ -190,46 +190,46 @@ def test_module_imports_are_stdlib_only():
                 assert m.split(".")[0] not in {"moeka", "nanobot", "awr", "pytest"}, m
 
 
-def test_version_line_and_wrapper(E):
+def test_version_line_and_wrapper(h):
     digest = hashlib.sha256(RUNNER.read_bytes()).hexdigest()
-    p = subprocess.run([str(WRAPPER), "--version"], capture_output=True, text=True, env=E.env())
+    p = subprocess.run([str(WRAPPER), "--version"], capture_output=True, text=True, env=h.env())
     assert p.returncode == 0 and p.stderr == ""
     assert p.stdout == f"heldout-run {hr.VERSION} sha256:{digest}\n"
     assert os.access(WRAPPER, os.X_OK)
 
 
-def test_help_states_the_limit(E):
-    p = E.run("--help")
+def test_help_states_the_limit(h):
+    p = h.run("--help")
     assert p.returncode == 0
     assert "not a sandbox" in p.stdout
     assert "not a sandbox" in (hr.__doc__ or "")
-    p = E.run("run", "--help")
+    p = h.run("run", "--help")
     assert "not a sandbox" in p.stdout
 
 
-def test_usage_error_never_echoes_values(E):
-    p = E.run("run", "--repo-name", "demo", "--feature", FEATURE, "--bogus-zzqx", "secretval")
+def test_usage_error_never_echoes_values(h):
+    p = h.run("run", "--repo-name", "demo", "--feature", FEATURE, "--bogus-zzqx", "secretval")
     assert p.returncode == 2
     assert p.stderr == "heldout-run: error E_USAGE\n" and p.stdout == ""
-    p = E.run("run", "--repo-name", "demo", "--feature", FEATURE, "--timeout", "notanumberqq")
+    p = h.run("run", "--repo-name", "demo", "--feature", FEATURE, "--timeout", "notanumberqq")
     assert p.stderr == "heldout-run: error E_USAGE\n"
 
 
 @pytest.mark.parametrize("feature,repo", [("1-demo", "demo"), ("001-Demo", "demo"),
                                           ("001-demo", "Demo"), ("001-demo", "_x")])
-def test_bad_names_are_refused(E, feature, repo):
-    E.suite(PASS_SUITE)
-    p = E.run("run", "--profile", "generic", "--repo-name", repo, "--feature", feature,
-              "--worktree", str(E.repo))
+def test_bad_names_are_refused(h, feature, repo):
+    h.suite(PASS_SUITE)
+    p = h.run("run", "--profile", "generic", "--repo-name", repo, "--feature", feature,
+              "--worktree", str(h.repo))
     assert (p.returncode, p.stderr, p.stdout) == (2, "heldout-run: error E_FEATURE\n", "")
 
 
 # -- US1: run and feedback ----------------------------------------------------------------------
 
 
-def test_scenario_failing_suite_exact_feedback(E):
-    E.suite(DEMO_SUITE)
-    p = E.run_wt()
+def test_scenario_failing_suite_exact_feedback(h):
+    h.suite(DEMO_SUITE)
+    p = h.run_wt()
     assert p.returncode == 1, p
     assert p.stdout == (
         "heldout-run: 001-demo round 1/4: failed\n"
@@ -239,16 +239,16 @@ def test_scenario_failing_suite_exact_feedback(E):
     assert p.stderr == ""
 
 
-def test_all_passing_suite(E):
-    E.suite(PASS_SUITE)
-    p = E.run_wt()
+def test_all_passing_suite(h):
+    h.suite(PASS_SUITE)
+    p = h.run_wt()
     assert p.returncode == 0
     assert p.stdout == ("heldout-run: 001-demo round 1/4: passed\n"
                         "total: 0/2 tests failing, 0 skipped; 0/2 ids failing\n")
 
 
-def test_repo_ref_mode_uses_committed_tree_and_records_commit(E):
-    E.suite({"test_v.py": """
+def test_repo_ref_mode_uses_committed_tree_and_records_commit(h):
+    h.suite({"test_v.py": """
         import pytest, demo, os
         @pytest.mark.fr("FR-001")
         def test_committed_value():
@@ -259,33 +259,33 @@ def test_repo_ref_mode_uses_committed_tree_and_records_commit(E):
             assert not os.path.exists(os.path.join(here, ".git"))
             assert not os.path.exists(os.path.join(here, "untracked.txt"))
     """})
-    commit = _git(E.repo, "rev-parse", "HEAD").strip()
-    (E.repo / "demo.py").write_text("def value():\n    return 2\n")  # uncommitted edit
-    (E.repo / "untracked.txt").write_text("x")
-    p = E.run("run", "--profile", "generic", "--repo-name", "demo", "--feature", FEATURE,
-              "--repo", str(E.repo), "--ref", "HEAD")
+    commit = _git(h.repo, "rev-parse", "HEAD").strip()
+    (h.repo / "demo.py").write_text("def value():\n    return 2\n")  # uncommitted edit
+    (h.repo / "untracked.txt").write_text("x")
+    p = h.run("run", "--profile", "generic", "--repo-name", "demo", "--feature", FEATURE,
+              "--repo", str(h.repo), "--ref", "HEAD")
     assert p.returncode == 0, p.stdout
-    meta = _report(E)["meta"]
+    meta = _report(h)["meta"]
     assert meta["tree"]["commit"] == commit and meta["commit"] == commit
 
 
-def test_bad_ref_is_e_git(E):
-    E.suite(PASS_SUITE)
-    p = E.run("run", "--profile", "generic", "--repo-name", "demo", "--feature", FEATURE,
-              "--repo", str(E.repo), "--ref", "no-such-ref")
+def test_bad_ref_is_e_git(h):
+    h.suite(PASS_SUITE)
+    p = h.run("run", "--profile", "generic", "--repo-name", "demo", "--feature", FEATURE,
+              "--repo", str(h.repo), "--ref", "no-such-ref")
     assert (p.returncode, p.stderr, p.stdout) == (2, "heldout-run: error E_GIT\n", "")
-    assert list(E.tmpdir.iterdir()) == []
+    assert list(h.tmpdir.iterdir()) == []
 
 
-def test_worktree_copy_contents_and_exclusions(E):
-    (E.repo / "demo.py").write_text("def value():\n    return 3\n")
-    (E.repo / "new.txt").write_text("untracked")
-    (E.repo / "link.txt").symlink_to("README.md")
+def test_worktree_copy_contents_and_exclusions(h):
+    (h.repo / "demo.py").write_text("def value():\n    return 3\n")
+    (h.repo / "new.txt").write_text("untracked")
+    (h.repo / "link.txt").symlink_to("README.md")
     for d in (".venv", "node_modules", "pkg/__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"):
-        (E.repo / d).mkdir(parents=True)
-        (E.repo / d / "junk").write_text("j")
-    (E.repo / "pkg" / "stale.pyc").write_bytes(b"x")
-    E.suite({"test_c.py": """
+        (h.repo / d).mkdir(parents=True)
+        (h.repo / d / "junk").write_text("j")
+    (h.repo / "pkg" / "stale.pyc").write_bytes(b"x")
+    h.suite({"test_c.py": """
         import os, pytest, demo
         ROOT = os.path.dirname(demo.__file__)
         @pytest.mark.fr("FR-007")
@@ -298,36 +298,36 @@ def test_worktree_copy_contents_and_exclusions(E):
                       ".mypy_cache", ".ruff_cache", "pkg/stale.pyc"):
                 assert not os.path.lexists(os.path.join(ROOT, d)), d
     """})
-    before = _tree_state(E.repo)
-    p = E.run_wt()
+    before = _tree_state(h.repo)
+    p = h.run_wt()
     assert p.returncode == 0, p.stdout
-    assert _tree_state(E.repo) == before
+    assert _tree_state(h.repo) == before
 
 
-def test_existing_heldout_dir_in_tree_is_replaced_and_suite_dest(E):
-    stale = E.repo / "tests" / "heldout" / FEATURE
+def test_existing_heldout_dir_in_tree_is_replaced_and_suite_dest(h):
+    stale = h.repo / "tests" / "heldout" / FEATURE
     stale.mkdir(parents=True)
     (stale / "test_stale.py").write_text("def test_stale():\n    assert False\n")
-    E.suite(PASS_SUITE)
-    p = E.run_wt()
+    h.suite(PASS_SUITE)
+    p = h.run_wt()
     assert p.returncode == 0 and "total: 0/2" in p.stdout
     # pytest is pointed at the dest only, so the stale tree copy is not collected.
-    p = E.run_wt("--suite-dest", "elsewhere/suite", "--no-count", "--keep")
+    p = h.run_wt("--suite-dest", "elsewhere/suite", "--no-count", "--keep")
     assert p.returncode == 0 and "total: 0/2" in p.stdout
-    kept = Path(json.loads(next(E.report_root.glob("run-*/report.json")).read_text())["meta"][
+    kept = Path(json.loads(next(h.report_root.glob("run-*/report.json")).read_text())["meta"][
         "kept_copy"])
     assert (kept / "elsewhere" / "suite" / "test_ok.py").exists()
     shutil.rmtree(kept)
 
 
-def test_suite_dest_outside_copy_is_refused(E):
-    E.suite(PASS_SUITE)
-    p = E.run_wt("--suite-dest", "../escape")
+def test_suite_dest_outside_copy_is_refused(h):
+    h.suite(PASS_SUITE)
+    p = h.run_wt("--suite-dest", "../escape")
     assert p.returncode == 2 and p.stderr == "heldout-run: error E_USAGE\n"
 
 
-def test_child_environment(E):
-    E.suite({"test_env.py": """
+def test_child_environment(h):
+    h.suite({"test_env.py": """
         import os, pytest
         @pytest.mark.fr("FR-012")
         def test_env():
@@ -342,18 +342,18 @@ def test_child_environment(E):
             assert os.path.isfile(os.path.join(parts[0], "demo.py"))
             assert not os.path.exists(os.path.join(os.getcwd(), "demo.py"))  # scratch cwd
     """})
-    p = E.run_wt("--unset", "DROP_ME_QQ", env=E.env(DROP_ME_QQ="1", KEEP_ME_QQ="1",
+    p = h.run_wt("--unset", "DROP_ME_QQ", env=h.env(DROP_ME_QQ="1", KEEP_ME_QQ="1",
                                                      PYTHONPATH="/inherited/entry"))
     assert p.returncode == 0, p.stdout
-    cmd = _report(E)["meta"]["pytest_command"]
+    cmd = _report(h)["meta"]["pytest_command"]
     assert cmd[1:3] == ["-m", "pytest"] and cmd[4:9] == ["-q", "-p", "no:cacheprovider", "-p",
                                                          "heldout_run"]
     assert cmd[9].startswith("--junitxml=") and cmd[9].endswith("round-01/junit.xml")
 
 
-def test_pytest_arg_values_are_appended(E):
-    E.suite(DEMO_SUITE)
-    p = E.run_wt("--pytest-arg", "-k", "--pytest-arg", "test_one or test_two")
+def test_pytest_arg_values_are_appended(h):
+    h.suite(DEMO_SUITE)
+    p = h.run_wt("--pytest-arg", "-k", "--pytest-arg", "test_one or test_two")
     assert p.returncode == 0, p.stdout
     assert "total: 0/2 tests failing" in p.stdout
 
@@ -378,18 +378,18 @@ UNMARKED = {
 }
 
 
-def test_spec_map_json_mode(E):
+def test_spec_map_json_mode(h):
     files = dict(UNMARKED)
     files["SPEC-MAP.json"] = json.dumps({"map": {"test_alpha": ["FR-001"], "test_beta": ["FR-002"],
                                                  "test_gamma": ["SC-001"], "test_delta": ["FR-002"]}})
-    E.suite(files)
-    p = E.run_wt()
+    h.suite(files)
+    p = h.run_wt()
     assert p.returncode == 1
     assert p.stdout.splitlines()[1:] == ["FR-002: 2/3 failing", "SC-001: 1/1 failing",
                                          "total: 3/5 tests failing, 0 skipped; 2/3 ids failing"]
 
 
-def test_fr_report_mode_is_never_executed_and_matches_fr_report(E, tmp_path):
+def test_fr_report_mode_is_never_executed_and_matches_fr_report(h, tmp_path):
     sentinel = tmp_path / "EXECUTED"
     files = dict(UNMARKED)
     files["fr_report.py"] = f"""
@@ -420,21 +420,21 @@ def test_fr_report_mode_is_never_executed_and_matches_fr_report(E, tmp_path):
         if __name__ == "__main__":
             main(sys.argv[1])
     """
-    suite = E.suite(files)
-    p = E.run_wt()
+    suite = h.suite(files)
+    p = h.run_wt()
     assert p.returncode == 1
     assert not sentinel.exists()
     lines = p.stdout.splitlines()
     assert lines[1:4] == ["FR-002: 1/2 failing", "FR-003a: 2/3 failing", "UNMAPPED: 1/1 failing"]
-    junit = E.report_root / "round-01" / "junit.xml"
+    junit = h.report_root / "round-01" / "junit.xml"
     ref = subprocess.run([sys.executable, str(suite / "fr_report.py"), str(junit)],
                          capture_output=True, text=True, check=True).stdout.splitlines()
     sentinel.unlink()
     assert ref == ["FR-002: 1 failing of 2", "FR-003a: 2 failing of 3"]
 
 
-def test_markers_and_map_are_unioned(E):
-    E.suite({
+def test_markers_and_map_are_unioned(h):
+    h.suite({
         "test_m.py": """
             import pytest
             @pytest.mark.fr("FR-001")
@@ -443,26 +443,26 @@ def test_markers_and_map_are_unioned(E):
         """,
         "SPEC-MAP.json": json.dumps({"test_x": ["FR-009"]}),
     })
-    p = E.run_wt()
+    p = h.run_wt()
     assert p.stdout.splitlines()[1:3] == ["FR-001: 1/1 failing", "FR-009: 1/1 failing"]
 
 
-def test_map_flag_overrides_and_bad_map_is_e_map(E, tmp_path):
-    E.suite({**UNMARKED, "SPEC-MAP.json": json.dumps({"test_gamma": ["FR-001"]})})
+def test_map_flag_overrides_and_bad_map_is_e_map(h, tmp_path):
+    h.suite({**UNMARKED, "SPEC-MAP.json": json.dumps({"test_gamma": ["FR-001"]})})
     alt = tmp_path / "alt.json"
     alt.write_text(json.dumps({"test_gamma": ["NFR-004"]}))
-    p = E.run_wt("--map", str(alt), "--no-count")
+    p = h.run_wt("--map", str(alt), "--no-count")
     assert "NFR-004: 1/1 failing" in p.stdout and "FR-001" not in p.stdout
     alt.write_text("{not json")
-    p = E.run_wt("--map", str(alt))
+    p = h.run_wt("--map", str(alt))
     assert (p.returncode, p.stderr, p.stdout) == (2, "heldout-run: error E_MAP\n", "")
-    (E.root / "demo" / FEATURE / "SPEC-MAP.json").write_text(json.dumps({"test_x": 5}))
-    p = E.run_wt()
+    (h.root / "demo" / FEATURE / "SPEC-MAP.json").write_text(json.dumps({"test_x": 5}))
+    p = h.run_wt()
     assert (p.returncode, p.stderr) == (2, "heldout-run: error E_MAP\n")
 
 
-def test_invalid_ids_unmapped_ordering_and_multi_ids(E):
-    E.suite({"test_o.py": """
+def test_invalid_ids_unmapped_ordering_and_multi_ids(h):
+    h.suite({"test_o.py": """
         import pytest
         @pytest.mark.fr("SC-002", "FR-010")
         def test_a():
@@ -483,7 +483,7 @@ def test_invalid_ids_unmapped_ordering_and_multi_ids(E):
         def test_f():
             assert False
     """})
-    p = E.run_wt()
+    p = h.run_wt()
     assert p.stdout.splitlines()[1:] == [
         "FR-002: 1/1 failing", "FR-002a: 1/1 failing", "FR-002b: 1/1 failing",
         "FR-010: 1/1 failing", "NFR-001: 1/1 failing", "SC-002: 1/1 failing",
@@ -493,8 +493,8 @@ def test_invalid_ids_unmapped_ordering_and_multi_ids(E):
     assert "qqzz" not in p.stdout
 
 
-def test_outcome_rules(E):
-    E.suite({"test_r.py": """
+def test_outcome_rules(h):
+    h.suite({"test_r.py": """
         import pytest
         @pytest.fixture
         def bad_setup():
@@ -524,7 +524,7 @@ def test_outcome_rules(E):
         def test_plain():
             pass
     """})
-    p = E.run_wt()
+    p = h.run_wt()
     assert p.returncode == 1
     assert p.stdout.splitlines()[1:] == [
         "FR-002: 1/1 failing", "FR-003: 1/1 failing", "FR-004: 1/1 failing",
@@ -532,10 +532,10 @@ def test_outcome_rules(E):
     ]
 
 
-def test_json_feedback_and_feedback_file(E, tmp_path):
-    E.suite(DEMO_SUITE)
+def test_json_feedback_and_feedback_file(h, tmp_path):
+    h.suite(DEMO_SUITE)
     ff = tmp_path / "fb.json"
-    p = E.run_wt("--json", "--feedback-file", str(ff))
+    p = h.run_wt("--json", "--feedback-file", str(ff))
     obj = json.loads(p.stdout)
     assert obj == json.loads(ff.read_text())
     assert set(obj) == {"schema", "feature", "round", "round_cap", "status", "cap_reached",
@@ -565,79 +565,80 @@ HANG_SUITE = {"test_h.py": """
 """}
 
 
-def test_timeout_ignoring_sigterm(E):
-    E.suite(HANG_SUITE)
+def test_timeout_ignoring_sigterm(h):
+    h.suite(HANG_SUITE)
     t0 = time.monotonic()
-    p = E.run_wt("--timeout", "3", timeout=60)
+    p = h.run_wt("--timeout", "3", timeout=60)
     assert time.monotonic() - t0 < 3 + 15
     assert p.returncode == 3 and p.stderr == ""
     assert p.stdout.splitlines() == ["heldout-run: 001-demo round 1/4: timeout",
                                      "FR-013: 2/2 failing",
                                      "total: 2/3 tests failing, 0 skipped; 1/2 ids failing"]
-    assert list(E.tmpdir.iterdir()) == []
-    rounds = json.loads((E.report_root / "rounds.json").read_text())
+    assert list(h.tmpdir.iterdir()) == []
+    rounds = json.loads((h.report_root / "rounds.json").read_text())
     assert [r["status"] for r in rounds["rounds"]] == ["timeout"]
 
 
-def test_collection_error_counts_a_round(E):
-    E.suite({"test_bad.py": "import no_such_module_qq\n\ndef test_x():\n    pass\n"})
-    p = E.run_wt()
+def test_collection_error_counts_a_round(h):
+    h.suite({"test_bad.py": "import no_such_module_qq\n\ndef test_x():\n    pass\n"})
+    p = h.run_wt()
     assert p.returncode == 3 and p.stderr == ""
     assert p.stdout.splitlines()[0] == "heldout-run: 001-demo round 1/4: collection_error"
-    rounds = json.loads((E.report_root / "rounds.json").read_text())
+    rounds = json.loads((h.report_root / "rounds.json").read_text())
     assert len(rounds["rounds"]) == 1
 
 
-def test_sync_failure_is_infra_error_not_counted(E, tmp_path):
+def test_sync_failure_is_infra_error_not_counted(h, tmp_path):
     fake = tmp_path / "fakebin"
     fake.mkdir()
     (fake / "uv").write_text("#!/bin/sh\necho 'sync secret qqsync' >&2\nexit 1\n")
     (fake / "uv").chmod(0o755)
-    E.suite(PASS_SUITE)
-    env = E.env(PATH=f"{fake}:{os.environ['PATH']}")
-    p = E.run("run", "--profile", "moeka", "--repo-name", "demo", "--feature", FEATURE,
-              "--worktree", str(E.repo), env=env)
+    h.suite(PASS_SUITE)
+    env = h.env(PATH=f"{fake}:{os.environ['PATH']}")
+    p = h.run("run", "--profile", "moeka", "--repo-name", "demo", "--feature", FEATURE,
+              "--worktree", str(h.repo), env=env)
     assert p.returncode == 3 and p.stderr == "heldout-run: error E_SYNC\n"
     assert p.stdout.splitlines()[0] == "heldout-run: 001-demo round -/4: infra_error"
     assert "qqsync" not in p.stdout + p.stderr
-    assert not (E.report_root / "rounds.json").exists()
-    runs = [d.name for d in E.report_root.iterdir() if d.name.startswith("run-")]
+    assert not (h.report_root / "rounds.json").exists()
+    runs = [d.name for d in h.report_root.iterdir() if d.name.startswith("run-")]
     assert len(runs) == 1
-    assert "qqsync" in (E.report_root / runs[0] / "sync.log").read_text()
-    assert list(E.tmpdir.iterdir()) == []
+    assert "qqsync" in (h.report_root / runs[0] / "sync.log").read_text()
+    assert list(h.tmpdir.iterdir()) == []
 
 
-def test_concurrent_run_is_busy(E):
-    E.suite(PASS_SUITE)
-    E.report_root.mkdir(parents=True)
-    fd = os.open(E.report_root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+def test_concurrent_run_is_busy(h):
+    h.suite(PASS_SUITE)
+    h.report_root.mkdir(parents=True)
+    fd = os.open(h.report_root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
-        p = E.run_wt()
+        p = h.run_wt()
     finally:
         os.close(fd)
     assert p.returncode == 3 and p.stderr == "heldout-run: error E_BUSY\n"
     assert "infra_error" in p.stdout.splitlines()[0]
-    assert not (E.report_root / "rounds.json").exists()
+    assert not (h.report_root / "rounds.json").exists()
 
 
-def test_sigint_cleans_scratch(E):
-    E.suite(HANG_SUITE)
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_signal_cleans_scratch(h, sig):
+    h.suite(HANG_SUITE)
     proc = subprocess.Popen([sys.executable, str(RUNNER), "run", "--profile", "generic",
                              "--repo-name", "demo", "--feature", FEATURE, "--worktree",
-                             str(E.repo)], env=E.env(), stdout=subprocess.PIPE,
+                             str(h.repo)], env=h.env(), stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        recs = list(E.tmpdir.glob("heldout-run-*/records.jsonl"))
+        recs = list(h.tmpdir.glob("heldout-run-*/records.jsonl"))
         if recs and 'test_hang", "when": "setup"' in recs[0].read_text():
             break
         time.sleep(0.2)
     time.sleep(1)
-    proc.send_signal(signal.SIGINT)
+    proc.send_signal(sig)
     out, err = proc.communicate(timeout=30)
     assert proc.returncode == 3
-    assert list(E.tmpdir.iterdir()) == []
+    assert list(h.tmpdir.iterdir()) == []
     assert err == "heldout-run: error E_SYNC\n"
     assert out.splitlines()[0] == "heldout-run: 001-demo round -/4: infra_error"
     _assert_clean(out, err)
@@ -677,13 +678,13 @@ def _assert_clean(*texts: str) -> None:
 
 
 @pytest.mark.parametrize("mode", ["pass", "fail", "hang", "collect", "sync", "busy", "refuse"])
-def test_canary_redaction_in_every_outcome(E, tmp_path, mode):
-    suite = E.suite(CANARY_SUITE)
+def test_canary_redaction_in_every_outcome(h, tmp_path, mode):
+    suite = h.suite(CANARY_SUITE)
     ff = tmp_path / "fb.json"
     extra = ["--feedback-file", str(ff)]
-    env = E.env(CANARY_MODE=mode)
+    env = h.env(CANARY_MODE=mode)
     args = ["run", "--profile", "generic", "--repo-name", "demo", "--feature", FEATURE,
-            "--worktree", str(E.repo)]
+            "--worktree", str(h.repo)]
     if mode == "hang":
         extra += ["--timeout", "2"]
     if mode == "collect":
@@ -697,13 +698,13 @@ def test_canary_redaction_in_every_outcome(E, tmp_path, mode):
         args[2] = "moeka"
     lock_fd = None
     if mode == "busy":
-        E.report_root.mkdir(parents=True)
-        lock_fd = os.open(E.report_root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        h.report_root.mkdir(parents=True)
+        lock_fd = os.open(h.report_root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
     if mode == "refuse":
         suite.chmod(0o755)
     try:
-        p = E.run(*args, *extra, env=env, timeout=90)
+        p = h.run(*args, *extra, env=env, timeout=90)
     finally:
         if lock_fd is not None:
             os.close(lock_fd)
@@ -713,88 +714,88 @@ def test_canary_redaction_in_every_outcome(E, tmp_path, mode):
     _assert_clean(*texts)
     for json_mode in (["--json"],):
         if mode in ("pass", "fail"):
-            q = E.run(*args, "--no-count", *json_mode, env=env)
+            q = h.run(*args, "--no-count", *json_mode, env=env)
             _assert_clean(q.stdout, q.stderr)
 
 
-def test_suite_inside_worktree_is_refused_before_copy(E):
-    suite = E.suite(PASS_SUITE, path=E.repo / "hidden")
-    p = E.run_wt(suite=suite)
+def test_suite_inside_worktree_is_refused_before_copy(h):
+    suite = h.suite(PASS_SUITE, path=h.repo / "hidden")
+    p = h.run_wt(suite=suite)
     assert (p.returncode, p.stderr, p.stdout) == (2, "heldout-run: error E_SUITE_IN_TREE\n", "")
-    assert list(E.tmpdir.iterdir()) == []
+    assert list(h.tmpdir.iterdir()) == []
 
 
-def test_suite_inside_other_worktree_or_forbidden(E, tmp_path):
+def test_suite_inside_other_worktree_or_forbidden(h, tmp_path):
     other = tmp_path / "other-wt"
-    _git(E.repo, "worktree", "add", "-q", str(other), "-b", "other")
-    suite = E.suite(PASS_SUITE, path=other / "x")
-    p = E.run_wt(suite=suite)
+    _git(h.repo, "worktree", "add", "-q", str(other), "-b", "other")
+    suite = h.suite(PASS_SUITE, path=other / "x")
+    p = h.run_wt(suite=suite)
     assert p.stderr == "heldout-run: error E_SUITE_IN_TREE\n" and p.returncode == 2
-    p = E.run("run", "--profile", "generic", "--repo-name", "demo", "--feature", FEATURE,
-              "--repo", str(E.repo), "--ref", "HEAD", "--suite", str(suite))
+    p = h.run("run", "--profile", "generic", "--repo-name", "demo", "--feature", FEATURE,
+              "--repo", str(h.repo), "--ref", "HEAD", "--suite", str(suite))
     assert p.stderr == "heldout-run: error E_SUITE_IN_TREE\n"
-    good = E.suite(PASS_SUITE)
-    p = E.run_wt("--forbid-under", str(E.root))
+    good = h.suite(PASS_SUITE)
+    p = h.run_wt("--forbid-under", str(h.root))
     assert p.stderr == "heldout-run: error E_SUITE_IN_TREE\n"
-    p = E.run_wt("--report-dir", str(E.repo / "rep"), suite=good)
+    p = h.run_wt("--report-dir", str(h.repo / "rep"), suite=good)
     assert p.stderr == "heldout-run: error E_REPORT_IN_TREE\n" and p.returncode == 2
-    assert not (E.repo / "rep").exists()
+    assert not (h.repo / "rep").exists()
 
 
-def test_runner_inside_worktree_is_refused(E):
-    E.suite(PASS_SUITE)
-    inner = E.repo / "scripts"
+def test_runner_inside_worktree_is_refused(h):
+    h.suite(PASS_SUITE)
+    inner = h.repo / "scripts"
     inner.mkdir()
     shutil.copy(RUNNER, inner / "heldout_run.py")
-    p = E.run_wt(runner=inner / "heldout_run.py")
+    p = h.run_wt(runner=inner / "heldout_run.py")
     assert (p.returncode, p.stderr) == (2, "heldout-run: error E_RUNNER_IN_TREE\n")
 
 
-def test_permissions_and_missing_suite(E):
-    suite = E.suite(PASS_SUITE)
+def test_permissions_and_missing_suite(h):
+    suite = h.suite(PASS_SUITE)
     suite.chmod(0o750)
-    p = E.run_wt()
+    p = h.run_wt()
     assert (p.returncode, p.stderr) == (2, "heldout-run: error E_SUITE_PERMS\n")
     suite.chmod(0o700)
-    E.root.chmod(0o711)
-    p = E.run_wt()
+    h.root.chmod(0o711)
+    p = h.run_wt()
     assert p.stderr == "heldout-run: error E_SUITE_PERMS\n"
-    E.root.chmod(0o700)
-    p = E.run_wt(suite=E.tmp / "nope")
+    h.root.chmod(0o700)
+    p = h.run_wt(suite=h.tmp / "nope")
     assert (p.returncode, p.stderr) == (2, "heldout-run: error E_SUITE_MISSING\n")
 
 
-def test_check_isolation(E, tmp_path):
-    suite = E.suite(PASS_SUITE)
-    p = E.run("check-isolation", "--suite", str(suite), "--repo", str(E.repo))
+def test_check_isolation(h, tmp_path):
+    suite = h.suite(PASS_SUITE)
+    p = h.run("check-isolation", "--suite", str(suite), "--repo", str(h.repo))
     assert p.returncode == 0 and p.stderr == ""
-    p = E.run("check-isolation", "--suite", str(suite), "--forbid-under", str(E.root))
+    p = h.run("check-isolation", "--suite", str(suite), "--forbid-under", str(h.root))
     assert (p.returncode, p.stderr) == (2, "heldout-run: error E_SUITE_IN_TREE\n")
-    inside = E.suite(PASS_SUITE, path=E.repo / "s")
-    p = E.run("check-isolation", "--suite", str(inside), "--repo", str(E.repo))
+    inside = h.suite(PASS_SUITE, path=h.repo / "s")
+    p = h.run("check-isolation", "--suite", str(inside), "--repo", str(h.repo))
     assert (p.returncode, p.stderr) == (2, "heldout-run: error E_SUITE_IN_TREE\n")
     suite.chmod(0o755)
-    p = E.run("check-isolation", "--suite", str(suite))
+    p = h.run("check-isolation", "--suite", str(suite))
     assert (p.returncode, p.stderr) == (2, "heldout-run: error E_SUITE_PERMS\n")
 
 
 @pytest.mark.parametrize("mode", ["pass", "fail", "hang"])
-def test_source_and_suite_unchanged_scratch_removed(E, tmp_path, mode):
-    suite = E.suite(CANARY_SUITE)
+def test_source_and_suite_unchanged_scratch_removed(h, tmp_path, mode):
+    suite = h.suite(CANARY_SUITE)
     scratch = tmp_path / "own-scratch"
     scratch.mkdir()
-    before_suite, before_repo = _tree_state(suite), _tree_state(E.repo)
-    p = E.run_wt("--scratch", str(scratch), "--timeout", "3", env=E.env(CANARY_MODE=mode))
+    before_suite, before_repo = _tree_state(suite), _tree_state(h.repo)
+    p = h.run_wt("--scratch", str(scratch), "--timeout", "3", env=h.env(CANARY_MODE=mode))
     assert p.returncode in (0, 1, 3)
-    assert _tree_state(suite) == before_suite and _tree_state(E.repo) == before_repo
-    assert list(scratch.iterdir()) == [] and list(E.tmpdir.iterdir()) == []
+    assert _tree_state(suite) == before_suite and _tree_state(h.repo) == before_repo
+    assert list(scratch.iterdir()) == [] and list(h.tmpdir.iterdir()) == []
 
 
-def test_keep_keeps_copy_and_records_it_privately(E):
-    E.suite(PASS_SUITE)
-    p = E.run_wt("--keep")
+def test_keep_keeps_copy_and_records_it_privately(h):
+    h.suite(PASS_SUITE)
+    p = h.run_wt("--keep")
     assert p.returncode == 0
-    kept = Path(_report(E)["meta"]["kept_copy"])
+    kept = Path(_report(h)["meta"]["kept_copy"])
     assert (kept / "demo.py").exists() and not (kept / ".git").exists()
     assert (kept / "tests" / "heldout" / FEATURE / "test_ok.py").exists()
     assert str(kept) not in p.stdout
@@ -804,10 +805,10 @@ def test_keep_keeps_copy_and_records_it_privately(E):
 # -- private report ------------------------------------------------------------------------------
 
 
-def test_report_layout_and_modes(E):
-    E.suite(DEMO_SUITE)
-    E.run_wt()
-    d = E.report_root / "round-01"
+def test_report_layout_and_modes(h):
+    h.suite(DEMO_SUITE)
+    h.run_wt()
+    d = h.report_root / "round-01"
     names = {p.name for p in d.iterdir()}
     assert {"report.json", "junit.xml", "pytest.log", "feedback.json"} <= names
     assert d.stat().st_mode & 0o777 == 0o700
@@ -824,48 +825,48 @@ def test_report_layout_and_modes(E):
     assert "assert 3 <= 2" in t["test_three[3]"]["longrepr"]
     assert json.loads((d / "feedback.json").read_text())["failing"] == {
         "FR-002": {"failing": 2, "total": 4}}
-    E.run_wt("--no-count")
-    runs = [p for p in E.report_root.iterdir() if re.fullmatch(r"run-\d{8}T\d{6}Z", p.name)]
+    h.run_wt("--no-count")
+    runs = [p for p in h.report_root.iterdir() if re.fullmatch(r"run-\d{8}T\d{6}Z", p.name)]
     assert len(runs) == 1
 
 
 # -- US4: rounds ---------------------------------------------------------------------------------
 
 
-def test_round_cap_escalation_and_refusal(E):
-    E.suite(DEMO_SUITE)
+def test_round_cap_escalation_and_refusal(h):
+    h.suite(DEMO_SUITE)
     for n in range(1, 4):
-        p = E.run_wt()
+        p = h.run_wt()
         assert p.stdout.startswith(f"heldout-run: 001-demo round {n}/4: failed\n")
         assert "escalate" not in p.stdout
-    p = E.run_wt("--no-count")
+    p = h.run_wt("--no-count")
     assert p.stdout.startswith("heldout-run: 001-demo round -/4: failed\n")
-    p = E.run_wt()
+    p = h.run_wt()
     assert p.stdout.splitlines()[-1] == "round cap reached: escalate to owner"
-    p = E.run_wt("--json")
+    p = h.run_wt("--json")
     assert (p.returncode, p.stderr, p.stdout) == (4, "heldout-run: error E_ROUND_CAP\n", "")
-    p = E.run_wt("--no-count")
+    p = h.run_wt("--no-count")
     assert p.returncode == 1
-    p = E.run("rounds", "--repo-name", "demo", "--feature", FEATURE)
+    p = h.run("rounds", "--repo-name", "demo", "--feature", FEATURE)
     assert p.stdout.splitlines() == ["round 1: failed FR-002"] * 0 + [
         f"round {n}: failed FR-002" for n in range(1, 5)]
-    p = E.run("rounds", "--repo-name", "demo", "--feature", FEATURE, "--reset")
+    p = h.run("rounds", "--repo-name", "demo", "--feature", FEATURE, "--reset")
     assert p.returncode == 2 and p.stderr == "heldout-run: error E_USAGE\n"
-    p = E.run("rounds", "--repo-name", "demo", "--feature", FEATURE, "--reset", "--reason",
+    p = h.run("rounds", "--repo-name", "demo", "--feature", FEATURE, "--reset", "--reason",
               "tester-bug")
     assert p.returncode == 0
-    doc = json.loads((E.report_root / "rounds.json").read_text())
+    doc = json.loads((h.report_root / "rounds.json").read_text())
     assert doc["schema"] == "heldout-rounds.v1" and doc["rounds"] == []
     assert doc["resets"][0]["reason"] == "tester-bug" and len(doc["resets"][0]["rounds"]) == 4
-    p = E.run_wt()
+    p = h.run_wt()
     assert p.stdout.startswith("heldout-run: 001-demo round 1/4: failed\n")
 
 
-def test_cap_flag_and_passing_at_cap(E):
-    E.suite(PASS_SUITE)
-    p = E.run_wt("--cap", "1")
+def test_cap_flag_and_passing_at_cap(h):
+    h.suite(PASS_SUITE)
+    p = h.run_wt("--cap", "1")
     assert p.returncode == 0 and "escalate" not in p.stdout
-    p = E.run_wt("--cap", "1")
+    p = h.run_wt("--cap", "1")
     assert p.returncode == 4
 
 
@@ -892,12 +893,12 @@ Paragraph after.
 """
 
 
-def test_triage_text_and_json(E, tmp_path):
-    E.suite(DEMO_SUITE)
-    E.run_wt()
+def test_triage_text_and_json(h, tmp_path):
+    h.suite(DEMO_SUITE)
+    h.run_wt()
     spec = tmp_path / "spec.md"
     spec.write_text(SPEC_MD)
-    p = E.run("triage", "--repo-name", "demo", "--feature", FEATURE, "--id", "FR-002",
+    p = h.run("triage", "--repo-name", "demo", "--feature", FEATURE, "--id", "FR-002",
               "--spec", str(spec))
     assert p.returncode == 0
     lines = p.stdout.splitlines()
@@ -907,13 +908,13 @@ def test_triage_text_and_json(E, tmp_path):
                        for x in (3, 4)] or len(headers) == 2
     assert "E       assert 3 <= 2" in p.stdout
     assert "  - nested bullet of FR-002" in p.stdout and "FR-003" not in p.stdout
-    q = E.run("triage", "--repo-name", "demo", "--feature", FEATURE, "--round", "1",
+    q = h.run("triage", "--repo-name", "demo", "--feature", FEATURE, "--round", "1",
               "--spec", str(spec), "--json")
     data = json.loads(q.stdout)
     assert len(data) == 2 and set(data[0]) == {"id", "nodeid", "assertion", "spec"}
     assert data[0]["spec"] == hr.extract_requirement(SPEC_MD, "FR-002")
-    assert len(json.loads((E.report_root / "rounds.json").read_text())["rounds"]) == 1
-    p = E.run("triage", "--repo-name", "demo", "--feature", FEATURE, "--id", "FR-001",
+    assert len(json.loads((h.report_root / "rounds.json").read_text())["rounds"]) == 1
+    p = h.run("triage", "--repo-name", "demo", "--feature", FEATURE, "--id", "FR-001",
               "--spec", str(spec))
     assert p.stdout.splitlines() == ["PRIVATE TRIAGE: not for the implementer"]
 
