@@ -284,6 +284,7 @@ def test_mixed_producer_fixture_validates_and_reduces_without_lying() -> None:
 
     sys.path.insert(0, str(SCHEMAS))
     import validate
+
     from nanobot.llm_usage.query import reduce_records
 
     docs = [json.loads(line) for line in (SCHEMAS / "examples" / "mixed-producers.jsonl").read_text().splitlines()]
