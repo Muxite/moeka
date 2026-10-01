@@ -44,7 +44,7 @@ Recommendation: GO for the cutover only after the stricter checklist in section 
 | Secrets | every token and key in `config.json` is a `${VAR}` reference; values are in the checkout's gitignored `keys.env` | No secret in a tracked file. Good |
 | Sessions | one SQLite database in the ADR-0001 location (migrated 2026-09-30 01:16); no database at the legacy location; the old per-channel JSONL files are already renamed `.imported` | The session migration is already done and is NOT part of this cutover |
 | Cron | `cron/jobs.json` v1, two system jobs (`dream` every 2 h, `heartbeat` every 30 min) | `nanobot/cron`, `gateway`, `triggers`, `channels`, `bus` are byte-identical between `main` and the candidate |
-| Usage DB | `llm_usage.sqlite3`, two rows, user_version 1 | New code migrates it to version 2 (see R7) |
+| Usage DB | `llm_usage.sqlite3`, two rows, user_version 1, last written 2026-09-29 (the bot has run a day since, heartbeat and dream jobs record nothing) | New code migrates it to version 2 (see R6). "Usage rows grow" is a valid post-cutover check only after a real model turn |
 | HTTP API server | configured (`api.port` 8900) but not listening | The restored `nanobot/api/server.py` is not exercised by the live bot today |
 | Backups | `/mnt/jesse` is not mounted; `ops/jesse.offline` marker exists (2026-09-30 17:46); the weekly workspace backup aborts when the mount is missing; its timer is `disabled` | No off-disk copy of the sessions, memory or config exists right now |
 | Tools on the host | the `sqlite3` command-line tool is not installed | CUTOVER's verification commands (`sqlite3 ...`) fail as written; use Python's `sqlite3` or `ops/sqlite-backup.py` |
