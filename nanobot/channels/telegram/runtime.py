@@ -2241,9 +2241,11 @@ class TelegramChannel(BaseChannel):
                     await cast(Any, updater).stop()
             except Exception as e:  # noqa: BLE001 - best effort; polling stops either way
                 self.logger.debug("stopping the updater after Conflict failed: {}", e)
-        deadline = self._conflict_retry_at or (time.monotonic() + self.conflict_retry_s)
-        while self._running and time.monotonic() < deadline:
-            await asyncio.sleep(min(POLL_WATCH_INTERVAL, max(0.0, deadline - time.monotonic())))
+        if self._conflict_retry_at is None:
+            self._conflict_retry_at = time.monotonic() + self.conflict_retry_s
+        while self._running and time.monotonic() < (self._conflict_retry_at or 0.0):
+            remaining = (self._conflict_retry_at or 0.0) - time.monotonic()
+            await asyncio.sleep(min(POLL_WATCH_INTERVAL, max(0.0, remaining)))
         if not self._running or self.polling_state != "conflict":
             return
         app = self._app
