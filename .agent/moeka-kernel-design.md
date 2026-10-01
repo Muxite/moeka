@@ -818,8 +818,28 @@ and when it may accept a change.
 - A candidate is accepted only if it passes every hard constraint, is not Pareto-dominated by its parent, and is
   strictly better on at least one objective.
 - Ties between accepted candidates break toward fewer tokens, then fewer tools.
-- The paired-margin gate and the cascade tiers live in `.agent/rsi-harness-design.md` (branch
-  `rsi-harness-spec`); the cost dimension is added to that gate.
+- The paired-margin gate and the cascade tiers live in `.agent/rsi-harness-design.md` (merged into this branch
+  from `rsi-harness-spec`); the cost dimension is added to that gate.
+
+**Held-out spec testing (first-class requirement; owner 2026-10-01; spec `004` FR-016, SC-007):**
+- The agent that changes moeka (the mutator in RSI, the implementer in ordinary feature work) never sees the
+  tests that judge it. Tester and implementer are different agents; the tester writes held-out tests from the
+  spec only.
+- Held-out tests and tasks live outside every implementer worktree and outside the mutator's write and read
+  scope (`~/projects/.heldout/<repo>/<feature>/`, 0700, uncommitted while in use; in RSI, outside the rollout
+  container). The mutator never sees the held-out task suite.
+- The evaluator runs them on an isolated copy of the candidate and returns only redacted per-requirement
+  results: requirement or task id plus pass/fail counts ("FR-007: 2/5 fail"). No assertion text, inputs, test
+  names or paths cross the boundary, and every query is counted (rate-limited, as in FR-011).
+- Accepted held-out tests are committed as regression tests and replaced by fresh ones for the next round. A
+  held-out test that fails a behaviour the spec allows is a tester bug.
+
+**Candidate kernel feature (not built; owner decision): a `heldout` evaluation helper.** A small kernel-side
+helper that takes a candidate tree (or variant) and a hidden suite reference, copies the candidate into a
+throwaway directory, runs the hidden checks there under a wall-clock cap and the kernel's isolation, and
+returns a `HeldoutResult` of `{requirement_id: (passed, total)}` with nothing else. The suite path never
+enters the agent's environment, trace payloads or the ledger (trace events carry ids and counts only). It
+would serve the RSI evaluator and the feature-work runner (`004` T013-T015) with one redaction rule.
 
 ```mermaid
 flowchart TD

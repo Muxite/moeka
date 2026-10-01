@@ -30,6 +30,12 @@ description: "Kernel-side task list for the RSI harness (pointer)"
 - [ ] T010 [US2] If kept: emit `clarify.question` and `clarify.commit_ready` (paths and reasons, never values) from `nanobot/kernel/clarify.py` or the facade, with a "needed" mark; test in `tests/kernel/test_clarify.py`
 - [ ] T011 [US2] If dropped: remove clarification yield from kernel design section 8 and `rsi-harness-design.md` on its branch via the owner's separate instruction
 
+## Phase 5: Held-out spec testing (FR-016, SC-007)
+
+- [ ] T013 Runner `heldout-run <repo> <feature> <worktree>`: copy the held-out suite into a throwaway copy of the tree, run under `timeout`, report per-requirement pass/fail counts only (FR-016)
+- [ ] T014 Redaction test on the runner's feedback: no test names, assertion text, inputs or held-out paths; held-out dir not mounted into the implementer or mutator container (SC-007)
+- [ ] T015 Candidate kernel helper (owner decision, see kernel design section 8): `heldout` evaluation that runs hidden checks in an isolated copy and returns redacted per-requirement results
+
 ## Phase N: Polish
 
 - [ ] T012 Update the harness design's prerequisite status lines (on its own branch, owner's instruction) and the kernel design section 14 after each landing

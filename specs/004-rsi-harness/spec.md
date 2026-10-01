@@ -128,6 +128,24 @@ Harness requirements (summary; the design is authoritative):
   minutes and resume from the last row.
 - **FR-015**: rollouts MUST run in containers whose only network peer is the model-serving sidecar; the
   container, not the kernel's shell floor, is the isolation boundary.
+- **FR-016 (held-out spec testing, owner 2026-10-01; applies to every specced feature, and to RSI)**: the agent
+  that implements a change MUST never see the tests that judge it.
+  - Tester and implementer are different agents with separate contexts. Both get the same spec (FR-### and
+    SC-### ids). The tester writes tests and benchmarks from the spec only.
+  - Held-out tests live outside every implementer worktree (`~/projects/.heldout/<repo>/<feature>/`, mode
+    0700) and are not committed during development. The implementer is told the directory exists and MUST NOT
+    read it.
+  - A runner copies the held-out tests into a throwaway copy of the implementer's tree and runs them under a
+    timeout. Feedback to the implementer is ONLY failing requirement ids with pass/fail counts (for example
+    "FR-007: 2/5 fail"): no assertion text, inputs, test names or file paths. The loop runs until green or a
+    round cap (default 4), then a human-readable result goes to the owner.
+  - On acceptance the held-out tests are committed (`tests/heldout/<feature>/`) and become regression tests;
+    the next round of that feature gets fresh held-out tests.
+  - A held-out test that fails against a reference behaviour the spec allows is a tester bug, fixed by the
+    tester; disputes go to the owner with the spec line.
+  - For RSI this is FR-011 made concrete: the mutator is the implementer and never sees the held-out task
+    suite; the evaluator returns only redacted per-requirement (per-task-id) pass/fail counts. Kernel design
+    section 8 records the same rule and a candidate kernel `heldout` evaluation helper.
 
 ### Key Entities
 
@@ -149,6 +167,9 @@ Harness requirements (summary; the design is authoritative):
 - **SC-004**: no held-out artifact appears in any mutator-visible path (checked by a redaction test).
 - **SC-005**: a kill and resume loses no more than the in-flight rollouts.
 - **SC-006**: the verifier false-pass rate on injected bad candidates is reported each epoch.
+- **SC-007**: in a held-out run (FR-016), the implementer- or mutator-visible feedback contains only requirement ids
+  and counts: a redaction test on the feedback channel finds 0 test names, assertion strings, inputs or held-out
+  paths; and the held-out directory is absent from the implementer's worktree and container mounts.
 
 ## Assumptions
 
