@@ -265,7 +265,8 @@ from `54069bb2` at 06:12 UTC; local tag `pre-consolidation-main` -> `54069bb2`. 
   `channel_token_in_use` or `UnexpandedWorkspaceError`; still active, same MainPID, `NRestarts=0`, health ready. PASS.
 - **G7**: 48 h soak started **2026-10-01T06:12:20Z**, ends no earlier than **2026-10-03T06:12:20Z**. Still to do in
   the soak: a real history turn on Telegram, a cron fire, a Dream run, one `/new` and one rewind, `llm_calls` grows
-  and `user_version` becomes 2. Push only with the owner's OK.
+  and `user_version` becomes 4 (`nanobot/llm_usage/store.py` `SCHEMA_VERSION`; the earlier "2" was stale).
+  Push only with the owner's OK.
 
 ### Rollback (exact commands)
 
@@ -289,3 +290,8 @@ can stay. Restore DBs from `20261001T061114Z` only if the old code errors on a f
   Owner confirmed success.
 - Still to observe before the push decision: a cron fire, a Dream run, `/new` and a rewind, usage rows growing.
   Soak ends no earlier than 2026-10-03T06:12:20Z.
+- 2026-10-01 17:20Z check: cron fires on schedule (heartbeat every 30 min, `dream` every 2 h at 14:12Z and
+  16:12Z, both "completed"); Dream ran but logged "nothing to process", so a Dream run that consolidates real
+  history is still unobserved. `llm_calls` 2 -> 4, `user_version` 4. Journal since G5: no ERROR or Traceback; one
+  WARNING (the 15:20Z OpenRouter 429, retried). Still owed: `/new` and a rewind on Telegram (owner), a Dream
+  that processes history, and the 48 h mark.
