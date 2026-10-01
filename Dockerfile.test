@@ -59,6 +59,12 @@ COPY scripts/ scripts/
 # tests/examples runs examples/*.py and the quick start in docs/python-sdk.md.
 COPY examples/ examples/
 COPY docs/python-sdk.md docs/python-sdk.md
+# Spec 005: the control script, workspace template, container files and the docs
+# their tests check (tests/cli/test_moeka_sh_*.py, tests/scripts, tests/docs).
+COPY bin/ bin/
+COPY templates/ templates/
+COPY Dockerfile compose.yaml ./
+COPY docs/deployment.md docs/multiple-instances.md docs/
 COPY schemas/ schemas/
 COPY tests/ tests/
 # webui/ itself is git-ignored here (Python tests don't need the frontend

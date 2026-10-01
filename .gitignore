@@ -130,3 +130,6 @@ webui/.verify-*
 # MagicMock file pollution from tests that mock Path objects
 <MagicMock*
 .playwright-cli/
+
+# compose secrets (spec 005)
+moeka.env
