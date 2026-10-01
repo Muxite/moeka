@@ -256,6 +256,8 @@ testpaths = ["tests", "nanobot/channels"]
 # for channel extras, and without a reason summary a dependency that silently
 # failed to install is indistinguishable from a healthy run.
 addopts = "-ra"
+# Accepted held-out suites run only on a throwaway copy: scripts/run-heldout.sh <feature>.
+norecursedirs = ["tests/heldout"]
 # A hung test used to burn the entire 20-minute job with no attribution: an
 # asyncio server whose handler never closed the writer made Server.wait_closed()
 # block forever on 3.12+. Per-test timeouts turn that into one named failure.
