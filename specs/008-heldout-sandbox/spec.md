@@ -84,7 +84,7 @@ import hook or monkeypatching the reporting) gets status `tampered`, not `passed
   readable or writable by uid `impl`.
 - **FR-012**: The image MUST provide `/usr/local/bin/heldout-impl CMD [ARGS...]`: it runs `CMD` as uid `impl`
   (gid `impl`, no supplementary groups, empty ambient and bounding capability sets for the child), with the same
-  stdin, stdout, stderr, working directory and environment (minus `HELDOUT_RUN_RECORDS`), and exits with the
+  stdin, stdout, stderr, working directory (or `/` when uid `impl` cannot enter it; amendment B1) and environment (minus `HELDOUT_RUN_RECORDS`), and exits with the
   child's status. Suites that launch the implementation as a process use it (the env var `HELDOUT_IMPL` holds its
   path in sandboxed runs and is unset otherwise, so a suite can write `[os.environ.get("HELDOUT_IMPL"), ...]`
   conditionally). The mechanism (a setuid helper, a root broker, `setpriv` with retained capabilities) is the
@@ -116,7 +116,8 @@ import hook or monkeypatching the reporting) gets status `tampered`, not `passed
 
 ### Compatibility
 - **FR-019**: Without `--sandbox`, every 007 behaviour, output and file is unchanged; the accepted suite
-  `tests/heldout/007-heldout-runner/` MUST still pass.
+  `tests/heldout/007-heldout-runner/` MUST still pass, with one head amendment: its `ERROR_CODES` check accepts
+  the 007 codes plus exactly the two codes this spec adds (amendment B1).
 - **FR-020**: `scripts/heldout-run`, `scripts/run-heldout.sh` and the awork-resume vendoring rule of 007 FR-003 are
   unchanged (the new `heldout_run.py` is vendored by the head later, not in this feature).
 
@@ -151,3 +152,12 @@ import hook or monkeypatching the reporting) gets status `tampered`, not `passed
 ## Assumptions
 - Docker 24+ with BuildKit on the host; the head may pull public base images.
 - Hostile-tree tests use toy trees and toy suites built in temp dirs; the GPU is never used.
+
+## Amendment B1 (2026-10-01, head, from implementer questions)
+- 007's accepted `test_error_codes_constant` is changed by the head to: the 007 set is a subset and the only extra
+  codes are `E_SANDBOX_UNAVAILABLE` and `E_SANDBOX_DOCKER` (FR-019).
+- `tampered` JSON keeps `schema` alongside feature, round, round cap and status; the text keeps the round-cap
+  escalation line of 007. Neither carries test information (FR-017).
+- FR-010: a `docker` term that is not directly negated (`not docker`) selects docker; `not slow and docker` is
+  refused.
+- FR-012: when `impl` cannot enter the caller's working directory, the command starts in `/`.

@@ -273,7 +273,8 @@ def test_stderr_empty_for_pass_fail(h, tree):
 
 @pytest.mark.fr("FR-025")
 def test_error_codes_constant(mod):
-    assert set(mod.ERROR_CODES) == _h7.ERROR_CODES
+    # amended by 008 B1: the sandbox spec adds exactly two codes
+    assert set(mod.ERROR_CODES) - {"E_SANDBOX_UNAVAILABLE", "E_SANDBOX_DOCKER"} == _h7.ERROR_CODES
 
 
 @pytest.mark.fr("FR-022")
