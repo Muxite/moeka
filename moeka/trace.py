@@ -2,7 +2,8 @@
 
 ``kernel.trace`` is a :class:`Tracer`: ``span(name, **tags)`` (sync or async context
 manager), ``subscribe(event, fn)``. Every event carries ``trace_id``, ``span``,
-``tags`` and ``ts``; :data:`EVENTS` lists the event names and their payload keys.
+``tags`` and ``ts``; :data:`EVENTS` lists the event names and their payload keys;
+:func:`args_digest` is the ``tool.call.args_digest`` function.
 """
 
 from nanobot.kernel.trace import (
@@ -15,6 +16,7 @@ from nanobot.kernel.trace import (
     Tracer,
     TraceSink,
 )
+from nanobot.kernel.trace_hook import args_digest
 
 __all__ = [
     "EVENTS",
@@ -25,4 +27,5 @@ __all__ = [
     "NullTraceSink",
     "TraceSink",
     "Tracer",
+    "args_digest",
 ]

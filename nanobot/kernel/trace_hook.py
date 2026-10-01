@@ -9,7 +9,9 @@ carries that span):
 - ``iteration``: ``session_key``, ``iteration`` (0-based), ``tool_calls`` (count),
   ``finish_reason``, ``usage`` (this iteration's tokens, ``None`` when unknown).
 - ``tool.call``: ``session_key``, ``iteration``, ``tool``, ``call_id``, ``ok``,
-  ``args_valid``, ``error_kind``, ``error`` (first 200 chars), ``duration_ms``.
+  ``args_valid``, ``error_kind``, ``error`` (first 200 chars), ``duration_ms``,
+  ``args_digest`` (:func:`args_digest` of the arguments as the model produced them;
+  ``None`` when they cannot be canonicalised; never the raw arguments).
   A call that failed preparation (unknown tool or arguments that failed validation,
   ``on_tool_invalid``) gives ``ok=False``, ``args_valid=False``,
   ``error_kind="invalid_args"`` and ``duration_ms=None``; the matching
@@ -29,6 +31,8 @@ Use one ``TraceHook`` per run (it keeps per-run counters). It never raises.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Callable
 from typing import Any
@@ -51,6 +55,32 @@ def usage_dict(usage: Any) -> dict[str, Any] | None:
             "cache_read_tokens": usage.cache_read_tokens,
         }
     except AttributeError:
+        return None
+
+
+def args_digest(arguments: Any) -> str | None:
+    """A stable sha256 hex digest of a tool call's arguments, or ``None``.
+
+    ``arguments`` are taken as the model produced them (before casting or validation):
+    ``None`` counts as ``{}``; a ``str`` is parsed as JSON when it parses, else digested
+    as a JSON string value. The value is serialised as canonical JSON (sorted keys,
+    ``(",", ":")`` separators, ``ensure_ascii=False``, ``allow_nan=False``) and hashed as
+    UTF-8. A value that cannot be serialised (non-JSON type, ``NaN``/``Infinity``,
+    circular) gives ``None``. No numeric normalisation: ``1`` and ``1.0`` differ.
+    Never raises.
+    """
+    try:
+        value = {} if arguments is None else arguments
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                pass
+        text = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        )
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    except Exception:  # noqa: BLE001 - fail-open: an uncanonicalisable value has no digest
         return None
 
 
@@ -172,6 +202,10 @@ class TraceHook(AgentHook):
     ) -> None:
         started = self._tool_started.pop(self._call_key(tool_call), None)
         duration = (time.monotonic() - started) * 1000.0 if started is not None else None
+        try:
+            digest = args_digest(getattr(tool_call, "arguments", None))
+        except Exception:  # noqa: BLE001 - the hook never raises
+            digest = None
         self._emit({
             "event": "tool.call",
             "session_key": self._session_key,
@@ -183,7 +217,8 @@ class TraceHook(AgentHook):
             "error_kind": error_kind,
             "error": error,
             "duration_ms": duration,
+            "args_digest": digest,
         })
 
 
-__all__ = ["TraceHook", "usage_dict"]
+__all__ = ["TraceHook", "args_digest", "usage_dict"]

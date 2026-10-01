@@ -481,6 +481,175 @@ async def test_trace_hook_run_completed_on_exception(sink) -> None:
     assert done["session_key"] == "s:2"
 
 
+# -- args_digest on tool.call (spec 006 K3) ---------------------------------------------------
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"b": 2, "a": 1}, _sha('{"a":1,"b":2}')),
+        ('{"b": 2, "a": 1}', _sha('{"a":1,"b":2}')),
+        ("not json", _sha('"not json"')),
+        (None, _sha("{}")),
+        ({"t": "é"}, _sha('{"t":"é"}')),
+        ({"n": 1}, _sha('{"n":1}')),
+        ({"n": 1.0}, _sha('{"n":1.0}')),
+        ([1, "x"], _sha('[1,"x"]')),
+    ],
+)
+def test_args_digest_canonicalises(arguments, expected) -> None:
+    from moeka.trace import args_digest
+
+    assert args_digest(arguments) == expected
+    assert len(expected) == 64
+
+
+@pytest.mark.parametrize(
+    "arguments", [{"x": float("nan")}, {"x": float("inf")}, {"x": object()}, '{"x": NaN}'],
+)
+def test_args_digest_is_none_when_not_canonicalisable(arguments) -> None:
+    from moeka.trace import args_digest
+
+    assert args_digest(arguments) is None
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+    assert args_digest(circular) is None
+
+
+def test_args_digest_distinguishes_int_and_float() -> None:
+    from moeka.trace import args_digest
+
+    assert args_digest({"n": 1}) != args_digest({"n": 1.0})
+
+
+class _Kinds(Tool):
+    """One tool per tool.call kind: ok, raise, error result, result_invalid."""
+
+    def __init__(self, name: str, mode: str) -> None:
+        self._name = name
+        self._mode = mode
+        if mode == "schema":
+            self.output_schema = {
+                "type": "object", "properties": {"v": {"type": "integer"}}, "required": ["v"],
+            }
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "kinds"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}
+
+    async def execute(self, **kwargs: Any) -> Any:
+        from nanobot.agent.tools.base import ToolResult
+
+        if self._mode == "raise":
+            raise ValueError("boom")
+        if self._mode == "error":
+            return ToolResult.error("Error: nope")
+        if self._mode == "schema":
+            return "not json"
+        return "fine"
+
+
+async def test_args_digest_on_every_tool_call_kind(tmp_path, sink) -> None:
+    from moeka.trace import args_digest
+
+    tools = ToolRegistry()
+    for mode in ("ok", "raise", "error", "schema"):
+        tools.register(_Kinds(mode, mode))
+    calls = [
+        ToolCallRequest(id="c-ok", name="ok", arguments={"x": "1"}),
+        ToolCallRequest(id="c-raise", name="raise", arguments='{"x": "2"}'),
+        ToolCallRequest(id="c-error", name="error", arguments={"x": "3"}),
+        ToolCallRequest(id="c-schema", name="schema", arguments={"x": "4"}),
+        ToolCallRequest(id="c-ghost", name="ghost", arguments={"x": "5"}),
+        ToolCallRequest(id="c-bad", name="ok", arguments=None),
+        ToolCallRequest(id="c-nan", name="ok", arguments={"x": float("nan")}),
+    ]
+    provider = MagicMock()
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        LLMResponse(content="calling", tool_calls=calls),
+        LLMResponse(content="done", tool_calls=[]),
+    ])
+    await AgentRunner().run(make_run_spec(
+        provider, initial_messages=[user("go")], tools=tools, model="m",
+        max_iterations=4, max_tool_result_chars=10_000, hook=TraceHook(sink),
+        env=_core_env(tmp_path, sink),
+    ))
+    events = {e["call_id"]: e for e in sink.of("tool.call")}
+    assert set(events) == {c.id for c in calls}
+    kinds = {k: e["error_kind"] for k, e in events.items()}
+    assert kinds["c-ok"] is None and kinds["c-raise"] == "ValueError"
+    assert kinds["c-error"] == "tool_error" and kinds["c-schema"] == "result_invalid"
+    assert kinds["c-ghost"] == "invalid_args" and kinds["c-bad"] == "invalid_args"
+    for call in calls:
+        event = events[call.id]
+        assert "args_digest" in event
+        assert event["args_digest"] == args_digest(call.arguments)
+        # no raw arguments on the event
+        assert "arguments" not in event and "params" not in event
+    assert events["c-nan"]["args_digest"] is None
+    assert events["c-raise"]["args_digest"] == args_digest({"x": "2"})
+    assert set(events["c-ok"]) - STAMP_KEYS == {
+        "session_key", "iteration", "tool", "call_id", "ok", "args_valid", "error_kind",
+        "error", "duration_ms", "args_digest",
+    }
+
+
+async def test_args_digest_counts_repeats(make_kernel, sink, tmp_path) -> None:
+    """SC-003: four calls, two distinct argument values."""
+    tools = ToolRegistry()
+    tools.register(_Kinds("q", "ok"))
+    calls = [
+        ToolCallRequest(id="a", name="q", arguments={"x": "x"}),
+        ToolCallRequest(id="b", name="q", arguments='{"x": "x"}'),
+        ToolCallRequest(id="c", name="q", arguments={"x": "x"}),
+        ToolCallRequest(id="d", name="q", arguments={"x": "y"}),
+    ]
+    provider = MagicMock()
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        LLMResponse(content="calling", tool_calls=calls),
+        LLMResponse(content="done", tool_calls=[]),
+    ])
+    await AgentRunner().run(make_run_spec(
+        provider, initial_messages=[user("go")], tools=tools, model="m",
+        max_iterations=4, max_tool_result_chars=10_000, hook=TraceHook(sink),
+    ))
+    assert len({e["args_digest"] for e in sink.of("tool.call")}) == 2
+
+
+def test_args_digest_failure_never_raises_out_of_the_hook(sink, monkeypatch) -> None:
+    import nanobot.kernel.trace_hook as th
+
+    def boom(_: Any) -> str:
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(th, "args_digest", boom)
+    hook = TraceHook(sink)
+    call = ToolCallRequest(id="z", name="t", arguments={})
+    asyncio.run(hook.after_execute_tool(
+        MagicMock(iteration=0), call, None, {}, "ok",
+    ))
+    [event] = sink.of("tool.call")
+    assert event["args_digest"] is None and event["ok"] is True
+
+
+def test_events_catalogue_mentions_args_digest() -> None:
+    assert "args_digest" in EVENTS["tool.call"]
+
+
 # -- skills ---------------------------------------------------------------------------------
 
 

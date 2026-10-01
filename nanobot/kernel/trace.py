@@ -405,7 +405,9 @@ EVENTS: Mapping[str, str] = MappingProxyType({
     "iteration": "session_key, iteration, tool_calls, finish_reason, usage (this "
                  "iteration's token delta)",
     "tool.call": "session_key, iteration, tool, call_id, ok, args_valid (False for "
-                 "invalid arguments / unknown tool), error_kind, error, duration_ms",
+                 "invalid arguments / unknown tool), error_kind, error, duration_ms, "
+                 "args_digest (sha256 hex of the canonical JSON of the arguments as the "
+                 "model produced them, None when not canonicalisable; never raw arguments)",
     "run.completed": "session_key, model, stop_reason, iterations, usage (totals), "
                      "tools_used, error",
     "skill.listed": "skills (names rendered into the system prompt), active (always-on "
