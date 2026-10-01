@@ -920,7 +920,8 @@ cmd_telegram_pair() {
     info "  config : $CFG"
     info "  keys   : $keys"
     local rc=0
-    "$(_python_bin)" "${SCRIPT_DIR}/scripts/telegram_pair.py" "$keys" "$CFG" "$@" || rc=$?
+    # telegram_pair.py is stdlib-only: any python3 runs it (no venv needed).
+    python3 "${SCRIPT_DIR}/scripts/telegram_pair.py" "$keys" "$CFG" "$@" || rc=$?
     if (( rc == 0 )); then
         ok "telegram paired — restart this instance to apply: ./bin/moeka.sh --workspace $ROOT restart"
     fi

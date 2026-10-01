@@ -2,7 +2,8 @@
 # moeka gateway image (spec 005): one instance per container, state on /data.
 #
 #   docker build -t moeka .
-#   docker run --rm -e MOEKA_TOKEN_ISSUE_SECRET=... -p 127.0.0.1:18790:18790 \
+#   export MOEKA_TOKEN_ISSUE_SECRET   # a long random value
+#   docker run --rm -e MOEKA_TOKEN_ISSUE_SECRET -p 127.0.0.1:18790:18790 \
 #       -v moeka-data:/data moeka
 #
 # Runs as UID/GID 1000. The instance root is /data/ws (config, memory, skills) and

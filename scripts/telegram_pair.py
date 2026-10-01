@@ -14,6 +14,7 @@ Usage: telegram_pair.py KEYS_ENV CONFIG_JSON [TOKEN]
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -34,7 +35,11 @@ def call(token: str, method: str, **params) -> dict:
 
 
 def write_keys_env(path: Path, token: str) -> None:
+    """Write TELEGRAM_TOKEN into *path* (the instance's keys.env), created with mode 0600."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    os.chmod(path, 0o600)
     lines = path.read_text().splitlines() if path.exists() else []
     out, replaced = [], False
     for ln in lines:
