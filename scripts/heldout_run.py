@@ -42,7 +42,9 @@ serves ``/usr/local/bin/heldout-impl``: a judge process (checked with SO_PEERCRE
 are refused) sends argv, environment, working directory and its stdin/stdout/stderr descriptors
 over a unix socket, and the broker forks, drops to uid/gid ``impl`` (no supplementary groups,
 empty capability sets) and execs; the client relays the exit status or signal, and killing the
-client kills the command. Why a broker: the required ``no-new-privileges`` flag disables setuid
+client kills the command. When impl cannot enter the caller's working directory (pytest's
+``tmp_path`` is judge-only, mode 0700), the command starts in ``/``; a suite that wants the
+implementation to use a temp directory must make it accessible (for example ``chmod 0o777``). Why a broker: the required ``no-new-privileges`` flag disables setuid
 bits and file capabilities, so a setuid helper or a capability-carrying ``setpriv`` cannot work,
 and keeping one privileged process outside pytest's tree is the simplest mechanism that leaves
 pytest, its children and the impl processes with nothing to escalate with.
