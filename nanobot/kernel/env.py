@@ -127,6 +127,8 @@ class CoreEnvironment:
     trace: TraceSink
     exec_base_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     strict: bool = False
+    # The consumer a model call is attributed to when no layer bound one (usage-record.v1).
+    consumer: str | None = None
 
     def __post_init__(self) -> None:
         # I2: ``overlap_ok=True`` is the legacy flat layout only; a strict env must

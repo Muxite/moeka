@@ -77,6 +77,7 @@ from nanobot.kernel.ledger import (
     call_attribution,
     compute_cost,
     current_attribution,
+    sanitize_tags,
 )
 from nanobot.kernel.llm_errors import (
     AuthError,
@@ -978,7 +979,7 @@ class LLM:
             "saved_tokens_out": saved_out,
             "saved_cost_usd": original_cost,
             "outcome": "ok",
-            "tags": thaw(plan.opts.tags),
+            "tags": sanitize_tags(plan.opts.tags),
             "producer": {"name": "moeka", "version": None},
         })
         return key, replace(

@@ -37,9 +37,9 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from loguru import logger
 
-from nanobot.kernel.frozen import FrozenMap, thaw
+from nanobot.kernel.frozen import FrozenMap
 from nanobot.kernel.ledger import (
-    SCHEMA_VERSION,
+    DOCUMENT_VERSIONS,
     UNATTRIBUTED,
     Attribution,
     CallAttribution,
@@ -47,6 +47,7 @@ from nanobot.kernel.ledger import (
     call_attribution,
     current_attribution,
     current_call_attribution,
+    sanitize_tags,
 )
 from nanobot.kernel.llm_errors import BudgetExceeded
 from nanobot.kernel.trace import TraceSink, safe_emit
@@ -124,7 +125,7 @@ class CallEstimate:
             "rounds": self.rounds,
             "worst_case_tokens": self.worst_case_tokens,
             "worst_case_usd": self.worst_case_usd,
-            "tags": thaw(self.tags),
+            "tags": sanitize_tags(self.tags),
         }
 
 
@@ -430,7 +431,10 @@ class CapBudget:
         with self._lock:
             self._spent_tokens += tokens
             if cost is None:
-                if tokens:
+                # Tokens billed at an unknown price, or a call that timed out or was cancelled
+                # (the provider may have billed it and reported nothing): the reservation stays
+                # as spend at release. Handing it back would let such calls overshoot the cap.
+                if tokens or event.outcome in ("timeout", "cancelled"):
                     reservation.unpriced_usage = True
                 if not reservation.released:
                     self._consume(reservation, 0.0, tokens)
@@ -512,7 +516,7 @@ class Metering:
         """``budget.admit`` / ``budget.refuse``: the estimate's keys plus ``budget-event.v1``."""
         event: dict[str, Any] = {
             "event": f"budget.{kind}", **estimate.to_trace(),
-            "schema_version": SCHEMA_VERSION, "kind": kind,
+            "schema_version": DOCUMENT_VERSIONS["budget-event"], "kind": kind,
             "producer": {"name": "moeka", "version": None},
         }
         figures: dict[str, Any] = {}

@@ -254,7 +254,8 @@ def test_observer_handles_missing_usage() -> None:
     sink = _RecordingSink()
     LedgerObserver(sink=sink)(_record(usage=None))
     event = sink.events[0]
-    assert (event["tokens_in"], event["tokens_out"], event["tokens_cache_read"]) == (0, 0, 0)
+    assert (event["tokens_in"], event["tokens_out"]) == (0, 0)
+    assert event["tokens_cache_read"] is None  # no usage: unknown, not zero
     assert event["cost_usd"] is None
 
 
@@ -318,7 +319,7 @@ def _columns(path: Path) -> set[str]:
 
 
 def test_schema_version_is_bumped() -> None:
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
 
 
 def test_v1_database_migrates_without_data_loss(tmp_path: Path) -> None:

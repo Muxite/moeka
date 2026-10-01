@@ -147,7 +147,10 @@ class Kernel:
 
         acquire_llm_usage_store(data_dir=env.core.paths.data_dir)
         self._holds_usage_store = True
-        self._core_env = dataclasses.replace(env.core, trace=self._tracer)
+        self._core_env = dataclasses.replace(
+            env.core, trace=self._tracer,
+            consumer=consumer if consumer is not None else env.core.consumer,
+        )
         self._budget = budget
         self._cache = cache
         self._max_concurrency = max_concurrency

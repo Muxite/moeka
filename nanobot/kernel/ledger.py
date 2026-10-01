@@ -38,6 +38,8 @@ layer (the agent loop) have no attribution and leave those fields empty.
 from __future__ import annotations
 
 import dataclasses
+import math
+import time
 import uuid
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
@@ -64,9 +66,65 @@ _PER_MTOK = 1_000_000
 
 # Version of the usage-record schema these events speak (``schemas/usage-record.v1``).
 # Additive fields bump the minor; a removed or re-meant field bumps the major.
-SCHEMA_VERSION = "1.0"
-SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("1.0",)
+SCHEMA_VERSION = "1.1"
+# Versions of ``usage-record`` this kernel EMITS (``kernel.usage.schema_versions()``). It
+# does not translate to older ones: a consumer pinned to 1.0 reads 1.1 under the reader rule
+# in ``schemas/ATTRIBUTION.md``.
+SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("1.1",)
+# Each document versions on its own (a change to one never bumps the others).
+DOCUMENT_VERSIONS: dict[str, str] = {
+    "usage-record": SCHEMA_VERSION,
+    "budget-event": "1.1",
+    "waste-label": "1.0",
+    "complete-json-call": "1.0",
+}
 UNATTRIBUTED = "unattributed"
+
+# Bounds that keep a record small and content-free (usage-record.v1.1 ``tags``): a tag
+# value that is not a short scalar is dropped, never clipped, because a clipped prompt is
+# still a leaked prompt. The marker key says something was dropped.
+MAX_TAGS = 16
+MAX_TAG_KEY = 64
+MAX_TAG_VALUE = 120
+MAX_TAGS_BYTES = 2048
+MAX_LABEL = 200
+TAGS_TRUNCATED = "moeka.tags_truncated"
+
+
+def sanitize_tags(tags: Mapping[str, Any] | None) -> dict[str, Any]:
+    """*tags* reduced to what a usage record may carry: at most :data:`MAX_TAGS` keys of
+    :data:`MAX_TAG_KEY` characters, scalar values (strings up to :data:`MAX_TAG_VALUE`
+    characters), :data:`MAX_TAGS_BYTES` serialised. Anything else is dropped and the
+    :data:`TAGS_TRUNCATED` marker is set."""
+    if not tags:
+        return {}
+    out: dict[str, Any] = {}
+    size = 2
+    dropped = False
+    for raw_key, value in dict(thaw(tags)).items():
+        key = str(raw_key)
+        ok = (
+            len(key) <= MAX_TAG_KEY
+            and (value is None or isinstance(value, bool | int)
+                 or (isinstance(value, float) and math.isfinite(value))
+                 or (isinstance(value, str) and len(value) <= MAX_TAG_VALUE))
+        )
+        if not ok or len(out) >= MAX_TAGS:
+            dropped = True
+            continue
+        entry = len(key) + len(str(value)) + 8
+        if size + entry > MAX_TAGS_BYTES:
+            dropped = True
+            continue
+        size += entry
+        out[key] = value
+    if dropped:
+        out[TAGS_TRUNCATED] = True
+    return out
+
+
+def _clip(value: str | None) -> str | None:
+    return value if value is None or len(value) <= MAX_LABEL else value[:MAX_LABEL]
 
 UsageSource = Literal["reported", "estimated", "mixed", "none"]
 
@@ -194,7 +252,7 @@ class LedgerEvent:
     provider: str
     tokens_in: int
     tokens_out: int
-    tokens_cache_read: int
+    tokens_cache_read: int | None
     latency_ms: float | None
     cost_usd: float | None
     source: LLMUsageSource
@@ -247,7 +305,7 @@ class LedgerEvent:
         ``cached`` is the pre-schema name of ``cache_hit``; kept as a deprecated alias.
         """
         fields = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
-        fields["tags"] = thaw(self.tags)
+        fields["tags"] = sanitize_tags(self.tags)
         return {
             "event": LEDGER_EVENT,
             "schema_version": SCHEMA_VERSION,
@@ -365,9 +423,13 @@ class LedgerObserver:
         sink: TraceSink | None = None,
         store: _UsageRecorder | None = None,
         pricing: PricingTable | Mapping[PricingKey, ModelPricing] | None = None,
+        default_consumer: str | None = None,
     ) -> None:
         self._sink = sink
         self._store = store
+        # The consumer a call falls back to when no layer bound one (dream, memory and
+        # router calls reach the provider directly): the kernel's own, never "unattributed".
+        self.default_consumer = default_consumer
         if isinstance(pricing, PricingTable):
             self._pricing = pricing
         else:
@@ -390,6 +452,15 @@ class LedgerObserver:
 
     def enrich(self, record: LLMCallRecord) -> LLMCallRecord:
         """Return *record* with ``tier`` and ``cost_usd`` filled from the pricing."""
+        hidden = self._hidden_output(record.usage)
+        if hidden and record.usage is not None:
+            # Billed output the provider left out of output_tokens: price and store it.
+            record = dataclasses.replace(
+                record,
+                usage=dataclasses.replace(
+                    record.usage, output_tokens=record.usage.output_tokens + hidden,
+                ),
+            )
         pricing = self._pricing_for(record.provider, record.model)
         if pricing is None:
             return record
@@ -424,19 +495,27 @@ class LedgerObserver:
         return "price_table"
 
     @staticmethod
+    def _hidden_output(usage: LLMUsage | None) -> int:
+        """Output tokens a provider billed but left out of ``output_tokens`` (reasoning):
+        the excess of its reported total over visible input plus output."""
+        if usage is None or usage.reported_tokens == 0:
+            return 0
+        return max(0, usage.total_tokens - usage.input_tokens - usage.output_tokens)
+
     def _event(
-        record: LLMCallRecord, *, attempt: int | None = None, direct_ids: bool = False,
+        self, record: LLMCallRecord, *, attempt: int | None = None, direct_ids: bool = False,
+        hidden: int = 0,
     ) -> LedgerEvent:
         usage = record.usage
         call = current_call_attribution()
         if call is not None and attempt is None:
             attempt = call.attempts or None
         who = (call.attribution if call is not None else None) or Attribution()
-        who = who.over(current_attribution())
+        who = who.over(current_attribution()).over(Attribution(consumer=self.default_consumer))
         call_id = call.call_id if call is not None else None
         if direct_ids and call is None:
             # A call made outside the LLM layer (agent loop): give it identity (G11).
-            call_id, attempt = f"direct-{uuid.uuid4().hex[:12]}", 1
+            call_id, attempt = f"direct-{uuid.uuid4().hex}", 1
         return LedgerEvent(
             trace_id=current_llm_usage_trace_id(),
             slot=current_llm_usage_slot(),
@@ -445,7 +524,7 @@ class LedgerObserver:
             provider=record.provider,
             tokens_in=usage.input_tokens if usage is not None else 0,
             tokens_out=usage.output_tokens if usage is not None else 0,
-            tokens_cache_read=(usage.cache_read_tokens or 0) if usage is not None else 0,
+            tokens_cache_read=usage.cache_read_tokens if usage is not None else None,
             latency_ms=float(record.duration_ms),
             cost_usd=record.cost_usd,
             source=record.source,
@@ -456,12 +535,13 @@ class LedgerObserver:
             attempt=attempt,
             cached=call.cached if call is not None else False,
             tags=call.tags if call is not None else FrozenMap(),
-            consumer=who.consumer or UNATTRIBUTED,
-            agent=who.agent,
-            session=who.session,
-            role=who.role,
-            purpose=who.purpose,
+            consumer=_clip(who.consumer) or UNATTRIBUTED,
+            agent=_clip(who.agent),
+            session=_clip(who.session),
+            role=_clip(who.role),
+            purpose=_clip(who.purpose),
             tokens_cache_write=usage.cache_write_tokens if usage is not None else None,
+            tokens_reasoning=hidden or None,
             price_source=LedgerObserver._price_source(record),
             outcome=LedgerObserver._outcome(record),
             error_kind=record.error_kind,
@@ -469,13 +549,26 @@ class LedgerObserver:
             request_key=call.request_key if call is not None else None,
             prompt_version=call.prompt_version if call is not None else None,
             parent_call_id=call.parent_call_id if call is not None else None,
-            waste_label="retry" if (attempt or 0) > 1 else None,
-            waste_set_by="kernel" if (attempt or 0) > 1 else None,
         )
 
     def event_for(self, record: LLMCallRecord) -> LedgerEvent:
         """The ledger event for *record* (slot and trace id from the context vars)."""
-        return self._event(self.enrich(record))
+        return self._event(self.enrich(record), hidden=self._hidden_output(record.usage))
+
+    def _emit_superseded(self, event: LedgerEvent) -> None:
+        """Attempt n of a call exists because attempt n-1 did not produce the result: label
+        n-1 ``retry`` (kernel-known, applied by a linked ``call.waste`` event because the
+        earlier event is already emitted and records are append-only)."""
+        if self._sink is None or event.call_id is None or (event.attempt or 0) < 2:
+            return
+        safe_emit(self._sink, {
+            "event": "call.waste", "schema_version": DOCUMENT_VERSIONS["waste-label"],
+            "call_id": event.call_id,
+            "attempt": (event.attempt or 2) - 1, "waste_label": "retry",
+            "waste_set_by": "kernel", "consumer": event.consumer, "agent": event.agent,
+            "session": event.session, "role": event.role, "purpose": event.purpose,
+            "started_at_ms": int(time.time() * 1000),
+        })
 
     def __call__(self, record: LLMCallRecord) -> None:
         try:
@@ -483,6 +576,7 @@ class LedgerObserver:
         except Exception:  # noqa: BLE001
             logger.exception("ledger enrichment failed for {}", record.model)
             enriched = record
+        hidden = self._hidden_output(record.usage)
         call = current_call_attribution()
         attempt: int | None = None
         if call is not None:
@@ -492,12 +586,13 @@ class LedgerObserver:
         on_event = call.on_event if call is not None else None
         event: LedgerEvent | None = None
         try:
-            event = self._event(enriched, attempt=attempt, direct_ids=True)
+            event = self._event(enriched, attempt=attempt, direct_ids=True, hidden=hidden)
         except Exception:  # noqa: BLE001
             logger.exception("ledger event build failed for {}", record.model)
         if event is not None:
             if self._sink is not None:
                 safe_emit(self._sink, event.to_trace())
+                self._emit_superseded(event)
             if on_event is not None:
                 try:
                     on_event(event)
@@ -516,10 +611,12 @@ class LedgerObserver:
 
 __all__ = [
     "LEDGER_EVENT",
+    "DOCUMENT_VERSIONS",
     "SCHEMA_VERSION",
     "SUPPORTED_SCHEMA_VERSIONS",
     "UNATTRIBUTED",
     "Attribution",
+    "sanitize_tags",
     "CallAttribution",
     "LedgerEvent",
     "LedgerObserver",

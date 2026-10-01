@@ -277,14 +277,18 @@ async def test_prompt_version_changes_the_cache_key(make_kernel) -> None:
 
 
 async def test_retry_attempt_is_labelled_and_summed(make_kernel, sink) -> None:
+    """The attempt a retry superseded is the waste (a linked ``call.waste`` event: the
+    attempt's own event is already emitted when the retry starts)."""
     kernel, _ = make_kernel("not json", '{"a": 1}')
     await kernel.llm.complete_json("give json", schema={"type": "object"}, retries=1)
     first, second = sink.named("model.call")
     assert first["attempt"] == 1 and first["waste_label"] is None
-    assert second["attempt"] == 2 and second["waste_label"] == "retry"
-    assert second["waste_set_by"] == "kernel"
+    assert second["attempt"] == 2 and second["waste_label"] is None
+    [waste] = sink.named("call.waste")
+    assert (waste["call_id"], waste["attempt"], waste["waste_label"], waste["waste_set_by"]) == (
+        first["call_id"], 1, "retry", "kernel")
     total = kernel.usage.total()
-    assert total.wasted_tokens == second["tokens_in"] + second["tokens_out"] > 0
+    assert total.wasted_tokens == first["tokens_in"] + first["tokens_out"] > 0
     by = {t.group["waste_label"]: t for t in kernel.usage.totals(["waste_label"])}
     assert by["retry"].requests == 1 and by[None].requests == 1
 
@@ -456,6 +460,6 @@ async def test_failing_store_never_fails_calls_and_is_counted(make_kernel, monke
 
 def test_schema_versions_are_reported(make_kernel) -> None:
     kernel, _ = make_kernel()
-    assert kernel.usage.schema_version == SCHEMA_VERSION == "1.0"
+    assert kernel.usage.schema_version == SCHEMA_VERSION == "1.1"
     assert SCHEMA_VERSION in kernel.usage.schema_versions()
     assert UsageFilter(consumer="x").consumer == "x"
