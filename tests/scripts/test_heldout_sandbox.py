@@ -932,3 +932,32 @@ def test_whole_out_dir_is_copied_to_the_report(h):
     for f in h.tmpdir.rglob("*"):
         raise AssertionError(f"scratch not empty: {f}")
     _assert_run_clean(h, h.report())
+
+
+@docker
+def test_sigkilled_runner_leaves_nothing_behind(h):
+    h.suite(HANG_SUITE)
+    proc = subprocess.Popen([sys.executable, str(RUNNER), "run", "--profile", "generic",
+                             "--repo-name", "demo", "--feature", FEATURE, "--worktree",
+                             str(h.repo), "--sandbox", "docker"], env=h.env(),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    run_id = None
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and run_id is None:
+            for log in h.report_root.glob("*/sandbox.log"):
+                m = re.search(r"heldout-([0-9a-f]{16})-test", log.read_text())
+                if m and m.group(1) in subprocess.run(
+                        ["docker", "ps", "--format", "{{.Names}}"], capture_output=True,
+                        text=True).stdout:
+                    run_id = m.group(1)
+            time.sleep(0.5)
+        assert run_id
+        time.sleep(2)
+    finally:
+        proc.kill()
+        proc.wait()
+    deadline = time.monotonic() + 60
+    while _docker_leftovers(run_id) and time.monotonic() < deadline:
+        time.sleep(1)
+    assert _docker_leftovers(run_id) == []

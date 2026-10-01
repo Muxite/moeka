@@ -1630,6 +1630,7 @@ class _Docker:
         self.log_path = log_path
         self.containers: list[str] = []
         self.volumes: list[str] = []
+        self.run_id: str | None = None
 
     @classmethod
     def connect(cls, log_path: str) -> "_Docker":
@@ -1669,19 +1670,55 @@ class _Docker:
         return subprocess.Popen([self.exe, *args], start_new_session=True, **kw)
 
     def cleanup(self) -> None:
-        """Remove every container, then every volume of the run (never raises)."""
-        while self.containers:
-            name = self.containers.pop()
+        """Remove every container, then every volume of the run (never raises).
+
+        SIGINT/SIGTERM are ignored meanwhile (main thread), so an interrupt cannot cut the
+        cleanup short; names are dropped only once docker confirms removal; volume removal is
+        retried (a dying container may hold them briefly); finally anything still carrying the
+        run's label is swept.
+        """
+        saved = {}
+        for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                self.run(["rm", "-f", "-v", name], timeout=120)
-            except Exception:  # noqa: BLE001
+                saved[sig] = signal.signal(sig, signal.SIG_IGN)
+            except (ValueError, TypeError):
                 pass
-        while self.volumes:
-            name = self.volumes.pop()
-            try:
-                self.run(["volume", "rm", "-f", name], timeout=120)
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            label = f"label={_SANDBOX_LABEL}={self.run_id}" if self.run_id else None
+            if label:
+                p = self.run(["ps", "-aq", "--filter", label], timeout=60, capture=True)
+                if p is not None and p.returncode == 0:
+                    for cid in p.stdout.decode(errors="replace").split():
+                        if cid not in self.containers:
+                            self.containers.append(cid)
+            for name in list(self.containers):
+                p = self.run(["rm", "-f", "-v", name], timeout=120)
+                if p is not None and p.returncode == 0:
+                    self.containers.remove(name)
+            if label:
+                p = self.run(["volume", "ls", "-q", "--filter", label], timeout=60, capture=True)
+                if p is not None and p.returncode == 0:
+                    for vol in p.stdout.decode(errors="replace").split():
+                        if vol not in self.volumes:
+                            self.volumes.append(vol)
+            for attempt in range(10):
+                for name in list(self.volumes):
+                    p = self.run(["volume", "rm", "-f", name], timeout=120)
+                    if p is not None and p.returncode == 0:
+                        self.volumes.remove(name)
+                if not self.volumes:
+                    break
+                for name in list(self.containers):
+                    self.run(["rm", "-f", "-v", name], timeout=120)
+                time.sleep(0.5 * (attempt + 1))
+        except Exception:  # noqa: BLE001 - cleanup never raises
+            pass
+        finally:
+            for sig, handler in saved.items():
+                try:
+                    signal.signal(sig, handler)
+                except (ValueError, TypeError):
+                    pass
 
     def ensure_image(self, image: str, scratch_dir: str, *, build: bool) -> None:
         p = self.run(["image", "inspect", "--format", "{{.Id}}", image], timeout=60, capture=True)
@@ -1756,6 +1793,42 @@ class _Docker:
             finally:
                 proc.stdout.close()
                 proc.wait()
+
+
+# Detached watchdog (``python3 -I -c``): waits for the runner to exit, however it exits
+# (SIGKILL included), then removes whatever still carries the run's label. argv: docker
+# executable, label filter, runner pid.
+_WATCHDOG = r"""
+import os, select, subprocess, sys, time
+docker, label, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    fd = os.pidfd_open(pid)
+    select.select([fd], [], [])
+except (OSError, AttributeError):
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        except OSError:
+            pass
+        time.sleep(1)
+def ids(*args):
+    try:
+        p = subprocess.run([docker, *args, "--filter", label], capture_output=True, timeout=60)
+        return p.stdout.decode().split()
+    except Exception:
+        return []
+for attempt in range(10):
+    cs, vs = ids("ps", "-aq"), ids("volume", "ls", "-q")
+    if not cs and not vs:
+        break
+    for c in cs:
+        subprocess.run([docker, "rm", "-f", "-v", c], capture_output=True, timeout=120)
+    for v in vs:
+        subprocess.run([docker, "volume", "rm", "-f", v], capture_output=True, timeout=120)
+    time.sleep(attempt + 1)
+"""
 
 
 def _tar_tree(tf: tarfile.TarFile, src: str, uid: int, *, private: bool, gid: int | None = None,
@@ -1877,6 +1950,14 @@ def _run_sandboxed(a, dk: _Docker, *, state, profile_name, copy, suite, plugin_d
     meta["image"] = image
     dk.ensure_image(image, os.path.dirname(plugin_dir), build=not a.sandbox_image)
     run_id = secrets.token_hex(8)
+    dk.run_id = run_id
+    try:
+        subprocess.Popen([sys.executable, "-I", "-c", _WATCHDOG, dk.exe,
+                          f"label={_SANDBOX_LABEL}={run_id}", str(os.getpid())],
+                         cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError:
+        pass
     meta["sandbox_run_id"] = run_id
     label = ["--label", f"{_SANDBOX_LABEL}={run_id}"]
     vol = {k: f"heldout-{run_id}-{k}" for k in ("work", "suite", "out")}
