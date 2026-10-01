@@ -22,7 +22,7 @@ from typing import Any, Generator, Literal, cast
 
 from filelock import FileLock
 
-from nanobot.config.paths import get_data_dir
+from nanobot.config.paths import get_data_dir, get_state_home
 from nanobot.process_runtime import (
     ManagedProcessRuntime,
     ProcessResult,
@@ -67,7 +67,8 @@ def _gateway_health_ready(host: str, port: int, *, timeout_s: float = 0.4) -> bo
 
 
 def _default_config_path() -> Path:
-    return (Path.home() / ".nanobot" / "config.json").resolve(strict=False)
+    """The default instance's config identity: ``get_state_home()/"config.json"``."""
+    return (get_state_home() / "config.json").resolve(strict=False)
 
 
 @dataclass(frozen=True)

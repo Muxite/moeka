@@ -7,6 +7,7 @@ import select
 import sys
 from collections.abc import Callable
 from contextlib import nullcontext, suppress
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from loguru import logger
@@ -169,8 +170,12 @@ def _build_cli_key_bindings() -> KeyBindings:
     return kb
 
 
-def _init_prompt_session() -> None:
-    """Create the prompt_toolkit session with persistent file history."""
+def _init_prompt_session(data_dir: Path | None = None) -> None:
+    """Create the prompt_toolkit session with persistent file history.
+
+    *data_dir*: the instance data dir of the loaded config (``config.runtime_data_dir``);
+    ``None`` derives it from the active config path.
+    """
     global _prompt_session, _saved_term_attrs
 
     # Save terminal state so we can restore it on exit
@@ -181,7 +186,7 @@ def _init_prompt_session() -> None:
 
     from nanobot.config.paths import get_cli_history_path
 
-    history_file = get_cli_history_path()
+    history_file = get_cli_history_path(data_dir)
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     _prompt_session = PromptSession(

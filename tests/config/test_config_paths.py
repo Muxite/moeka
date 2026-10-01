@@ -58,34 +58,33 @@ def test_is_default_workspace_distinguishes_default_and_custom_paths() -> None:
 # Config.workspace_path placeholder-fallback tests
 # ---------------------------------------------------------------------------
 
-def test_workspace_path_falls_back_when_placeholder_unexpanded(monkeypatch) -> None:
-    """workspace_path must return the default state home when ${VAR} is not expanded."""
+def test_workspace_path_refuses_unexpanded_placeholder(monkeypatch) -> None:
+    """Spec 005 FR-025: an unexpanded ${VAR} workspace raises, never a state-home guess."""
+    import pytest
+
+    from nanobot.config.schema import UnexpandedWorkspaceError
+
     monkeypatch.delenv("MOEKA_WORKSPACE", raising=False)
     monkeypatch.delenv("MOEKA_STATE", raising=False)
     monkeypatch.delenv("NANOBOT_HOME", raising=False)
 
     config = Config()
     config.agents.defaults.workspace = "${MOEKA_WORKSPACE}"
-    result = config.workspace_path
-
-    assert "${" not in str(result), (
-        f"workspace_path must not contain unexpanded placeholder, got: {result}"
-    )
-    assert result == Path.home() / ".nanobot"
+    with pytest.raises(UnexpandedWorkspaceError) as info:
+        config.workspace_path
+    assert "${MOEKA_WORKSPACE}" in str(info.value)
+    assert "MOEKA_WORKSPACE" in str(info.value)
 
 
-def test_workspace_path_falls_back_for_any_unexpanded_var(monkeypatch) -> None:
-    """Any ${...} token in workspace should trigger the fallback."""
-    monkeypatch.delenv("MOEKA_WORKSPACE", raising=False)
-    monkeypatch.delenv("MOEKA_STATE", raising=False)
-    monkeypatch.delenv("NANOBOT_HOME", raising=False)
+def test_workspace_path_refuses_any_unexpanded_var(monkeypatch) -> None:
+    """Any ${...} token left after expansion raises (it is a ValueError)."""
+    import pytest
 
+    monkeypatch.delenv("SOME_OTHER_VAR", raising=False)
     config = Config()
     config.agents.defaults.workspace = "${SOME_OTHER_VAR}/subdir"
-    result = config.workspace_path
-
-    assert "${" not in str(result)
-    assert result == Path.home() / ".nanobot"
+    with pytest.raises(ValueError, match="SOME_OTHER_VAR"):
+        config.workspace_path
 
 
 def test_workspace_path_uses_moeka_workspace_env_when_set(monkeypatch, tmp_path) -> None:
@@ -93,7 +92,7 @@ def test_workspace_path_uses_moeka_workspace_env_when_set(monkeypatch, tmp_path)
     monkeypatch.setenv("MOEKA_WORKSPACE", str(tmp_path / "custom"))
     config = Config()
     config.agents.defaults.workspace = "${MOEKA_WORKSPACE}"
-    # Still has placeholder — fallback kicks in, but fallback now reads MOEKA_WORKSPACE
+    # The effective workspace string expands a set ${MOEKA_WORKSPACE}.
     result = config.workspace_path
     assert result == tmp_path / "custom"
 

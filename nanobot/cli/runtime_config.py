@@ -130,7 +130,21 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
     loaded = _load_config_for_cli(config_path, resolve_env=True)
     if workspace:
         loaded.agents.defaults.workspace = workspace
+    _require_expanded_workspace(loaded)
     return loaded
+
+
+def _require_expanded_workspace(config: Config) -> None:
+    """Exit 2 (before anything is created) when the workspace is an unexpanded ``${VAR}``."""
+    from nanobot.config.schema import UnexpandedWorkspaceError
+
+    try:
+        config.workspace_path
+    except UnexpandedWorkspaceError as exc:
+        import sys
+
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(2) from exc
 
 
 def _load_inspection_config(

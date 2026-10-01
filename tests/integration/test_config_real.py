@@ -139,19 +139,17 @@ class TestResolveEnvVarsReal:
         # Unresolved var → placeholder left in place (warning logged, no crash)
         assert "${UNSET_INTEGRATION_VAR_XYZ}" in (resolved.providers.groq.api_key or "")
 
-    def test_workspace_placeholder_fallback_when_env_not_set(self, monkeypatch) -> None:
-        """workspace_path must never return a path with ${...} in it."""
+    def test_workspace_placeholder_refused_when_env_not_set(self, monkeypatch) -> None:
+        """Spec 005 FR-025: an unexpanded workspace raises instead of guessing ~/.nanobot."""
+        from nanobot.config.schema import UnexpandedWorkspaceError
+
         monkeypatch.delenv("MOEKA_WORKSPACE", raising=False)
         monkeypatch.delenv("MOEKA_STATE", raising=False)
         monkeypatch.delenv("NANOBOT_HOME", raising=False)
         config = Config()
         config.agents.defaults.workspace = "${MOEKA_WORKSPACE}"
-        path = config.workspace_path
-        assert "${" not in str(path), (
-            f"workspace_path must not contain unexpanded placeholder, got: {path}"
-        )
-        # Must resolve to the default state home (~/.nanobot)
-        assert path == Path.home() / ".nanobot"
+        with pytest.raises(UnexpandedWorkspaceError):
+            config.workspace_path
 
     def test_workspace_placeholder_resolved_when_env_set(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("MOEKA_WORKSPACE", str(tmp_path / "mybot"))

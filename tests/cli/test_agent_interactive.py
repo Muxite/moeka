@@ -117,7 +117,7 @@ def test_interactive_agent_routes_a_complete_user_turn(
     )
     monkeypatch.setattr("nanobot.cron.service.CronService", lambda *_args: object())
     monkeypatch.setattr("nanobot.cli.agent.signal.signal", lambda *_args: None)
-    monkeypatch.setattr("nanobot.cli.terminal._init_prompt_session", lambda: None)
+    monkeypatch.setattr("nanobot.cli.terminal._init_prompt_session", lambda **_kw: None)
     monkeypatch.setattr("nanobot.cli.terminal._flush_pending_tty_input", lambda: None)
     monkeypatch.setattr("nanobot.cli.terminal._restore_terminal", lambda: None)
     monkeypatch.setattr("nanobot.cli.terminal._read_interactive_input_async", read_input)

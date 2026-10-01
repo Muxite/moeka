@@ -270,7 +270,7 @@ def agent(
         # Interactive mode — route through bus like other channels
         from nanobot.bus.events import InboundMessage
 
-        cli_terminal._init_prompt_session()
+        cli_terminal._init_prompt_session(data_dir=runtime_config.runtime_data_dir)
         _model, _preset_tag = _model_display(runtime_config)
         _icon = runtime_config.agents.defaults.bot_icon or __logo__
         console.print(

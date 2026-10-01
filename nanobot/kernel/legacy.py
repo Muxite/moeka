@@ -321,9 +321,10 @@ def _legacy_paths(config: Any) -> Paths:
     """Paths that keep every legacy on-disk location where it is today.
 
     - ``sessions_root``: the ``<workspace>-sessions`` sibling (``default_sessions_root``).
-    - A config loaded from a file (``load_config`` binds its source path): data,
-      media and logs stay at ``get_data_dir()``/``get_media_dir()``/``get_logs_dir()``,
-      resolved lazily so building the env performs no filesystem or ``~`` access.
+    - A config loaded from a file F (``load_config`` binds its source path): data,
+      media and logs are ``F.parent``, ``F.parent/"media"`` and ``F.parent/"logs"``
+      (the config's own directory, captured here, whatever the process-global
+      config path is; spec 005 FR-027).
     - A purely in-memory config: data/logs/media derive from its own state dir
       (the workspace), never from ``~/.nanobot``.
     """
@@ -333,11 +334,13 @@ def _legacy_paths(config: Any) -> Paths:
     # workspace that is ``<link>-sessions``, where the pre-kernel loop kept it.
     workspace = Path(config.workspace_path)
     overrides: dict[str, Any] = {"sessions_root_override": default_sessions_root(workspace)}
-    if getattr(config, "runtime_data_dir", None) is not None:
+    data_dir = getattr(config, "runtime_data_dir", None)
+    if data_dir is not None:
+        data_dir = Path(data_dir)
         overrides.update(
-            data_dir_override=_legacy_data_dir,
-            media_dir_override=lambda: _legacy_data_dir() / "media",
-            logs_dir_override=lambda: _legacy_data_dir() / "logs",
+            data_dir_override=data_dir,
+            media_dir_override=data_dir / "media",
+            logs_dir_override=data_dir / "logs",
         )
     return Paths(work_dir=workspace, state_dir=workspace, overlap_ok=True, **overrides)
 
