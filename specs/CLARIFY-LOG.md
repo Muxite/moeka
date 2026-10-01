@@ -6,7 +6,7 @@ owning spec and the entry gets a dated "Answered" line. Created 2026-09-30.
 
 Q1-Q4 and Q8 are the open owner decisions that carry a `[NEEDS CLARIFICATION]` marker in a spec. Q5-Q7 and Q9-Q13
 carry recommended defaults and no marker (the design already records a default, or the choice is mechanical);
-the owner may veto any of them.
+the owner may veto any of them. Spec 005's three marked questions are logged as 005-Q1..005-Q3.
 
 ## Questions with a marker
 
@@ -169,6 +169,55 @@ the owner may veto any of them.
 ### Q16. CI as a gate (review D-M5)
 - Context: floor 5400 against about 9600 tests; strict type check reports 791 errors. Recommended: raise the floor
   and scope the type check to kernel packages.
+
+## Spec 005 questions (multi-instance; marker in `005-multi-instance/spec.md`)
+
+Numbered `005-Q*n*` so they never clash with the log's own Q1-Q16. Implemented with the recommended defaults
+(the held-out tests assume them); the owner may veto any of them.
+
+### 005-Q1. Timed-out or cancelled call: charge the full remaining reservation or an input estimate?
+- Spec: `005-multi-instance` FR-046, FR-047 (Owner Decisions Q1). Applies to `CapBudget` and `SharedCapBudget`.
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. Charge the full remaining reservation (today's `CapBudget` rule); an expired lease is charged the same way | never undercounts; a timed-out call may overcharge by up to its output cap |
+  | B. Charge only an input-token estimate | closer to real cost; can undercount when the provider billed output it never reported |
+
+- Recommended: A. Reason: caps must hold (constitution V/VI); undercounting is the failure the owner rulings on
+  paid models cannot accept.
+- Lands in: `005` FR-046/FR-047; `nanobot/kernel/budget.py` (`settle_charge`), `nanobot/kernel/budget_shared.py`.
+- Answered 2026-10-01 (agent, recommended default; owner may veto): A. Implemented.
+
+### 005-Q2. One-shot `nanobot agent -m` / `nanobot serve` on a workspace whose gateway runs: refuse or share?
+- Spec: `005-multi-instance` FR-033/FR-034 (Owner Decisions Q2).
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. Refuse with exit 3 (one writer per state dir); the interactive TUI agent, which talks to the gateway, is unaffected | no lost writes to memory files, session caches or cron state; a one-shot call needs its own workspace or the gateway |
+  | B. Allow it and rely on SQLite locking | convenient; non-SQLite state (memory files, cron JSON, caches) can still lose writes |
+
+- Recommended: A. Reason: the findings register shows lost writes with shared state dirs; SQLite covers only part
+  of the state.
+- Lands in: `005` FR-033/FR-034; `nanobot/cli/runtime_config.py` (`_acquire_writer_lock`), `nanobot/cli/agent.py`,
+  `nanobot/cli/commands.py` (`serve`), `nanobot/cli/gateway.py`.
+- Answered 2026-10-01 (agent, recommended default; owner may veto): A. Implemented.
+
+### 005-Q3. Does the default instance keep auto-loading the repo-level `.env`/`keys.env`?
+- Spec: `005-multi-instance` FR-003 (Owner Decisions Q3).
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. Only the default instance (`~/.nanobot`) loads them, or any instance with `MOEKA_REPO_ENV=1` | the live bot keeps its keys at the M5 cutover; named instances never see the default's secrets by accident |
+  | B. Never load them (each instance has only `<root>/keys.env`) | cleanest separation; the default instance breaks on the first restart after cutover until its keys move |
+  | C. Always load them | today's behaviour; every instance inherits the default's bot tokens (double polling) |
+
+- Recommended: A. Reason: protects the live service at cutover (plan, Complexity Tracking) while keeping named
+  instances separated.
+- Lands in: `005` FR-003; `bin/moeka.sh` (env loading).
+- Answered 2026-10-01 (agent, recommended default; owner may veto): A. Implemented.
 
 ## Inconsistencies found while writing the specs (verified 2026-09-30; none edited)
 
