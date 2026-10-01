@@ -304,4 +304,9 @@ can stay. Restore DBs from `20261001T061114Z` only if the old code errors on a f
   25 messages). `/new` archived to `memory/history.jsonl` and `.cursor` at 22:03:35Z (the drop from 1742 messages
   at G3 is the cleared session). `.dream_cursor` unchanged since 2026-07-05: watch whether the 22:12Z Dream
   processes the new archive entries.
+- 2026-10-01 22:12:40Z: Dream processed real history (model `google/gemini-3-flash-preview`, cursor advanced to 27,
+  `MEMORY.md` rewritten, Dream commit `522fef3a`). Journal since G5: 0 ERROR, 0 Traceback.
+- Soak items now all observed: history turn, cron fires, a Dream that processes history, `/new`, rewind
+  (rehearsed on a copy; not reachable from chat), usage rows growing. Remaining: the 48 h mark
+  (2026-10-03T06:12:20Z), then the owner's push decision.
 
