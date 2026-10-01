@@ -36,9 +36,13 @@ for i in $(seq 1 40); do
 done
 echo "health:"; cat /tmp/smoke/health.json; echo
 echo "== 3. mock chat turn via CLI agent (host loop: cron+message tools)"
-timeout 120 uv run --no-sync nanobot agent --config $CFG --workspace /tmp/smoke/ws -m "say hi" --no-markdown 2>&1 | tail -8
+# One writer per state dir (spec 005): the one-shot agent gets its own workspace.
+timeout 120 uv run --no-sync nanobot agent --config $CFG --workspace /tmp/smoke/ws-agent -m "say hi" --no-markdown 2>&1 | tail -8
+echo "== 3b. a second writer on the gateway's workspace is refused (expect exit 3)"
+timeout 120 uv run --no-sync nanobot agent --config $CFG --workspace /tmp/smoke/ws -m "say hi" --no-markdown >/tmp/smoke/refused.log 2>&1
+echo "exit=$? $(grep -o 'locked by another writer' /tmp/smoke/refused.log | head -1)"
 echo "== 4. mock chat turn via HTTP API server (nanobot serve)"
-uv run --no-sync nanobot serve --config $CFG --workspace /tmp/smoke/ws --port 28900 > /tmp/smoke/serve.log 2>&1 & SV=$!
+uv run --no-sync nanobot serve --config $CFG --workspace /tmp/smoke/ws-serve --port 28900 > /tmp/smoke/serve.log 2>&1 & SV=$!
 for i in $(seq 1 30); do python3 /tmp/smoke/get.py http://127.0.0.1:28900/health >/dev/null 2>&1 && break; sleep 1; done
 python3 /tmp/smoke/get.py http://127.0.0.1:28900/v1/chat/completions '{"model":"custom/mock-model","messages":[{"role":"user","content":"hello"}]}' | head -c 700; echo
 echo "== gateway log tail"; tail -25 /tmp/smoke/gateway.log
