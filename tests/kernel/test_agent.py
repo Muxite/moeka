@@ -134,10 +134,153 @@ def test_from_profile_maps_fields(tmp_path: Path) -> None:
         AgentSpec.from_profile(AgentProfileConfig(planning=True))
 
 
-def test_max_tool_errors_not_implemented(make_kernel) -> None:
+# -- max_tool_errors (spec 006 K4) -----------------------------------------------------
+
+
+GHOST = tool_call("ghost_tool", {"a": 1})
+
+
+def _calls(*calls: tuple[str, dict[str, Any]]) -> LLMResponse:
+    return LLMResponse(
+        content="",
+        tool_calls=[ToolCallRequest(id=f"c{i}", name=n, arguments=a)
+                    for i, (n, a) in enumerate(calls)],
+        finish_reason="tool_calls",
+        usage=LLMUsage.reported(input_tokens=10, output_tokens=5),
+    )
+
+
+@pytest.mark.parametrize("n", [1, 2, 7, 1000])
+def test_max_tool_errors_builds_for_positive_ints(make_kernel, n) -> None:
     kernel = make_kernel(FakeProvider())
-    with pytest.raises(NotImplementedError):
-        kernel.agent(AgentSpec(name="x", limits=RunLimits(max_tool_errors=3)))
+    agent = kernel.agent(AgentSpec(name=f"x{n}", limits=RunLimits(max_tool_errors=n)))
+    assert agent.tools  # builds the loop without NotImplementedError
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, False, 1.5, "3"])
+def test_max_tool_errors_validation(bad) -> None:
+    with pytest.raises(ValueError):
+        RunLimits(max_tool_errors=bad)
+
+
+async def test_tool_error_ceiling_stops_the_run(make_kernel, sink) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="te", limits=RunLimits(max_tool_errors=3, max_iterations=20))
+    result = await kernel.agent(spec).run("go")
+    assert len(fake.calls) == 3
+    assert result.stop_reason == "tool_error"
+    assert result.iterations == 3
+    assert result.error == "max_tool_errors: 3 tool errors (limit 3)"
+    events = _for_trace(sink, result.trace_id)
+    [done] = [e for e in events if e["event"] == "run.completed"]
+    assert done["stop_reason"] == "tool_error"
+    failed = [e for e in events if e["event"] == "tool.call" and not e["ok"]]
+    assert len(failed) == 3
+
+
+async def test_tool_error_ceiling_runs_every_call_of_the_response(make_kernel, sink) -> None:
+    fake = FakeProvider(default=_calls(
+        ("ghost", {}), ("ghost", {"b": 1}), ("ghost", {"c": 1}), ("list_dir", {"path": "."}),
+    ))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="all", limits=RunLimits(max_tool_errors=2))
+    result = await kernel.agent(spec).run("go")
+    assert len(fake.calls) == 1
+    assert result.stop_reason == "tool_error"
+    assert result.error == "max_tool_errors: 3 tool errors (limit 2)"
+    calls = [e for e in _for_trace(sink, result.trace_id) if e["event"] == "tool.call"]
+    assert len(calls) == 4 and sum(1 for e in calls if e["ok"]) == 1
+
+
+async def test_tool_errors_counted_across_iterations_and_kinds(make_kernel) -> None:
+    # read_file of a missing file is an error result; an unknown tool is invalid_args.
+    fake = FakeProvider([
+        tool_call("read_file", {"path": "missing.txt"}),
+        tool_call("list_dir", {"path": "."}),
+        GHOST,
+        "unused",
+    ])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="k", limits=RunLimits(max_tool_errors=2))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "tool_error"
+    assert len(fake.calls) == 3 and result.iterations == 3
+
+
+async def test_tool_errors_below_the_ceiling_complete(make_kernel) -> None:
+    fake = FakeProvider([GHOST, GHOST, "done"])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="ok", limits=RunLimits(max_tool_errors=3))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "completed" and result.content == "done"
+
+
+async def test_tool_error_count_is_per_run(make_kernel) -> None:
+    fake = FakeProvider([GHOST, "first", GHOST, "second"])
+    kernel = make_kernel(fake)
+    agent = kernel.agent(AgentSpec(name="pr", limits=RunLimits(max_tool_errors=2)))
+    assert (await agent.run("one")).stop_reason == "completed"
+    assert (await agent.run("two")).stop_reason == "completed"
+
+
+async def test_no_ceiling_by_default(make_kernel) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    result = await kernel.agent(
+        AgentSpec(name="none", limits=RunLimits(max_iterations=5)),
+    ).run("go")
+    assert result.stop_reason == "max_iterations"
+
+
+async def test_tool_error_wins_over_max_iterations(make_kernel) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="last", limits=RunLimits(max_tool_errors=2, max_iterations=2))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "tool_error" and len(fake.calls) == 2
+
+
+async def test_ask_user_wins_and_is_not_counted(make_kernel) -> None:
+    fake = FakeProvider([_calls(("ghost", {}), ("ask_user", {"question": "Which?"}))])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="au", limits=RunLimits(max_tool_errors=1))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "ask_user"
+
+
+async def test_ask_user_interrupt_not_counted(make_kernel) -> None:
+    fake = FakeProvider([
+        _calls(("ghost", {})),
+        _calls(("ask_user", {"question": "Which?"})),
+    ])
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="au2", limits=RunLimits(max_tool_errors=2))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "ask_user"
+
+
+async def test_policy_denials_win_over_tool_error(make_kernel) -> None:
+    fake = FakeProvider(default=_calls(("list_dir", {"path": "."}), ("ghost", {})))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(
+        name="pd", policy=_DenyAll(),
+        limits=RunLimits(max_policy_denials=1, max_tool_errors=1),
+    )
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "policy_denials"
+
+
+def test_tool_error_stream_ends_with_run_failed(make_kernel) -> None:
+    fake = FakeProvider(default=GHOST)
+    kernel = make_kernel(fake)
+    agent = kernel.agent(AgentSpec(name="st", limits=RunLimits(max_tool_errors=1)))
+    with agent.stream_sync("go") as stream:
+        events = list(stream)
+        result = stream.result()
+    assert events[-1].type == "run.failed"
+    assert events[-1].metadata["stop_reason"] == "tool_error"
+    assert result.stop_reason == "tool_error"
 
 
 def test_kernel_agent_caches_per_spec(make_kernel) -> None:

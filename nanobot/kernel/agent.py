@@ -691,10 +691,6 @@ class Agent:
     """An agent on a kernel. Build with ``kernel.agent(spec)``; see the module docstring."""
 
     def __init__(self, kernel: Kernel, spec: AgentSpec) -> None:
-        if spec.limits.max_tool_errors is not None:
-            raise NotImplementedError(
-                "RunLimits.max_tool_errors: the runner has no tool-error ceiling yet"
-            )
         self._kernel = kernel
         self._spec = spec
         self._offline = spec.offline or kernel.env.offline
@@ -822,6 +818,7 @@ class Agent:
             "inject_memory": spec.memory,
             "variant": kernel.variant,
             "max_policy_denials": spec.limits.max_policy_denials,
+            "max_tool_errors": spec.limits.max_tool_errors,
             "plugin_registry": kernel.plugins,
         }
         if route.spec is not None and route.spec.context_window is not None:

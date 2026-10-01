@@ -193,9 +193,14 @@ Purpose: the rules that no phase, plugin or self-improvement step may break.
   hash or grant check (`.agent/kernel-p4-followups.md`, Task 19).
 
 **I5 Hard failure limits**
-- A turn must terminate as soon as it exceeds its step budget or 6 policy denials.
+- A turn must terminate as soon as it exceeds its step budget or 6 policy denials, or (when declared) its
+  tool-error ceiling `RunLimits.max_tool_errors`.
 - Enforced by: `budget.iterations` and `budget.policy_denials` in the runner, with the existing
-  budget-exhausted finalisation.
+  budget-exhausted finalisation; the tool-error ceiling (`AgentRunSpec.max_tool_errors`, `ToolErrorCount`
+  in `nanobot/agent/runner.py`, spec 006 K4) ends the turn with `stop_reason="tool_error"` after the
+  iteration's tool batch, without another model call (no finalisation). It counts every `tool.call` with
+  `ok=False` except an `ask_user` interruption; precedence in one iteration is ask_user, policy_denials,
+  tool_error, and tool_error is decided before the iteration budget.
 - Proven by: the incident replay test (a whitelist-only policy, 50 distinct commands, turn ends at 6 denials).
 - Status: met (P2, Checkpoint 2). The 6-denial ceiling ends the turn through the budget-exhausted
   finalisation (`tests/kernel/test_incident_replay.py`, including the real `tools.exec.allowPatterns`
@@ -318,7 +323,8 @@ Purpose: show where each invariant surfaces in the `moeka` package, the only sur
 
 **I5 -> `RunLimits` and stop reasons.**
 - `RunLimits(max_iterations, max_policy_denials=6, max_tool_errors, deadline_s)` per spec, with a per-run
-  `deadline_s`. `max_tool_errors` raises `NotImplementedError` until the runner has that ceiling.
+  `deadline_s`. `max_tool_errors` is enforced (spec 006 K4): `RunResult.error` is
+  `"max_tool_errors: {count} tool errors (limit {N})"`.
 - Every run returns a `RunResult` whose `stop_reason` names the limit that ended it: `max_iterations`,
   `policy_denials`, `deadline`, `budget`, plus `completed`, `ask_user`, `empty_final_response`,
   `tool_error`, `error` (typed `LLMError`) and `cancelled`. `run.completed` in the trace carries the same value.
