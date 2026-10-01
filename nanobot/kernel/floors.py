@@ -57,13 +57,18 @@ def _fs_floor(req: CapabilityRequest, protected: ProtectedFloor | None) -> Deny 
         ProtectedFloor,
         default_config_files,
         default_data_dirs,
+        default_other_instance_roots,
     )
 
     if not req.resource:
         return None
-    floor = protected or ProtectedFloor(
-        data_dir=default_data_dirs(), workspace=None, config_files=default_config_files(),
-    )
+    if protected is None:
+        data_dirs = default_data_dirs()
+        protected = ProtectedFloor(
+            data_dir=data_dirs, workspace=None, config_files=default_config_files(),
+            other_instance_roots=default_other_instance_roots(None, data_dirs),
+        )
+    floor = protected
     reason = floor.reason(Path(req.resource), write=req.capability == "fs.write")
     if reason is None:
         return None

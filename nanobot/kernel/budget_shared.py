@@ -57,41 +57,7 @@ if TYPE_CHECKING:
 
 USAGE_DB_FILENAME = "llm_usage.sqlite3"
 
-BUDGET_DDL = """
-CREATE TABLE IF NOT EXISTS budget_caps (
-    budget_id TEXT PRIMARY KEY,
-    limit_usd REAL,
-    limit_tokens INTEGER,
-    per_tag TEXT NOT NULL DEFAULT '{}',
-    allow_unpriced INTEGER NOT NULL DEFAULT 0,
-    updated_ms INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS budget_reservations (
-    id INTEGER PRIMARY KEY,
-    budget_id TEXT NOT NULL,
-    call_id TEXT,
-    usd REAL NOT NULL,
-    tokens INTEGER NOT NULL,
-    slots TEXT NOT NULL DEFAULT '[]',
-    holder TEXT,
-    created_ms INTEGER NOT NULL,
-    lease_expires_ms INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    unpriced INTEGER NOT NULL DEFAULT 0,
-    expired_charge_usd REAL NOT NULL DEFAULT 0,
-    expired_charge_tokens INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS budget_reservations_open_idx
-    ON budget_reservations(budget_id, state, lease_expires_ms);
-CREATE TABLE IF NOT EXISTS budget_spend (
-    budget_id TEXT NOT NULL,
-    scope_key TEXT NOT NULL,
-    scope_value TEXT NOT NULL,
-    spent_usd REAL NOT NULL DEFAULT 0,
-    spent_tokens INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (budget_id, scope_key, scope_value)
-);
-"""
+from nanobot.llm_usage.store import BUDGET_DDL  # noqa: E402 - the tables live in the usage store
 
 _KERNEL_SCOPE = ("", "")
 

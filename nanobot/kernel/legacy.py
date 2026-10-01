@@ -345,6 +345,17 @@ def _legacy_paths(config: Any) -> Paths:
     return Paths(work_dir=workspace, state_dir=workspace, overlap_ok=True, **overrides)
 
 
+def legacy_other_instance_roots(own: Path | None) -> list[Path]:
+    """Other moeka instances on this machine (``$HOME`` scan + registry, spec 005).
+
+    Host-side discovery for the legacy file-tool floor: roots that neither equal nor
+    contain *own* (the agent's work dir). Kernel-native hosts pass their own list.
+    """
+    from nanobot.config.instances import other_instance_roots
+
+    return other_instance_roots(own)
+
+
 def legacy_floor_extras() -> tuple[list[Path], list[Path]]:
     """Ambient floor roots for legacy hosts: config-file data dirs and config files."""
     from nanobot.security.protected_paths import default_config_files, default_data_dirs
