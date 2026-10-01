@@ -261,6 +261,22 @@ class AgentSpec:
     agent can search (the ``search_documents`` action). ``memory_key`` names the
     agent's memory (files, semantic store, default session; default ``name``).
     ``offline``: see the module docstring.
+
+    ``on_unsupported`` governs the run's explicit sampling (the run's ``sampling=``,
+    else ``AgentSpec.sampling``; ``ModelSpec.sampling`` defaults are never strict and
+    are dropped quietly when unsupported): ``"drop"`` (default) removes a field that
+    is unsupported for a model call from that request and reports it in one
+    ``sampling.dropped`` event; ``"raise"`` sends nothing and ends the run with
+    ``stop_reason="error"`` and ``RunResult.error`` an ``UnsupportedRequestError``
+    whose ``fields`` name the unsupported fields (in ``Sampling`` field order), so
+    a strict run fails before its first provider call. A field is unsupported when
+    the provider (a fallback provider's primary) does not declare it for that model
+    and reasoning effort, when (``"raise"`` only) the provider declares no support
+    information at all, or when ``ModelSpec.unsupported_sampling`` lists it.
+    Stated limit: a backend that accepts a field on the wire and ignores it (a
+    ``seed`` a local server never applies), when neither the provider nor
+    ``ModelSpec.unsupported_sampling`` declares it unsupported, cannot be detected
+    in-process; the kernel never reports a field as honoured.
     """
 
     name: str
@@ -281,10 +297,18 @@ class AgentSpec:
     policy: PermissionPolicy | None = None
     offline: bool = False
     memory_key: str | None = None
+    on_unsupported: Literal["drop", "raise"] = "drop"
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("AgentSpec.name must be a non-empty string")
+        if not isinstance(self.on_unsupported, str) or self.on_unsupported not in (
+            "drop", "raise",
+        ):
+            raise ValueError(
+                f"AgentSpec.on_unsupported must be 'drop' or 'raise', got "
+                f"{self.on_unsupported!r}"
+            )
         if self.system_prompt is not None and not isinstance(self.system_prompt, str):
             raise TypeError("AgentSpec.system_prompt must be a str or None")
         if self.model is not None and (not isinstance(self.model, str) or not self.model):
@@ -1237,6 +1261,10 @@ class Agent:
         return RequestExtras(
             sampling=explicit if explicit is not None and explicit.set_fields() else None,
             default_sampling=defaults,
+            on_unsupported=self._spec.on_unsupported,
+            unsupported_sampling=(
+                route.spec.unsupported_sampling if route.spec is not None else ()
+            ),
         )
 
     async def _run(

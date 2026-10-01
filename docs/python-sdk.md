@@ -128,13 +128,21 @@ Environment.for_host(
     key needs neither.
 - `models`: one `ModelSpec` per model alias; calls and agents name aliases.
   - `ModelSpec(name, model, provider, tier=None, context_window=None, max_tokens=None,
-    sampling=None, price_in=None, price_out=None, price_cache_read=None, native_json=None)`.
+    sampling=None, price_in=None, price_out=None, price_cache_read=None, native_json=None,
+    unsupported_sampling=())`.
   - `tier` is one of `local`, `fast`, `standard`, `frontier`.
   - Prices are USD per million tokens. No price means unknown cost (never free),
     except `tier="local"` with no prices, which costs 0.
   - `sampling` holds the model's default `Sampling`; set fields of a call's own
     sampling win.
   - `native_json=False` skips the native `response_format` round in `complete_json`.
+  - `unsupported_sampling`: `Sampling` field names the host knows this backend
+    ignores (for example `("seed",)` for a local server that accepts a seed and
+    never applies it). They count as unsupported whatever the provider declares,
+    for agent runs and `kernel.llm` calls alike: dropped and reported
+    (`sampling.dropped`) under `on_unsupported="drop"`, `UnsupportedRequestError`
+    under `"raise"`, dropped quietly when they come from `sampling` defaults. A
+    name that is not a `Sampling` field raises `ValueError`.
   - The name `default` is reserved.
 - `trace`: the host's `TraceSink` (see [Tracing](#tracing)); default discards.
 - `tools`: the `tools` config section as a dict (web search keys, exec settings).
@@ -245,7 +253,17 @@ async with kernel.llm.stream(msgs) as stream:
   events and its budget estimate, merged over the active span's tags (these win).
 - `on_unsupported`: `"drop"` (default: omit fields the provider cannot honour
   and emit `sampling.dropped`) or `"raise"` (`UnsupportedRequestError` before
-  anything is sent). Rollouts that must be reproducible use `"raise"`.
+  anything is sent). Rollouts that must be reproducible use `"raise"`. Under
+  `"raise"` a provider that declares no field support at all (pass-through)
+  fails closed: every explicit sampling field is unsupported. A fallback
+  provider decides against its primary; fallback candidates still drop what
+  they cannot send. Model defaults (`ModelSpec.sampling`) are never strict: an
+  unsupported default is dropped quietly under both modes.
+  - Stated limit: a backend that accepts a field on the wire and ignores it,
+    when neither the provider nor `ModelSpec.unsupported_sampling` declares it
+    unsupported, cannot be detected in-process. No event or field ever claims a
+    seed (or any field) was honoured; declare such fields in
+    `ModelSpec.unsupported_sampling`.
 
 `Sampling(temperature, top_p, top_k, min_p, presence_penalty, frequency_penalty,
 repetition_penalty, logit_bias, seed, stop, max_tokens, reasoning_effort)`: every
@@ -457,7 +475,8 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
 - `AgentSpec(name, system_prompt=None, bootstrap={}, model=None, sampling=None,
   tools_allow=None, tools_deny=(), actions=(), mcp_servers={}, skills_include=None,
   skills_exclude=(), inline_skills=(), memory=False, doc_scopes=(),
-  limits=RunLimits(), policy=None, offline=False)` is frozen and hashable.
+  limits=RunLimits(), policy=None, offline=False, memory_key=None,
+  on_unsupported="drop")` is frozen and hashable.
   - `system_prompt` becomes the agent's `AGENTS.md` persona unless `bootstrap`
     supplies one; `bootstrap` maps section names (`AGENTS.md`, `SOUL.md`,
     `USER.md`, or any other name, appended) to text. Nothing is written to disk.
@@ -478,6 +497,18 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
     raises `ValueError`. `exec` follows moeka's permissive posture (strict mode
     requires a sandbox); deny it with `tools_deny=("exec", "exec_session")` or
     leave it out of `tools_allow` when the agent must not run commands.
+  - `on_unsupported` (`"drop"` or `"raise"`, anything else `ValueError`) is the
+    strictness of the run's explicit sampling: the run's `sampling=` argument,
+    else `AgentSpec.sampling` (`ModelSpec.sampling` defaults are never strict).
+    `"drop"` removes a field that is unsupported for a model call from that
+    request and emits one `sampling.dropped` per affected call. `"raise"` sends
+    nothing: the run ends with `stop_reason="error"`, `result.error` an
+    `UnsupportedRequestError` whose `fields` are the unsupported explicit fields
+    in `Sampling` field order, no `sampling.dropped`, and zero provider calls.
+    Unsupported means what the `kernel.llm` `on_unsupported` section says
+    (provider declaration, pass-through fails closed, `ModelSpec.unsupported_sampling`).
+    The same stated limit applies: a backend that silently ignores a field
+    nobody declared cannot be detected.
   - `inline_skills` are `InlineSkillConfig` values or dicts
     (`{"name", "content", "description"}`).
   - Every kernel agent keeps its memory files (`MEMORY.md`, the archived

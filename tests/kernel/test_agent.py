@@ -771,3 +771,127 @@ async def test_same_session_key_serialised_across_agents(make_kernel) -> None:
     assert len(turns) == 4
     assert [role for role, _ in turns] == ["user", "assistant", "user", "assistant"]
     assert {turns[0][1], turns[2][1]} == {"from a", "from b"}
+
+
+# -- strict sampling (spec 006 K5) -----------------------------------------------------
+
+
+def _no_seed(fake: FakeProvider) -> FakeProvider:
+    fake.supported_sampling_fields = frozenset({"temperature", "max_tokens", "reasoning_effort"})
+    return fake
+
+
+def test_on_unsupported_validation() -> None:
+    assert AgentSpec(name="a").on_unsupported == "drop"
+    assert AgentSpec(name="a", on_unsupported="raise") != AgentSpec(name="a")
+    assert hash(AgentSpec(name="a", on_unsupported="raise")) == hash(
+        AgentSpec(name="a", on_unsupported="raise")
+    )
+    for bad in ("strict", "", None, 1):
+        with pytest.raises(ValueError):
+            AgentSpec(name="a", on_unsupported=bad)  # type: ignore[arg-type]
+
+
+async def test_strict_sampling_raises_before_any_call(make_kernel, sink) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = _no_seed(FakeProvider(["never"]))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="s", on_unsupported="raise",
+                     sampling=Sampling(top_p=0.5, seed=7, temperature=0.1))
+    result = await kernel.agent(spec).run("go")
+    assert fake.calls == []
+    assert result.stop_reason == "error"
+    assert isinstance(result.error, UnsupportedRequestError)
+    assert result.error.fields == ("top_p", "seed")
+    events = _for_trace(sink, result.trace_id)
+    assert not [e for e in events if e["event"] == "sampling.dropped"]
+    [done] = [e for e in events if e["event"] == "run.completed"]
+    assert done["stop_reason"] == "error"
+
+
+async def test_strict_sampling_run_argument_is_explicit(make_kernel) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = _no_seed(FakeProvider(["never"]))
+    kernel = make_kernel(fake)
+    agent = kernel.agent(AgentSpec(name="s2", on_unsupported="raise"))
+    result = await agent.run("go", sampling=Sampling(seed=7))
+    assert fake.calls == [] and isinstance(result.error, UnsupportedRequestError)
+    assert result.error.fields == ("seed",)
+
+
+async def test_drop_sampling_sends_without_the_field(make_kernel, sink) -> None:
+    fake = _no_seed(FakeProvider(["ok"]))
+    kernel = make_kernel(fake)
+    spec = AgentSpec(name="d", sampling=Sampling(seed=7))
+    result = await kernel.agent(spec).run("go")
+    assert result.stop_reason == "completed" and len(fake.calls) == 1
+    request = fake.calls[0].provider_context.request
+    assert request.sampling is None or request.sampling.seed is None
+    dropped = [e for e in _for_trace(sink, result.trace_id)
+               if e["event"] == "sampling.dropped"]
+    assert len(dropped) == 1 and dropped[0]["fields"] == ["seed"]
+
+
+async def test_strict_model_defaults_are_dropped_quietly(make_kernel, sink, tmp_path) -> None:
+    fake = _no_seed(FakeProvider(["ok"]))
+    kernel = make_kernel()
+    kernel.llm.register_provider("main", fake, ModelSpec(
+        name="main", model="fake-main", provider="openai", sampling=Sampling(seed=3),
+    ))
+    result = await kernel.agent(AgentSpec(name="q", on_unsupported="raise")).run("go")
+    assert result.stop_reason == "completed" and len(fake.calls) == 1
+    assert not sink.of("sampling.dropped")
+
+
+async def test_strict_pass_through_provider_fails_closed(make_kernel) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = FakeProvider(["ok", "ok"])
+    fake.supported_sampling_fields = None  # type: ignore[assignment]
+    kernel = make_kernel(fake)
+    strict = await kernel.agent(
+        AgentSpec(name="p1", on_unsupported="raise", sampling=Sampling(seed=1)),
+    ).run("go")
+    assert isinstance(strict.error, UnsupportedRequestError) and fake.calls == []
+    lax = await kernel.agent(AgentSpec(name="p2", sampling=Sampling(seed=1))).run("go")
+    assert lax.stop_reason == "completed" and len(fake.calls) == 1
+    assert fake.calls[0].provider_context.request.sampling.seed == 1
+
+
+async def test_model_spec_unsupported_sampling_on_agent_runs(make_kernel, sink) -> None:
+    from moeka.errors import UnsupportedRequestError
+
+    fake = FakeProvider(["ok"])  # declares seed support
+    kernel = make_kernel()
+    kernel.llm.register_provider("main", fake, ModelSpec(
+        name="main", model="fake-main", provider="openai", unsupported_sampling=("seed",),
+    ))
+    strict = await kernel.agent(
+        AgentSpec(name="h1", on_unsupported="raise", sampling=Sampling(seed=1)),
+    ).run("go")
+    assert isinstance(strict.error, UnsupportedRequestError)
+    assert strict.error.fields == ("seed",) and fake.calls == []
+    lax = await kernel.agent(AgentSpec(name="h2", sampling=Sampling(seed=1))).run("go")
+    assert lax.stop_reason == "completed"
+    sent = fake.calls[0].provider_context.request.sampling
+    assert sent is None or sent.seed is None
+    dropped = [e for e in _for_trace(sink, lax.trace_id) if e["event"] == "sampling.dropped"]
+    assert [e["fields"] for e in dropped] == [["seed"]]
+
+
+def test_model_spec_unsupported_sampling_validation() -> None:
+    assert ModelSpec(name="m", model="m", provider="p").unsupported_sampling == ()
+    spec = ModelSpec(name="m", model="m", provider="p", unsupported_sampling=["seed", "top_k"])
+    assert spec.unsupported_sampling == ("seed", "top_k")
+    hash(spec)
+    for bad in (("bogus",), ("extra_body",), "seed", (1,)):
+        with pytest.raises(ValueError):
+            ModelSpec(name="m", model="m", provider="p", unsupported_sampling=bad)
+
+
+def test_no_event_claims_a_field_was_honoured() -> None:
+    from moeka.trace import EVENTS
+
+    assert not [name for name in EVENTS if "honour" in name or "honor" in name]
