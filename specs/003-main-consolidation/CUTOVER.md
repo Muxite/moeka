@@ -280,3 +280,12 @@ curl -s http://127.0.0.1:17380/health
 
 The new files the old code ignores (`~/.nanobot/.instance.lock`, `.instance.json`, `/run/user/1000/moeka/`)
 can stay. Restore DBs from `20261001T061114Z` only if the old code errors on a file.
+
+### G7 soak log
+
+- 2026-10-01 15:20:00Z: real Telegram turn from the owner ("test") processed on the new main (`d3524a79`),
+  reply sent 15:20:19Z. One transient OpenRouter error ("could not verify available credits in time") on attempt
+  1/3, retried and succeeded. No other ERROR/Traceback in the service journal since the G5 start (06:12:20Z).
+  Owner confirmed success.
+- Still to observe before the push decision: a cron fire, a Dream run, `/new` and a rewind, usage rows growing.
+  Soak ends no earlier than 2026-10-03T06:12:20Z.
