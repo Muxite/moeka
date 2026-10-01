@@ -484,6 +484,8 @@ def apply_variant_parameters(variant: Any, tool: Tool) -> None:
     parameters_for = getattr(variant, "parameters_for", None)
     if not callable(parameters_for):
         return
+    if not getattr(variant, "tool_param_descriptions", {}).get(tool.name):
+        return  # never touch a tool's schema without an override for it
     schema = parameters_for(tool.name, tool.parameters or {})
     if schema is not None:
         tool.set_parameters_override(schema)
