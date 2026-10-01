@@ -415,9 +415,13 @@ IMPL_SUITE = {"test_impl.py": """
             socket.create_connection(("1.1.1.1", 53), timeout=3)
         with pytest.raises(OSError):
             open("/usr/qq-written", "w")
-        assert not os.access("/work", os.W_OK)
         st = os.stat("/work")
-        assert st.st_uid == 10102
+        assert (st.st_uid, st.st_gid) == (10102, 10101)  # owner impl; group judge may write
+        open("/work/judge-wrote.txt", "w").write("x")  # a suite may write into the repo
+        with open("/tmp/x.sh", "w") as fh:
+            fh.write(chr(10).join(["#!/bin/sh", "echo ok", ""]))
+        os.chmod("/tmp/x.sh", 0o755)
+        assert subprocess.run(["/tmp/x.sh"], capture_output=True, text=True).stdout.strip() == "ok"
         for d in ("/suite", "/out"):
             st = os.stat(d)
             assert (st.st_uid, st.st_mode & 0o777) == (10101, 0o700), d

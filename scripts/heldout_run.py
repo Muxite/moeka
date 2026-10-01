@@ -656,7 +656,7 @@ RUN groupadd -g 10101 judge \\
  && groupadd -g 10102 impl \\
  && useradd -u 10102 -g 10102 -m -d /home/impl -s /bin/sh impl \\
  && mkdir -p /work /suite /out /run/heldout \\
- && chown impl:impl /work && chmod 0755 /work \\
+ && chown impl:judge /work && chmod 2775 /work \\
  && chown judge:judge /suite /out && chmod 0700 /suite /out
 COPY <<"HELDOUT_EOF" /usr/local/sbin/heldout-init
 """
@@ -1737,18 +1737,25 @@ class _Docker:
                 proc.wait()
 
 
-def _tar_tree(tf: tarfile.TarFile, src: str, uid: int, *, private: bool) -> None:
-    """Add ``src``'s contents (not ``src`` itself) owned by ``uid``; skip special files."""
+def _tar_tree(tf: tarfile.TarFile, src: str, uid: int, *, private: bool, gid: int | None = None,
+              group_write: bool = False) -> None:
+    """Add ``src``'s contents (not ``src`` itself) owned by ``uid``; skip special files.
+
+    ``private``: judge-only modes (0700/0600). Otherwise modes are kept (setuid/setgid/sticky
+    bits dropped) with the owner's rw added, and ``group_write`` makes them group-writable
+    (the copy at /work: owner impl, group judge, so a suite that writes into the repo works).
+    """
+    group = uid if gid is None else gid
 
     def owned(ti: tarfile.TarInfo):
         if not (ti.isreg() or ti.isdir() or ti.issym()):
             return None
-        ti.uid = ti.gid = uid
+        ti.uid, ti.gid = uid, group
         ti.uname = ti.gname = ""
         if ti.isdir():
-            ti.mode = 0o700 if private else (ti.mode & 0o777) | 0o700
+            ti.mode = 0o700 if private else (ti.mode & 0o777) | 0o700 | (0o2070 if group_write else 0)
         elif ti.isreg():
-            ti.mode = 0o600 if private else (ti.mode & 0o777) | 0o600
+            ti.mode = 0o600 if private else (ti.mode & 0o777) | 0o600 | (0o060 if group_write else 0)
         return ti
 
     for dirpath, dirnames, filenames in os.walk(src):
@@ -1857,7 +1864,8 @@ def _run_sandboxed(a, dk: _Docker, *, state, profile_name, copy, suite, plugin_d
         dk.run(["volume", "create", *label, v], timeout=120, check="E_SANDBOX_UNAVAILABLE")
 
     def fill_work(tf):
-        _tar_tree(tf, copy, SANDBOX_IMPL_UID, private=False)
+        _tar_tree(tf, copy, SANDBOX_IMPL_UID, private=False, gid=SANDBOX_JUDGE_UID,
+                  group_write=True)
 
     # Build phase (FR-004, FR-005): untrusted code, network, the copy only.
     if a.sync_cmd is not None:
@@ -1888,7 +1896,7 @@ def _run_sandboxed(a, dk: _Docker, *, state, profile_name, copy, suite, plugin_d
     dk.run(["create", "--name", test, *label, "--user", "0:0", "--cap-drop", "ALL",
             *[x for cap in ("SETUID", "SETGID", "SETPCAP", "KILL") for x in ("--cap-add", cap)],
             *_limits(a)[2:], "--security-opt", "no-new-privileges", "--network", "none",
-            "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
+            "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,mode=1777",
             "--tmpfs", "/run/heldout:rw,nosuid,nodev,noexec,mode=0755",
             "-v", f"{vol['work']}:/work", "-v", f"{vol['suite']}:/suite",
             "-v", f"{vol['out']}:/out", "-i", image, "/usr/local/sbin/heldout-init"],
