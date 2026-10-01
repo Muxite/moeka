@@ -12,7 +12,6 @@ from nanobot.config.timezone import detect_system_timezone
 from nanobot.config_base import Base
 
 if TYPE_CHECKING:
-    from nanobot.cron.types import CronSchedule
     from nanobot.agent.runner import RunnerLimits
     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
     from nanobot.agent.tools.filesystem import FileToolsConfig
@@ -20,6 +19,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.web import WebToolsConfig
+    from nanobot.cron.types import CronSchedule
 
 
 class ChannelsConfig(Base):

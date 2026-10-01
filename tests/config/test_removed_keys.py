@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 from nanobot.config.loader import load_config
-from nanobot.config.schema import Config
+
 
 def _capture_warnings():
     """Return (records, handler_id) for a loguru WARNING-level sink."""

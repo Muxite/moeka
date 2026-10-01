@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import asyncio
 import inspect
 import json
+import os
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
