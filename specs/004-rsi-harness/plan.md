@@ -20,12 +20,12 @@ feasibility.md`, `.agent/rsi-and-agent-core-report.md`). That branch is read, no
 
   | Harness id | Requirement | State |
   |---|---|---|
-  | K1 | skills in fingerprint | open: `variants.py` fingerprint components are `system_prompt`, `tools`, `model`, `sampling` |
-  | K2 | tool parameter-description overrides | open: no `tool_param_descriptions` in `nanobot/` |
-  | K3 | `args_digest` on `tool.call` | open: not present in `nanobot/` |
-  | K4 | `max_tool_errors` enforced | open: `nanobot/kernel/agent.py:693` raises `NotImplementedError` |
-  | K5 | strict sampling on agent runs | open: `on_unsupported` exists on `GenerateOptions` only (`nanobot/kernel/llm.py:132`) |
-  | K6 | `skill.read` from any read | open: emitted from `nanobot/agent/tools/filesystem.py` only |
+  | K1 | skills in fingerprint | done (spec 006): `skills` component in `nanobot/kernel/variants.py` (`skills_component`) |
+  | K2 | tool parameter-description overrides | done (spec 006): `Variant.tool_param_descriptions`, `VariantError`; applied per instance in `nanobot/agent/tools/loader.py` |
+  | K3 | `args_digest` on `tool.call` | done (spec 006): `nanobot/kernel/trace_hook.py` `args_digest`, re-exported as `moeka.trace.args_digest` |
+  | K4 | `max_tool_errors` enforced | done (spec 006): `ToolErrorCount` / `AgentRunSpec.max_tool_errors` in `nanobot/agent/runner.py`; stop reason `tool_error` |
+  | K5 | strict sampling on agent runs | done (spec 006): `AgentSpec.on_unsupported`, `ModelSpec.unsupported_sampling`, pass-through fails closed under `raise` |
+  | K6 | `skill.read` from any read | done (spec 006): `read_file` (after success) and `grep` content mode, with `via` and `call_id`; exec/MCP reads stay a stated lower bound |
 
 - Clarification yield: no `clarify.*` trace event exists; `clarify.resolve_divergence` is pure.
 - Usage and waste signals the harness wants depend on `001` (not built).

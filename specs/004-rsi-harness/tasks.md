@@ -14,12 +14,12 @@ description: "Kernel-side task list for the RSI harness (pointer)"
 
 ## Phase 2: Kernel prerequisites (each its own commit and test, tests first)
 
-- [ ] T003 [P] [US1] K5: add `on_unsupported` to `AgentSpec`; run ends `stop_reason="error"` with `UnsupportedRequestError`; `nanobot/kernel/agent.py`, `tests/kernel/test_agent.py` (FR-005)
-- [ ] T004 [P] [US2] K3: add `args_digest` (sha256 of canonical arguments JSON) to `tool.call` in `nanobot/kernel/trace_hook.py`; update `EVENTS` in `nanobot/kernel/trace.py`; test in `tests/kernel/test_trace_spans.py` (FR-003)
-- [ ] T005 [US1] K1: add a `skills` component to the fingerprint in `nanobot/kernel/variants.py`; test in `tests/kernel/test_variants.py` (FR-001)
-- [ ] T006 [P] [US3] K2: add `Variant.tool_param_descriptions`, rejecting structural keys, in `nanobot/kernel/variants.py` (FR-002)
-- [ ] T007 [P] [US1] K4: implement `RunLimits.max_tool_errors` at `nanobot/kernel/agent.py:693` and the runner ceiling in `nanobot/agent/runner.py`; stop reason `tool_error`; update the I5 text in the design (FR-004)
-- [ ] T008 [US2] K6 (optional): emit `skill.read` with `via=<tool>` from any `fs.read` check on a `SKILL.md` in `nanobot/kernel/gate.py` (FR-006)
+- [x] T003 [P] [US1] K5: add `on_unsupported` to `AgentSpec`; run ends `stop_reason="error"` with `UnsupportedRequestError`; `nanobot/kernel/agent.py`, `tests/kernel/test_agent.py` (FR-005)
+- [x] T004 [P] [US2] K3: add `args_digest` (sha256 of canonical arguments JSON) to `tool.call` in `nanobot/kernel/trace_hook.py`; update `EVENTS` in `nanobot/kernel/trace.py`; test in `tests/kernel/test_trace_spans.py` (FR-003)
+- [x] T005 [US1] K1: add a `skills` component to the fingerprint in `nanobot/kernel/variants.py`; test in `tests/kernel/test_variants.py` (FR-001)
+- [x] T006 [P] [US3] K2: add `Variant.tool_param_descriptions`, rejecting structural keys, in `nanobot/kernel/variants.py` (FR-002)
+- [x] T007 [P] [US1] K4: implement `RunLimits.max_tool_errors` at `nanobot/kernel/agent.py:693` and the runner ceiling in `nanobot/agent/runner.py`; stop reason `tool_error`; update the I5 text in the design (FR-004)
+- [x] T008 [US2] K6 (optional): emit `skill.read` with `via=<tool>` from any `fs.read` check on a `SKILL.md` in `nanobot/kernel/gate.py` (FR-006)
 
 ## Phase 3: Observation the harness depends on
 
