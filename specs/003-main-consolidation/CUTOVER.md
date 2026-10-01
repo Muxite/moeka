@@ -295,3 +295,5 @@ can stay. Restore DBs from `20261001T061114Z` only if the old code errors on a f
   history is still unobserved. `llm_calls` 2 -> 4, `user_version` 4. Journal since G5: no ERROR or Traceback; one
   WARNING (the 15:20Z OpenRouter 429, retried). Still owed: `/new` and a rewind on Telegram (owner), a Dream
   that processes history, and the 48 h mark.
+- 2026-10-01 22:03:27Z: owner ran `/new` on Telegram; processed, no ERROR or Traceback after it. `llm_calls` 6.
+  Still owed: a rewind, a Dream run that processes history (next due 22:12Z), and the 48 h mark.
