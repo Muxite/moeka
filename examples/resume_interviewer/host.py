@@ -409,6 +409,22 @@ class Interviewer:
         })
         return result
 
+    def asked(self, result: RunResult | None) -> qmod.Question | None:
+        """The accepted question a run ended on: an ``ask_user`` call, or (small local
+        models do this) a final text that is just an accepted question."""
+        if result is None or not self.state.accepted:
+            return None
+        if result.stop_reason == "ask_user":
+            return self.match(result.question.question if result.question else "")
+        if result.stop_reason == "completed":
+            q = self.match(result.content or "")
+            if q is not None and q.id in self.state.answers:
+                return None  # a summary quoting an answered question is not an ask
+            if q is not None:
+                self.state.agent_stops[-1]["asked_as_text"] = q.id
+            return q
+        return None
+
     def _fallback(self, why: str) -> bool:
         """Code-ranked questions when the model gave none; False if not allowed."""
         if self.state.accepted:
@@ -434,11 +450,13 @@ class Interviewer:
                     result = self._run("Host: call propose_questions first; only accepted "
                                        "questions are relayed to the user.")
                     continue
-                if self.match(result.question.question if result.question else "") is None:
+                if self.asked(result) is None:
                     if not self._strike():
                         return result
                     result = self._run(self._not_accepted_message())
                     continue
+                return result
+            if self.asked(result) is not None:
                 return result
             if result.stop_reason == "completed" and not self.state.accepted and self._strike():
                 result = self._run("Host: no questions were accepted yet. Call awr_build if "
@@ -463,9 +481,8 @@ class Interviewer:
         project, reason}`` per line); stop where the agent asks."""
         result = self._propose_phase()
         stop = result.stop_reason if result else "none"
-        if result is not None and result.stop_reason == "ask_user" and self.state.accepted:
-            asked = self.match(result.question.question if result.question else "")
-            self.state.pending_ask = asked.id if asked else None
+        asked = self.asked(result)
+        self.state.pending_ask = asked.id if asked else None
         if not self._fallback(stop):
             self.state.save(self.settings.runs_dir)
             return self._outcome(ok=False, error=f"no questions: agent stopped with {stop}")
@@ -496,8 +513,9 @@ class Interviewer:
     def interview(self, ask: Callable[[qmod.Question], str], out: Path | None = None) -> dict:
         """Interactive: relay each accepted ``ask_user`` to *ask* and resume the session."""
         result = self._propose_phase()
-        while result is not None and result.stop_reason == "ask_user":
-            q = self.match(result.question.question if result.question else "")
+        while result is not None and (
+                result.stop_reason == "ask_user" or self.asked(result) is not None):
+            q = self.asked(result)
             if q is None or q.id in self.state.answers:
                 if not self._strike():
                     break
@@ -533,7 +551,7 @@ class Interviewer:
         except AwrError as exc:
             self.state.awr_questions = {"error": str(exc)}
         summary = None
-        if batch and self.settings.summary and self.state.pending_ask:
+        if batch and self.settings.summary and self.state.agent_stops:
             message = ("Host: the user answered every question in one batch:\n" + "\n".join(
                 f"[{r['id']}] {r['answer']}" for r in self._answer_rows())
                 + "\nThe answers are recorded and the notes doc is written; the host rebuilt "

@@ -64,6 +64,7 @@ _LEADING = re.compile(
     re.IGNORECASE,
 )
 _SENTENCE_BREAK = re.compile(r"[.!?]\s+[A-Z]")
+_CUT_NUMBER = re.compile(r"\d\s*(?:\.\.\.|\u2026)")
 
 
 class Question(BaseModel):
@@ -135,6 +136,8 @@ def question_problems(
             problems.append("text must be one question ending with a single '?'")
         if _SENTENCE_BREAK.search(text):
             problems.append("text must be one sentence")
+        if _CUT_NUMBER.search(text):
+            problems.append("text cuts a quote right after a number; quote whole words")
     if not reason:
         problems.append("reason is empty: say why a true answer strengthens the resume")
     elif len(reason) > MAX_REASON:
@@ -201,12 +204,20 @@ def must_weight(text: str, report: Mapping[str, Any]) -> float:
     return best
 
 
-def _short(text: str, limit: int = 90) -> str:
+def _short(text: str, limit: int = 160) -> str:
+    """Quote *text* whole when it fits; else cut at a word and never mid-number.
+
+    A cut that leaves "under 2..." reads as a different claim to the extractor once
+    the question is echoed in the notes doc (seen live: "2 seconds" came back as
+    "2 hours"), so trailing words with digits go too.
+    """
     text = _clean(text).rstrip(".")
     if len(text) <= limit:
         return text
-    cut = text[:limit].rsplit(" ", 1)[0]
-    return cut + "..."
+    words = text[:limit].rsplit(" ", 1)[0].split(" ")
+    while words and _HAS_NUMBER.search(words[-1]):
+        words.pop()
+    return " ".join(words) + " ..."
 
 
 _HAS_NUMBER = re.compile(r"\d")

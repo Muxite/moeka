@@ -468,3 +468,31 @@ def test_no_state_written_to_real_home(paths, fake_awr) -> None:
     assert (state_dir / "runs").is_dir()
     assert os.environ.get("HOME") is None or not str(state_dir).startswith(
         str(Path.home() / ".nanobot"))
+
+
+def test_quotes_are_never_cut_mid_number() -> None:
+    long = ("Designed a constraint-based shift scheduler in Python for a volunteer roster "
+            "of a community kitchen that plans 300 shifts in under 2 seconds.")
+    short = qmod._short(long, limit=110)
+    assert short.endswith(" ...") and not any(ch.isdigit() for ch in short.split()[-2])
+    ok = {"kind": "number_context", "project": "", "reason": "Context helps.",
+          "text": 'What was the baseline in "plans 300 shifts in under 2..."?'}
+    assert any("after a number" in p for p in qmod.question_problems(ok))
+
+
+def test_question_asked_as_plain_text_counts_as_the_ask(paths, fake_awr, tmp_path) -> None:
+    """Small local models often end the turn with the question as text, not ask_user."""
+    script = ScriptedInterviewer()
+
+    def model(call: FakeCall) -> LLMResponse | str:
+        reply = script(call)
+        if isinstance(reply, LLMResponse) and reply.tool_calls[0].name == "ask_user":
+            return reply.tool_calls[0].arguments["question"]
+        return reply
+
+    with Interviewer(settings(paths, fake_awr, run_id="t1"),
+                     provider=FakeProvider(default=model)) as iv:
+        outcome = iv.questions_out(tmp_path / "q.jsonl")
+        assert iv.state.pending_ask == "q1"
+    assert outcome["agent_stops"][-1]["stop_reason"] == "completed"
+    assert outcome["agent_stops"][-1]["asked_as_text"] == "q1"

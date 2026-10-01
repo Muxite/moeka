@@ -30,12 +30,14 @@ def notes_path(workspace: Path, day: _dt.date | None = None) -> Path:
 
 
 def _section(run_id: str, row: Mapping[str, Any]) -> str:
-    project = row.get("project") or ""
-    heading = f"{project}: {row['text']}" if project else row["text"]
+    # The heading names the project only; the question is labelled as a question so
+    # the extractor does not take its wording (or a quote in it) as the user's claim.
+    project = row.get("project") or "General"
     return (
-        f"## {heading}\n"
+        f"## {project}\n"
         f"<!-- resume-interviewer: run={run_id} id={row['id']} kind={row['kind']} "
         f"fact={row.get('fact_id') or '-'} source=user -->\n\n"
+        f"Question asked by the interviewer (a question, not a claim): {row['text']}\n\n"
         f"Answer from the user: {' '.join(str(row['answer']).split())}\n"
     )
 
