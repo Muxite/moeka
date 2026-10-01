@@ -4,14 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repo is **moeka**, a fork of [nanobot](https://github.com/HKUDS/nanobot) (HKUDS). This branch,
-`core-slim`, is the **slim agent kernel**: the agent loop, LLM providers, tools, skills, prompt templates, memory
-(Dream), the SQLite session store, config, and the embeddable `MoekaKernel` library (`nanobot.kernel`; `MoekaCore` is the real class and stays as an alias). The chat channels, gateway,
-WebUI, HTTP API server, pairing, audio, cron, triggers, heartbeat, CLI apps and the `message` tool are removed
-here; they live on in the full chat-bot distribution on `main`. The kernel is driven by a harness (a separate repo
-that pins a `core-slim` commit as a submodule), by `MoekaKernel`, or by the `nanobot agent` CLI.
+This repo is **moeka**, a fork of [nanobot](https://github.com/HKUDS/nanobot) (HKUDS). `main` is the consolidated
+distribution (003, owner decision 2026-09-30): the **agent kernel** is the base (`moeka` package, `nanobot/kernel`,
+the agent loop, providers, tools, skills, prompt templates, memory/Dream, SQLite sessions, `nanobot/llm_usage`,
+specs and `.agent/` design docs), and the **gateway host** sits on top of it as a consumer: chat channels, gateway,
+WebUI, HTTP API server, pairing, audio, cron, triggers, heartbeat, CLI apps and the `message` tool. The live
+systemd service runs the gateway from this branch. The kernel is also driven by the RSI harness and awork (pinned
+submodule), by `moeka.Kernel`, or by the `nanobot agent` CLI.
 
-Moeka-specific deviations from upstream nanobot that still exist in the kernel:
+Dependency direction: host packages import the kernel, never the reverse (enforced by
+`tests/core/test_import_boundary.py`; ambient process reads are confined by `tests/kernel/test_no_ambient_reads.py`,
+which carries a reviewed `HOST_AMBIENT_ALLOWLIST` for the gateway packages). Host-owned tools (`message`, `cron`,
+`run_cli_app`) load only for loops built with `host_tools=True` (gateway, `serve`, CLI agent); a bare kernel loop or
+`moeka.Kernel` agent never gets them.
+
+Moeka-specific deviations from upstream nanobot:
 
 - **Permissive shell sandbox** — `nanobot/agent/tools/shell.py` always applies a non-removable floor,
   `_FLOOR_DENY_PATTERNS` = `_INTERNAL_DENY_PATTERNS` (writes to `history.jsonl` / `.dream_cursor`) plus the fork
@@ -36,18 +43,24 @@ Moeka-specific deviations from upstream nanobot that still exist in the kernel:
 - **Missing `${VAR}` config references warn, not hard-fail** — `resolve_config_env_vars`
   (`nanobot/config/loader.py`) logs a warning with the dotted field path and leaves the placeholder. See
   `tests/config/test_env_var_warnings.py`.
-- **Retired config sections are dropped** — `channels`, `gateway`, `api`, `heartbeat`, `transcription` are removed
-  at load with a warning (`_migrate_config`), and saving the config removes them from the file. Do not point slim
-  tooling at a `config.json` shared with a `main` deployment.
-- **Dream runs only when called** — no scheduler: `nanobot/agent/dream.py:run_dream()`, `AgentLoop.run_dream()` or
-  the `/dream` command. `DreamConfig.enabled` / `interval_h` are advice for the caller.
+- **Gateway sections are live config** — `channels`, `gateway`, `api`, `heartbeat`, `transcription` belong to the
+  host and load normally (the slim-era "retired sections" stripping was removed in the consolidation). Kernel-only
+  hosts simply never set them.
+- **Dream** — callable directly (`nanobot/agent/dream.py:run_dream()`, `AgentLoop.run_dream()`); the gateway also
+  schedules it as a cron system job (`DreamConfig.build_schedule`, `nanobot/cli/gateway_runtime.py`).
+- **Dispatcher watchdog** — `ChannelManager._dispatch_with_watchdog` auto-restarts the outbound dispatcher on crashes.
+- **`nanobot channels enable/disable <name>` CLI** — atomic config flip, defined in `nanobot/cli/commands.py`.
+- **Telegram `drop_pending_updates` defaults to True** to avoid stale floods on restart.
+- **Transcription `api_base` propagation** — Groq/OpenAI Whisper provider honours per-provider `api_base`.
+- **No CONTRIBUTING.md and no upstream `images/nanobot_logo.png`** — both intentionally removed; moeka uses its own `images/GitHub_README.png`.
+- **Gateway still on the legacy loop path** — the gateway builds `AgentLoop` through `AgentLoop.from_config` with a
+  `LegacyEnvironment`, not through `moeka.Kernel`; moving it is stage 2 of `specs/003-main-consolidation/`.
 
 ## Documentation for agents
 
-`docs/core-map/README.md` is the authoritative, line-cited map of this kernel (agent loop, tools, prompts/skills/
-memory, config/providers/sessions) and states what a self-improvement agent may and may not change. On this
-branch the rest of `docs/` describes the full distribution on `main` and is legacy (see the banner in
-`docs/README.md`).
+`docs/core-map/README.md` is the authoritative, line-cited map of the kernel (agent loop, tools, prompts/skills/
+memory, config/providers/sessions) and states what a self-improvement agent may and may not change. The rest of
+`docs/` documents the gateway host and the embedding API (`python-sdk.md`, `migration-moeka-api.md`).
 
 ## Development Commands
 
@@ -63,6 +76,11 @@ scripts/test-docker.sh ruff check nanobot/ tests/   # lint (never ruff format)
 # CLI (entry point nanobot/cli/entry.py -> nanobot/cli/commands.py)
 nanobot agent [-m "message"]    # interactive chat, or one message
 nanobot status | sessions | provider
+nanobot gateway                 # the host: channels + WebUI + cron + HTTP API
+
+# WebUI: dev server (proxies API/WS to gateway :8765), build, test
+# Build outputs to ../nanobot/web/dist (bundled into the Python wheel)
+cd webui && bun run dev && bun run build && bun run test
 ```
 
 ## Architecture
@@ -81,6 +99,10 @@ nanobot status | sessions | provider
   `nanobot/agent/dream.py`).
 - **Sessions** (`nanobot/session/`), **config** (`nanobot/config/schema.py`, `loader.py`), **commands**
   (`nanobot/command/builtin.py`), **security** guards (`nanobot/security/`).
+- **Gateway host** (the live bot): `nanobot/channels/` (platform runtimes, `manager.py`), `nanobot/gateway/`,
+  `nanobot/webui/` + `webui/` (React SPA), `nanobot/api/server.py` (OpenAI-compatible HTTP API),
+  `nanobot/cron/`, `nanobot/triggers/`, `nanobot/apps/` (CLI apps), `nanobot/pairing/`, `nanobot/audio/`,
+  `nanobot/cli/gateway*.py`. Consumes the kernel through `AgentLoop` and the `MessageBus`.
 - **Embedding**: `MoekaKernel` = `MoekaCore` (`nanobot/core/`, re-exported by `nanobot/kernel/`; import boundary enforced by `tests/core/test_import_boundary.py`)
   and the `Nanobot` SDK facade (`nanobot/nanobot.py`).
 
@@ -92,11 +114,17 @@ nanobot status | sessions | provider
 
 ## Branching Strategy
 
-- `core-slim` (this branch) — the slim kernel (the `moeka` package). A long-lived branch *downstream* of `main`: it deletes channels, the WebUI and the gateway, so never merge it into `main`. The harness repo pins a `core-slim` commit as its kernel submodule, so never rebase it.
-- `main` — the full chat-bot distribution; the live systemd service follows it. Upstream syncs land there.
-- `nightly` — retired 2026-09-28 (fast-forwarded to `main`, kept only as an alias).
+- `main` — the consolidated distribution (kernel base + gateway host); the running systemd unit follows it and
+  upstream syncs land here.
+- `core-slim` — historical, pinned: the RSI harness and awork pinned `core-slim` commits (`6f80c392`). Never
+  rebased, force-pushed or deleted; it stops receiving merges once consumers move to `main`.
+- `nightly` — retired 2026-09-28 (alias of the old `main`); do not integrate there.
 
-Syncing: `upstream/main` (the `upstream` remote is `HKUDS/nanobot`) → merge branch off `main` → `main` → `git merge main` into `core-slim`. Here, modify/delete conflicts on files this branch removed resolve as "keep deleted"; upstream tests for removed subsystems are dropped too. Moeka deviations must survive conflict resolution.
+The `upstream` remote points at `HKUDS/nanobot`. Flow: `upstream/main` → merge branch off `main` (for example
+`merge/upstream-main-<date>`) → `main` after tests and a deploy check. Upstream edits to kernel-owned paths
+(`nanobot/agent`, `providers`, `tools`) need a check against the kernel contract (`specs/`, `.agent/`). Moeka
+deviations must be preserved during conflict resolution. The cutover record is
+`specs/003-main-consolidation/CUTOVER.md`.
 
 ## Code Style
 

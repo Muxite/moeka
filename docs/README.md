@@ -1,10 +1,10 @@
 # nanobot Documentation
 
-> **Branch note (`core-slim`).** On the `core-slim` branch only [`docs/core-map/`](./core-map/README.md) is
-> authoritative: it describes the slim agent core with line-cited references. Every other page in `docs/`
-> (including this index) describes the full chat-bot distribution on `main` (channels, gateway, WebUI, HTTP API,
-> cron, heartbeat, onboarding) and is legacy here; commands and features it mentions may not exist on this
-> branch.
+> **Layout note (consolidated `main`).** [`docs/core-map/`](./core-map/README.md) is the line-cited map of
+> the agent kernel (`nanobot/kernel`, the `moeka` package). Embedding hosts start at
+> [`python-sdk.md`](python-sdk.md) and [`migration-moeka-api.md`](migration-moeka-api.md). The remaining pages
+> describe the chat-bot host (channels, gateway, WebUI, HTTP API, cron, heartbeat, onboarding), which runs on
+> top of the kernel.
 
 Use these docs to get a working agent first, then open a task guide only when you need the next capability. Source-level design and extension details are kept in the contributor section.
 

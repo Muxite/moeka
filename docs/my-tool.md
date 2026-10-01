@@ -192,7 +192,7 @@ Cannot be checked or modified — fully hidden:
 | Tool registry | `tools` | Must not remove its own tools |
 | Subsystems | `runner`, `sessions`, `consolidator`, etc. | Affects other users/sessions |
 | Sensitive data | `_mcp_servers`, `_pending_queues`, etc. | Contains credentials and message routing |
-| Security boundaries | `restrict_to_workspace` | Bypassing would violate isolation |
+| Security boundaries | `restrict_to_workspace`, `channels_config` | Bypassing would violate isolation |
 | Python internals | `__class__`, `__dict__`, etc. | Prevents sandbox escape |
 
 ### Read-only (check only)
