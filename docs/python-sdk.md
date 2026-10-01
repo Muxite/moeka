@@ -428,6 +428,24 @@ sink.close()
   `iteration` / `tool.call` / `run.completed` for agents, `skill.listed` /
   `skill.read`, `policy.decision`, `tool.invalid`, `mcp.error`, `fact.recorded`,
   `artifact.proposed` / `artifact.rejected`.
+- `tool.call` carries `args_digest`: the sha256 hex of the canonical JSON
+  (sorted keys, `(",", ":")` separators, `ensure_ascii=False`,
+  `allow_nan=False`) of the arguments as the model produced them (`None` counts
+  as `{}`; a string is parsed as JSON when it parses, else digested as a JSON
+  string). `None` when the arguments cannot be canonicalised (`NaN`, a
+  non-JSON value). No numeric normalisation: `1` and `1.0` differ. Equal
+  digests mean repeated calls; the raw arguments are never on the event.
+  `moeka.trace.args_digest(arguments)` is the same function.
+- `skill.read` (`skill`, `path`, `via`, `call_id`) fires once per tool call and
+  skill file (`.../skills/<name>/SKILL.md`, or a `SKILL.md` directly under the
+  variant's `builtin_skills_dir`) whose successful result returned that file's
+  content: `read_file` (any successful read, ranges included) and `grep` with
+  `output_mode="content"` (one per distinct skill file with a returned line).
+  `via` is the tool name; `call_id` joins `tool.call.call_id` (`None` outside a
+  runner); it is emitted before that call's `tool.call`. Failed calls,
+  `files_with_matches` / `count` greps, other files and fingerprinting emit
+  none. It is a lower bound: reads through `exec`, `exec_session`, MCP or other
+  tools are not seen.
 - `span(name, **tags)` is a sync and async context manager. A root span mints a
   fresh `trace_id`; a nested span keeps it, extends the path and merges its tags
   over the outer ones. Events outside any span have `trace_id` `None`.

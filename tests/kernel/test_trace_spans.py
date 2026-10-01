@@ -702,6 +702,104 @@ async def test_skill_read_from_read_file(tmp_path, sink) -> None:
     await tool.execute(path=str(work / "skills" / "missing" / "SKILL.md"))
     [read] = sink.of("skill.read")
     assert read["skill"] == "triage" and read["path"] == str(skill)
+    assert read["via"] == "read_file" and read["call_id"] is None
+
+
+def _calls_response(*calls: ToolCallRequest) -> LLMResponse:
+    return LLMResponse(
+        content="", tool_calls=list(calls), finish_reason="tool_calls",
+        usage=LLMUsage.reported(input_tokens=5, output_tokens=5),
+    )
+
+
+def _skill_agent(make_kernel, tmp_path, *script):
+    from moeka.agents import AgentSpec
+
+    kernel = make_kernel()
+    _fake(kernel, *script, "done")
+    work = kernel.env.paths.work_dir
+    work.mkdir(parents=True, exist_ok=True)
+    return kernel.agent(AgentSpec(name="sk", tools_allow=("read_file", "grep"))), work
+
+
+def _by_call(sink) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    reads: dict[str, list[dict[str, Any]]] = {}
+    order = [e["event"] for e in sink.events if e["event"] in ("skill.read", "tool.call")]
+    for event in sink.of("skill.read"):
+        reads.setdefault(event["call_id"], []).append(event)
+    return reads, order
+
+
+async def test_grep_content_emits_one_skill_read_per_skill_file(make_kernel, sink, tmp_path):
+    agent, work = _skill_agent(make_kernel, tmp_path, _calls_response(
+        ToolCallRequest(id="g1", name="grep", arguments={
+            "pattern": "Do ", "path": "skills", "output_mode": "content",
+            "context_before": 0, "context_after": 0}),
+        ToolCallRequest(id="g2", name="grep", arguments={
+            "pattern": "Do ", "path": "skills", "output_mode": "files_with_matches"}),
+        ToolCallRequest(id="g3", name="grep", arguments={
+            "pattern": "Do ", "path": "skills", "output_mode": "count"}),
+    ))
+    alpha = _skill(work, "alpha")
+    beta = _skill(work, "beta")
+    (alpha.parent / "notes.md").write_text("Do not count me\nDo twice\n")
+    alpha.write_text(alpha.read_text() + "Do again.\n")  # two matches, one event
+    result = await agent.run("go")
+    assert result.stop_reason == "completed"
+    reads, order = _by_call(sink)
+    assert set(reads) == {"g1"}
+    assert sorted(e["skill"] for e in reads["g1"]) == ["alpha", "beta"]
+    assert {e["path"] for e in reads["g1"]} == {str(alpha.resolve()), str(beta.resolve())}
+    assert all(e["via"] == "grep" for e in reads["g1"])
+    calls = {e["call_id"]: e for e in sink.of("tool.call")}
+    assert set(calls) == {"g1", "g2", "g3"} and calls["g1"]["ok"]
+    # every skill.read of the call precedes its tool.call
+    events = sink.events
+    g1_call = next(i for i, e in enumerate(events)
+                   if e["event"] == "tool.call" and e["call_id"] == "g1")
+    assert all(i < g1_call for i, e in enumerate(events) if e["event"] == "skill.read")
+
+
+async def test_read_file_skill_read_carries_call_id(make_kernel, sink, tmp_path):
+    agent, work = _skill_agent(make_kernel, tmp_path, _calls_response(
+        ToolCallRequest(id="r1", name="read_file", arguments={"path": "skills/alpha/SKILL.md"}),
+        ToolCallRequest(id="r2", name="read_file", arguments={
+            "path": "skills/alpha/SKILL.md", "offset": 2, "limit": 1, "force": True}),
+        ToolCallRequest(id="r3", name="read_file", arguments={"path": "skills/alpha/other.md"}),
+        ToolCallRequest(id="r4", name="read_file", arguments={"path": "skills/nope/SKILL.md"}),
+        ToolCallRequest(id="r5", name="read_file", arguments={"path": "SKILL.md"}),
+        ToolCallRequest(id="r6", name="read_file", arguments={
+            "path": "skills/alpha/SKILL.md", "offset": 999}),
+    ))
+    alpha = _skill(work, "alpha")
+    (alpha.parent / "other.md").write_text("other")
+    (work / "SKILL.md").write_text("not a skill file")
+    await agent.run("go")
+    reads, _ = _by_call(sink)
+    assert set(reads) == {"r1", "r2"}
+    assert all(len(v) == 1 and v[0]["via"] == "read_file" and v[0]["skill"] == "alpha"
+               for v in reads.values())
+    calls = {e["call_id"]: e for e in sink.of("tool.call")}
+    assert not calls["r4"]["ok"] and not calls["r6"]["ok"]
+
+
+async def test_skill_read_outside_a_runner_has_no_call_id(tmp_path, sink) -> None:
+    from nanobot.agent.tools.search import GrepTool
+
+    work = tmp_path / "work"
+    _skill(work, "triage")
+    ctx = ToolContext(config=ToolsConfig(), workspace=str(work), env=_core_env(tmp_path, sink))
+    grep = GrepTool.create(ctx)
+    await grep.execute(pattern="Do", path="skills")
+    [read] = sink.of("skill.read")
+    assert read["call_id"] is None and read["via"] == "grep"
+    await grep.execute(pattern="zzz-no-match", path="skills")
+    assert len(sink.of("skill.read")) == 1
+
+
+def test_skill_read_catalogue_mentions_via_and_call_id() -> None:
+    assert "via" in EVENTS["skill.read"] and "call_id" in EVENTS["skill.read"]
+    assert "lower bound" in EVENTS["skill.read"]
 
 
 # -- event schema ---------------------------------------------------------------------------

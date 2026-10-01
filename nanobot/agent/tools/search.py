@@ -1077,10 +1077,24 @@ class GrepTool(_SearchTool):
         if not fixed_strings:
             flags = re.IGNORECASE if case_insensitive else 0
             worker = _RegexWorker(pattern, flags, deadline, self._base_env)
+        # Files with at least one line in the returned content (content mode only).
+        returned: list[Path] = []
         try:
-            return await asyncio.to_thread(
-                self._execute_sync, deadline=deadline, worker=worker, **scan_kwargs
+            result = await asyncio.to_thread(
+                self._execute_sync, deadline=deadline, worker=worker, returned=returned,
+                **scan_kwargs,
             )
+            if (
+                output_mode == "content"
+                and returned
+                and not (isinstance(result, ToolResult) and result.is_error)
+            ):
+                # skill.read per distinct skill file whose lines reach the model (K6).
+                from nanobot.agent.tools.filesystem import emit_skill_read
+
+                for file_path in returned:
+                    emit_skill_read(self, file_path, via="grep")
+            return result
         except asyncio.CancelledError:
             if worker is not None:
                 worker.kill()
@@ -1116,6 +1130,7 @@ class GrepTool(_SearchTool):
         offset: int = 0,
         deadline: float | None = None,
         worker: _RegexWorker | None = None,
+        returned: list[Path] | None = None,
     ) -> str:
         try:
             target = self._resolve(path or ".")
@@ -1257,6 +1272,10 @@ class GrepTool(_SearchTool):
                                 break
                             blocks.append(block)
                             result_chars += extra_sep + len(block)
+                            if returned is not None:
+                                resolved = file_path.resolve()
+                                if resolved not in returned:
+                                    returned.append(resolved)
                     else:
                         for line in source_lines:
                             if not line.searchable or file_regex.search(line.text) is None:

@@ -30,7 +30,7 @@ from nanobot.agent.context_governance import (
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
 from nanobot.agent.tools.base import ToolResult
-from nanobot.agent.tools.file_state import file_read_context
+from nanobot.agent.tools.file_state import file_read_context, tool_call_context
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.events import NO_EVENTS, EventSink
 from nanobot.llm_usage.context import (
@@ -1835,9 +1835,10 @@ class AgentRunner:
         await hook.before_execute_tool(context, tool_call, tool, params)
         try:
             with (
+                tool_call_context(tool_call.id),
                 file_read_context(tool_call.id, read_results)
                 if tool_call.name == "read_file" and read_results is not None
-                else nullcontext()
+                else nullcontext(),
             ):
                 if tool is not None:
                     result = await tool.execute(**params)

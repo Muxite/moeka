@@ -52,6 +52,55 @@ class FileToolsConfig(Base):
 DEFAULT_MAX_WRITE_BYTES = 10 * 1024 * 1024
 
 
+def skill_file_name(fp: Path, builtin_skills_dir: Path | None) -> str | None:
+    """The skill name when *fp* is a skill file, else ``None`` (spec 006 Terms).
+
+    A skill file is a regular file named exactly ``SKILL.md`` whose grandparent
+    directory is named ``skills`` or is the agent's built-in skills root; the skill's
+    name is its parent directory's name.
+    """
+    if fp.name != "SKILL.md":
+        return None
+    try:
+        if not fp.is_file():
+            return None
+    except OSError:
+        return None
+    if fp.parent.parent.name == "skills":
+        return fp.parent.name
+    if builtin_skills_dir is not None:
+        try:
+            if fp.resolve().parent.parent == builtin_skills_dir.resolve():
+                return fp.resolve().parent.name
+        except OSError:
+            return None
+    return None
+
+
+def emit_skill_read(tool: Any, fp: Path, *, via: str) -> None:
+    """Emit one ``skill.read`` for *fp* on *tool*'s trace sink when it is a skill file.
+
+    Carries ``skill``, ``path`` (the resolved path), ``via`` (the tool name) and
+    ``call_id`` (the current tool call's id; ``None`` outside a runner). Never raises.
+    """
+    sink = getattr(tool, "_trace_sink", None)
+    if sink is None:
+        return
+    try:
+        name = skill_file_name(fp, getattr(tool, "_builtin_skills_dir", None))
+        if name is None:
+            return
+        from nanobot.agent.tools.file_state import current_tool_call_id
+        from nanobot.kernel.trace import safe_emit
+
+        safe_emit(sink, {
+            "event": "skill.read", "skill": name, "path": str(fp), "via": via,
+            "call_id": current_tool_call_id(),
+        })
+    except Exception:  # noqa: BLE001 - tracing never changes a tool's outcome
+        return
+
+
 class _FsTool(Tool):
     """Shared base for filesystem tools — common init and path resolution."""
 
@@ -401,25 +450,8 @@ class ReadFileTool(_FsTool):
         return [capability_request("fs.read", params.get("path"))]
 
     def _trace_skill_read(self, fp: Path) -> None:
-        """Emit ``skill.read`` when *fp* is a ``skills/<name>/SKILL.md`` file (or a
-        ``SKILL.md`` directly under a variant's bundled-skills root)."""
-        sink = self._trace_sink
-        if sink is None or fp.name != "SKILL.md":
-            return
-        if fp.parent.parent.name != "skills" and not self._under_variant_skills(fp):
-            return
-        from nanobot.kernel.trace import safe_emit
-
-        safe_emit(sink, {"event": "skill.read", "skill": fp.parent.name, "path": str(fp)})
-
-    def _under_variant_skills(self, fp: Path) -> bool:
-        root = self._builtin_skills_dir
-        if root is None:
-            return False
-        try:
-            return fp.resolve().parent.parent == root.resolve()
-        except OSError:
-            return False
+        """Emit ``skill.read`` (``via="read_file"``) when *fp* is a skill file."""
+        emit_skill_read(self, fp, via="read_file")
 
     def _is_scratchpad(self, fp: Path) -> bool:
         """True for a file under ``<work_dir>/scratchpad`` (untrusted on read-back)."""
@@ -435,6 +467,26 @@ class ReadFileTool(_FsTool):
         limit: int | None = None,
         pages: str | None = None,
         force: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        read: list[Path] = []
+        result = await self._read(
+            path, offset=offset, limit=limit, pages=pages, force=force, read=read, **kwargs,
+        )
+        # skill.read only for a successful read (spec 006 K6): never for an error result.
+        if read and not (isinstance(result, ToolResult) and result.is_error):
+            self._trace_skill_read(read[0])
+        return result
+
+    async def _read(
+        self,
+        path: str | None = None,
+        offset: int = 1,
+        limit: int | None = None,
+        pages: str | None = None,
+        force: bool = False,
+        *,
+        read: list[Path],
         **kwargs: Any,
     ) -> Any:
         try:
@@ -454,7 +506,7 @@ class ReadFileTool(_FsTool):
                 return ToolResult.error(f"Error: File not found: {path}")
             if not fp.is_file():
                 return ToolResult.error(f"Error: Not a file: {path}")
-            self._trace_skill_read(fp)
+            read.append(fp)
 
             file_size = fp.stat().st_size
             if file_size > self._MAX_FILE_SIZE_BYTES:
