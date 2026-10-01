@@ -360,8 +360,12 @@ kernel.usage.totals(["agent"], session="b1")         # grouped
 kernel.usage.records(limit=20, consumer="awork")     # usage-record.v1 documents
 kernel.usage.budget()                                # cap, spent, reserved, remaining (CapBudget)
 sub = kernel.usage.subscribe(on_event)               # live; own thread, bounded queue, never blocks a call
-kernel.usage.label_waste(call_id, "discarded_draft") # caller-known waste, appended as call.waste
-kernel.usage.loss()                                  # store failures, dropped events, subscriber errors
+kernel.usage.label_waste(call_id, "discarded_draft", attempt=2)  # caller-known waste (waste-label.v1)
+kernel.usage.loss()                                  # failed/pending/dropped writes, duplicates, pruned rows,
+                                                     # unattributed calls, subscriber drops: all 0 when whole
+cp = kernel.usage.checkpoint()                       # keep OUTSIDE the agent's reach; later:
+kernel.usage.verify(cp)                              # {"ok": False, "reason": "rows_changed"} if forged
+kernel.usage.documents()                             # the version each document type is emitted at
 ```
 
 - Attribution is typed: `consumer` (kernel default or per call), `agent`, `session`, `role`, `purpose`.
@@ -369,8 +373,14 @@ kernel.usage.loss()                                  # store failures, dropped e
   `session` themselves. A call with no consumer is recorded as `unattributed`.
 - A cache hit is its own record (`cache.hit`): zero billed tokens, `saved_tokens_*` and `saved_cost_usd`.
 - A refused call is a `budget.refuse` event with the same attribution and a typed `refusal.code`.
+- Waste: `retry` labels the attempt a retry superseded (not the one that produced the answer).
+  `cost_usd` splits into `billed_cost_usd` and `estimated_cost_usd`; a timed-out or cancelled call keeps its
+  reservation as spend. Read `loss()` before trusting a total: a pruned or failed write makes it incomplete.
+- Not covered by the ledger: image generation, transcription and the local embedder
+  (`schemas/ATTRIBUTION.md`, "Not covered"). The usage database is in the file floor; the exec floor refuses
+  commands that name it; `checkpoint`/`verify` is the tamper evidence, not prevention.
 - `prompt_version` joins the cache key when set. Not implemented yet: cross-process stream, replay
-  recording, protected sink, OpenTelemetry export.
+  recording, a writer the agent cannot reach, OpenTelemetry export.
 
 ## Tracing
 

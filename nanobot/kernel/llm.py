@@ -68,6 +68,7 @@ from nanobot.kernel.budget import (
 from nanobot.kernel.frozen import FrozenMap, thaw
 from nanobot.kernel.hostenv import ModelSpec
 from nanobot.kernel.ledger import (
+    REQUEST_KEY_SCHEME,
     SCHEMA_VERSION,
     UNATTRIBUTED,
     Attribution,
@@ -963,6 +964,7 @@ class LLM:
             "purpose": who.purpose,
             "key": key[:16],
             "request_key": key,
+            "key_scheme": REQUEST_KEY_SCHEME,
             "prompt_version": plan.opts.prompt_version,
             "alias": plan.route.alias,
             "model": hit.model,

@@ -68,11 +68,11 @@ description: "Task list for consumer usage surface"
 ## Phase 6: Consumer Story 4 - waste and replay (P2)
 
 - [~] T020 [P] [US4] Failing fixtures `tests/kernel/test_usage_waste.py` for retry, failover, avoidable miss, discarded draft, post-admission refusal (FR-010, SC-004)
-  Status 2026-10-01: retry and discarded draft are tested; failover, avoidable cache miss and post-admission refusal are NOT labelled
+  Status 2026-10-01: retry and discarded draft are tested; failover, avoidable cache miss and post-admission refusal are NOT labelled. Review 2026-10-01: the retry label was on the wrong attempt (fixed, usage-record 1.1); a late label now targets its own attempt (`tests/kernel/test_usage_review.py` R1)
 - [~] T021 [US4] Waste label and linked event in `nanobot/kernel/ledger.py`; label retries and failovers in `nanobot/kernel/llm.py` (FR-010)
   Status 2026-10-01: `waste_label` on `model.call` (retry = attempt > 1) and `kernel.usage.label_waste` -> `call.waste`; failover and post-admission labels pending
 - [ ] T022 [US4] Protected host-owned append-only usage sink and file-floor coverage for `llm_usage.sqlite3` in the flat layout in `nanobot/kernel/floors.py` (FR-005, SC-007)
-  Status 2026-10-01: not done: protected host-owned sink and flat-layout file floor (SC-007 unproven)
+  Status 2026-10-01: not done: protected host-owned sink and flat-layout file floor (SC-007 unproven). Review 2026-10-01: partial. The usage database and sidecars are in the file floor (`protected_paths`), the exec floor refuses command lines naming it, and `kernel.usage.checkpoint()/verify()` gives tamper evidence. A writer the agent cannot reach (separate uid or process) is NOT built; SC-007 stays unproven
 - [ ] T023 [US4] Replay recorder and replayer keyed by `kernel.llm.request_key` in `nanobot/kernel/llm.py` (FR-011, SC-005)
   Status 2026-10-01: not done: replay recorder (SC-005 unproven)
 

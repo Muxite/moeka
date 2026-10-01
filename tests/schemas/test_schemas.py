@@ -19,7 +19,7 @@ FIELDS_V1 = {
     "usage-record": {
         "schema_version", "record_id", "kind", "call_id", "attempt", "consumer", "agent",
         "session", "role", "purpose", "slot", "source", "tags", "trace_id", "parent_call_id",
-        "request_key", "prompt_version", "started_at_ms", "latency_ms", "model", "provider",
+        "request_key", "key_scheme", "prompt_version", "started_at_ms", "latency_ms", "model", "provider",
         "alias", "tier", "tokens_in", "tokens_out", "tokens_cache_read", "tokens_cache_write",
         "tokens_reasoning", "usage_source", "cost_usd", "cost_billed", "price_source",
         "cache_hit", "saved_tokens_in", "saved_tokens_out", "saved_cost_usd", "finish_reason",
@@ -119,6 +119,9 @@ def breaking_changes(old: dict, new: dict, path: str = "$") -> list[str]:
         out.append(f"{path}: enum value removed")
     if "enum" not in old and "enum" in new:
         out.append(f"{path}: enum added")
+    if "enum" in old and "enum" not in new and "pattern" not in new and not (
+            "type" in new and "type" in old and _types(old) <= _types(new)):
+        out.append(f"{path}: enum removed without a replacement rule")
     for k in _BOUNDS_UP:
         if k in new and (k not in old or new[k] > old[k]):
             out.append(f"{path}: {k} tightened")
@@ -126,7 +129,13 @@ def breaking_changes(old: dict, new: dict, path: str = "$") -> list[str]:
         if k in new and (k not in old or new[k] < old[k]):
             out.append(f"{path}: {k} tightened")
     if old.get("pattern") != new.get("pattern"):
-        out.append(f"{path}: pattern changed")
+        import re
+
+        # an enum relaxed to a pattern that still accepts every old value is a widening
+        relaxed = "pattern" not in old and "enum" in old and "enum" not in new and all(
+            isinstance(v, str) and re.search(new["pattern"], v) for v in old["enum"])
+        if not relaxed:
+            out.append(f"{path}: pattern changed")
     if "required" in new and not set(new["required"]) <= set(old.get("required", [])):
         out.append(f"{path}: required grew {set(new['required']) - set(old.get('required', []))}")
     if old.get("additionalProperties", True) is True and new.get("additionalProperties", True) is not True:
@@ -262,3 +271,33 @@ def test_a_third_party_emitter_written_from_the_docs_validates() -> None:
     wl = {"schema_version": "1.0", "call_id": call, "attempt": 1, "waste_label": "retry",
           "waste_set_by": "consumer"}
     assert validate.problems(wl, "waste-label") == []
+
+
+# -- two producers, one analysis -----------------------------------------------------------------------
+
+
+def test_mixed_producer_fixture_validates_and_reduces_without_lying() -> None:
+    """awr.llm and moeka records (one duplicate delivery, one record_id collision) merge under
+    the definitions in ATTRIBUTION.md. awork-resume's copy of this test asserts the same numbers
+    with its own reducer."""
+    import sys
+
+    sys.path.insert(0, str(SCHEMAS))
+    import validate
+    from nanobot.llm_usage.query import reduce_records
+
+    docs = [json.loads(line) for line in (SCHEMAS / "examples" / "mixed-producers.jsonl").read_text().splitlines()]
+    for d in docs:
+        assert validate.problems(d, "usage-record") == [], d
+    total = reduce_records(docs)[0]
+    assert (total.requests, total.calls, total.retries) == (5, 3, 2)  # 6 distinct records, 1 hit
+    assert total.cache_hits == 1 and total.saved_tokens_in == 100
+    assert total.tokens_in == 100 + 120 + 50 + 100 + 0 and total.tokens_out == 20 + 25 + 2048 + 20 + 0
+    assert total.cost_usd == pytest.approx(0.001 + 0.0012 + 0.004 + 0.0005)
+    assert total.billed_cost_usd == pytest.approx(0.001 + 0.0012 + 0.0005)
+    assert total.estimated_cost_usd == pytest.approx(0.004)
+    assert (total.unpriced_requests, total.estimated_requests, total.failed_requests) == (1, 1, 2)
+    assert total.wasted_tokens == 120  # only the superseded awr attempt carries a label
+    assert total.cache_read_tokens == 60  # null counted as 0 in a sum; the doc keeps the null
+    by = {t.group["consumer"]: t for t in reduce_records(docs, ("consumer",))}
+    assert by["awork-resume"].requests == 3 and by["awork"].requests == 2

@@ -55,8 +55,8 @@
         "cache_mode": {"enum": ["live", "replay", "off"], "description": "replay: a miss is an error, never a provider call."},
         "request_key": {"type": ["string", "null"], "description": "Derived cache/replay key; opaque outside key_scheme."},
         "key_scheme": {
-          "enum": ["awr.sha256.v1", "moeka.request_key.v1"],
-          "description": "How request_key is computed. awr.sha256.v1: sha256 of canonical JSON {provider, model, system, prompt, schema, prompt_version, max_tokens, t:0}. moeka.request_key.v1: kernel.llm.request_key over messages, alias, model, provider, sampling, schema, retries (and prompt_version when set)."
+          "type": "string", "pattern": "^[a-z0-9_.-]+\\.v[0-9]+$", "examples": ["awr.sha256.v1", "moeka.request_key.v1"],
+          "description": "How request_key is computed; open set, a new producer names its own '<name>.v<N>'. awr.sha256.v1: sha256 of canonical JSON {provider, model, system, prompt, schema, prompt_version, max_tokens, t:0}. moeka.request_key.v1: kernel.llm.request_key over messages, alias, model, provider, sampling, schema, retries (and prompt_version when set)."
         }
       }
     },

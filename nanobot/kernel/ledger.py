@@ -79,6 +79,8 @@ DOCUMENT_VERSIONS: dict[str, str] = {
     "complete-json-call": "1.0",
 }
 UNATTRIBUTED = "unattributed"
+# How ``request_key`` is derived (``LLM.request_key``); named on every record that carries one.
+REQUEST_KEY_SCHEME = "moeka.request_key.v1"
 
 # Bounds that keep a record small and content-free (usage-record.v1.1 ``tags``): a tag
 # value that is not a short scalar is dropped, never clipped, because a clipped prompt is
@@ -312,6 +314,7 @@ class LedgerEvent:
             "record_id": self.record_id,
             "kind": "model_call",
             "cache_hit": False,
+            "key_scheme": REQUEST_KEY_SCHEME if self.request_key else None,
             "cost_billed": self.cost_is_billed,
             "producer": {"name": "moeka", "version": None},
             **fields,

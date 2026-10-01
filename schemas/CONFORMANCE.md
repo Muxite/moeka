@@ -9,7 +9,7 @@ can emit the same documents today, and what adopting moeka later changes. Nothin
 A producer conforms when every document it emits validates against `usage-record.v1.schema.json`
 (and `budget-event.v1.schema.json` for budget decisions), states `schema_version`, and honours the
 semantics in `ATTRIBUTION.md` (tokens_in includes cache tokens, null means unknown, a cache hit bills zero).
-Test it with `jsonschema.Draft202012Validator`; `tests/schemas/test_schemas.py` shows the pattern.
+Test it with `schemas/validate.py` (`problems(doc, "usage-record")`: the schema plus the cross-field rules a schema cannot say, such as `record_id == "<call_id>:<attempt>"` and `tokens_reasoning <= tokens_out`); `tests/schemas/test_schemas.py` shows the pattern, including a 30-line emitter written from these docs alone. Producers validate strict; readers use `strict=False` (ATTRIBUTION.md, reader rule).
 
 ## What awr.llm records today
 
@@ -55,7 +55,7 @@ Test it with `jsonschema.Draft202012Validator`; `tests/schemas/test_schemas.py` 
 | `finish_reason` | not carried | null |
 | `outcome` | ok; `ProviderTimeout` -> `timeout`; `MalformedResponse` or a parse failure on the round -> `parse_failure`; other `LLMInfraError` -> `error` | adapter |
 | `error_kind` | `type(exc).__name__` of the `LLMInfraError` | adapter |
-| `waste_label` | round 2 of a re-prompt or timeout retry -> `retry`, `waste_set_by = "consumer"` | adapter |
+| `waste_label` | round 1 of a re-prompt or timeout retry (the round that is superseded; known before the record is written) -> `retry`, `waste_set_by = "consumer"`; the round that produced the answer is not waste, and a final failed round is unlabelled (count it through `outcome`) | adapter |
 | `tags` | `{}` | optional |
 | `producer` | `{"name": "awr.llm"}` | constant |
 
@@ -103,7 +103,7 @@ class UsageEmitter:
 
     def record(self, *, call_id, attempt, ref, purpose, role, session, request_key,
                prompt_version, reply=None, cost=None, price_source="none",
-               outcome="ok", error_kind=None, started_at=None, cache_hit=False, saved=None):
+               outcome="ok", error_kind=None, started_at=None, cache_hit=False, saved=None, superseded=False):
         local = ref.provider == "ollama"
         doc = {
             "schema_version": SCHEMA_VERSION, "record_id": f"{call_id}:{attempt}",
@@ -127,8 +127,8 @@ class UsageEmitter:
             "saved_tokens_in": (saved or {}).get("in"), "saved_tokens_out": (saved or {}).get("out"),
             "saved_cost_usd": (saved or {}).get("usd"),
             "outcome": outcome, "error_kind": error_kind,
-            "waste_label": "retry" if attempt > 1 else None,
-            "waste_set_by": "consumer" if attempt > 1 else None,
+            "waste_label": "retry" if superseded else None,   # a retry will follow this attempt
+            "waste_set_by": "consumer" if superseded else None,
             "producer": {"name": "awr.llm", "version": None},
         }
         if self._validate:
@@ -159,9 +159,12 @@ record with `reply=None`, `outcome="timeout"`, `cost=amount` (the sketch then em
   (`moeka.request_key.v1`), so existing `awr.sha256.v1` replay fixtures do not hit under moeka; keep
   `key_scheme` beside each recording (add a nullable column, default `awr.sha256.v1`) and re-record or run both
   schemes side by side; (2) moeka's re-prompt count is `retries` and a native `response_format` round may be
-  added, so `max_rounds` is not always 2; (3) moeka counts every attempt including failed ones in `requests`,
-  awr's `calls` counts settled calls; (4) awr's per-stage `seconds` is wall time, moeka's `latency_ms` sums
-  call latencies; (5) paid-disabled and replay-miss are awork-resume policy and stay in its wrapper.
+  added, so `max_rounds` is not always 2; (3) moeka's `requests` counts every attempt including failed ones, awr's old `calls` counts settled
+  calls: both are now defined once in ATTRIBUTION.md "Totals" (`requests`, `calls`, `retries`) and
+  `schemas/examples/mixed-producers.jsonl` merges both producers under them; (4) awr's per-stage `seconds`
+  is wall time, moeka's `latency_ms` sums call latencies (not interchangeable); (5) awr emits one
+  budget-event per round (`attempt` set), moeka one per logical call; (6) paid-disabled and replay-miss are
+  awork-resume policy and stay in its wrapper.
 - Bumping to moeka's latest main: pin `schema_version` major 1 in the consumer's tests (validate against the
   copy of `schemas/` at the pinned commit). An additive minor never breaks that; a major bump is announced by
   `kernel.usage.schema_versions()`.

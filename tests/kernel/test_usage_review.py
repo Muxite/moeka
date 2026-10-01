@@ -571,3 +571,36 @@ def test_r10_unmetered_model_paths_are_inventoried() -> None:
         "providers/image_generation.py",  # billed image generation
         "providers/transcription.py",  # billed speech to text
     }
+
+
+# -- R13 the reducer and the store agree ----------------------------------------------------------------------
+
+
+async def test_r13_reference_reducer_agrees_with_the_store(make_kernel) -> None:
+    from nanobot.llm_usage.query import reduce_records
+
+    est = reply("ok", usage=LLMUsage.estimated(input_tokens=300, output_tokens=60))
+    kernel, _ = make_kernel("not json", '{"a": 1}', est, cache=DictCache())
+    who = {"consumer": "x", "agent": "a1", "role": "maker", "session": "s1"}
+    await kernel.llm.complete_json("j", schema={"type": "object"}, retries=1,
+                                   opts=GenerateOptions(attribution=Attribution(**who)))
+    await kernel.llm.generate([user("p")], GenerateOptions(attribution=Attribution(**who)))
+    await kernel.llm.generate([user("p")], GenerateOptions(attribution=Attribution(**who)))  # hit
+    await kernel.llm.generate([user("q")], GenerateOptions(
+        attribution=Attribution(consumer="y", agent="a2")))
+    docs = kernel.usage.records(limit=1000)
+    names = ("requests", "calls", "retries", "tokens_in", "tokens_out", "cache_read_tokens",
+             "cache_write_tokens", "cost_usd", "billed_cost_usd", "estimated_cost_usd",
+             "unpriced_requests", "estimated_requests", "failed_requests", "wasted_tokens",
+             "wasted_cost_usd", "cache_hits", "saved_tokens_in", "saved_tokens_out",
+             "saved_cost_usd")
+    for group in ((), ("consumer",), ("consumer", "agent"), ("waste_label",)):
+        stored = {tuple(sorted(t.group.items())): t for t in kernel.usage.totals(group)}
+        rebuilt = {tuple(sorted(t.group.items())): t for t in reduce_records(docs, group)}
+        assert stored.keys() == rebuilt.keys(), group
+        for key, sv in stored.items():
+            for name in names:
+                assert getattr(rebuilt[key], name) == pytest.approx(getattr(sv, name)), (
+                    group, key, name)
+    twice = reduce_records([*docs, *docs])[0]
+    assert twice.requests == reduce_records(docs)[0].requests  # duplicate delivery counts once

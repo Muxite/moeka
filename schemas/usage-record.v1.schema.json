@@ -37,6 +37,7 @@
     "trace_id": {"type": ["string", "null"]},
     "parent_call_id": {"type": ["string", "null"], "description": "call_id of the logical call that caused this one (sub-agent, verifier)."},
     "request_key": {"type": ["string", "null"], "description": "Cache/replay key of the request (opaque; see complete-json-call.v1 key_scheme)."},
+    "key_scheme": {"type": ["string", "null"], "pattern": "^[a-z0-9_.-]+\\.v[0-9]+$", "description": "How request_key was derived (awr.sha256.v1, moeka.request_key.v1, or your own '<name>.v<N>'). Two request_keys are comparable only under the same scheme; a different scheme can never match, so a cross-producer 'same request' analysis must say which scheme it joined on. null when request_key is null."},
     "prompt_version": {"type": ["string", "null"], "description": "Caller's version label of the prompt template."},
 
     "started_at_ms": {"type": ["integer", "null"], "minimum": 0, "description": "Unix epoch milliseconds."},

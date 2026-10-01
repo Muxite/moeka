@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from nanobot.llm_usage.store import LLMUsageStore
 
 SCHEMA_VERSION = "1.1"  # usage-record.v1
+REQUEST_KEY_SCHEME = "moeka.request_key.v1"
 
 _SHARED = ("consumer", "agent", "session", "role", "purpose", "model", "provider", "trace_id")
 GROUP_BY_CALLS = (*_SHARED, "tier", "outcome", "waste_label", "alias", "source")
@@ -59,6 +61,9 @@ class UsageFilter:
 class UsageTotals:
     """Sums over one group of calls. ``tokens_in`` includes cache reads and writes.
 
+    ``requests`` counts physical attempts (``model_call`` records); ``calls`` the logical
+    calls they belong to (distinct ``call_id``); ``retries`` the attempts after a call's first;
+    ``latency_ms`` sums attempt latencies (concurrent attempts overlap, so it is not wall time).
     ``cost_usd`` sums the priced attempts only and splits exactly into ``billed_cost_usd``
     (provider-reported usage at a known price, or the local-zero convention) and
     ``estimated_cost_usd`` (the producer's own count at its price table: a hint, not a bill);
@@ -68,6 +73,9 @@ class UsageTotals:
 
     group: dict[str, Any]
     requests: int = 0
+    calls: int = 0
+    retries: int = 0
+    latency_ms: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
     cache_read_tokens: int = 0
@@ -97,6 +105,9 @@ class UsageTotals:
 
 _CALL_SQL = """
     COUNT(*) AS requests,
+    COUNT(DISTINCT COALESCE(call_id, 'legacy-' || id)) AS calls,
+    COALESCE(SUM(CASE WHEN attempt > 1 THEN 1 ELSE 0 END), 0) AS retries,
+    COALESCE(SUM(duration_ms), 0.0) AS latency_ms,
     COALESCE(SUM(COALESCE(input_tokens, 0)), 0) AS tokens_in,
     COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS tokens_out,
     COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0) AS cache_read_tokens,
@@ -229,6 +240,7 @@ def _record_from_call(row: sqlite3.Row) -> dict[str, Any]:
         "purpose": row["purpose"], "slot": row["slot"], "source": row["source"],
         "tags": _tags(row["tags"]),
         "trace_id": row["trace_id"], "request_key": row["request_key"],
+        "key_scheme": REQUEST_KEY_SCHEME if row["request_key"] else None,
         "prompt_version": row["prompt_version"],
         "started_at_ms": row["started_at_ms"], "latency_ms": row["duration_ms"],
         "model": row["model"], "provider": row["provider"], "alias": row["alias"],
@@ -260,6 +272,7 @@ def _record_from_hit(row: sqlite3.Row) -> dict[str, Any]:
         payload = {}
     return {
         "request_key": payload.get("request_key"),
+        "key_scheme": payload.get("key_scheme"),
         "prompt_version": payload.get("prompt_version"),
         "schema_version": SCHEMA_VERSION,
         "record_id": f"{call_id}:0",
@@ -301,3 +314,63 @@ def records(
     merged = [_record_from_call(r) for r in calls] + [_record_from_hit(r) for r in hits]
     merged.sort(key=lambda r: r["started_at_ms"] or 0, reverse=True)
     return merged[:limit]
+
+
+_GROUPABLE = (*_SHARED, "tier", "outcome", "waste_label", "alias", "source")
+
+
+def reduce_records(
+    docs: Iterable[dict[str, Any]], group_by: tuple[str, ...] = (),
+) -> list[UsageTotals]:
+    """The reference reducer: :class:`UsageTotals` computed from ``usage-record`` documents
+    alone (no store), so any producer's records can be merged in one analysis with the same
+    definitions. A document delivered twice counts once (key: producer name and ``record_id``);
+    cache hits add to ``cache_hits`` and ``saved_*`` and never to ``requests``. ``refusals`` come
+    from budget events, not records, and stay 0 here."""
+    seen: set[tuple[Any, Any]] = set()
+    calls: dict[tuple[Any, ...], set[Any]] = {}
+    out: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for doc in docs:
+        producer = (doc.get("producer") or {}).get("name")
+        ident = (producer, doc.get("record_id"))
+        if ident in seen:
+            continue
+        seen.add(ident)
+        key = tuple(doc.get(g) for g in group_by)
+        acc = out.setdefault(key, {})
+
+        def add(name: str, value: float, acc: dict[str, Any] = acc) -> None:
+            acc[name] = acc.get(name, 0) + value
+
+        if doc.get("kind") == "cache_hit":
+            add("cache_hits", 1)
+            add("saved_tokens_in", doc.get("saved_tokens_in") or 0)
+            add("saved_tokens_out", doc.get("saved_tokens_out") or 0)
+            add("saved_cost_usd", doc.get("saved_cost_usd") or 0.0)
+            continue
+        cost = doc.get("cost_usd")
+        add("requests", 1)
+        calls.setdefault(key, set()).add((producer, doc.get("call_id")))
+        add("retries", 1 if (doc.get("attempt") or 0) > 1 else 0)
+        add("latency_ms", doc.get("latency_ms") or 0.0)
+        add("tokens_in", doc.get("tokens_in") or 0)
+        add("tokens_out", doc.get("tokens_out") or 0)
+        add("cache_read_tokens", doc.get("tokens_cache_read") or 0)
+        add("cache_write_tokens", doc.get("tokens_cache_write") or 0)
+        add("cost_usd", cost or 0.0)
+        add("billed_cost_usd", (cost or 0.0) if doc.get("cost_billed") else 0.0)
+        add("estimated_cost_usd", cost if cost is not None and not doc.get("cost_billed") else 0.0)
+        add("unpriced_requests", 1 if cost is None else 0)
+        add("estimated_requests", 1 if doc.get("usage_source") in ("estimated", "mixed") else 0)
+        add("failed_requests", 1 if doc.get("outcome") in ("error", "timeout", "cancelled") else 0)
+        if doc.get("waste_label"):
+            add("wasted_tokens", (doc.get("tokens_in") or 0) + (doc.get("tokens_out") or 0))
+            add("wasted_cost_usd", cost or 0.0)
+    result = []
+    for key, values in out.items():
+        values["calls"] = len(calls.get(key, ()))
+        result.append(UsageTotals(group=dict(zip(group_by, key, strict=True)), **values))
+    if not result and not group_by:
+        result.append(UsageTotals(group={}))
+    result.sort(key=lambda t: (-t.tokens, str(sorted(t.group.items()))))
+    return result
