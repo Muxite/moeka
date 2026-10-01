@@ -904,3 +904,31 @@ def _wait_and_interrupt(h, proc, deadline):
     assert proc.returncode == 3 and err == "heldout-run: error E_SYNC\n"
     assert _docker_leftovers(run_id) == []
     assert list(h.tmpdir.iterdir()) == []
+
+
+@docker
+def test_whole_out_dir_is_copied_to_the_report(h):
+    h.suite({"test_out.py": """
+        import os, pytest
+
+        @pytest.mark.fr("FR-009")
+        def test_writes_out():
+            open("/out/evidence.txt", "w").write("qqevidence")
+            os.makedirs("/out/sub/deeper", exist_ok=True)
+            open("/out/sub/deeper/more.txt", "w").write("qqmore")
+            os.symlink("/etc/passwd", "/out/link")
+            open("/out/report.json", "w").write("forged")
+    """})
+    p = h.run_wt()
+    assert p.returncode == 0, p.stdout
+    d = h.report_root / "round-01"
+    assert (d / "evidence.txt").read_text() == "qqevidence"
+    assert (d / "sub" / "deeper" / "more.txt").read_text() == "qqmore"
+    assert not (d / "link").exists() and not (d / "link").is_symlink()
+    assert not (d / "plugin").exists()
+    assert json.loads((d / "report.json").read_text())["meta"]["status"] == "passed"
+    for f in d.rglob("*"):
+        assert f.stat().st_mode & 0o777 == (0o700 if f.is_dir() else 0o600), f
+    for f in h.tmpdir.rglob("*"):
+        raise AssertionError(f"scratch not empty: {f}")
+    _assert_run_clean(h, h.report())

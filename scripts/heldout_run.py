@@ -206,10 +206,12 @@ _SANDBOX_LABEL = "heldout-run.id"
 _SANDBOX_CWD = "/tmp/heldout-cwd"
 _SANDBOX_HOME = "/tmp/heldout-home"
 _SANDBOX_PLUGIN = "/out/plugin"
-# Files copied from /out to the private report directory (FR-009), each capped.
-_OUT_FILES = ("junit.xml", "pytest.log", "records.jsonl", "collect.jsonl", "collect.log",
-              "collect-junit.xml")
-_OUT_CAP = 256 << 20
+# FR-009: all of /out goes to the private report directory (regular files and directories
+# only), except the injected plugin directory and the names the runner itself writes there.
+_OUT_SKIP_TOP = frozenset({"plugin", "report.json", "feedback.json", "sync.log", "sandbox.log"})
+_OUT_CAP = 256 << 20  # per file
+_OUT_TOTAL_CAP = 2 << 30
+_OUT_MAX_ENTRIES = 20000
 # In-container launchers (FR-007: syncing disabled) and sync steps (FR-004). awork-resume has
 # no sync step of its own (its ``uv run`` syncs), so sandboxed it syncs like moeka.
 _UV_SYNC = ["uv", "sync", "--project", "{copy}", "--extra", "dev", "-q"]
@@ -1715,21 +1717,40 @@ class _Docker:
             raise HeldoutError("E_SANDBOX_UNAVAILABLE")
 
     def fetch_out(self, container: str, report_dir: str) -> None:
-        """Copy the allowed regular files of ``container:/out`` into the report (FR-009)."""
+        """Copy ``container:/out`` into the private report directory (FR-009).
+
+        Regular files (0600) and directories (0700) only; symlinks, devices, hard links and
+        unsafe names are skipped; sizes and entry counts are capped.
+        """
         with self._log() as log:
             proc = self.popen(["cp", f"{container}:/out", "-"], stdout=subprocess.PIPE,
                               stderr=log)
+            total = entries = 0
             try:
                 with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
                     for member in tf:
-                        parts = member.name.split("/")
-                        if (len(parts) != 2 or parts[1] not in _OUT_FILES
-                                or not member.isreg()):
+                        entries += 1
+                        if entries > _OUT_MAX_ENTRIES or total > _OUT_TOTAL_CAP:
+                            break
+                        parts = member.name.split("/")[1:]  # drop the leading "out"
+                        if (not parts or parts[0] in _OUT_SKIP_TOP
+                                or any(x in ("", ".", "..") for x in parts)):
                             continue
-                        src = tf.extractfile(member)
-                        if src is None:
+                        dest = os.path.join(report_dir, *parts)
+                        parent = os.path.dirname(dest)
+                        if os.path.islink(parent) or not _inside(parent, report_dir):
                             continue
-                        _write_private(os.path.join(report_dir, parts[1]), src.read(_OUT_CAP))
+                        if member.isdir():
+                            if not os.path.lexists(dest):
+                                _mkdir_private(dest)
+                        elif member.isreg():
+                            src = tf.extractfile(member)
+                            if src is None or os.path.islink(dest) or os.path.isdir(dest):
+                                continue
+                            _mkdir_private(parent)
+                            data = src.read(_OUT_CAP)
+                            total += len(data)
+                            _write_private(dest, data)
             except (OSError, tarfile.TarError):
                 pass
             finally:
