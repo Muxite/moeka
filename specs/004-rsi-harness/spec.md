@@ -121,9 +121,10 @@ Harness requirements (summary; the design is authoritative):
   better on at least one objective, with ties broken toward fewer tokens, then fewer tools.
 - **FR-013**: objectives MUST include held-out quality, cost per solved task, provenance rate, clarification
   yield, denial rate, latency, and wasted tokens per `001`; ambient leakage MUST be a hard zero.
-  [NEEDS CLARIFICATION: clarification yield has no signal today; either the kernel emits a clarification trace
-  event (with a way to mark a question as needed) or the objective is dropped until the harness can measure it;
-  until decided the objective is absent from any Pareto comparison (CLARIFY-LOG Q1)]
+  Clarification yield (CLARIFY-LOG Q1, answered B): the kernel MUST emit `clarify.question` and
+  `clarify.commit_ready` trace events (paths and reasons, never values); whether a question was needed MUST be
+  judged by the harness from downstream outcomes, never by the kernel. Until those events land the objective
+  stays out of any Pareto comparison.
 - **FR-014**: every step MUST write durable state first; the daemon MUST stop on notice within about two
   minutes and resume from the last row.
 - **FR-015**: rollouts MUST run in containers whose only network peer is the model-serving sidecar; the

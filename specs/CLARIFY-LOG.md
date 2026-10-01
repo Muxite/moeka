@@ -26,6 +26,8 @@ the owner may veto any of them. Spec 005's three marked questions are logged as 
   cheap and also serves audit; the outcome half cannot live in the kernel (verifier is outside by design). Until
   answered, the objective is absent from any Pareto comparison.
 - Lands in: `004` FR-013, kernel design sections 8 and 12, contract section 9 item 1.
+- Answered 2026-10-01 (owner): B. The kernel emits `clarify.question` and `clarify.commit_ready` (paths and
+  reasons, never values); "needed" is computed by the harness from outcomes. Encoded in `004` FR-013, T010.
 
 ### Q2. Typed attribution fields, or tags by convention?
 - Spec: `001-consumer-usage-surface` FR-002 (U2, G2).

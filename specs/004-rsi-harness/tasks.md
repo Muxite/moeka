@@ -9,8 +9,10 @@ description: "Kernel-side task list for the RSI harness (pointer)"
 
 ## Phase 1: Setup
 
-- [ ] T001 Decide CLARIFY-LOG Q1 (clarification-yield event or drop); record in `spec.md` (FR-013)
-- [ ] T002 [P] Confirm the pin `6f80c392` is on `origin/core-slim` with `git ls-remote` before any bump
+- [x] T001 Decide CLARIFY-LOG Q1 (clarification-yield event or drop); record in `spec.md` (FR-013). Owner, 2026-10-01: B
+- [~] T002 [P] Pin. Superseded by the consolidation: K1-K6 and the held-out runner exist only on `consolidate/new-main`
+  (merges `d1766eb2`, `b67c795f`), not on `core-slim` or the cut `main` (`d3524a79`). The local-only harness pins a
+  `consolidate/new-main` commit with a green `scripts/test-docker.sh` run; after the G7 push it re-pins to `main`
 
 ## Phase 2: Kernel prerequisites (each its own commit and test, tests first)
 
@@ -23,18 +25,32 @@ description: "Kernel-side task list for the RSI harness (pointer)"
 
 ## Phase 3: Observation the harness depends on
 
-- [ ] T009 [US2] Track `001` tasks T020-T023 (waste labels, protected sink, replay) as blockers for harness M4
+- [~] T009 [US2] `001` T020-T023 (waste labels, protected sink, replay) no longer block harness M4. The plan's M4
+  needs only K1 and K3; the harness covers the rest outside the kernel until `001` lands:
+  - Protected cost stream: a metering proxy in front of the model server, in the supervisor's trust zone (not
+    the runner container), logs per-request usage keyed by rollout tags. Cost is scored from the proxy log;
+    kernel usage rows are cross-checked against it and any difference flags the rollout. The runner's file tools
+    cannot reach the proxy log (it is not mounted).
+  - Replay: not needed for M4. Resume uses M3's result cache (task, seed, fingerprint, variant tree hash, core
+    commit); the proxy can record responses by request digest when replay is wanted.
+  - Wasted tokens: derived in `supervisor/metrics.py` from the proxy log (repeated request digests = retries)
+    and the trace; any part that cannot be derived is marked unavailable, which M4's exit criterion allows.
+  - Switch to the kernel sink and replayer once `001` T022 and T023 land; keep the proxy as the cross-check
 
 ## Phase 4: Clarification yield (after T001)
 
-- [ ] T010 [US2] If kept: emit `clarify.question` and `clarify.commit_ready` (paths and reasons, never values) from `nanobot/kernel/clarify.py` or the facade, with a "needed" mark; test in `tests/kernel/test_clarify.py`
-- [ ] T011 [US2] If dropped: remove clarification yield from kernel design section 8 and `rsi-harness-design.md` on its branch via the owner's separate instruction
+- [ ] T010 [US2] Emit `clarify.question` and `clarify.commit_ready` (paths and reasons, never values) from `nanobot/kernel/clarify.py` or the facade; no "needed" mark in the kernel (Q1 = B, the harness judges it); test in `tests/kernel/test_clarify.py`
+- [-] T011 [US2] Not applicable (Q1 = B, objective kept). Was: if dropped: remove clarification yield from kernel design section 8 and `rsi-harness-design.md` on its branch via the owner's separate instruction
 
 ## Phase 5: Held-out spec testing (FR-016, SC-007)
 
-- [ ] T013 Runner `heldout-run <repo> <feature> <worktree>`: copy the held-out suite into a throwaway copy of the tree, run under `timeout`, report per-requirement pass/fail counts only (FR-016)
-- [ ] T014 Redaction test on the runner's feedback: no test names, assertion text, inputs or held-out paths; held-out dir not mounted into the implementer or mutator container (SC-007)
-- [ ] T015 Candidate kernel helper (owner decision, see kernel design section 8): `heldout` evaluation that runs hidden checks in an isolated copy and returns redacted per-requirement results
+Done by spec `007-heldout-runner` (`scripts/heldout_run.py`, `scripts/run-heldout.sh`; accepted suite
+`tests/heldout/007-heldout-runner/`). T015 needed no kernel API: the harness vendors or calls the runner.
+
+
+- [x] T013 Runner `heldout-run <repo> <feature> <worktree>`: copy the held-out suite into a throwaway copy of the tree, run under `timeout`, report per-requirement pass/fail counts only (FR-016)
+- [x] T014 Redaction test on the runner's feedback: no test names, assertion text, inputs or held-out paths; held-out dir not mounted into the implementer or mutator container (SC-007)
+- [x] T015 Candidate kernel helper (owner decision, see kernel design section 8): `heldout` evaluation that runs hidden checks in an isolated copy and returns redacted per-requirement results
 
 ## Phase N: Polish
 
@@ -42,4 +58,5 @@ description: "Kernel-side task list for the RSI harness (pointer)"
 
 ## Dependencies
 
-- T005 and T004 are needed by harness M4; T003 by M3; T006 and T007 by M5. T009 gates M4 scoring on waste.
+- T005 and T004 are needed by harness M4; T003 by M3; T006 and T007 by M5. T009 no longer gates M4 (proxy metering). T010 gates the
+clarification-yield objective only.
