@@ -286,9 +286,10 @@ is refused with exit 4.
   (allowing a parenthesised suffix inside the bold, such as `- **FR-016 (held-out ...)**`), up to but not including
   the next line that starts a list item at the same or lower indent, a heading, or a blank line followed by a
   non-indented line. When absent, the block reads `(not found in spec)`.
-- **FR-038**: Triage output MUST start with the line `PRIVATE TRIAGE: not for the implementer`; `--json` gives
-  schema `heldout-triage.v1` (`[{id, nodeid, assertion, spec}]`). Triage never runs tests, never counts a round and
-  never writes a feedback file.
+- **FR-038**: Triage text output MUST start with the line `PRIVATE TRIAGE: not for the implementer`; `--json`
+  instead prints exactly one JSON object `{"schema": "heldout-triage.v1", "entries": [{"id", "nodeid", "assertion",
+  "spec"}, ...]}`, never a bare list (head-agent erratum, round 1). Triage never runs tests, never counts a round
+  and never writes a feedback file.
 
 #### Stated limits
 
