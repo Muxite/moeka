@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# heldout-run: run a held-out pytest suite on a throwaway copy (see heldout_run.py).
+exec python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/heldout_run.py" "$@"
