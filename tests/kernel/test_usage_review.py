@@ -591,7 +591,7 @@ async def test_r13_reference_reducer_agrees_with_the_store(make_kernel) -> None:
     docs = kernel.usage.records(limit=1000)
     names = ("requests", "calls", "retries", "tokens_in", "tokens_out", "cache_read_tokens",
              "cache_write_tokens", "cost_usd", "billed_cost_usd", "estimated_cost_usd",
-             "unpriced_requests", "estimated_requests", "failed_requests", "wasted_tokens",
+             "unpriced_requests", "estimated_requests", "estimated_tokens", "failed_requests", "wasted_tokens",
              "wasted_cost_usd", "cache_hits", "saved_tokens_in", "saved_tokens_out",
              "saved_cost_usd")
     for group in ((), ("consumer",), ("consumer", "agent"), ("waste_label",)):

@@ -85,6 +85,7 @@ class UsageTotals:
     estimated_cost_usd: float = 0.0
     unpriced_requests: int = 0
     estimated_requests: int = 0
+    estimated_tokens: int = 0
     failed_requests: int = 0
     wasted_tokens: int = 0
     wasted_cost_usd: float = 0.0
@@ -120,6 +121,10 @@ _CALL_SQL = """
     COALESCE(SUM(CASE WHEN usage_source IN ('estimated', 'mixed')
         OR (usage_source IS NULL AND estimated_tokens > 0 AND reported_tokens = 0)
         THEN 1 ELSE 0 END), 0) AS estimated_requests,
+    COALESCE(SUM(CASE WHEN usage_source IN ('estimated', 'mixed')
+        OR (usage_source IS NULL AND estimated_tokens > 0 AND reported_tokens = 0)
+        THEN COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) ELSE 0 END), 0)
+        AS estimated_tokens,
     COALESCE(SUM(CASE WHEN COALESCE(outcome, CASE WHEN finish_reason IN ('error', 'cancelled')
         THEN 'error' ELSE 'ok' END) IN ('error', 'timeout', 'cancelled') THEN 1 ELSE 0 END), 0)
         AS failed_requests,
@@ -361,7 +366,9 @@ def reduce_records(
         add("billed_cost_usd", (cost or 0.0) if doc.get("cost_billed") else 0.0)
         add("estimated_cost_usd", cost if cost is not None and not doc.get("cost_billed") else 0.0)
         add("unpriced_requests", 1 if cost is None else 0)
-        add("estimated_requests", 1 if doc.get("usage_source") in ("estimated", "mixed") else 0)
+        est = doc.get("usage_source") in ("estimated", "mixed")
+        add("estimated_requests", 1 if est else 0)
+        add("estimated_tokens", (doc.get("tokens_in") or 0) + (doc.get("tokens_out") or 0) if est else 0)
         add("failed_requests", 1 if doc.get("outcome") in ("error", "timeout", "cancelled") else 0)
         if doc.get("waste_label"):
             add("wasted_tokens", (doc.get("tokens_in") or 0) + (doc.get("tokens_out") or 0))

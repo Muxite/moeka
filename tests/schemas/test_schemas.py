@@ -297,6 +297,7 @@ def test_mixed_producer_fixture_validates_and_reduces_without_lying() -> None:
     assert total.billed_cost_usd == pytest.approx(0.001 + 0.0012 + 0.0005)
     assert total.estimated_cost_usd == pytest.approx(0.004)
     assert (total.unpriced_requests, total.estimated_requests, total.failed_requests) == (1, 1, 2)
+    assert total.estimated_tokens == 50 + 2048  # tokens of attempts the producer estimated
     assert total.wasted_tokens == 120  # only the superseded awr attempt carries a label
     assert total.cache_read_tokens == 60  # null counted as 0 in a sum; the doc keeps the null
     by = {t.group["consumer"]: t for t in reduce_records(docs, ("consumer",))}
