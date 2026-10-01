@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from nanobot.llm_usage.store import LLMUsageStore
 
-SCHEMA_VERSION = "1.0"  # usage-record.v1
+SCHEMA_VERSION = "1.1"  # usage-record.v1
 
 _SHARED = ("consumer", "agent", "session", "role", "purpose", "model", "provider", "trace_id")
 GROUP_BY_CALLS = (*_SHARED, "tier", "outcome", "waste_label", "alias", "source")
@@ -59,8 +59,10 @@ class UsageFilter:
 class UsageTotals:
     """Sums over one group of calls. ``tokens_in`` includes cache reads and writes.
 
-    ``cost_usd`` sums the priced attempts only; ``unpriced_requests`` counts the rest
-    (their cost is unknown, never zero). ``wasted_*`` sum attempts carrying a waste
+    ``cost_usd`` sums the priced attempts only and splits exactly into ``billed_cost_usd``
+    (provider-reported usage at a known price, or the local-zero convention) and
+    ``estimated_cost_usd`` (the producer's own count at its price table: a hint, not a bill);
+    ``unpriced_requests`` counts the rest (their cost is unknown, never zero). ``wasted_*`` sum attempts carrying a waste
     label (set on the event or by a later ``call.waste`` event).
     """
 
@@ -71,6 +73,8 @@ class UsageTotals:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cost_usd: float = 0.0
+    billed_cost_usd: float = 0.0
+    estimated_cost_usd: float = 0.0
     unpriced_requests: int = 0
     estimated_requests: int = 0
     failed_requests: int = 0
@@ -98,11 +102,15 @@ _CALL_SQL = """
     COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0) AS cache_read_tokens,
     COALESCE(SUM(COALESCE(cache_write_tokens, 0)), 0) AS cache_write_tokens,
     COALESCE(SUM(cost_usd), 0.0) AS cost_usd,
+    COALESCE(SUM(CASE WHEN cost_billed = 1 THEN cost_usd ELSE 0 END), 0.0) AS billed_cost_usd,
+    COALESCE(SUM(CASE WHEN cost_usd IS NOT NULL AND COALESCE(cost_billed, 0) = 0
+        THEN cost_usd ELSE 0 END), 0.0) AS estimated_cost_usd,
     COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced_requests,
     COALESCE(SUM(CASE WHEN usage_source IN ('estimated', 'mixed')
         OR (usage_source IS NULL AND estimated_tokens > 0 AND reported_tokens = 0)
         THEN 1 ELSE 0 END), 0) AS estimated_requests,
-    COALESCE(SUM(CASE WHEN finish_reason IN ('error', 'cancelled') THEN 1 ELSE 0 END), 0)
+    COALESCE(SUM(CASE WHEN COALESCE(outcome, CASE WHEN finish_reason IN ('error', 'cancelled')
+        THEN 'error' ELSE 'ok' END) IN ('error', 'timeout', 'cancelled') THEN 1 ELSE 0 END), 0)
         AS failed_requests,
     COALESCE(SUM(CASE WHEN waste_label IS NOT NULL
         THEN COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) ELSE 0 END), 0)
@@ -110,12 +118,21 @@ _CALL_SQL = """
     COALESCE(SUM(CASE WHEN waste_label IS NOT NULL THEN cost_usd ELSE 0 END), 0.0)
         AS wasted_cost_usd
 """
-# attempts with the late ``call.waste`` label folded in
-_CALLS_VIEW = """(
-    SELECT c.*, COALESCE(c.waste_label, (
-        SELECT w.waste_label FROM llm_usage_events w
-        WHERE w.kind = 'waste' AND w.call_id = c.call_id ORDER BY w.id DESC LIMIT 1
-    )) AS eff_waste
+# attempts with the late ``call.waste`` label folded in. A label names one attempt, or the
+# whole call when its ``attempt`` is null; an attempt's own label wins over a call-wide one.
+_LATE = """(
+        SELECT {col} FROM llm_usage_events w
+        WHERE w.kind = 'waste' AND w.call_id = c.call_id AND {match}
+        ORDER BY w.id DESC LIMIT 1)"""
+_CALLS_VIEW = f"""(
+    SELECT c.*,
+    COALESCE(c.waste_label,
+        {_LATE.format(col="w.waste_label", match="w.attempt = c.attempt")},
+        {_LATE.format(col="w.waste_label", match="w.attempt IS NULL")}) AS eff_waste,
+    COALESCE(c.waste_set_by,
+        {_LATE.format(col="json_extract(w.payload, '$.waste_set_by')", match="w.attempt = c.attempt")},
+        {_LATE.format(col="json_extract(w.payload, '$.waste_set_by')", match="w.attempt IS NULL")},
+        'caller') AS eff_set_by
     FROM llm_calls c
 )"""
 
@@ -188,6 +205,14 @@ def totals(
     return result
 
 
+def _tags(text: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(text) if text else {}
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _record_from_call(row: sqlite3.Row) -> dict[str, Any]:
     attempt = row["attempt"] if row["attempt"] is not None else 1
     call_id = row["call_id"] or f"legacy-{row['id']}"
@@ -202,6 +227,7 @@ def _record_from_call(row: sqlite3.Row) -> dict[str, Any]:
         "consumer": row["consumer"] or "unattributed",
         "agent": row["agent"], "session": row["session"], "role": row["role"],
         "purpose": row["purpose"], "slot": row["slot"], "source": row["source"],
+        "tags": _tags(row["tags"]),
         "trace_id": row["trace_id"], "request_key": row["request_key"],
         "prompt_version": row["prompt_version"],
         "started_at_ms": row["started_at_ms"], "latency_ms": row["duration_ms"],
@@ -220,8 +246,8 @@ def _record_from_call(row: sqlite3.Row) -> dict[str, Any]:
         "finish_reason": row["finish_reason"],
         "outcome": row["outcome"] or ("error" if failed else "ok"),
         "error_kind": row["error_kind"],
-        "waste_label": row["eff_waste"], "waste_set_by": row["waste_set_by"] or (
-            "caller" if row["eff_waste"] and not row["waste_label"] else None),
+        "waste_label": row["eff_waste"],
+        "waste_set_by": row["eff_set_by"] if row["eff_waste"] else None,
         "producer": {"name": "moeka", "version": None},
     }
 
@@ -249,7 +275,8 @@ def _record_from_hit(row: sqlite3.Row) -> dict[str, Any]:
         "cache_hit": True,
         "saved_tokens_in": row["saved_tokens_in"], "saved_tokens_out": row["saved_tokens_out"],
         "saved_cost_usd": row["saved_cost_usd"],
-        "outcome": "ok", "producer": {"name": "moeka", "version": None},
+        "outcome": "ok", "tags": payload.get("tags") or {},
+        "producer": {"name": "moeka", "version": None},
     }
 
 

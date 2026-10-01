@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import sqlite3
 import threading
 import time
+from collections import deque
 from collections.abc import Iterable
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
@@ -16,7 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nanobot.llm_usage.models import LLMCallRecord
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Columns added after v1, as (name, declaration). v2 (Task 14): the kernel ledger's
 # model tier and USD cost. v3 (spec 001): typed attribution and the rest of the
 # ``usage-record.v1`` event. Migrations only ever ADD nullable columns, so an old row
@@ -43,12 +46,13 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("usage_source", "TEXT"),
     ("cost_billed", "INTEGER"),
     ("tokens_reasoning", "INTEGER"),
+    ("tags", "TEXT"),  # v4: bounded host tags (JSON object), so the store round-trips the event
 )
 # Attribution and identity columns a usage event writes (see ``record_event``).
 _EVENT_COLUMNS = (
     "call_id", "attempt", "consumer", "agent", "session", "role", "purpose", "trace_id",
     "slot", "alias", "request_key", "prompt_version", "waste_label", "waste_set_by",
-    "outcome", "price_source", "usage_source", "cost_billed", "tokens_reasoning",
+    "outcome", "price_source", "usage_source", "cost_billed", "tokens_reasoning", "tags",
 )
 _EVENTS_DDL = """
     CREATE TABLE IF NOT EXISTS llm_usage_events (
@@ -71,13 +75,18 @@ _EVENTS_DDL = """
         saved_cost_usd REAL,
         waste_label TEXT,
         reason_code TEXT,
-        payload TEXT
+        payload TEXT,
+        dedupe_key TEXT
     );
     CREATE INDEX IF NOT EXISTS llm_usage_events_call_idx ON llm_usage_events(call_id);
     CREATE INDEX IF NOT EXISTS llm_usage_events_kind_ts_idx ON llm_usage_events(kind, ts_ms);
 """
 MAX_DAYS_RETAINED = 400
 MAX_CALLS_RETAINED = 100_000
+MAX_PAYLOAD_CHARS = 8000
+_META_DDL = """
+    CREATE TABLE IF NOT EXISTS llm_usage_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+"""
 
 _ERROR_KINDS = frozenset({
     "authentication",
@@ -239,6 +248,15 @@ class LLMUsageStore:
         self._write_version = 0
         self._cached_payload_key: tuple[int, str, str, int, int] | None = None
         self._cached_payload: dict[str, Any] | None = None
+        # Loss accounting (per process): a write that cannot land is kept for the next
+        # write instead of vanishing, up to MAX_PENDING; beyond that it is dropped and counted.
+        self._pending: deque[tuple[str, Any]] = deque()
+        self._call_write_failures = 0
+        self._write_dropped = 0
+        self._duplicates = 0
+
+    #: Writes kept for retry while the database is locked or unwritable.
+    MAX_PENDING = 1000
 
     def _connect(self) -> sqlite3.Connection:
         pid = os.getpid()
@@ -294,15 +312,49 @@ class LLMUsageStore:
                 ON llm_calls(provider, model, started_at_ms);
             """
         )
-        self._migrate(connection)
+        old_version = self._migrate(connection)
         connection.executescript(_EVENTS_DDL)
+        connection.executescript(_META_DDL)
+        self._migrate_events(connection)
+        if old_version == 3:
+            self._fix_v3_retry_labels(connection)
+        if old_version < SCHEMA_VERSION:
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._connection = connection
         self._connection_pid = pid
         return connection
 
     @staticmethod
-    def _migrate(connection: sqlite3.Connection) -> None:
-        """Bring an older ``llm_calls`` table up to ``SCHEMA_VERSION`` in place.
+    def _fix_v3_retry_labels(connection: sqlite3.Connection) -> None:
+        """v3 labelled attempt n > 1 ``retry``; the waste is attempt n-1 (usage-record 1.1).
+
+        Move each kernel-set label to the attempt before it as a linked waste event. Runs
+        once, on the v3 -> v4 step, inside one transaction.
+        """
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                "INSERT OR IGNORE INTO llm_usage_events (ts_ms, kind, call_id, attempt, consumer, "
+                "waste_label, payload, dedupe_key) "
+                "SELECT started_at_ms, 'waste', call_id, attempt - 1, consumer, 'retry', "
+                "'{\"waste_set_by\": \"kernel\", \"migrated_from\": \"v3\"}', "
+                "'waste:' || call_id || ':' || (attempt - 1) || ':retry' FROM llm_calls "
+                "WHERE waste_label = 'retry' AND waste_set_by = 'kernel' "
+                "AND call_id IS NOT NULL AND attempt > 1"
+            )
+            connection.execute(
+                "UPDATE llm_calls SET waste_label = NULL, waste_set_by = NULL "
+                "WHERE waste_label = 'retry' AND waste_set_by = 'kernel'"
+            )
+            connection.execute("COMMIT")
+        except sqlite3.Error:
+            connection.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> int:
+        """Bring an older ``llm_calls`` table up to ``SCHEMA_VERSION`` in place; returns the
+        ``user_version`` it found.
 
         Keyed on the actual columns (not only ``user_version``) so a half-applied
         or concurrent migration from another process converges instead of failing.
@@ -325,8 +377,38 @@ class LLMUsageStore:
             "CREATE INDEX IF NOT EXISTS llm_calls_consumer_time_idx "
             "ON llm_calls(consumer, started_at_ms)"
         )
-        if version < SCHEMA_VERSION:
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return version
+
+    @staticmethod
+    def _migrate_events(connection: sqlite3.Connection) -> None:
+        """Idempotency: one row per call attempt, per cache hit and per waste label.
+
+        ``llm_calls`` is unique on ``(call_id, attempt)`` and ``llm_usage_events`` on
+        ``dedupe_key``; a duplicate delivery is ignored and counted. Databases written
+        before these indexes may already hold duplicates: the index is then skipped
+        (logged) rather than failing the open.
+        """
+        existing = {
+            str(info[1]) for info in connection.execute("PRAGMA table_info(llm_usage_events)")
+        }
+        if "dedupe_key" not in existing:
+            try:
+                connection.execute("ALTER TABLE llm_usage_events ADD COLUMN dedupe_key TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        for ddl in (
+            "CREATE UNIQUE INDEX IF NOT EXISTS llm_usage_events_dedupe_uq "
+            "ON llm_usage_events(dedupe_key) WHERE dedupe_key IS NOT NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS llm_calls_attempt_uq "
+            "ON llm_calls(call_id, attempt) WHERE call_id IS NOT NULL AND attempt IS NOT NULL",
+        ):
+            try:
+                connection.execute(ddl)
+            except sqlite3.IntegrityError:
+                from loguru import logger
+
+                logger.warning("usage store holds duplicate rows; idempotency index skipped")
 
     def _read_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -408,17 +490,64 @@ class LLMUsageStore:
         if event is not None:
             values = (*values, *self._event_values(event))
             columns.extend(_EVENT_COLUMNS)
+        sql = (
+            f"INSERT OR IGNORE INTO llm_calls ({', '.join(columns)}) "  # noqa: S608 - fixed names
+            f"VALUES ({', '.join('?' * len(columns))})"
+        )
+        with self._lock:
+            try:
+                connection = self._connect()
+                self._insert(connection, sql, values)
+                self._flush_pending(connection)
+            except sqlite3.Error:
+                self._call_write_failures += 1
+                self._defer("call", (sql, values))
+                raise
+            self._prune_if_due(connection)
+
+    def _insert(self, connection: sqlite3.Connection, sql: str, values: tuple[object, ...]) -> None:
+        cursor = connection.execute(sql, values)
+        if cursor.rowcount == 0:
+            self._duplicates += 1  # a duplicate delivery: already counted once
+        self._write_version += 1
+        self._cached_payload_key = None
+        self._cached_payload = None
+
+    def _defer(self, kind: str, item: Any) -> None:
+        """Keep a write that could not land (the lock is held by the caller)."""
+        self._pending.append((kind, item))
+        while len(self._pending) > self.MAX_PENDING:
+            self._pending.popleft()
+            self._write_dropped += 1
+
+    def _flush_pending(self, connection: sqlite3.Connection) -> None:
+        """Retry deferred writes in order; stop at the first that fails again."""
+        while self._pending:
+            kind, item = self._pending[0]
+            try:
+                if kind == "call":
+                    self._insert(connection, *item)
+                else:
+                    self._insert_event(connection, item)
+            except sqlite3.Error:
+                return
+            self._pending.popleft()
+
+    def stats(self) -> dict[str, Any]:
+        """Loss and retention accounting for this store (durable counters survive restarts)."""
         with self._lock:
             connection = self._connect()
-            connection.execute(
-                f"INSERT INTO llm_calls ({', '.join(columns)}) "  # noqa: S608 - fixed names
-                f"VALUES ({', '.join('?' * len(columns))})",
-                values,
-            )
-            self._write_version += 1
-            self._cached_payload_key = None
-            self._cached_payload = None
-            self._prune_if_due(connection)
+            meta = dict(connection.execute("SELECT key, value FROM llm_usage_meta").fetchall())
+            oldest = connection.execute("SELECT MIN(started_at_ms) FROM llm_calls").fetchone()[0]
+            return {
+                "pending_writes": len(self._pending),
+                "write_failures": self._call_write_failures,
+                "write_dropped": self._write_dropped,
+                "duplicates": self._duplicates,
+                "pruned_rows": int(meta.get("pruned_rows", 0)),
+                "pruned_through_id": int(meta.get("pruned_through_id", 0)),
+                "oldest_started_at_ms": oldest,
+            }
 
     @staticmethod
     def _event_values(event: Any) -> tuple[object, ...]:
@@ -429,6 +558,12 @@ class LLMUsageStore:
         billed = getattr(event, "cost_is_billed", None)
         reasoning = getattr(event, "tokens_reasoning", None)
         attempt = getattr(event, "attempt", None)
+        tags = getattr(event, "tags", None)
+        tags_json = None
+        if tags:
+            from nanobot.kernel.ledger import sanitize_tags
+
+            tags_json = json.dumps(sanitize_tags(tags), sort_keys=True)
         return (
             text("call_id"),
             attempt if isinstance(attempt, int) else None,
@@ -438,16 +573,30 @@ class LLMUsageStore:
             text("outcome"), text("price_source"), text("usage_source"),
             None if billed is None else int(bool(billed)),
             reasoning if isinstance(reasoning, int) else None,
+            tags_json,
         )
+
+    @staticmethod
+    def _payload(event: dict[str, Any]) -> str:
+        """The event as JSON, always parseable: an oversized event is slimmed (long values
+        and nested objects dropped), never cut mid-document."""
+        text = json.dumps(event, default=str, sort_keys=True)
+        if len(text) <= MAX_PAYLOAD_CHARS:
+            return text
+        slim = {
+            k: v for k, v in event.items()
+            if isinstance(v, str | int | float | bool | type(None)) and len(str(v)) <= 512
+        }
+        slim["payload_slimmed"] = True
+        return json.dumps(slim, default=str, sort_keys=True)[:MAX_PAYLOAD_CHARS]
 
     def record_usage_event(self, event: dict[str, Any]) -> None:
         """Append one non-call usage event: ``cache_hit``, ``refusal`` or ``waste``.
 
         *event* is the content-free trace payload (``cache.hit``, ``budget.refuse`` or
         ``call.waste``); only the attribution and figures are kept, plus the JSON payload.
+        Idempotent per call: the same hit, refusal or label delivered twice lands once.
         """
-        import json
-
         kind = {"cache.hit": "cache_hit", "budget.refuse": "refusal", "call.waste": "waste"}.get(
             str(event.get("event")),
         )
@@ -462,26 +611,43 @@ class LLMUsageStore:
 
         refusal = event.get("refusal")
         reason = refusal.get("code") if isinstance(refusal, dict) else None
+        label = event.get("waste_label") or event.get("label")
+        call_id = event.get("call_id")
+        dedupe = None
+        if call_id:
+            dedupe = (
+                f"waste:{call_id}:{event.get('attempt')}:{label}" if kind == "waste"
+                else f"{kind}:{call_id}"
+            )
         row = (
             int(event.get("started_at_ms") or time.time() * 1000), kind,
-            event.get("call_id"), event.get("attempt"),
+            call_id, event.get("attempt"),
             event.get("consumer"), event.get("agent"), event.get("session"), event.get("role"),
             event.get("purpose"), event.get("trace_id"), event.get("model"),
             event.get("provider"), event.get("alias"),
             num("saved_tokens_in"), num("saved_tokens_out"), num("saved_cost_usd", False),
-            event.get("waste_label") or event.get("label"), reason,
-            json.dumps(event, default=str, sort_keys=True)[:8000],
+            label, reason, self._payload(event), dedupe,
         )
         with self._lock:
-            connection = self._connect()
-            connection.execute(
-                "INSERT INTO llm_usage_events (ts_ms, kind, call_id, attempt, consumer, agent, "
-                "session, role, purpose, trace_id, model, provider, alias, saved_tokens_in, "
-                "saved_tokens_out, saved_cost_usd, waste_label, reason_code, payload) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                row,
-            )
-            self._write_version += 1
+            try:
+                connection = self._connect()
+                self._insert_event(connection, row)
+                self._flush_pending(connection)
+            except sqlite3.Error:
+                self._defer("event", row)
+                raise
+
+    def _insert_event(self, connection: sqlite3.Connection, row: tuple[object, ...]) -> None:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO llm_usage_events (ts_ms, kind, call_id, attempt, consumer, "
+            "agent, session, role, purpose, trace_id, model, provider, alias, saved_tokens_in, "
+            "saved_tokens_out, saved_cost_usd, waste_label, reason_code, payload, dedupe_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            row,
+        )
+        if cursor.rowcount == 0:
+            self._duplicates += 1
+        self._write_version += 1
 
     def _prune_if_due(self, connection: sqlite3.Connection) -> None:
         utc_day = int(time.time() // 86_400)
@@ -490,23 +656,98 @@ class LLMUsageStore:
         prune_size = self._writes_since_size_prune >= 1_024
         if not prune_age and not prune_size:
             return
+        deleted = 0
+        through = 0
         if prune_age:
             cutoff_ms = int(
                 (datetime.now(timezone.utc) - timedelta(days=MAX_DAYS_RETAINED)).timestamp()
                 * 1000
             )
-            connection.execute("DELETE FROM llm_calls WHERE started_at_ms < ?", (cutoff_ms,))
+            row = connection.execute(
+                "SELECT MAX(id) FROM llm_calls WHERE started_at_ms < ?", (cutoff_ms,),
+            ).fetchone()
+            through = int(row[0] or 0)
+            deleted += connection.execute(
+                "DELETE FROM llm_calls WHERE started_at_ms < ?", (cutoff_ms,),
+            ).rowcount
+            connection.execute("DELETE FROM llm_usage_events WHERE ts_ms < ?", (cutoff_ms,))
+        row = connection.execute(
+            "SELECT id FROM llm_calls ORDER BY id DESC LIMIT 1 OFFSET ?", (MAX_CALLS_RETAINED,),
+        ).fetchone()
+        if row is not None:
+            through = max(through, int(row[0]))
+            deleted += connection.execute(
+                "DELETE FROM llm_calls WHERE id <= ?", (int(row[0]),),
+            ).rowcount
         connection.execute(
-            """
-            DELETE FROM llm_calls
-            WHERE id <= COALESCE((
-                SELECT id FROM llm_calls ORDER BY id DESC LIMIT 1 OFFSET ?
-            ), -1)
-            """,
-            (MAX_CALLS_RETAINED,),
+            "DELETE FROM llm_usage_events WHERE id <= COALESCE((SELECT id FROM llm_usage_events "
+            "ORDER BY id DESC LIMIT 1 OFFSET ?), -1)", (MAX_CALLS_RETAINED,),
         )
+        if deleted:
+            connection.execute(
+                "INSERT INTO llm_usage_meta (key, value) VALUES ('pruned_rows', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = value + excluded.value", (deleted,),
+            )
+            connection.execute(
+                "INSERT INTO llm_usage_meta (key, value) VALUES ('pruned_through_id', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)", (through,),
+            )
         self._last_prune_utc_day = utc_day
         self._writes_since_size_prune = 0
+
+    # -- tamper evidence -----------------------------------------------------------------
+
+    _CHECK_CALLS = (
+        "SELECT id, call_id, attempt, started_at_ms, provider, model, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, consumer, outcome, "
+        "finish_reason FROM llm_calls WHERE id BETWEEN ? AND ? ORDER BY id"
+    )
+    _CHECK_EVENTS = (
+        "SELECT id, kind, call_id, attempt, ts_ms, saved_tokens_in, saved_tokens_out, "
+        "saved_cost_usd, waste_label, reason_code FROM llm_usage_events "
+        "WHERE id BETWEEN ? AND ? ORDER BY id"
+    )
+
+    def _digest(self, connection: sqlite3.Connection, sql: str, lo: int, hi: int) -> tuple[int, str]:
+        h = hashlib.sha256()
+        n = 0
+        for row in connection.execute(sql, (lo, hi)):
+            h.update(json.dumps(list(tuple(row)), default=str).encode())
+            h.update(b"\n")
+            n += 1
+        return n, h.hexdigest()
+
+    def checkpoint(self) -> dict[str, Any]:
+        """A digest of every row so far. Keep it where the agent cannot write (the harness's
+        own state); :meth:`verify` later proves those rows were not edited, removed or
+        reordered. Honest appends after the checkpoint do not affect it. Pruning does, so
+        take one per run, not per year."""
+        with self._lock:
+            connection = self._connect()
+            out: dict[str, Any] = {"at_ms": int(time.time() * 1000), "version": 1}
+            for name, table, sql in (
+                ("calls", "llm_calls", self._CHECK_CALLS),
+                ("events", "llm_usage_events", self._CHECK_EVENTS),
+            ):
+                lo, hi = connection.execute(f"SELECT MIN(id), MAX(id) FROM {table}").fetchone()  # noqa: S608
+                lo, hi = int(lo or 0), int(hi or 0)
+                n, digest = self._digest(connection, sql, lo, hi)
+                out[name] = {"first_id": lo, "last_id": hi, "rows": n, "digest": digest}
+            return out
+
+    def verify(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        """Check the store against a :meth:`checkpoint`: ``{"ok", "reason"}``; the reason is
+        ``rows_missing`` (deleted or pruned) or ``rows_changed`` (edited)."""
+        with self._lock:
+            connection = self._connect()
+            for name, sql in (("calls", self._CHECK_CALLS), ("events", self._CHECK_EVENTS)):
+                part = checkpoint[name]
+                n, digest = self._digest(connection, sql, part["first_id"], part["last_id"])
+                if n < part["rows"]:
+                    return {"ok": False, "reason": "rows_missing", "table": name}
+                if n != part["rows"] or digest != part["digest"]:
+                    return {"ok": False, "reason": "rows_changed", "table": name}
+        return {"ok": True, "reason": None}
 
     def count(self) -> int:
         with self._lock:

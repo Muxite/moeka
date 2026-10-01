@@ -22,7 +22,12 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from nanobot.kernel.ledger import SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS
+from nanobot.kernel.ledger import (
+    DOCUMENT_VERSIONS,
+    SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+    UNATTRIBUTED,
+)
 from nanobot.kernel.trace import safe_emit
 from nanobot.llm_usage.query import UsageFilter, UsageTotals, records, totals
 
@@ -154,8 +159,13 @@ class UsageView:
         return SCHEMA_VERSION
 
     def schema_versions(self) -> tuple[str, ...]:
-        """Every ``usage-record`` version this kernel speaks."""
+        """Every ``usage-record`` version this kernel emits."""
         return SUPPORTED_SCHEMA_VERSIONS
+
+    def documents(self) -> dict[str, str]:
+        """The version each document type is emitted at (``usage-record``, ``budget-event``,
+        ``waste-label``, ``complete-json-call``): they version independently."""
+        return dict(DOCUMENT_VERSIONS)
 
     # -- queries --------------------------------------------------------------------
 
@@ -194,7 +204,7 @@ class UsageView:
         snapshot = getattr(budget, "snapshot", None)
         if not callable(snapshot):
             return None
-        return {"schema_version": SCHEMA_VERSION, **snapshot()}
+        return {"schema_version": DOCUMENT_VERSIONS["budget-event"], **snapshot()}
 
     # -- waste ----------------------------------------------------------------------
 
@@ -209,7 +219,8 @@ class UsageView:
         if label not in WASTE_LABELS:
             raise ValueError(f"unknown waste label {label!r}; choose from {WASTE_LABELS}")
         safe_emit(self._kernel.trace, {
-            "event": "call.waste", "schema_version": SCHEMA_VERSION, "call_id": call_id,
+            "event": "call.waste", "schema_version": DOCUMENT_VERSIONS["waste-label"],
+            "call_id": call_id,
             "attempt": attempt, "waste_label": label, "waste_set_by": set_by,
         })
 
@@ -230,14 +241,41 @@ class UsageView:
         return sub
 
     def loss(self) -> dict[str, int]:
-        """What observation lost: stored-event write failures and subscriber drops/errors."""
+        """What observation lost or could not keep, as counters (all zero when whole).
+
+        ``store_failures``: writes that failed (a locked or full database); ``pending_writes``:
+        of those, still waiting to be retried with the next write; ``write_dropped``: lost for
+        good (retry buffer full); ``dropped_events`` / ``subscriber_errors``: live subscribers;
+        ``duplicates``: duplicate deliveries ignored; ``pruned_rows``: rows retention removed
+        (a total over a window older than ``store.stats()["oldest_started_at_ms"]`` is
+        incomplete); ``unattributed_requests``: calls no layer attributed (a defect).
+        """
         with self._lock:
             subs = list(self._subs)
+        stats = self._store().stats()
         return {
-            "store_failures": self._projection.failures,
+            "store_failures": self._projection.failures + stats["write_failures"],
+            "pending_writes": stats["pending_writes"],
+            "write_dropped": stats["write_dropped"],
             "dropped_events": sum(s.dropped for s in subs),
             "subscriber_errors": sum(s.errors for s in subs),
+            "duplicates": stats["duplicates"],
+            "pruned_rows": stats["pruned_rows"],
+            "unattributed_requests": self.total(consumer=UNATTRIBUTED).requests,
         }
+
+    # -- tamper evidence ------------------------------------------------------------
+
+    def checkpoint(self) -> dict[str, Any]:
+        """A digest of the stored rows to keep OUTSIDE the agent's reach (the harness's own
+        state). An exec-capable agent can rewrite the usage database; it cannot make an edited
+        database match a digest it never saw. See :meth:`verify`."""
+        return self._store().checkpoint()
+
+    def verify(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        """``{"ok": bool, "reason": None | "rows_missing" | "rows_changed"}`` against a
+        :meth:`checkpoint`. Honest appends since the checkpoint are fine."""
+        return self._store().verify(checkpoint)
 
     def _close(self) -> None:
         with self._lock:

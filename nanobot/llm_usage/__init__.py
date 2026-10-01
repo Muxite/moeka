@@ -40,6 +40,9 @@ def empty_usage_payload() -> dict[str, Any]:
     }
 
 
+USAGE_DB_FILENAME = "llm_usage.sqlite3"
+
+
 def llm_usage_store_path(data_dir: Path | None = None) -> Path:
     """Usage DB under *data_dir* (``env.paths.data_dir``); ``None`` = legacy data dir."""
     if data_dir is not None:
@@ -48,7 +51,7 @@ def llm_usage_store_path(data_dir: Path | None = None) -> Path:
         from nanobot.kernel.legacy import legacy_data_dir
 
         base = legacy_data_dir()
-    return base / "llm_usage.sqlite3"
+    return base / USAGE_DB_FILENAME
 
 
 def get_llm_usage_store(
@@ -141,6 +144,7 @@ def llm_usage_payload(
 
 
 __all__ = [
+    "USAGE_DB_FILENAME",
     "LLMCallRecord",
     "LLMUsageStore",
     "empty_usage_payload",
