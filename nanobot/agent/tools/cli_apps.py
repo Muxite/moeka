@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import Field
 
@@ -17,11 +18,13 @@ from nanobot.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
-from nanobot.apps.cli import CliAppError, CliAppManager, CliAppsRuntimeConfig
-from nanobot.apps.cli.utils import runtime_lines_for_request
 from nanobot.config_base import Base
 from nanobot.runtime_context import RuntimeContextBlock, wrap_runtime_context_lines
 from nanobot.security.workspace_access import current_tool_workspace
+
+if TYPE_CHECKING:
+    # Gateway-owned app runtime; imported lazily (see the call sites).
+    from nanobot.apps.cli import CliAppsRuntimeConfig
 
 
 class CliAppsToolConfig(Base):
@@ -72,6 +75,8 @@ class CliAppsTool(Tool):
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
+        from nanobot.apps.cli import CliAppsRuntimeConfig
+
         cfg = ctx.config.cli_apps
         return cls(
             workspace=Path(ctx.workspace),
@@ -92,7 +97,11 @@ class CliAppsTool(Tool):
     ) -> None:
         self.workspace = workspace
         self.restrict_to_workspace = restrict_to_workspace
-        self.runtime = runtime or CliAppsRuntimeConfig()
+        if runtime is None:
+            from nanobot.apps.cli import CliAppsRuntimeConfig
+
+            runtime = CliAppsRuntimeConfig()
+        self.runtime = runtime
 
     @property
     def name(self) -> str:
@@ -101,6 +110,8 @@ class CliAppsTool(Tool):
     @property
     def description(self) -> str:
         try:
+            from nanobot.apps.cli import CliAppManager
+
             installed = CliAppManager(workspace=self.workspace, runtime=self.runtime).installed_names()
         except Exception:
             installed = []
@@ -123,6 +134,8 @@ class CliAppsTool(Tool):
         self,
         request: RequestContext,
     ) -> RuntimeContextBlock | None:
+        from nanobot.apps.cli.utils import runtime_lines_for_request
+
         lines = runtime_lines_for_request(
             request.original_user_text or "",
             request.metadata,
@@ -146,6 +159,8 @@ class CliAppsTool(Tool):
             restrict_to_workspace=self.restrict_to_workspace,
         )
         workspace = access.project_path or self.workspace
+        from nanobot.apps.cli import CliAppError, CliAppManager
+
         manager = CliAppManager(workspace=workspace, runtime=self.runtime)
         try:
             return manager.run(

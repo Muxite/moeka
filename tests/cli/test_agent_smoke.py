@@ -1,4 +1,4 @@
-"""Smoke test: the slimmed CLI exposes the agent command and none of the comms/UI commands."""
+"""Smoke test: the consolidated CLI exposes the agent command and the gateway host commands."""
 
 import os
 import subprocess
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 
-def test_cli_exposes_only_agent_command(tmp_path: Path) -> None:
+def test_cli_exposes_agent_and_host_commands(tmp_path: Path) -> None:
     env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
     out = subprocess.run(
         [sys.executable, "-m", "nanobot", "--help"],
@@ -17,5 +17,5 @@ def test_cli_exposes_only_agent_command(tmp_path: Path) -> None:
     )
     assert out.returncode == 0, out.stderr
     assert "agent" in out.stdout
-    for gone in ("gateway", "onboard", "channels", "webui"):
-        assert gone not in out.stdout
+    for host_command in ("gateway", "onboard", "channels", "webui"):
+        assert host_command in out.stdout

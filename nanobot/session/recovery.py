@@ -27,8 +27,6 @@ from nanobot.bus.queue import MessageBus
 from nanobot.session import turn_continuation
 from nanobot.session.keys import UNIFIED_SESSION_KEY, last_channel_from_metadata
 from nanobot.session.manager import Session, SessionManager
-from nanobot.webui.metadata import WEBUI_TURN_METADATA_KEY
-from nanobot.webui.session_identity import webui_chat_id, webui_session_key
 
 RUNTIME_CHECKPOINT_KEY = "runtime_checkpoint"
 PENDING_USER_TURN_KEY = "pending_user_turn"
@@ -787,6 +785,8 @@ class RecoveryCoordinator:
         chat_id: str,
         state: Mapping[str, Any],
     ) -> None:
+        from nanobot.webui.metadata import WEBUI_TURN_METADATA_KEY
+
         recovery_id = cast(str, state["recovery_id"])
         await self.bus.publish_inbound(
             InboundMessage(
@@ -878,6 +878,9 @@ class RecoveryCoordinator:
         return state
 
     def _session_key(self, chat_id: str) -> str:
+        # WebUI helpers are imported on use: this module is on the kernel import path.
+        from nanobot.webui.session_identity import webui_session_key
+
         return UNIFIED_SESSION_KEY if self.unified_session else webui_session_key(chat_id)
 
     @staticmethod
@@ -930,6 +933,8 @@ class RecoveryCoordinator:
         session_key: str,
         metadata: Mapping[str, Any],
     ) -> tuple[str, str] | None:
+        from nanobot.webui.session_identity import webui_chat_id
+
         chat_id = webui_chat_id(session_key)
         if chat_id is not None:
             return ("websocket", chat_id)

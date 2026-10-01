@@ -174,8 +174,12 @@ def test_channel_format_hint_absent_for_unknown(tmp_path) -> None:
     prompt = builder.build_system_prompt(channel=None)
     assert "Format Hint" not in prompt
 
-    prompt2 = builder.build_system_prompt(channel="telegram")
+    prompt2 = builder.build_system_prompt(channel="some-unknown-channel")
     assert "Format Hint" not in prompt2
+
+    # Messaging channels (gateway-owned) keep their hint; the kernel adds none.
+    prompt3 = builder.build_system_prompt(channel="telegram")
+    assert "Format Hint" in prompt3
 
 
 def test_build_messages_passes_channel_to_system_prompt(tmp_path) -> None:

@@ -1,6 +1,6 @@
 """Prompt templates and built-in skills must not describe removed features.
 
-The slim core no longer ships the cron/scheduler, the ``message`` (channel
+The kernel prompts must not describe host-owned features: the slim core does not ship the cron/scheduler, the ``message`` (channel
 delivery) tool, the heartbeat, CLI apps, chat channels, the gateway, the WebUI,
 pairing/trigger commands or the one-shot ``nanobot`` CLI commands other than
 ``agent``/``status``/``sessions``/``provider``. Telling the model about them
@@ -8,6 +8,11 @@ invites calls to tools that do not exist.
 
 The phrases are deliberately specific (regex, case-insensitive) so that
 ordinary English is not flagged. Allowed exceptions are documented inline.
+
+Consolidation (003): the gateway is a host on top of the kernel, so host-owned
+files (cron/heartbeat templates, the cron skill) are excluded by name below, and
+``tool_contract.md`` is checked as rendered for a kernel agent (no host tools).
+A host loop adds its sections through the ``tools`` template variable.
 """
 
 from __future__ import annotations
@@ -48,7 +53,19 @@ FORBIDDEN = {
 
 # (relative path, forbidden key) pairs that are legitimate. Keep empty unless
 # a hit is ordinary English unrelated to a removed feature; explain each one.
+# Files that belong to the gateway host and are only meant for host loops.
+HOST_OWNED_FILES: set[str] = {
+    "nanobot/templates/HEARTBEAT.md",
+    "nanobot/templates/agent/automation_creation.md",
+    "nanobot/templates/agent/cron_reminder.md",
+    "nanobot/templates/agent/evaluator.md",
+    "nanobot/skills/cron/SKILL.md",
+}
+
 ALLOWED: set[tuple[str, str]] = {
+    # Messaging-app format hints are keyed on the origin channel; they render only
+    # for gateway channels, never for a kernel agent (channel is empty or ``cli``).
+    ("nanobot/templates/agent/identity.md", "channel names"),
     # ``channel`` is the Jinja variable naming the session origin (only ``cli``
     # gets a format hint now); it is not a chat-integration reference.
     ("nanobot/templates/agent/identity.md", "channel"),
@@ -66,11 +83,21 @@ def _text_files():
                 yield path
 
 
+def _kernel_text(path: Path, rel: str) -> str:
+    if rel == "nanobot/templates/agent/tool_contract.md":
+        from nanobot.utils.prompt_templates import render_template
+
+        return render_template("agent/tool_contract.md", tools=[])
+    return path.read_text(encoding="utf-8")
+
+
 def test_prompts_and_skills_do_not_mention_removed_features():
     hits = []
     for path in _text_files():
         rel = path.relative_to(REPO).as_posix()
-        text = path.read_text(encoding="utf-8")
+        if rel in HOST_OWNED_FILES:
+            continue
+        text = _kernel_text(path, rel)
         for key, pattern in FORBIDDEN.items():
             if (rel, key) in ALLOWED:
                 continue

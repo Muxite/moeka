@@ -255,10 +255,10 @@ class TestIsTemplateContent:
 
 class TestBundledToolContract:
     def test_tool_contract_balances_general_and_coding_workflows(self):
-        from importlib.resources import files as pkg_files
+        from nanobot.utils.prompt_templates import render_template
 
-        tpl = pkg_files("nanobot") / "templates" / "agent" / "tool_contract.md"
-        content = tpl.read_text(encoding="utf-8")
+        # No host tools registered: the kernel contract (no messaging/scheduling).
+        content = render_template("agent/tool_contract.md", tools=[])
 
         assert "## General Tool Contract" in content
         assert "Use the narrowest structured tool" in content
@@ -274,6 +274,17 @@ class TestBundledToolContract:
         assert "## Media" in content
         assert "## Messaging and Media" not in content
         assert "## Scheduling and Background Work" not in content
+
+    def test_tool_contract_adds_host_sections_only_for_registered_host_tools(self):
+        from nanobot.utils.prompt_templates import render_template
+
+        content = render_template(
+            "agent/tool_contract.md", tools=["message", "cron", "run_cli_app"],
+        )
+        assert "## Messaging and Media" in content
+        assert "## Scheduling and Background Work" in content
+        assert "## CLI App Attachments" in content
+        assert "## Media\n" not in content
 
     def test_tool_contract_is_injected_without_workspace_file(self, tmp_path):
         builder = _builder(tmp_path)

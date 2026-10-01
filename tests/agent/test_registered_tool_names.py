@@ -1,8 +1,8 @@
-"""Pin the exact tool set the slim core registers through the plugin loader."""
+"""Pin the exact tool set the kernel registers through the plugin loader (host tools excluded)."""
 
 from __future__ import annotations
 
-from dataclasses import fields
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -69,5 +69,12 @@ def test_registered_tool_names_are_exactly_the_slim_set(slim_tool_ctx):
     assert names == EXPECTED_SLIM_TOOLS
 
 
-def test_tool_context_has_no_cron_service_field():
-    assert "cron_service" not in {f.name for f in fields(ToolContext)}
+def test_host_tools_load_only_for_host_loops(slim_tool_ctx):
+    """message/cron/run_cli_app are gateway-owned: absent unless the loop opts in."""
+    assert slim_tool_ctx.host_tools is False
+    host_ctx = dataclasses.replace(
+        slim_tool_ctx, host_tools=True, cron_service=SimpleNamespace(),
+    )
+    names = set(ToolLoader().load(host_ctx, ToolRegistry()))
+    assert {"message", "cron", "run_cli_app"} <= names
+    assert names - {"message", "cron", "run_cli_app"} == set(EXPECTED_SLIM_TOOLS)

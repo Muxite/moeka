@@ -4,7 +4,8 @@ Every ``nanobot/**/*.py`` and ``moeka/**/*.py`` is parsed with :mod:`ast` (so do
 never match) and scanned for reads of process-global state: the process
 environment, the user's home directory, and the ambient config/state locations.
 Kernel code must receive all of these through ``CoreEnvironment``; only the host
-adapters in :data:`AMBIENT_ALLOWLIST` may touch them.
+adapters in :data:`AMBIENT_ALLOWLIST` and the host packages in
+:data:`HOST_AMBIENT_ALLOWLIST` (each with a written reason) may touch them.
 
 The scanner has its own self-test (``test_scanner_*``): each forbidden pattern
 must be flagged and each allowed pattern must not.
@@ -35,6 +36,42 @@ AMBIENT_ALLOWLIST: dict[str, str] = {
     "nanobot/kernel/legacy.py": "ambient adapter (LegacyEnvironment + legacy helpers)",
     # Process restart helper: re-execs the host with its own environment.
     "nanobot/utils/restart.py": "host process restart (re-exec with process env)",
+}
+
+# HOST-SIDE allow-list (003 consolidation, reviewed 2026-10-01). These packages are the
+# gateway and its consumers, carried over from the pre-consolidation `main`. They are
+# NOT part of the kernel: the kernel may never import them (tests/core/test_import_boundary.py)
+# and nothing in nanobot/kernel/ or moeka/ may appear here. Each entry says why the host
+# legitimately reads process state; a new entry needs the same written reason and review.
+# The long-term fix is to hand these an explicit CoreEnvironment (003 plan, stage 2).
+HOST_AMBIENT_ALLOWLIST: dict[str, str] = {
+    "nanobot/channels/": (
+        "chat-platform runtimes: load_config() for hot reload of their own section, "
+        "credentials/proxy env for the platform SDKs, state dirs for sessions/QR logins"
+    ),
+    "nanobot/webui/": (
+        "WebUI server: serves and edits the user's config.json (load_config), reads "
+        "DISPLAY/PATH-style env for the native folder picker, builds and dev-server env"
+    ),
+    "nanobot/gateway/": "gateway service: resolves state home and data dir for its own stores",
+    "nanobot/apps/": (
+        "CLI-app runner: builds the minimal child-process environment (HOME, PATH, LANG, "
+        "Windows system vars) for installed third-party CLIs; never forwards secrets"
+    ),
+    "nanobot/audio/": "transcription provider key lookup from the process env (host convention)",
+    "nanobot/pairing/": "pairing store lives under the user's data dir (get_data_dir)",
+    "nanobot/api/server.py": (
+        "HTTP/openai-compat server: media dir default (get_media_dir); the server is a host "
+        "consumer, the kernel API is nanobot/api/complete.py (not allow-listed)"
+    ),
+    "nanobot/optional_features.py": (
+        "optional-extras installer: reads config.json/PATH to decide which channel "
+        "dependencies to pip-install at gateway start"
+    ),
+    "nanobot/agent/tools/message.py": (
+        "host-owned `message` tool (loaded only for host loops, ToolContext.host_tools); "
+        "falls back to the legacy workspace path when built without a workspace"
+    ),
 }
 
 # Per-file exemptions outside the allow-list: each needs a written reason. Keep tiny.
@@ -233,7 +270,7 @@ def scan_source(source: str, path: str = "<src>") -> list[Violation]:
 
 def _allowed(rel: str) -> bool:
     return any(rel == entry or (entry.endswith("/") and rel.startswith(entry))
-               for entry in AMBIENT_ALLOWLIST)
+               for entry in (*AMBIENT_ALLOWLIST, *HOST_AMBIENT_ALLOWLIST))
 
 
 def scan_package() -> list[Violation]:
@@ -265,9 +302,29 @@ def test_scan_covers_the_moeka_facade() -> None:
 
 def test_allowlist_and_exemptions_exist() -> None:
     """A stale entry would silently widen the guard; every entry must name real code."""
-    for entry in [*AMBIENT_ALLOWLIST, *KNOWN_EXEMPTIONS]:
+    for entry in [*AMBIENT_ALLOWLIST, *HOST_AMBIENT_ALLOWLIST, *KNOWN_EXEMPTIONS]:
         assert (REPO_ROOT / entry).exists(), entry
     assert len(KNOWN_EXEMPTIONS) <= 2, "exemption list must stay tiny"
+
+
+def test_host_allowlist_never_covers_kernel_code() -> None:
+    """Host packages may read process state; the kernel and the facade never may."""
+    kernel_prefixes = ("nanobot/kernel/", "moeka/", "nanobot/api/complete.py", "nanobot/core/")
+    for entry, reason in HOST_AMBIENT_ALLOWLIST.items():
+        assert reason.strip(), f"host allow-list entry {entry} needs a reason"
+        assert not entry.startswith(kernel_prefixes), entry
+        assert not any(entry.startswith(p) or p.startswith(entry) for p in kernel_prefixes), entry
+
+
+def test_host_allowlist_entries_still_need_it() -> None:
+    """Every host entry must still contain an ambient read, or it widens the guard for nothing."""
+    for entry in HOST_AMBIENT_ALLOWLIST:
+        target = REPO_ROOT / entry
+        files = [target] if target.is_file() else sorted(target.rglob("*.py"))
+        assert any(
+            scan_source(f.read_text(encoding="utf-8"), f.relative_to(REPO_ROOT).as_posix())
+            for f in files
+        ), f"{entry} no longer reads process state; drop it from HOST_AMBIENT_ALLOWLIST"
 
 
 def test_exemptions_are_still_needed() -> None:

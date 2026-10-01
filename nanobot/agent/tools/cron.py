@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_context
@@ -15,10 +15,12 @@ from nanobot.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
-from nanobot.cron.service import CronService
-from nanobot.cron.session_turns import is_cron_turn
-from nanobot.cron.types import CronJob, CronJobState, CronSchedule
 from nanobot.session.keys import UNIFIED_SESSION_KEY
+
+if TYPE_CHECKING:
+    # Gateway-owned scheduler; imported lazily so the kernel import graph stays free of it.
+    from nanobot.cron.service import CronService
+    from nanobot.cron.types import CronJob, CronJobState, CronSchedule
 
 _CRON_PARAMETERS = tool_parameters_schema(
     action=StringSchema("Action to perform", enum=["add", "list", "remove"]),
@@ -137,6 +139,8 @@ class CronTool(Tool):
         job_id: str | None = None,
     ) -> str:
         if action == "add":
+            from nanobot.cron.session_turns import is_cron_turn
+
             request = current_request_context()
             if request is not None and is_cron_turn(request.metadata):
                 return ToolResult.error("Error: cannot schedule new jobs from within a cron job execution")
@@ -180,6 +184,8 @@ class CronTool(Tool):
             return ToolResult.error(
                 "Error: exactly one of every_seconds, cron_expr, or at is required"
             )
+
+        from nanobot.cron.types import CronSchedule
 
         # Build schedule
         delete_after = False

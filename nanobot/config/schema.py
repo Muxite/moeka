@@ -10,9 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nanobot.config.timezone import detect_system_timezone
 from nanobot.config_base import Base
-from nanobot.cron.types import CronSchedule
 
 if TYPE_CHECKING:
+    from nanobot.cron.types import CronSchedule
     from nanobot.agent.runner import RunnerLimits
     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
     from nanobot.agent.tools.filesystem import FileToolsConfig
@@ -78,6 +78,9 @@ class DreamConfig(Base):
 
     def build_schedule(self, timezone: str) -> CronSchedule:
         """Build the runtime schedule, preferring the legacy cron override if present."""
+        # Gateway-owned scheduler types; imported on use to keep the kernel import graph clean.
+        from nanobot.cron.types import CronSchedule
+
         if self.cron:
             return CronSchedule(kind="cron", expr=self.cron, tz=timezone)
         return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)

@@ -23,7 +23,6 @@ from nanobot.agent import context as agent_context
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
-from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
 from nanobot.agent.memory import Consolidator
 from nanobot.agent.model_runtime import ModelRuntimeResolver
@@ -105,7 +104,6 @@ from nanobot.session.summary import (
     SessionSummary,
     SessionSummaryCheckpoint,
 )
-from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
 from nanobot.utils.background import log_task_exceptions
 from nanobot.utils.cancellation import task_is_cancelling
 from nanobot.utils.document import reference_non_image_attachments
@@ -550,18 +548,26 @@ class AgentLoop:
         self._deferred_automation_turns: dict[str, list[InboundMessage]] = {}
         # Automation sources (cron, local triggers) are gateway-owned; the inbox's
         # defer/complete hooks iterate this tuple (empty for a bare kernel loop).
-        self._cron_turns = CronTurnCoordinator(
-            enqueue=self._enqueue_session_message,
-            deferred_queues=self._deferred_automation_turns,
-        )
-        self._local_trigger_turns = LocalTriggerTurnCoordinator(
-            enqueue=self._enqueue_session_message,
-            deferred_queues=self._deferred_automation_turns,
-        )
-        self._automation_turn_coordinators: tuple[Any, ...] = (
-            self._cron_turns,
-            self._local_trigger_turns,
-        )
+        # Imported only for host loops so a bare kernel agent never loads them.
+        self._cron_turns: Any = None
+        self._local_trigger_turns: Any = None
+        self._automation_turn_coordinators: tuple[Any, ...] = ()
+        if host_tools:
+            from nanobot.agent.cron_turns import CronTurnCoordinator
+            from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
+
+            self._cron_turns = CronTurnCoordinator(
+                enqueue=self._enqueue_session_message,
+                deferred_queues=self._deferred_automation_turns,
+            )
+            self._local_trigger_turns = LocalTriggerTurnCoordinator(
+                enqueue=self._enqueue_session_message,
+                deferred_queues=self._deferred_automation_turns,
+            )
+            self._automation_turn_coordinators = (
+                self._cron_turns,
+                self._local_trigger_turns,
+            )
         # Explicit arg, else the host env's runtime.max_concurrent_requests (the
         # legacy adapter maps NANOBOT_MAX_CONCURRENT_REQUESTS); <=0 = unlimited.
         _max = _resolve_max_concurrent_requests(max_concurrent_requests, env)
@@ -837,15 +843,21 @@ class AgentLoop:
         return _unsubscribe
 
     async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
+        assert self._cron_turns is not None, "cron turns need a host loop (host_tools=True)"
         return await self._cron_turns.submit(msg)
 
     async def submit_local_trigger_turn(self, msg: InboundMessage) -> OutboundMessage | None:
+        assert self._local_trigger_turns is not None, "trigger turns need a host loop (host_tools=True)"
         return await self._local_trigger_turns.submit(msg)
 
     def pending_cron_job_ids_for_session(self, session_key: str) -> set[str]:
+        if self._cron_turns is None:
+            return set()
         return self._cron_turns.pending_job_ids_for_session(session_key)
 
     def pending_local_trigger_ids_for_session(self, session_key: str) -> set[str]:
+        if self._local_trigger_turns is None:
+            return set()
         return self._local_trigger_turns.pending_trigger_ids_for_session(session_key)
 
     def _persist_user_message_early(
