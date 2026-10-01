@@ -113,9 +113,9 @@ removal.
 - **FR-008**: there MUST be one documented stop contract for budget exhaustion across surfaces: an LLM call, a
   batch, and an agent run each report it in a stated, typed way (exception, systemic error, stop reason), and
   the page MUST say how a consumer whose own stop signal must bypass best-effort handlers (awork's
-  `BudgetHalt`, a `BaseException`) maps onto it. [NEEDS CLARIFICATION: whether the kernel only documents the
-  mapping and leaves `BudgetHalt` in the consumer, or offers a kernel-provided stop type or hook; recommended:
-  document only (CLARIFY-LOG Q4)]
+  `BudgetHalt`, a `BaseException`) maps onto it. Decided (Q4, option A, 2026-10-01, provisional until the owner
+  answers): the kernel only documents the mapping and leaves `BudgetHalt` in the consumer; no kernel
+  `BaseException` type or hook. The refusal is also a `budget-event.v1` with `refusal.code`.
 - **FR-009**: a batch MUST return outcomes in input order with per-item typed errors, keep completed items on a
   systemic stop, pause on rate limits and treat a long `retry_after` as systemic.
 - **FR-010**: sync twins MUST be safe from any thread and inside a running event loop; one deadline MUST cover

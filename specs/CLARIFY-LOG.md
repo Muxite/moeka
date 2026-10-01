@@ -42,6 +42,7 @@ the owner may veto any of them.
 - Recommended: A. Reason: U9 requires an unattributed token to fail a test, which is only crisp with typed
   required fields; the store needs columns to query by them anyway (the SQLite table has no tags column).
 - Lands in: `001` FR-002, plan design decisions, T007; kernel design U2 and G2.
+- Answered 2026-10-01 (agent, recommended default; owner may veto): A (typed fields). Encoded in the owning spec.
 
 ### Q3. Where does the waste label live?
 - Spec: `001-consumer-usage-surface` FR-010 (U10, G8).
@@ -58,6 +59,7 @@ the owner may veto any of them.
 - Recommended: C. Reason: matches U10's "label set by the caller or the kernel", keeps the stream append-only,
   and the query layer hides the join from consumers.
 - Lands in: `001` FR-010, T021; kernel design U10 and G8.
+- Answered 2026-10-01 (agent, recommended default; owner may veto): C (field plus linked event). Encoded in the owning spec.
 
 ### Q4. What replaces `BudgetHalt` as the stop contract?
 - Spec: `002-kernel-api-for-consumers` FR-008 (G12). Related: `001` FR-004, FR-015.
@@ -76,6 +78,7 @@ the owner may veto any of them.
   (constitution VI favours the smaller surface); the contract table plus a test gives the single documented stop
   semantics the gap asks for.
 - Lands in: `002` FR-008, T004; `docs/migration-moeka-api.md` Behaviour differences.
+- Answered 2026-10-01 (agent, recommended default; owner may veto): A (document only). Encoded in the owning spec.
 
 ### Q8. How does the gateway move onto `moeka.Kernel`, and in what order?
 - Spec: `003-main-consolidation` FR-009.

@@ -124,9 +124,8 @@ export in OpenTelemetry GenAI naming loads in a standard viewer.
   a consumer MUST NOT need `nanobot.*` imports or direct SQLite reads to read usage for its own calls.
 - **FR-002** (U2; closes G2): every physical call event MUST carry consumer, agent, session, role or slot,
   call id and attempt number, set by the caller through typed fields and never inferred from free-form tags.
-  [NEEDS CLARIFICATION: which attribution fields become first-class typed fields on the event and store, and
-  whether they replace or sit beside `tags`; recommended: typed `consumer`, `agent`, `session`, `role`, with
-  `tags` kept for host-defined extras (CLARIFY-LOG Q2)]
+  Decided (Q2, option A): typed `consumer`, `agent`, `session`, `role` and `purpose` on the event, the store
+  and every query; `tags` stays beside them for host-defined extras and never carries these five.
 - **FR-003** (U3; closes G3): each call event MUST state tokens in, tokens out, cache-read tokens, cache-write
   tokens, reasoning tokens where the provider reports them, model, provider, tier, latency, cost in USD with a
   billed-or-estimated flag, finish reason, and whether a response-cache hit answered it. A hit MUST be an
@@ -151,8 +150,9 @@ export in OpenTelemetry GenAI naming loads in a standard viewer.
 - **FR-010** (U10; closes G8): moeka MUST report, per scope, tokens and USD spent on retries of a failed or
   malformed call, failover attempts, avoidable cache misses, discarded drafts, and calls refused after
   admission. Waste MUST be a label set by the caller or kernel at the time known, not a later estimate.
-  [NEEDS CLARIFICATION: where the waste label lives: a field on `model.call`, a separate linked event, or both
-  (a discarded draft is known only after its call); recommended: both (CLARIFY-LOG Q3)]
+  Decided (Q3, option C): kernel-known cases (retry, failover, post-admission refusal) are a `waste_label`
+  field on the event at emission; caller-known cases (discarded draft) are a separate append-only `call.waste`
+  event keyed by `call_id`. The query layer joins them; past events are never mutated.
 - **FR-011** (U11; closes G9): a trace stream plus recorded model responses MUST be enough to replay a run and
   reproduce verdicts, cache behaviour and cost figures without network access. Recordings are a separate,
   host-owned, opt-in artifact; usage events stay content-free (FR-003).
@@ -194,6 +194,21 @@ export in OpenTelemetry GenAI naming loads in a standard viewer.
   non-zero reported loss count.
 - **SC-009**: awork's usage view has no ledger code of its own after migration (checked by awork's own
   review, tracked in `002`).
+
+## Decisions (2026-10-01)
+
+Resolved with the CLARIFY-LOG recommended defaults, after checking the code (nothing in it argued otherwise).
+Provisional until the owner answers; the owner may veto.
+
+- **Q2 typed attribution**: option A. Canonical fields are in `schemas/usage-record.v1.schema.json`
+  (`consumer`, `agent`, `session`, `role`, `purpose`; `consumer` required). The SQLite store has columns for
+  them because it has no tags column.
+- **Q3 waste label**: option C (see FR-010).
+- **Q4 stop contract**: option A, in `002` FR-008: the kernel documents one stop-contract table and ships no
+  `BaseException` type. The refusal itself is a recorded `budget-event.v1` with a typed `refusal.code`.
+- **Schemas**: `schemas/` holds the canonical `usage-record.v1`, `budget-event.v1` and
+  `complete-json-call.v1`; the kernel's `model.call`, `cache.hit` and `budget.*` events are those documents
+  (plus the `event` key and the legacy `cached` alias).
 
 ## Assumptions
 
