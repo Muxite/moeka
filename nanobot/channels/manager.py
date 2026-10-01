@@ -137,6 +137,9 @@ class ChannelManager:
         self._channel_owners: dict[str, str] = {}
         self._channel_runtime_specs: dict[str, tuple[str, str]] = {}
         self._channel_errors: dict[str, str] = {}
+        # Spec 005: token channels refused because another process polls the token.
+        self._channel_locked: dict[str, str] = {}
+        self._token_locks: dict[str, Any] = {}
         self._channel_tasks: dict[str, asyncio.Task[None]] = {}
         self._dispatch_task: asyncio.Task[None] | None = None
         # Counter for dispatcher watchdog restarts; escalates to critical
@@ -399,17 +402,79 @@ class ChannelManager:
         value = getattr(section, key, None)
         return value if isinstance(value, bool) else default
 
+    def _channel_token(self, name: str, channel: BaseChannel) -> str | None:
+        """The bot token a token channel (Telegram, Discord) polls with, if lockable."""
+        from nanobot.channels.token_lock import TOKEN_LOCK_CHANNELS, lockable_token
+
+        owners = getattr(self, "_channel_owners", {})
+        kind = owners.get(name, name).partition(":")[0]
+        if kind not in TOKEN_LOCK_CHANNELS and name.partition(":")[0] not in TOKEN_LOCK_CHANNELS:
+            return None
+        config = getattr(channel, "config", None)
+        token = config.get("token") if isinstance(config, dict) else getattr(config, "token", None)
+        return lockable_token(token)
+
+    def _lock_channel_token(self, name: str, channel: BaseChannel) -> bool:
+        """Take the channel's token lock; False (state ``locked``) when another holds it."""
+        from nanobot.channels.token_lock import ChannelTokenInUseError, acquire_channel_token_lock
+
+        locked = getattr(self, "_channel_locked", None)
+        if locked is None:
+            locked = self._channel_locked = {}
+        token_locks = getattr(self, "_token_locks", None)
+        if token_locks is None:
+            token_locks = self._token_locks = {}
+        locked.pop(name, None)
+        token = self._channel_token(name, channel)
+        if token is None:
+            return True
+        previous = token_locks.pop(name, None)
+        if previous is not None:
+            previous.release()
+        owners = getattr(self, "_channel_owners", {})
+        kind = owners.get(name, name).partition(":")[0]
+        workspace: str | None
+        try:
+            workspace = str(self.config.workspace_path)
+        except Exception:  # noqa: BLE001 - diagnostics only
+            workspace = None
+        try:
+            token_locks[name] = acquire_channel_token_lock(
+                kind, token,
+                owner={"workspace": workspace, "config": str(getattr(self, "_config_path", ""))},
+            )
+        except ChannelTokenInUseError as exc:
+            locked[name] = str(exc)
+            logger.error("Not starting channel {}: {}", name, exc)
+            return False
+        except OSError as exc:
+            # No run dir: run unlocked; Telegram's Conflict handling still applies.
+            logger.warning("channel {}: token lock unavailable ({}); starting unlocked", name, exc)
+        return True
+
+    def _release_channel_token(self, name: str) -> None:
+        token_locks = getattr(self, "_token_locks", None) or {}
+        lock = token_locks.pop(name, None)
+        if lock is not None:
+            lock.release()
+        locked = getattr(self, "_channel_locked", None)
+        if locked:
+            locked.pop(name, None)
+
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
         errors = getattr(self, "_channel_errors", None)
         if errors is None:
             errors = self._channel_errors = {}
         errors.pop(name, None)
+        if not self._lock_channel_token(name, channel):
+            return
         try:
             await channel.start()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._release_channel_token(name)
             public_error = channel.start_error_message(exc)
             errors[name] = public_error or "Channel failed to start. Check gateway logs."
             if public_error:
@@ -435,6 +500,7 @@ class ChannelManager:
         channel = self.channels.get(name)
         if channel is None:
             self._channel_tasks.pop(name, None)
+            self._release_channel_token(name)
             return False
 
         task = self._channel_tasks.pop(name, None)
@@ -453,6 +519,7 @@ class ChannelManager:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        self._release_channel_token(name)
         return True
 
     async def apply_channel_feature_action(
@@ -1129,15 +1196,27 @@ class ChannelManager:
                 (owners.get(runtime_name, runtime_name), "default"),
             )
         tasks = getattr(self, "_channel_tasks", {})
-        errors = getattr(self, "_channel_errors", {})
+        errors = dict(getattr(self, "_channel_errors", {}))
+        locked = getattr(self, "_channel_locked", {})
         status: dict[str, Any] = {}
         for runtime_name, (owner, instance_id) in runtime_specs.items():
             channel = self.channels.get(runtime_name)
             task = tasks.get(runtime_name)
             error = errors.get(runtime_name)
             running = bool(channel and channel.is_running)
-            if error:
+            conflict = getattr(channel, "polling_state", None) == "conflict"
+            if runtime_name in locked:
+                state = "locked"
+                error = locked[runtime_name]
+                running = False
+            elif error:
                 state = "failed"
+            elif conflict:
+                state = "conflict"
+                error = (
+                    "telegram_conflict: another process is polling this bot token; "
+                    "polling paused"
+                )
             elif running:
                 state = "running"
             elif task is not None and not task.done():

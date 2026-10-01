@@ -153,11 +153,13 @@ def _write_holder(state_dir: Path, holder: dict[str, Any]) -> None:
 
 def acquire_instance_lock(
     state_dir: str | Path, *, mode: str = "write", create: bool = True,
+    role: str | None = None,
 ) -> InstanceLock:
     """Take the exclusive lock on *state_dir* or raise :class:`InstanceLockedError`.
 
     Never blocks. A refused writer creates and modifies nothing. *create* makes the
-    state dir when it is missing (a writer owns it).
+    state dir when it is missing (a writer owns it). *role* (``"gateway"``,
+    ``"serve"``, ``"agent"``, ``"kernel"``) is recorded in the holder record.
     """
     raw = Path(state_dir)
     if create:
@@ -194,6 +196,8 @@ def acquire_instance_lock(
             "argv0": sys.argv[0] if sys.argv else "",
             "mode": mode,
         }
+        if role:
+            holder["role"] = role
         try:
             _write_holder(resolved, holder)
         except OSError:

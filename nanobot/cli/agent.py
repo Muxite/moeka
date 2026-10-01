@@ -14,6 +14,7 @@ from rich.console import Console
 from nanobot import __logo__
 from nanobot.cli.log_control import _set_nanobot_logs
 from nanobot.cli.runtime_config import (
+    _acquire_writer_lock,
     _load_runtime_config,
     _migrate_cron_store,
     _model_display,
@@ -151,6 +152,9 @@ def agent(
         _print_agent_start_error(exc)
         raise typer.Exit(1) from exc
 
+    # One-shot and --classic agents write the workspace's state: one writer per
+    # state dir (spec 005 FR-033, Q2). The native TUI above talks to the gateway.
+    _acquire_writer_lock(runtime_config, role="agent")
     sync_workspace_templates(runtime_config.workspace_path)
 
     bus = MessageBus()

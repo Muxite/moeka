@@ -42,7 +42,8 @@ INTERNAL_CHANNEL_FIELDS = {
     # on restart) -- a fixed operational default, not a user-configurable
     # WebUI setup field. See TelegramConfig.drop_pending_updates /
     # CLAUDE.md's "Telegram drop_pending_updates defaults to True" deviation.
-    "telegram": {"dropPendingUpdates"},
+    # conflictRetryS (spec 005 FR-043): an operational backoff, edited in config.json.
+    "telegram": {"dropPendingUpdates", "conflictRetryS"},
     # nanobot WebUI owns this transport and intentionally has no channel dialog.
     "websocket": {
         "allowFrom",

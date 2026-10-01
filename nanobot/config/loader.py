@@ -80,6 +80,12 @@ def pin_config_path(path: Path) -> None:
     _pinned_config_path = resolved
 
 
+def unpin_config_path() -> None:
+    """Drop the pin and keep the current binding (a host command that pinned it ended)."""
+    global _pinned_config_path
+    _pinned_config_path = None
+
+
 def reset_config_path() -> None:
     """Clear the process config path binding and its pin (teardown and tests)."""
     global _current_config_path, _pinned_config_path

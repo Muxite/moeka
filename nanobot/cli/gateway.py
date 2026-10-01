@@ -45,6 +45,26 @@ def _resolved_config_selector(config: str | None) -> Path:
     return get_config_path().resolve(strict=False)
 
 
+def _pin_gateway_config(path: Path) -> None:
+    """Pin the process config path for this gateway; unpinned when the command ends."""
+    import click
+
+    from nanobot.config.loader import (
+        ConfigPathConflictError,
+        pin_config_path,
+        unpin_config_path,
+    )
+
+    try:
+        pin_config_path(path)
+    except ConfigPathConflictError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(3) from exc
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.call_on_close(unpin_config_path)
+
+
 def create_gateway_app(
     *,
     console: Console,
@@ -237,10 +257,16 @@ def create_gateway_app(
 
         configure_logging(verbose)
         cfg = load_runtime_config(config, workspace)
+        # Spec 005: one gateway config per process (FR-031) and one writer per
+        # state dir (FR-033), both before anything is written.
+        _pin_gateway_config(_resolved_config_selector(config))
         instance = instance_for_selectors(workspace=workspace, config=config)
         unconfigured_provider_error = None
         if validate_startup_config is not None:
             unconfigured_provider_error = validate_startup_config(cfg)
+        from nanobot.cli.runtime_config import _acquire_writer_lock
+
+        _acquire_writer_lock(cfg, role="gateway")
         try:
             run_gateway(
                 cfg,

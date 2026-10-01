@@ -25,7 +25,7 @@ from telegram import (
     Update,
     User,
 )
-from telegram.error import BadRequest, InvalidToken, NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, Conflict, InvalidToken, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.request import BaseRequest, HTTPXRequest
 
@@ -76,12 +76,19 @@ APP_RESTART_SEND_WAIT_SECONDS = 2.0
 class _LivenessTrackedRequest(BaseRequest):
     """Wrap the getUpdates request pool, reporting each completed round trip."""
 
-    __slots__ = ("inner", "_on_round_trip")
+    __slots__ = ("inner", "_on_round_trip", "_on_success")
 
-    def __init__(self, inner: BaseRequest, on_round_trip: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        inner: BaseRequest,
+        on_round_trip: Callable[[], None],
+        on_success: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__()
         self.inner = inner
         self._on_round_trip = on_round_trip
+        # Called for a 2xx getUpdates answer only (a 409 Conflict is a round trip too).
+        self._on_success = on_success
 
     @property
     def read_timeout(self) -> float | None:
@@ -96,6 +103,8 @@ class _LivenessTrackedRequest(BaseRequest):
     async def do_request(self, *args: Any, **kwargs: Any) -> tuple[int, bytes]:
         result = await self.inner.do_request(*args, **kwargs)
         self._on_round_trip()
+        if self._on_success is not None and 200 <= int(result[0]) < 300:
+            self._on_success()
         return result
 
 
@@ -436,6 +445,9 @@ class TelegramConfig(Base):
     webhook_path: str = "/telegram"
     webhook_secret_token: str = ""
     webhook_max_connections: int = Field(default=4, ge=1, le=100)
+    # Spec 005 FR-043: after a getUpdates Conflict (another process polls this token),
+    # polling pauses and one restart is tried no earlier than this many seconds later.
+    conflict_retry_s: int = Field(default=60, ge=5, le=3600)
 
     @field_validator("webhook_path")
     @classmethod
@@ -566,6 +578,18 @@ class TelegramChannel(BaseChannel):
         self._last_poll_ok: float = 0.0  # monotonic time of last getUpdates round trip
         self._app_ready = asyncio.Event()  # cleared while the app is being rebuilt
         self._teardown_lock = asyncio.Lock()
+        # Spec 005 FR-043: "polling" | "conflict" (a Conflict episode pauses polling).
+        self.polling_state: str = "polling"
+        self._conflict_logged = False
+        self._conflict_task: asyncio.Task[None] | None = None
+        self._conflict_retry_at: float | None = None
+        self._webhook_conflict_logged = False
+        self._allowed_updates: list[str] = ["message"]
+
+    @property
+    def conflict_retry_s(self) -> int:
+        """Seconds before one polling restart is tried after a ``Conflict`` (config)."""
+        return int(self.config.conflict_retry_s)
 
     def _require_app(self) -> TelegramApplication:
         if self._app is None:
@@ -682,7 +706,9 @@ class TelegramChannel(BaseChannel):
             Application.builder()
             .token(self.config.token)
             .request(api_request)
-            .get_updates_request(_LivenessTrackedRequest(poll_request, self._note_poll_ok))
+            .get_updates_request(_LivenessTrackedRequest(
+                poll_request, self._note_poll_alive, on_success=self._note_poll_ok,
+            ))
         )
         self._app = builder.build()
         self._app.add_error_handler(self._on_error)
@@ -723,6 +749,7 @@ class TelegramChannel(BaseChannel):
             self.logger.debug("inline keyboards enabled")
         else:
             allowed_updates = ["message"]
+        self._allowed_updates = list(allowed_updates)
 
         if self.config.mode == "webhook":
             self.logger.info("Starting bot (webhook mode)...")
@@ -766,7 +793,7 @@ class TelegramChannel(BaseChannel):
                 allowed_updates=allowed_updates,
                 # moeka: honour drop_pending_updates (default True).
                 drop_pending_updates=self.config.drop_pending_updates,
-                error_callback=self._on_polling_error,
+                error_callback=self.handle_polling_error,
             )
 
         self._app_ready.set()
@@ -798,16 +825,29 @@ class TelegramChannel(BaseChannel):
             raise RuntimeError("Telegram application is restarting; message not delivered")
         return self._app
 
-    def _note_poll_ok(self) -> None:
+    def _note_poll_alive(self) -> None:
         # HTTP error statuses count too: the watchdog detects transport stalls,
         # not logical failures.
         self._last_poll_ok = time.monotonic()
+
+    def _note_poll_ok(self) -> None:
+        """A successful getUpdates round trip: liveness, and the end of a Conflict episode."""
+        self._last_poll_ok = time.monotonic()
+        if self.polling_state == "conflict":
+            self.polling_state = "polling"
+            self._conflict_logged = False
+            self._conflict_retry_at = None
+            self.logger.info("polling resumed: getUpdates succeeded after a Conflict")
 
     async def _watch_polling(self) -> bool:
         """Idle until stop(); in polling mode, return True when getUpdates goes stale."""
         watch = self.config.mode != "webhook"
         while self._running:
             await asyncio.sleep(POLL_WATCH_INTERVAL)
+            if self.polling_state == "conflict":
+                # Polling is paused on purpose; the conflict task restarts it.
+                self._last_poll_ok = time.monotonic()
+                continue
             if watch and time.monotonic() - self._last_poll_ok > POLL_STALE_SECONDS:
                 return True
         return False
@@ -840,6 +880,9 @@ class TelegramChannel(BaseChannel):
     async def stop(self) -> None:
         """Stop the Telegram bot."""
         self._running = False
+        task, self._conflict_task = self._conflict_task, None
+        if task is not None and not task.done():
+            task.cancel()
 
         # Cancel all typing indicators
         for chat_id in list(self._typing_tasks):
@@ -2136,13 +2179,86 @@ class TelegramChannel(BaseChannel):
             return f"{exc.__class__.__name__} ({cause.__class__.__name__})"
         return exc.__class__.__name__
 
-    def _on_polling_error(self, exc: Exception) -> None:
-        """Keep long-polling network failures to a single readable line."""
+    def handle_polling_error(self, exc: Exception) -> None:
+        """The polling error callback (spec 005 FR-043).
+
+        ``telegram.error.Conflict`` (another process polls this bot token): set
+        ``polling_state = "conflict"``, stop issuing ``getUpdates``, schedule one
+        restart no earlier than ``conflict_retry_s`` seconds later, and log one ERROR
+        record per episode (never the token). The episode ends at the next successful
+        ``getUpdates`` round trip. In webhook mode a Conflict is logged once and changes
+        no state. Other errors keep their one-line logging.
+        """
+        if isinstance(exc, Conflict):
+            self._handle_conflict()
+            return
         summary = self._format_telegram_error(exc)
         if isinstance(exc, (NetworkError, TimedOut)):
             self.logger.warning("polling network issue: {}", summary)
         else:
             self.logger.error("polling error: {}", summary)
+
+    # Back-compat name of the polling error callback.
+    _on_polling_error = handle_polling_error
+
+    def _handle_conflict(self) -> None:
+        if self.config.mode == "webhook":
+            if not self._webhook_conflict_logged:
+                self._webhook_conflict_logged = True
+                self.logger.error(
+                    "Conflict from Telegram in webhook mode: another process is polling "
+                    "this bot token or holds its webhook"
+                )
+            return
+        first = self.polling_state != "conflict" or not self._conflict_logged
+        self.polling_state = "conflict"
+        if first:
+            self._conflict_logged = True
+            self.logger.error(
+                "polling Conflict: another process is polling this bot token; pausing "
+                "polling, one restart in {}s",
+                self.conflict_retry_s,
+            )
+        self._schedule_conflict_restart()
+
+    def _schedule_conflict_restart(self) -> None:
+        """Stop the updater now and try one restart after ``conflict_retry_s``."""
+        if self._conflict_task is not None and not self._conflict_task.done():
+            return
+        self._conflict_retry_at = time.monotonic() + self.conflict_retry_s
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (called from a sync context): nothing is polling here
+        self._conflict_task = loop.create_task(self._conflict_pause())
+
+    async def _conflict_pause(self) -> None:
+        app = self._app
+        updater = getattr(app, "updater", None) if app is not None else None
+        if updater is not None:
+            try:
+                if getattr(updater, "running", False):
+                    await cast(Any, updater).stop()
+            except Exception as e:  # noqa: BLE001 - best effort; polling stops either way
+                self.logger.debug("stopping the updater after Conflict failed: {}", e)
+        deadline = self._conflict_retry_at or (time.monotonic() + self.conflict_retry_s)
+        while self._running and time.monotonic() < deadline:
+            await asyncio.sleep(min(POLL_WATCH_INTERVAL, max(0.0, deadline - time.monotonic())))
+        if not self._running or self.polling_state != "conflict":
+            return
+        app = self._app
+        updater = getattr(app, "updater", None) if app is not None else None
+        if updater is None:
+            return
+        try:
+            self._last_poll_ok = time.monotonic()
+            await cast(Any, updater).start_polling(
+                allowed_updates=self._allowed_updates,
+                drop_pending_updates=self.config.drop_pending_updates,
+                error_callback=self.handle_polling_error,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning("polling restart after Conflict failed: {}", e)
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log polling / handler errors instead of silently swallowing them."""

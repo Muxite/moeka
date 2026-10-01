@@ -11,6 +11,7 @@ from rich.text import Text
 from nanobot.config.schema import Config
 
 __all__ = [
+    "_acquire_writer_lock",
     "_load_config_for_cli",
     "_load_inspection_config",
     "_load_runtime_config",
@@ -197,3 +198,33 @@ def _provider_setup_error(config: Config) -> str | None:
     except ValueError as exc:
         return str(exc)
     return None
+
+
+def _acquire_writer_lock(config: Config, *, role: str) -> object:
+    """Take the instance lock on the config's state dir (the flat layout's workspace).
+
+    One writer per state dir (spec 005 FR-033): a second gateway / serve / one-shot
+    agent on the same workspace exits 3 with the holder on stderr, before anything is
+    written. The lock is released when the CLI command's context closes (or the
+    process exits, SIGKILL included).
+    """
+    import sys
+
+    from nanobot.kernel.instance_lock import InstanceLockedError, acquire_instance_lock
+
+    try:
+        lock = acquire_instance_lock(config.workspace_path, mode="write", role=role)
+    except InstanceLockedError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(3) from exc
+    import click
+
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.call_on_close(lock.release)
+    _HELD_LOCKS.append(lock)
+    return lock
+
+
+# Held for the process lifetime when no click context owns them.
+_HELD_LOCKS: list[object] = []

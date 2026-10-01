@@ -33,10 +33,22 @@ def test_media_dir_supports_channel_namespace(monkeypatch, tmp_path: Path) -> No
     assert get_media_dir("telegram") == config_file.parent / "media" / "telegram"
 
 
-def test_shared_and_legacy_paths_remain_global() -> None:
+def test_shared_and_legacy_paths_follow_the_active_config_dir(tmp_path) -> None:
+    """Spec 005 FR-030: derived from the active config's directory, or an explicit data dir."""
+    from nanobot.config.loader import reset_config_path, set_config_path
+
+    reset_config_path()
     assert get_cli_history_path() == Path.home() / ".nanobot" / "history" / "cli_history"
     assert get_bridge_install_dir() == Path.home() / ".nanobot" / "bridge"
     assert get_legacy_sessions_dir() == Path.home() / ".nanobot" / "sessions"
+    set_config_path(tmp_path / "inst" / "config.json")
+    assert get_cli_history_path() == tmp_path / "inst" / "history" / "cli_history"
+    assert get_bridge_install_dir() == tmp_path / "inst" / "bridge"
+    assert get_legacy_sessions_dir() == tmp_path / "inst" / "sessions"
+    other = tmp_path / "other"
+    assert get_cli_history_path(other) == other / "history" / "cli_history"
+    assert get_bridge_install_dir(other) == other / "bridge"
+    assert get_legacy_sessions_dir(other) == other / "sessions"
 
 
 def test_workspace_path_is_explicitly_resolved() -> None:

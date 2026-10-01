@@ -90,6 +90,20 @@ def _restore_os_environ():
 
 
 @pytest.fixture(autouse=True)
+def _restore_process_config_path():
+    """Restore the process-global config path (and its pin, spec 005) after each test.
+
+    CLI tests bind it with ``set_config_path``; the gateway command pins it. Neither
+    may leak into the next test.
+    """
+    from nanobot.config import loader
+
+    saved = (loader._current_config_path, loader._pinned_config_path)
+    yield
+    loader._current_config_path, loader._pinned_config_path = saved
+
+
+@pytest.fixture(autouse=True)
 def _reenable_nanobot_logging():
     """Undo loguru ``logger.disable("nanobot")`` leaking across tests.
 

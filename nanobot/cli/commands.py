@@ -60,6 +60,7 @@ from nanobot.cli.log_control import _set_nanobot_logs  # noqa: E402
 from nanobot.cli.process_identity import set_cli_process_identity  # noqa: E402
 from nanobot.cli.provider import provider_app  # noqa: E402
 from nanobot.cli.runtime_config import (  # noqa: E402
+    _acquire_writer_lock,
     _load_inspection_config,
     _load_runtime_config,
     _model_display,
@@ -382,6 +383,7 @@ def serve(
             "Set api.api_key in config to prevent unauthenticated access.[/red]"
         )
         raise typer.Exit(1)
+    _acquire_writer_lock(runtime_config, role="serve")
     sync_workspace_templates(runtime_config.workspace_path)
     bus = MessageBus()
     session_manager = build_default_session_manager(runtime_config.workspace_path)
