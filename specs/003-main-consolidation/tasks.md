@@ -1,5 +1,5 @@
 ---
-description: "Task list for main consolidation (executed 2026-10-01 up to the cutover; cutover not performed)"
+description: "Task list for main consolidation (cutover performed locally 2026-10-01; push waits for the G7 soak)"
 ---
 
 # Tasks: Main Consolidation
@@ -43,7 +43,7 @@ Cutover, consumer pins and the live deploy are NOT done; see `CUTOVER.md`.
 
 ## Phase 6: Story 4 - live service (P1)
 
-- [ ] T018 [US4] Cutover: owner only, per `CUTOVER.md` (not performed; the live checkout and `moeka.service` were not touched).
+- [x] T018 [US4] Cutover (M7, owner-approved in the plan): live `main` fast-forwarded `54069bb2` -> `c5340d24` on 2026-10-01 06:12 UTC, `moeka.service` restarted on the new code (still disabled at boot); record in `CUTOVER.md`, "M7 gate record".
 - [x] T019 Offline smoke test in an isolated container (`scripts/smoke-gateway.sh`): `moeka` import, gateway health, mock chat turn through the CLI agent and the HTTP API server.
 
 ## Phase 7: Cutover gates (added by review 2026-10-01; see docs/reviews/2026-10-01-architecture-review.md)
@@ -51,10 +51,10 @@ Cutover, consumer pins and the live deploy are NOT done; see `CUTOVER.md`.
 Numbering: the review wrote these as T019-T025; T019 was already taken by the smoke test, so they are T020-T026
 here (review T0nn = T0nn+1). Gates G0-G7 are in `CUTOVER.md`.
 
-- [ ] T020 Verified two-disk backup of live state with the service stopped; counts and integrity recorded (FR-012, SC-007, gate G3). Partial: a verified backup taken 2026-10-01 with the SQLite backup API exists at `/mnt/arteta/backups/moeka-workspace/20261001T025034Z` and `~/quarantine/moeka-backup-20261001T025034Z`; G3 still re-takes it with the service stopped just before cutover.
-- [ ] T021 Re-run the parity probes (`docs/reviews/2026-10-01-parity/`) on the exact tip to be cut; list approved differences (FR-013, SC-008, gate G2)
-- [ ] T022 Canary on a throwaway bot credential and a workspace copy: history turn, tool call, heartbeat (FR-014, gate G4)
-- [ ] T023 Rehearse rollback on a copy; record the time (SC-009, gate G6)
+- [x] T020 Verified two-disk backup of live state with the service stopped; counts and integrity recorded (FR-012, SC-007, gate G3). Partial: a verified backup taken 2026-10-01 with the SQLite backup API exists at `/mnt/arteta/backups/moeka-workspace/20261001T025034Z` and `~/quarantine/moeka-backup-20261001T025034Z`; re-taken with the service stopped as `20261001T061114Z` (M7 gate record).
+- [x] T021 Re-run the parity probes (`docs/reviews/2026-10-01-parity/`) on the exact tip to be cut; list approved differences (FR-013, SC-008, gate G2). Done at `cd03700e` (M7 gate record).
+- [x] T022 Canary on a throwaway bot credential and a workspace copy: history turn, tool call, heartbeat (FR-014, gate G4). Done as `moeka@canary` WITHOUT any bot token (websocket channel, mock provider); channel connect verified live at G5.
+- [x] T023 Rehearse rollback on a copy; record the time (SC-009, gate G6). 9 s before and 4 s after the cutover.
 - [x] T024 Gateway test asserting the registered tool set (guards the `host_tools` default): `tests/gateway/test_toolset_parity.py` (host loops register `message`, `cron`, `run_cli_app`; kernel agents do not; every gateway `AgentLoop` construction site passes `host_tools=True`).
 - [x] T025 Fix `CUTOVER.md`: session DB and memory in the backup, `ops/sqlite-backup.py` in place of the `sqlite3` command-line tool, dependency sync dropped (FR-015), gates G0-G7.
 - [ ] T026 After a 48 hour soak (gate G7) and owner approval only: publish `main` (FR-016)

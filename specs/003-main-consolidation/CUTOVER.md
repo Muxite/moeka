@@ -207,3 +207,76 @@ The old `main` commit `54069bb2` is untouched and tagged in step 1. Rehearsed be
 3. The gateway stays on the legacy `AgentLoop.from_config` path (see `plan.md`, "Stage 2 remaining"); approve
    stage 2 as separate work.
 4. Delete the stray untracked `docs/core-map/` in the live checkout (it predates and is superseded by the tracked one).
+
+## M7 gate record (2026-10-01, executed)
+
+Cut tip: `c5340d24` (code `cd03700e` + the runbook refresh). Live checkout `~/projects/moeka` fast-forwarded
+from `54069bb2` at 06:12 UTC; local tag `pre-consolidation-main` -> `54069bb2`. Nothing pushed.
+
+- **G0** (06:11:10Z): live checkout `54069bb2`, branch `main`, status only `?? docs/core-map/`. PASS.
+- **G1**: `scripts/test-docker.sh` on a `git archive` export of exactly `cd03700e` (image `moeka-test-m7`):
+  **9857 passed, 0 failed, 64 skipped** in 10 min 26 s. `main` (`54069bb2`) and `core-slim` (`c382d0c9`) are
+  ancestors; the gated-path diff lists exactly the six spec-005 files (`bin/moeka.sh`,
+  `nanobot/channels/{manager.py,token_lock.py,telegram/runtime.py}`, `nanobot/gateway/{runtime.py,service.py}`);
+  `uv.lock` identical. PASS.
+- **G2** (`docs/reviews/2026-10-01-parity/`, live venv, throwaway `HOME`, copy of the live config, old =
+  `git archive 54069bb2`, candidate = `git archive cd03700e`): config validates on both; tools identical except
+  `defer_action` (24 -> 25 in the probe; gateway log "Registered 25" -> "Registered 26"); exec env keys identical;
+  channel plugin list identical (15 plugins). Provider request through `stub_openai.py` (one `nanobot agent -m`
+  turn per tree): headers identical, body keys identical, tool list differs by `defer_action` plus description
+  text in four tools (`ask_user` drops the "use the message tool" sentence, `exec` describes the floor,
+  `exec_session` mentions input screening, `web_fetch` documents the 200 000 cap and its `maxChars` schema gains
+  `maximum: 200000`); system prompt -213 bytes (the `bg_shell`/`message` background-job guidance replaced by
+  `exec`/`exec_session` guidance). All differences are in tools and prompt. PASS.
+- **Workspace check (step 2)**: live `agents.defaults.workspace` is exactly `${MOEKA_WORKSPACE}`; the unit
+  provides `MOEKA_WORKSPACE` (absolute, resolves to `~/.nanobot`) through `EnvironmentFile=%h/projects/moeka/.env`;
+  the new loader resolves it to `~/.nanobot` with the variable set and raises `UnexpandedWorkspaceError` without
+  it. Under the unit it expands, so nothing needed fixing. Do not start `nanobot gateway` by hand without
+  `MOEKA_WORKSPACE` or `--workspace`.
+- **G4 canary** (deviation, as instructed: NO bot token at all, so no Telegram/Discord connect; those were
+  checked live at G5): `MOEKA_WORKSPACE=~/.moeka-canary bin/moeka.sh new canary` (ports 18800/18801, Unix WS
+  socket), `scripts/install-service.sh canary --no-enable` from this worktree (rendered unit runs
+  `/home/muk/projects/moeka-newmain/bin/moeka.sh`), launcher `MOEKA_NANOBOT_BIN` = live venv python with
+  `PYTHONPATH` = this worktree, provider pointed at `stub_openai.py`. `systemctl --user start moeka@canary`:
+  health ready in under 2 s, "Registered 26 tools", `.instance.lock`/`.instance.json`/`gateway.lock`/`moeka.pid`
+  present; three websocket turns answered in ~2 s, the third request carried the earlier turn (history used),
+  `/status` answered; heartbeat (60 s) executed and completed; a second writer (`nanobot agent -m`) exited 3 with
+  "locked by another writer"; a second token-lock acquire was refused (`ChannelTokenInUseError`, sidecar has no
+  token); 0 ERROR, 0 Traceback. Unit stopped, `~/.config/systemd/user/moeka@.service` removed, daemon reloaded,
+  instance moved to `~/quarantine/moeka-canary-20261001T060411Z`. `moeka.service` untouched (same MainPID). PASS.
+- **G3** (service stopped 06:11:10Z): backup `20261001T061114Z` in `~/quarantine/moeka-backup-20261001T061114Z/`
+  (with `secrets/`) and `/mnt/arteta/backups/moeka-workspace/20261001T061114Z/` (no secrets). 27 SQLite copies,
+  27 `quick_check` ok; `sha256sum -c` OK on both disks; session DB live vs arteta copy
+  `[sessions, messages] = [19, 1742]` both, copy `check` ok; `llm_usage` `llm_calls` 2 = 2, `user_version` 1.
+  Git bundles (moeka, awork-resume, awork) verify "okay" when checked inside each repo (the script's own
+  verify ran outside a repo and logged nothing; fix that in the script). PASS.
+- **G6** (worktree `scratchpad/m7/rollback-wt` detached at `54069bb2`; temp `HOME` restored from the backup;
+  channels disabled, stub provider, other ports): old tree `nanobot gateway` health ready, one `nanobot agent -m`
+  turn answered, 0 errors, 9 s end to end. Re-run after G5 on a backup-API copy of the state the new code had
+  written: same result, 4 s. PASS.
+- **G5** (06:12:20Z): `docs/core-map/` moved to `~/quarantine/moeka-core-map-20261001T061211Z/core-map`;
+  `git merge --ff-only consolidate/new-main` -> `c5340d24`; import check OK; `systemctl --user start
+  moeka.service`: active, still `disabled`, `/health` `ready: true` in ~3 s; journal: "Registered 26 tools"
+  (incl. `message`, `cron`, `run_cli_app`), "Channels enabled: discord, telegram", Telegram "bot ... connected"
+  (polling), Discord "bot connected", cron `dream` + `heartbeat` registered; `.instance.json` pid = MainPID =
+  `moeka.pid`; `/run/user/1000/moeka/channel-locks/` holds one telegram and one discord lock; `moeka.sh status
+  --json` reports `running: true, manager: systemd`. The 30 "Unknown channel: websocket" warnings per start
+  are pre-existing (identical count on the old code). 10-minute journal watch (06:12-06:22Z): no ERROR, Traceback, `Conflict`,
+  `channel_token_in_use` or `UnexpandedWorkspaceError`; still active, same MainPID, `NRestarts=0`, health ready. PASS.
+- **G7**: 48 h soak started **2026-10-01T06:12:20Z**, ends no earlier than **2026-10-03T06:12:20Z**. Still to do in
+  the soak: a real history turn on Telegram, a cron fire, a Dream run, one `/new` and one rewind, `llm_calls` grows
+  and `user_version` becomes 2. Push only with the owner's OK.
+
+### Rollback (exact commands)
+
+```bash
+systemctl --user stop moeka.service
+git -C ~/projects/moeka reset --hard pre-consolidation-main      # = 54069bb2
+mv ~/quarantine/moeka-core-map-20261001T061211Z/core-map ~/projects/moeka/docs/core-map   # optional, untracked drafts
+~/projects/moeka/.venv/bin/python -c "import telegram, discord, nanobot.cli.commands; print('imports OK')"
+systemctl --user start moeka.service       # do not enable
+curl -s http://127.0.0.1:17380/health
+```
+
+The new files the old code ignores (`~/.nanobot/.instance.lock`, `.instance.json`, `/run/user/1000/moeka/`)
+can stay. Restore DBs from `20261001T061114Z` only if the old code errors on a file.
