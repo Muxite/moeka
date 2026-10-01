@@ -720,6 +720,7 @@ def test_canary_redaction_in_every_outcome(h, tmp_path, mode):
 
 def test_suite_inside_worktree_is_refused_before_copy(h):
     suite = h.suite(PASS_SUITE, path=h.repo / "hidden")
+    suite.chmod(0o755)  # placement is reported before permissions
     p = h.run_wt(suite=suite)
     assert (p.returncode, p.stderr, p.stdout) == (2, "heldout-run: error E_SUITE_IN_TREE\n", "")
     assert list(h.tmpdir.iterdir()) == []

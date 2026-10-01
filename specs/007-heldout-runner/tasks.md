@@ -22,46 +22,46 @@ and suites in temp dirs (`HOME`, `HELDOUT_ROOT`, `TMPDIR` all temp; `--profile g
 
 - [ ] T001 Tester: hidden suite from spec.md only, under `~/projects/.heldout/moeka/007-heldout-runner/` (mode
   0700), every test `@pytest.mark.fr(...)`, `SPEC-MAP.md`, `RUN.md`; includes the canary suite for SC-002.
-- [ ] T002 [P] Fixture builders in `tests/scripts/conftest.py` (or a helper module): temp git repo with a tiny
+- [x] T002 [P] Fixture builders in `tests/scripts/conftest.py` (or a helper module): temp git repo with a tiny
   package, suite factory (markers, `SPEC-MAP.json`, `fr_report.py` `MAP`), canary-token generator.
 
 ## Phase 2: Foundational
 
-- [ ] T003 Skeleton `scripts/heldout_run.py`: `main(argv)`, error type with `E_*` codes, no-echo argparse,
+- [x] T003 Skeleton `scripts/heldout_run.py`: `main(argv)`, error type with `E_*` codes, no-echo argparse,
   `--version` with own sha256 (FR-001, FR-002, FR-025, FR-026); wrapper `scripts/heldout-run`.
-- [ ] T004 AST test that module-level imports are stdlib only and nothing imports `moeka`/`nanobot`/`awr` (FR-001).
+- [x] T004 AST test that module-level imports are stdlib only and nothing imports `moeka`/`nanobot`/`awr` (FR-001).
 
 ## Phase 3: User Story 1 - run and feedback (P1)
 
-- [ ] T005 [US1] Tree copy: `--repo/--ref` via `git archive`; `--worktree` filtered copy; no `.git`; scratch
+- [x] T005 [US1] Tree copy: `--repo/--ref` via `git archive`; `--worktree` filtered copy; no `.git`; scratch
   placement (FR-006 to FR-008).
-- [ ] T006 [US1] Suite placement into `<copy>/tests/heldout/<feature>/`, suite untouched (FR-009); cleanup on every
+- [x] T006 [US1] Suite placement into `<copy>/tests/heldout/<feature>/`, suite untouched (FR-009); cleanup on every
   exit path and signal (FR-010).
-- [ ] T007 [US1] Profiles and pytest invocation, child environment, plugin injection (FR-011, FR-012).
-- [ ] T008 [US1] Plugin hooks and records; outcome rules; timeout with process-group kill; collection and sync
+- [x] T007 [US1] Profiles and pytest invocation, child environment, plugin injection (FR-011, FR-012).
+- [x] T008 [US1] Plugin hooks and records; outcome rules; timeout with process-group kill; collection and sync
   errors (FR-013 to FR-015, FR-020).
-- [ ] T009 [US1] Id mapping: markers, `SPEC-MAP.json`, `fr_report.py` via `ast.literal_eval`, `INVALID_ID`,
+- [x] T009 [US1] Id mapping: markers, `SPEC-MAP.json`, `fr_report.py` via `ast.literal_eval`, `INVALID_ID`,
   `UNMAPPED` (FR-017 to FR-019).
-- [ ] T010 [US1] `summarize`, `format_feedback`, `--json`, `--feedback-file`, ordering rules (FR-021 to FR-023).
-- [ ] T011 [US1] Private report layout and modes (FR-027, FR-028); feature lock (FR-016).
+- [x] T010 [US1] `summarize`, `format_feedback`, `--json`, `--feedback-file`, ordering rules (FR-021 to FR-023).
+- [x] T011 [US1] Private report layout and modes (FR-027, FR-028); feature lock (FR-016).
 
 ## Phase 4: User Story 2 - redaction and isolation (P1)
 
-- [ ] T012 [US2] Placement checks against the tree, `git worktree list`, `--forbid-under`; permission check;
+- [x] T012 [US2] Placement checks against the tree, `git worktree list`, `--forbid-under`; permission check;
   `check-isolation` (FR-005, FR-029 to FR-031).
-- [ ] T013 [US2] Redaction tests over every status and refusal with canary tokens and an absolute-path regex
+- [x] T013 [US2] Redaction tests over every status and refusal with canary tokens and an absolute-path regex
   (FR-024, SC-002); source tree and suite unchanged, scratch removed (SC-003).
-- [ ] T014 [P] [US2] Stated limit in the module docstring and `--help` (FR-039). Pending owner answer on sandboxing;
+- [x] T014 [P] [US2] Stated limit in the module docstring and `--help` (FR-039). Pending owner answer on sandboxing;
   default: no sandbox.
 
 ## Phase 5: User Story 4 - rounds (P2)
 
-- [ ] T015 [US4] `rounds.json`, counting rules, cap refusal, escalation line, `rounds` and `--reset --reason`
+- [x] T015 [US4] `rounds.json`, counting rules, cap refusal, escalation line, `rounds` and `--reset --reason`
   (FR-032 to FR-035). Pending owner answer on tester-bug rounds; default: counts unless reset.
 
 ## Phase 6: User Story 3 - triage (P2)
 
-- [ ] T016 [US3] `triage`: failure message extraction, `extract_requirement` grammar, banner, `--json` (FR-036 to
+- [x] T016 [US3] `triage`: failure message extraction, `extract_requirement` grammar, banner, `--json` (FR-036 to
   FR-038, SC-007).
 
 ## Phase 7: Adoption in both repos
@@ -69,6 +69,9 @@ and suites in temp dirs (`HOME`, `HELDOUT_ROOT`, `TMPDIR` all temp; `--profile g
 - [ ] T017 Parity check (SC-005): run moeka `005-multi-instance` and awork-resume `007-data-retention` accepted
   suites through `heldout-run` on their accepted refs; compare per-id totals with their own summaries. Record the
   numbers in this file.
+  - 2026-10-01 awork-resume `007-data-retention` at `7af9ea8` (profile `awork-resume`, `--no-count`): status
+    passed, 194 tests, 68 ids, 0 failing; per-id totals from `report.json` equal `fr_report.py` on the same junit
+    (0 unmapped). moeka `005-multi-instance`: not run yet (host run not permitted in the implementer session).
 - [ ] T018 awork-resume (its own branch and commit, owner-approved): vendor `scripts/heldout_run.py` and
   `scripts/heldout-run` byte-identical, add `scripts/heldout_run.SOURCE` with the moeka commit (on `origin`), and a
   test that the file's sha256 matches the moeka file at that commit when available (FR-003). Do not change

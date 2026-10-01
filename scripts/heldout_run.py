@@ -301,7 +301,8 @@ def format_feedback(feedback: dict) -> str:
     feature = feedback.get("feature")
     if not isinstance(feature, str) or not FEATURE_RX.match(feature):
         feature = "-"
-    lines = [f"heldout-run: {feature} round {r}/{int(feedback.get('round_cap', DEFAULT_CAP))}: {status}"]
+    cap = int(feedback.get("round_cap", DEFAULT_CAP))
+    lines = [f"heldout-run: {feature} round {r}/{cap}: {status}"]
     failing = feedback.get("failing") or {}
     for label in sorted((k for k in failing if _safe_label(k)), key=_id_sort_key):
         v = failing[label]
@@ -509,7 +510,8 @@ def _tree_sha256(root: str) -> str:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_NAMES)
         rel_dir = os.path.relpath(dirpath, root)
-        for name in sorted(filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]):
+        links = [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]
+        for name in sorted(filenames + links):
             if name in EXCLUDED_NAMES or name.endswith(".pyc"):
                 continue
             p = os.path.join(dirpath, name)
@@ -638,7 +640,7 @@ def _build_parser() -> _Parser:
     def common(sp):
         sp.add_argument("--repo-name", required=True)
         sp.add_argument("--feature", required=True)
-        sp.add_argument("--heldout-root", help="held-out root (default: $HELDOUT_ROOT, else under HOME)")
+        sp.add_argument("--heldout-root", help="held-out root (default: $HELDOUT_ROOT, else HOME)")
 
     r = sub.add_parser(
         "run",
@@ -685,7 +687,9 @@ def _build_parser() -> _Parser:
     rd.add_argument("--reset", action="store_true")
     rd.add_argument("--reason")
 
-    c = sub.add_parser("check-isolation", help="placement and permission checks only", allow_abbrev=False)
+    c = sub.add_parser(
+        "check-isolation", help="placement and permission checks only", allow_abbrev=False
+    )
     c.add_argument("--suite", required=True)
     c.add_argument("--repo")
     c.add_argument("--forbid-under", action="append", default=[])
@@ -993,7 +997,6 @@ def _cmd_run(a, out) -> int:
     suite = os.path.abspath(a.suite) if a.suite else os.path.join(root, a.repo_name, a.feature)
     if not os.path.isdir(suite):
         raise HeldoutError("E_SUITE_MISSING")
-    _check_perms(suite, root)
 
     if a.worktree:
         tree = os.path.abspath(a.worktree)
@@ -1009,6 +1012,7 @@ def _cmd_run(a, out) -> int:
     explicit_report = os.path.abspath(a.report_dir) if a.report_dir else None
     bases = _forbidden_bases(tree, repo_for_wt, a.forbid_under, strict_git=bool(a.repo))
     _check_placement(bases, suite=suite, report_dir=explicit_report or report_root, root=root)
+    _check_perms(suite, root)
     if a.worktree and _inside(_runner_file(), tree):
         raise HeldoutError("E_RUNNER_IN_TREE")
 
@@ -1063,7 +1067,8 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
     elif counted:
         report_dir = os.path.join(report_root, f"round-{round_n:02d}")
         if os.path.lexists(report_dir):
-            os.replace(report_dir, os.path.join(report_root, f"stale-{_run_stamp()[4:]}-round-{round_n:02d}"))
+            stale = f"stale-{_run_stamp()[4:]}-round-{round_n:02d}"
+            os.replace(report_dir, os.path.join(report_root, stale))
     else:
         report_dir = _fresh_run_dir(report_root)
     _mkdir_private(report_dir)
@@ -1148,7 +1153,8 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
         for name in a.unset:
             env.pop(name, None)
         inherited = env.get("PYTHONPATH")
-        pp = _expand(profile["pythonpath"], copy) + [plugin_dir] + ([inherited] if inherited else [])
+        pp = _expand(profile["pythonpath"], copy) + [plugin_dir]
+        pp += [inherited] if inherited else []
         env["PYTHONPATH"] = os.pathsep.join(pp)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env[RECORDS_ENV] = records
@@ -1168,7 +1174,9 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
             if to or rc != 0:
                 raise HeldoutError("E_SYNC")
 
-        launcher = [sys.executable if s == "@python" else s for s in _expand(profile["launcher"], copy)]
+        launcher = [
+            sys.executable if s == "@python" else s for s in _expand(profile["launcher"], copy)
+        ]
         junit = os.path.join(report_dir, "junit.xml")
         cmd = launcher + [
             dest, "-q", "-p", "no:cacheprovider", "-p", "heldout_run", f"--junitxml={junit}",
@@ -1383,10 +1391,10 @@ def _cmd_check_isolation(a, out) -> int:
     suite = os.path.abspath(a.suite)
     if not os.path.isdir(suite):
         raise HeldoutError("E_SUITE_MISSING")
-    _check_perms(suite, root)
     repo = os.path.abspath(a.repo) if a.repo else None
     bases = _forbidden_bases(repo, repo, a.forbid_under, strict_git=False)
     _check_placement(bases, suite=suite, report_dir=None, root=root)
+    _check_perms(suite, root)
     out.write("heldout-run: isolated\n")
     return 0
 
@@ -1472,7 +1480,11 @@ def pytest_collection_finish(session):
 def pytest_collectreport(report):
     if report.failed and os.environ.get(RECORDS_ENV):
         _emit_record(
-            {"type": "collect_error", "nodeid": report.nodeid, "longrepr": str(report.longrepr)[:100000]}
+            {
+                "type": "collect_error",
+                "nodeid": report.nodeid,
+                "longrepr": str(report.longrepr)[:100000],
+            }
         )
 
 
