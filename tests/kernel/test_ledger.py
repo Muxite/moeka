@@ -225,6 +225,9 @@ def test_observer_maps_record_to_event() -> None:
         source="cron",
         usage_source="reported",
         finish_reason="stop",
+        price_source="price_table",
+        started_at_ms=1,
+        tokens_cache_write=None,
     )
     assert len(sink.events) == 1
     emitted = sink.events[0]
@@ -315,7 +318,7 @@ def _columns(path: Path) -> set[str]:
 
 
 def test_schema_version_is_bumped() -> None:
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_v1_database_migrates_without_data_loss(tmp_path: Path) -> None:

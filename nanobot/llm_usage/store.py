@@ -16,14 +16,66 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nanobot.llm_usage.models import LLMCallRecord
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Columns added after v1, as (name, declaration). v2 (Task 14): the kernel ledger's
-# model tier and USD cost. Migrations only ever ADD nullable columns, so an old row
+# model tier and USD cost. v3 (spec 001): typed attribution and the rest of the
+# ``usage-record.v1`` event. Migrations only ever ADD nullable columns, so an old row
 # reads back with NULL for them and no data is rewritten.
 _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tier", "TEXT"),  # v2
     ("cost_usd", "REAL"),  # v2
+    ("call_id", "TEXT"),  # v3
+    ("attempt", "INTEGER"),
+    ("consumer", "TEXT"),
+    ("agent", "TEXT"),
+    ("session", "TEXT"),
+    ("role", "TEXT"),
+    ("purpose", "TEXT"),
+    ("trace_id", "TEXT"),
+    ("slot", "TEXT"),
+    ("alias", "TEXT"),
+    ("request_key", "TEXT"),
+    ("prompt_version", "TEXT"),
+    ("waste_label", "TEXT"),
+    ("waste_set_by", "TEXT"),
+    ("outcome", "TEXT"),
+    ("price_source", "TEXT"),
+    ("usage_source", "TEXT"),
+    ("cost_billed", "INTEGER"),
+    ("tokens_reasoning", "INTEGER"),
 )
+# Attribution and identity columns a usage event writes (see ``record_event``).
+_EVENT_COLUMNS = (
+    "call_id", "attempt", "consumer", "agent", "session", "role", "purpose", "trace_id",
+    "slot", "alias", "request_key", "prompt_version", "waste_label", "waste_set_by",
+    "outcome", "price_source", "usage_source", "cost_billed", "tokens_reasoning",
+)
+_EVENTS_DDL = """
+    CREATE TABLE IF NOT EXISTS llm_usage_events (
+        id INTEGER PRIMARY KEY,
+        ts_ms INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        call_id TEXT,
+        attempt INTEGER,
+        consumer TEXT,
+        agent TEXT,
+        session TEXT,
+        role TEXT,
+        purpose TEXT,
+        trace_id TEXT,
+        model TEXT,
+        provider TEXT,
+        alias TEXT,
+        saved_tokens_in INTEGER,
+        saved_tokens_out INTEGER,
+        saved_cost_usd REAL,
+        waste_label TEXT,
+        reason_code TEXT,
+        payload TEXT
+    );
+    CREATE INDEX IF NOT EXISTS llm_usage_events_call_idx ON llm_usage_events(call_id);
+    CREATE INDEX IF NOT EXISTS llm_usage_events_kind_ts_idx ON llm_usage_events(kind, ts_ms);
+"""
 MAX_DAYS_RETAINED = 400
 MAX_CALLS_RETAINED = 100_000
 
@@ -243,6 +295,7 @@ class LLMUsageStore:
             """
         )
         self._migrate(connection)
+        connection.executescript(_EVENTS_DDL)
         self._connection = connection
         self._connection_pid = pid
         return connection
@@ -265,6 +318,13 @@ class LLMUsageStore:
             except sqlite3.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS llm_calls_call_idx ON llm_calls(call_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS llm_calls_consumer_time_idx "
+            "ON llm_calls(consumer, started_at_ms)"
+        )
         if version < SCHEMA_VERSION:
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -297,7 +357,15 @@ class LLMUsageStore:
             self._cached_payload_key = None
             self._cached_payload = None
 
-    def record(self, call: LLMCallRecord) -> None:
+    def record_event(self, call: LLMCallRecord, event: Any) -> None:
+        """Record *call* together with the ledger *event* it produced.
+
+        The row's attribution and identity columns are projected from *event*, so the
+        stored row and the ``model.call`` event are one fact (spec 001 FR-008).
+        """
+        self.record(call, event)
+
+    def record(self, call: LLMCallRecord, event: Any = None) -> None:
         usage = call.usage
         usage_data = usage.to_dict() if usage is not None else {}
         values: tuple[object, ...] = (
@@ -329,27 +397,91 @@ class LLMUsageStore:
             call.tier[:32] if call.tier else None,
             _clean_cost(call.cost_usd),
         )
+        columns = [
+            "started_at_ms", "duration_ms", "provider", "model", "source", "stream",
+            "finish_reason", "input_tokens", "output_tokens", "total_tokens",
+            "cache_read_tokens", "cache_write_tokens", "reported_tokens",
+            "estimated_tokens", "generation_ms", "measured_output_tokens",
+            "ttft_ms", "timed_requests", "error_status_code", "error_kind",
+            "tier", "cost_usd",
+        ]
+        if event is not None:
+            values = (*values, *self._event_values(event))
+            columns.extend(_EVENT_COLUMNS)
         with self._lock:
             connection = self._connect()
             connection.execute(
-                """
-                INSERT INTO llm_calls (
-                    started_at_ms, duration_ms, provider, model, source, stream,
-                    finish_reason, input_tokens, output_tokens, total_tokens,
-                    cache_read_tokens, cache_write_tokens, reported_tokens,
-                    estimated_tokens, generation_ms, measured_output_tokens,
-                    ttft_ms, timed_requests, error_status_code, error_kind,
-                    tier, cost_usd
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
+                f"INSERT INTO llm_calls ({', '.join(columns)}) "  # noqa: S608 - fixed names
+                f"VALUES ({', '.join('?' * len(columns))})",
                 values,
             )
             self._write_version += 1
             self._cached_payload_key = None
             self._cached_payload = None
             self._prune_if_due(connection)
+
+    @staticmethod
+    def _event_values(event: Any) -> tuple[object, ...]:
+        def text(name: str, limit: int = 240) -> str | None:
+            value = getattr(event, name, None)
+            return None if value is None else str(value)[:limit]
+
+        billed = getattr(event, "cost_is_billed", None)
+        reasoning = getattr(event, "tokens_reasoning", None)
+        attempt = getattr(event, "attempt", None)
+        return (
+            text("call_id"),
+            attempt if isinstance(attempt, int) else None,
+            text("consumer"), text("agent"), text("session"), text("role"), text("purpose"),
+            text("trace_id"), text("slot"), text("alias"), text("request_key"),
+            text("prompt_version"), text("waste_label"), text("waste_set_by"),
+            text("outcome"), text("price_source"), text("usage_source"),
+            None if billed is None else int(bool(billed)),
+            reasoning if isinstance(reasoning, int) else None,
+        )
+
+    def record_usage_event(self, event: dict[str, Any]) -> None:
+        """Append one non-call usage event: ``cache_hit``, ``refusal`` or ``waste``.
+
+        *event* is the content-free trace payload (``cache.hit``, ``budget.refuse`` or
+        ``call.waste``); only the attribution and figures are kept, plus the JSON payload.
+        """
+        import json
+
+        kind = {"cache.hit": "cache_hit", "budget.refuse": "refusal", "call.waste": "waste"}.get(
+            str(event.get("event")),
+        )
+        if kind is None:
+            raise ValueError(f"not a usage event: {event.get('event')!r}")
+
+        def num(name: str, as_int: bool = True) -> object:
+            value = event.get(name)
+            if value is None or isinstance(value, bool):
+                return None
+            return int(value) if as_int else float(value)
+
+        refusal = event.get("refusal")
+        reason = refusal.get("code") if isinstance(refusal, dict) else None
+        row = (
+            int(event.get("started_at_ms") or time.time() * 1000), kind,
+            event.get("call_id"), event.get("attempt"),
+            event.get("consumer"), event.get("agent"), event.get("session"), event.get("role"),
+            event.get("purpose"), event.get("trace_id"), event.get("model"),
+            event.get("provider"), event.get("alias"),
+            num("saved_tokens_in"), num("saved_tokens_out"), num("saved_cost_usd", False),
+            event.get("waste_label") or event.get("label"), reason,
+            json.dumps(event, default=str, sort_keys=True)[:8000],
+        )
+        with self._lock:
+            connection = self._connect()
+            connection.execute(
+                "INSERT INTO llm_usage_events (ts_ms, kind, call_id, attempt, consumer, agent, "
+                "session, role, purpose, trace_id, model, provider, alias, saved_tokens_in, "
+                "saved_tokens_out, saved_cost_usd, waste_label, reason_code, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
+            self._write_version += 1
 
     def _prune_if_due(self, connection: sqlite3.Connection) -> None:
         utc_day = int(time.time() // 86_400)
