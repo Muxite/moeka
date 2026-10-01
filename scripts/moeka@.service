@@ -1,0 +1,30 @@
+# Template user unit for a named moeka instance: moeka@<name>.service runs the
+# gateway of $HOME/.moeka-<name>. Installed by scripts/install-service.sh <name>,
+# which replaces @MOEKA_REPO@ with the absolute path of this checkout.
+[Unit]
+Description=Moeka gateway instance %i
+After=network-online.target
+Wants=network-online.target
+# Never give up — allow unlimited restart attempts.
+StartLimitBurst=0
+
+[Service]
+Type=simple
+Environment=MOEKA_WORKSPACE=%h/.moeka-%i
+EnvironmentFile=-%h/.moeka-%i/keys.env
+# 'run' starts the gateway in the foreground so systemd owns the PID.
+ExecStart=@MOEKA_REPO@/bin/moeka.sh --workspace %h/.moeka-%i run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+# Exponential backoff: 5s → ~10s → ~20s → ~40s → ~80s → 5min (cap).
+# Requires systemd 254+.
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=5min
+# Give the process up to 30s to shut down gracefully before SIGKILL
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
