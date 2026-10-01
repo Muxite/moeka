@@ -14,6 +14,14 @@ process never see each other's overrides.
   reflects it for data-file tools. Tools registered outside the loader (MCP servers,
   host actions) are not overridden. A variant's dir file is read when the loader
   builds the tool, never per prompt.
+- **Tool parameter descriptions.** ``tool_param_descriptions[tool][path]`` replaces
+  (or adds) the ``description`` of one parameter of a loader-built tool (the same
+  coverage as tool descriptions). ``path`` is ``segment ("." segment)*`` with
+  ``segment = name ("[]")*``: a name descends into ``properties[name]``, each ``[]``
+  into ``items`` (``edits[].old_text``). Only ``description`` keys change: types,
+  constraints and requiredness stay the base schema's, and argument validation
+  keeps using the base schema. A path that does not resolve fails the agent build
+  with :class:`VariantError`; an entry for a tool the agent does not load is ignored.
 - **Templates.** A file in ``templates_dir`` shadows the built-in template of the same
   relative name (``agent/identity.md``, ``agent/_snippets/...``); missing ones fall
   back. Applies to the main system prompt (``ContextBuilder``) and to the sub-agent
@@ -53,6 +61,93 @@ if TYPE_CHECKING:
 _FILE_STEM = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
 
+# A parameter path: segment ("." segment)*, segment = name ("[]")*, name has no . [ ].
+_PARAM_PATH = re.compile(r"[^.\[\]]+(?:\[\])*(?:\.[^.\[\]]+(?:\[\])*)*")
+_PARAM_SEGMENT = re.compile(r"([^.\[\]]+)((?:\[\])*)")
+
+
+class VariantError(ValueError):
+    """A variant override that does not fit the agent's tools (``ValueError``).
+
+    ``variant``, ``tool`` and ``path`` name the variant, the tool and the parameter
+    path that did not resolve against the tool's parameters schema.
+    """
+
+    def __init__(self, message: str, *, variant: str, tool: str, path: str) -> None:
+        super().__init__(message)
+        self.variant = variant
+        self.tool = tool
+        self.path = path
+
+
+def _param_map(value: Any) -> FrozenMap:
+    field_name = "tool_param_descriptions"
+    if not isinstance(value, Mapping):
+        raise TypeError(f"Variant.{field_name} must be a mapping, got {type(value).__name__}")
+    for tool, paths in value.items():
+        if not isinstance(tool, str) or not tool:
+            raise TypeError(f"Variant.{field_name} keys must be non-empty str, got {tool!r}")
+        if not isinstance(paths, Mapping):
+            raise TypeError(
+                f"Variant.{field_name}[{tool!r}] must be a mapping of parameter path -> "
+                f"description, got {type(paths).__name__}"
+            )
+        for path, text in paths.items():
+            if not isinstance(path, str) or not isinstance(text, str):
+                raise TypeError(
+                    f"Variant.{field_name}[{tool!r}] maps str -> str, got {path!r}: {text!r}"
+                )
+            if not _PARAM_PATH.fullmatch(path):
+                raise ValueError(
+                    f"Variant.{field_name}[{tool!r}]: invalid parameter path {path!r} "
+                    "(expected name(.name)* with optional [] after a name, e.g. "
+                    "'edits[].old_text')"
+                )
+    return value if isinstance(value, FrozenMap) else FrozenMap(value)
+
+
+def apply_param_descriptions(
+    schema: Mapping[str, Any], overrides: Mapping[str, str], *, variant: str, tool: str,
+) -> dict[str, Any]:
+    """A deep copy of *schema* with each override's ``description`` set.
+
+    Raises :class:`VariantError` when a path does not resolve (see the module docstring).
+    Only ``description`` keys of the resolved nodes change.
+    """
+    import copy
+
+    result: dict[str, Any] = copy.deepcopy(thaw(schema))
+    for path in sorted(overrides):
+        node: Any = result
+        for match in _PARAM_SEGMENT.finditer(path):
+            name, brackets = match.group(1), match.group(2)
+            props = node.get("properties") if isinstance(node, dict) else None
+            if not isinstance(props, dict) or name not in props:
+                raise VariantError(
+                    f"variant {variant!r}: tool {tool!r} has no parameter path {path!r} "
+                    f"(no property {name!r})",
+                    variant=variant, tool=tool, path=path,
+                )
+            node = props[name]
+            for _ in range(len(brackets) // 2):
+                items = node.get("items") if isinstance(node, dict) else None
+                if not isinstance(items, dict):
+                    raise VariantError(
+                        f"variant {variant!r}: tool {tool!r} has no parameter path {path!r} "
+                        f"({name!r} has no items schema)",
+                        variant=variant, tool=tool, path=path,
+                    )
+                node = items
+        if not isinstance(node, dict):
+            raise VariantError(
+                f"variant {variant!r}: tool {tool!r} parameter path {path!r} is not a schema "
+                "object",
+                variant=variant, tool=tool, path=path,
+            )
+        node["description"] = overrides[path]
+    return result
+
+
 def _as_path(value: Any, field_name: str) -> Path | None:
     if value is None:
         return None
@@ -80,6 +175,9 @@ class Variant:
     templates_dir: Path | None = None
     builtin_skills_dir: Path | None = None
     bootstrap: Mapping[str, str] = field(default_factory=FrozenMap)
+    tool_param_descriptions: Mapping[str, Mapping[str, str]] = field(
+        default_factory=FrozenMap,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -88,6 +186,9 @@ class Variant:
             object.__setattr__(self, name, _as_path(getattr(self, name), name))
         for name in ("tool_descriptions", "bootstrap"):
             object.__setattr__(self, name, _str_map(getattr(self, name), name))
+        object.__setattr__(
+            self, "tool_param_descriptions", _param_map(self.tool_param_descriptions),
+        )
 
     @property
     def template_roots(self) -> tuple[Path, ...]:
@@ -113,6 +214,21 @@ class Variant:
         from nanobot.agent.tools.base import read_description_file  # lazy: import cycle
 
         return read_description_file(path, tool=tool_name)
+
+    def parameters_for(
+        self, tool_name: str, schema: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """*schema* with this variant's parameter descriptions for *tool_name* applied.
+
+        ``None`` when the variant has none for that tool. Raises :class:`VariantError`
+        when a path does not resolve against *schema*.
+        """
+        overrides = self.tool_param_descriptions.get(tool_name)
+        if not overrides:
+            return None
+        return apply_param_descriptions(
+            schema, overrides, variant=self.name, tool=tool_name,
+        )
 
 
 @dataclass(frozen=True)
@@ -285,4 +401,11 @@ def fingerprint(loop: Any, *, model: str, sampling: Sampling | None) -> Fingerpr
     return Fingerprint(digest=digest, components=components)
 
 
-__all__ = ["Fingerprint", "Variant", "fingerprint", "skills_component"]
+__all__ = [
+    "Fingerprint",
+    "Variant",
+    "VariantError",
+    "apply_param_descriptions",
+    "fingerprint",
+    "skills_component",
+]

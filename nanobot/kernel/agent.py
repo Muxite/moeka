@@ -416,6 +416,13 @@ class ToolInfo:
     parameters: Mapping[str, Any]
 
 
+class ToolList(list):  # type: ignore[type-arg]
+    """``agent.tools``: a ``list[ToolInfo]`` that is also callable (returns itself)."""
+
+    def __call__(self) -> ToolList:
+        return self
+
+
 @dataclass(frozen=True)
 class RunResult:
     """The outcome of one :meth:`Agent.run`."""
@@ -1071,10 +1078,14 @@ class Agent:
         return infos
 
     @property
-    def tools(self) -> list[ToolInfo]:
-        """The tools the model sees (builds the agent on first use)."""
+    def tools(self) -> ToolList:
+        """The tools the model sees (builds the agent on first use).
+
+        A list of :class:`ToolInfo`; it is also callable (``agent.tools()`` returns
+        the same list), so both spellings work.
+        """
         self._check_open()
-        return self._sync(self._tools())
+        return ToolList(self._sync(self._tools()))
 
     async def _fingerprint(self) -> Fingerprint:
         from nanobot.kernel.variants import fingerprint

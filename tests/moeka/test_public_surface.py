@@ -56,6 +56,7 @@ SURFACE: dict[str, list[str]] = {
         "TransientError",
         "TruncatedError",
         "UnsupportedRequestError",
+        "VariantError",
     ],
     "moeka.llm": [
         "BatchResult",
@@ -93,14 +94,14 @@ SURFACE: dict[str, list[str]] = {
     ],
     "moeka.trace": [
         "EVENTS", "FanoutSink", "JsonlTraceSink", "LoguruTraceSink", "MemoryTraceSink",
-        "NullTraceSink", "TraceSink", "Tracer",
+        "NullTraceSink", "TraceSink", "Tracer", "args_digest",
     ],
     "moeka.usage": [
         "Attribution", "SCHEMA_VERSION", "SUPPORTED_SCHEMA_VERSIONS", "Subscription",
         "UNATTRIBUTED", "USAGE_EVENTS", "UsageFilter", "UsageTotals", "UsageView",
         "WASTE_LABELS", "bind_attribution", "current_attribution",
     ],
-    "moeka.variants": ["Fingerprint", "Variant"],
+    "moeka.variants": ["Fingerprint", "Variant", "VariantError"],
 }
 
 

@@ -600,8 +600,8 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
       result = await events.result()
   ```
 
-- `agent.tools` lists `ToolInfo(name, description, read_only, parameters)` as the
-  model sees them; `agent.fingerprint()` digests what the model sees (see
+- `agent.tools` (or `agent.tools()`: the list is also callable) lists
+  `ToolInfo(name, description, read_only, parameters)` as the model sees them; `agent.fingerprint()` digests what the model sees (see
   [Variants](#variants-and-fingerprints)); `await agent.aclose()` cancels in-flight
   runs and closes the loop (the kernel closes all agents on `close`).
 
@@ -825,15 +825,44 @@ with Kernel(env, variant=variant) as kernel:
 ```
 
 - `Variant(name="base", tool_descriptions_dir=None, tool_descriptions={},
-  templates_dir=None, builtin_skills_dir=None, bootstrap={})`. Two kernels with
-  different variants in one process never see each other's overrides.
-  `Variant()` and `None` both mean the built-in text.
+  templates_dir=None, builtin_skills_dir=None, bootstrap={},
+  tool_param_descriptions={})`. Two kernels with different variants in one
+  process never see each other's overrides. `Variant()` and `None` both mean
+  the built-in text.
 - Tool description overrides apply to tools the loader builds; MCP tools and
-  host actions keep their own descriptions. Templates cover the main system
+  host actions keep their own descriptions.
+- `tool_param_descriptions` maps a tool name to `{parameter path: description}`
+  and replaces (or adds) that parameter's `description` in the schema the model
+  sees (`agent.tools`, the provider request, the `tools` fingerprint component),
+  with the same coverage as `tool_descriptions`. A path is
+  `segment ("." segment)*` with `segment = name ("[]")*`: a name descends into
+  `properties`, each `[]` into `items`, e.g. `"path"`, `"edits[].old_text"`,
+  `"grid[][]"`. Only `description` keys change; types, constraints and
+  `required` stay the tool's own, and argument validation still uses the base
+  schema. A malformed value raises `TypeError`, a malformed path `ValueError`
+  at construction. An entry for a tool the agent does not load is ignored; a
+  path that does not resolve for a loaded tool makes the agent's build (the
+  first `agent.tools`, `agent.fingerprint()` or run) raise
+  `moeka.errors.VariantError` (a `ValueError` with `variant`, `tool`, `path`). Templates cover the main system
   prompt and sub-agent prompts; memory and runner templates stay built-in.
 - `Fingerprint(digest, components)`: sha256 over the rendered system prompt,
-  the tool definitions, the model and the sampling (`components` holds each
-  part's hash). Workspace and skills paths are normalised and memory is
+  the tool definitions, the model, the sampling and the skills (`components`
+  holds each part's hash under `system_prompt`, `tools`, `model`, `sampling`,
+  `skills`; `digest` is the sha256 of the sorted `name=hex` lines joined by
+  newlines).
+- `components["skills"]` covers every byte of the agent's effective skill set:
+  inline, workspace, plugin and built-in skills after shadowing and
+  `skills_include` / `skills_exclude`, always-on and unavailable skills
+  included. Each file-based skill `N` contributes one record per regular file
+  under its directory (symlinks to files followed; `__pycache__`, dot paths and
+  `*.pyc` skipped): key `file:N/<relative path>`, value the file's sha256. Each
+  inline skill contributes `inline:N` with the sha256 of the canonical JSON of
+  its `name`, `description`, `content` and `metadata`. The component is the
+  sha256 of `key\nvalue\n` over the records sorted by key (the empty set
+  hashes the empty string). It never depends on absolute paths, mtimes or
+  directory order, so a copied tree gives the same value and editing any
+  counted byte changes it. `fingerprint()` reads the files at call time, emits
+  no `skill.read`, and raises `OSError` when a counted file cannot be read. Workspace and skills paths are normalised and memory is
   excluded (the long-term memory and "Recent History" sections are left out even
   for a `memory=True` agent), so the digest is stable across rollouts of one
   variant. `fingerprint()` connects the agent's MCP servers first, so their tools

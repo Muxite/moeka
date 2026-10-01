@@ -825,6 +825,9 @@ class AgentLoop:
             )
             if self.variant is not None:
                 my_tool.set_description_override(self.variant.description_for("my"))
+                from nanobot.agent.tools.loader import apply_variant_parameters
+
+                apply_variant_parameters(self.variant, my_tool)
             self.tools.register(my_tool)
             registered.append("my")
 
