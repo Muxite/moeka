@@ -504,8 +504,19 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
     True, so a converted spec opens semantic memory unless the profile says
     otherwise.
 - `RunLimits(max_iterations=None, max_policy_denials=6, max_tool_errors=None,
-  deadline_s=None)`. `max_tool_errors` is not implemented yet (`kernel.agent`
-  raises `NotImplementedError` when it is set).
+  deadline_s=None)`. Every limit is a positive int (or `None`); `0`, negatives,
+  bools and non-ints raise `ValueError`.
+  - `max_tool_errors=N` ends the run with `stop_reason="tool_error"` once `N`
+    tool calls of that run failed (every `tool.call` event with `ok=False`:
+    unknown tool or invalid arguments, a raised exception, an error result, a
+    result that failed its output schema, exec-guard refusals included; an
+    `ask_user` interruption and capability-gate denials are not counted). The
+    count starts at 0 for every run. It is checked after all tool calls of a
+    model response ran (none is cancelled mid-response), after the `ask_user`
+    and `policy_denials` stops and before the iteration budget, and no further
+    model call is made. `result.error` is
+    `"max_tool_errors: {count} tool errors (limit {N})"`. `None` (default): tool
+    errors never end a run by themselves.
 - `run(message, *, session=None, media=(), sampling=None, deadline_s=None,
   tags=None) -> RunResult`:
   - `session` is a key or a `kernel.sessions` handle; default `"agent:<name>"`.
@@ -533,7 +544,7 @@ print(result.stop_reason, result.content, result.cost_usd, result.usage)
 | `max_iterations` | `RunLimits.max_iterations` (or the config default) was reached. |
 | `policy_denials` | `max_policy_denials` policy denials in one run (I5). |
 | `empty_final_response` | The model ended with no text. |
-| `tool_error` | A tool raised a fatal error and the run ended. |
+| `tool_error` | A tool raised a fatal error, or `max_tool_errors` was reached. |
 | `error` | A provider error; `result.error` is the typed `LLMError`. |
 | `budget` | The budget refused a call; `result.error` is the `BudgetExceeded`. |
 | `deadline` | `deadline_s` expired. |
