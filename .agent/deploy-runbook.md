@@ -210,6 +210,19 @@ uv sync --locked
 Expect `uv sync` to *remove* stale packages as well as add new ones; a long
 removal list means the venv had drifted, which is normal here.
 
+**`uv sync --locked` also removes every channel's runtime dependencies**
+(`python-telegram-bot`, `discord-py`, ...): they are not in `uv.lock` but
+installed on demand from each channel's manifest by `nanobot plugins enable`.
+Starting the service without them breaks those channels. Before step 7,
+re-enable every channel the config enables (`.venv/bin/nanobot plugins list`
+shows them) and check the imports; this bit the 2026-09-28 deploy:
+
+```bash
+.venv/bin/nanobot plugins enable telegram
+.venv/bin/nanobot plugins enable discord
+.venv/bin/python -c "import telegram, discord; print('channel deps OK')"
+```
+
 ### 6. Verify before starting the service
 
 ```bash
