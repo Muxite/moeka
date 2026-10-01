@@ -9,8 +9,11 @@ Candidate: branch `consolidate/new-main` (worktree `/home/muk/projects/moeka-new
 
 ## Verified state (before cutover)
 
-- Full suite via `scripts/test-docker.sh`: 9607 passed, 0 failed, 59 skipped (6 min 28 s, image built from this tree).
-- Offline smoke (`scripts/smoke-gateway.sh`): `import moeka` ok, no host module loaded by the kernel import;
+- Full suite via `scripts/test-docker.sh` at `25e66fa7` (after merging `review/usage`, `review/arch`,
+  `rsi-harness-spec`, `feat/setup-harness`): 9699 passed, 0 failed, 59 skipped (6 min 44 s, image built from
+  this tree). Earlier, at `bc86a31f` before those merges: 9607 passed. Gate G1 compares against `25e66fa7`;
+  the commit that records this line changes only this file.
+- Offline smoke (`scripts/smoke-gateway.sh`, re-run 2026-10-01 at `25e66fa7`): `import moeka` ok, no host module loaded by the kernel import;
   `nanobot gateway` health `{"status":"ok","process":"alive","ready":true,"websocket":"running"}`; one mock
   chat turn through the CLI agent and through the HTTP API server (`MOCK-REPLY: smoke ok`).
 - Live checkout at preparation time: `~/projects/moeka` on `main` `54069bb2`, `moeka.service` untouched.
