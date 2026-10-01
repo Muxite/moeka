@@ -381,6 +381,19 @@ are confined to the dated subsection below so they can be refreshed without touc
 - U12, observation is tested. Attribution completeness, schema stability, totals agreement (U8) and waste
   labelling have tests that fail on drift; this is the precondition for allowing better or paid models.
 
+**Update 2026-10-01 (branch `feat/usage-surface`):** G1, G2 (LLM layer, agent loop, direct calls), G3 (cache
+write and cache-hit events; reasoning tokens still null), G4, G6 (`schema_version`, canonical schemas in
+`schemas/`), G7 and the in-process half of G5 are closed or reduced; G8 is partial (retry, discarded draft);
+G9, G10, the cross-process stream, sub-agent/memory/router attribution and OpenTelemetry export remain open.
+Details and status per task: `specs/001-consumer-usage-surface/tasks.md`. The bullets below are the
+2026-09-30 snapshot.
+
+**Review 2026-10-01 (branch `review/usage`, `docs/reviews/2026-10-01-usage-schema-review.md`):** U9 does not hold
+for image generation, transcription or the local embedder (a test pins that list); the waste label was on the
+wrong attempt (usage-record 1.1 fixes it); the store was not idempotent, silently lost locked writes and
+forgot pruning (now counted in `kernel.usage.loss()`); U5's "agent cannot rewrite it" is only partly met (file
+floor plus `checkpoint`/`verify` tamper evidence; no unreachable writer).
+
 **Current state (verified against code 2026-09-30; refresh on change; not a requirement)**
 - Exists: the I6 ledger, `nanobot/kernel/ledger.py`, emits one `model.call` event per physical attempt with
   `trace_id, slot, tier, model, provider, tokens_in, tokens_out, tokens_cache_read, latency_ms, cost_usd,

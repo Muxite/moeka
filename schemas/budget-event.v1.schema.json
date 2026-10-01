@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moeka.dev/schemas/budget-event.v1.schema.json",
+  "title": "budget-event.v1",
+  "description": "A budget decision about one logical call (or one attempt of it, see attempt): admitted or refused, with the budget state in force. A refusal carries the same attribution as an admitted call. Content-free.",
+  "type": "object",
+  "required": ["schema_version", "kind", "call_id", "consumer", "scope", "remaining_usd", "remaining_tokens"],
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.[0-9]+$"},
+    "kind": {"enum": ["admit", "refuse"]},
+    "call_id": {"type": "string", "minLength": 1, "description": "Joins usage-record.v1.call_id (an admitted call) and the refused call's exception."},
+    "attempt": {"type": ["integer", "null"], "minimum": 0, "description": "The attempt (round) this decision gates, for producers that admit each attempt separately (awork-resume reserves per round). null = one decision for the whole logical call (moeka). Without it two admits of one call_id are indistinguishable."},
+    "ts_ms": {"type": ["integer", "null"], "minimum": 0},
+    "consumer": {"type": "string", "minLength": 1},
+    "agent": {"type": ["string", "null"]},
+    "session": {"type": ["string", "null"]},
+    "role": {"type": ["string", "null"]},
+    "purpose": {"type": ["string", "null"]},
+    "model": {"type": ["string", "null"]},
+    "provider": {"type": ["string", "null"]},
+    "alias": {"type": ["string", "null"]},
+    "tags": {"type": "object"},
+    "scope": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["kernel", "consumer", "tag"]},
+        "key": {"type": ["string", "null"], "description": "Tag key when kind is tag."},
+        "value": {"type": ["string", "number", "boolean", "null"], "description": "Tag value, or consumer name, for that scope."}
+      },
+      "description": "The budget scope the figures below describe (the binding scope for a refusal)."
+    },
+    "cap_usd": {"type": ["number", "null"], "minimum": 0, "description": "null = no USD cap."},
+    "cap_tokens": {"type": ["integer", "null"], "minimum": 0, "description": "null = no token cap."},
+    "spent_usd": {"type": ["number", "null"], "minimum": 0},
+    "spent_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "reserved_usd": {"type": ["number", "null"], "minimum": 0, "description": "Held for in-flight calls."},
+    "reserved_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "remaining_usd": {"type": ["number", "null"], "description": "cap - spent - reserved, floored at 0; null when uncapped."},
+    "remaining_tokens": {"type": ["integer", "null"], "description": "Likewise in tokens; null when uncapped."},
+    "worst_case_usd": {"type": ["number", "null"], "minimum": 0, "description": "The admission estimate; null when the model is unpriced."},
+    "worst_case_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "refusal": {
+      "type": ["object", "null"],
+      "required": ["code"],
+      "properties": {
+        "code": {"enum": ["cap_usd", "cap_tokens", "cap_tag", "unpriced_model", "paid_disabled", "policy", "other"]},
+        "message": {"type": ["string", "null"]}
+      },
+      "description": "Present exactly when kind is refuse."
+    },
+    "producer": {"type": ["object", "null"], "properties": {"name": {"type": "string"}, "version": {"type": ["string", "null"]}}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "refuse"}}},
+      "then": {"required": ["refusal"], "properties": {"refusal": {"type": "object"}}},
+      "else": {"properties": {"refusal": {"type": "null"}}}
+    }
+  ],
+  "additionalProperties": true
+}

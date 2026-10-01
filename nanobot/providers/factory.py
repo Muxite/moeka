@@ -486,6 +486,7 @@ def attach_ledger(
             sink=env.trace,
             store=get_llm_usage_store(data_dir=env.paths.data_dir),
             pricing=pricing,
+            default_consumer=getattr(env, "consumer", None),
         ))
     except Exception:
         from loguru import logger

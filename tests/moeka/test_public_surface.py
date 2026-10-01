@@ -90,6 +90,11 @@ SURFACE: dict[str, list[str]] = {
         "EVENTS", "FanoutSink", "JsonlTraceSink", "LoguruTraceSink", "MemoryTraceSink",
         "NullTraceSink", "TraceSink", "Tracer",
     ],
+    "moeka.usage": [
+        "Attribution", "SCHEMA_VERSION", "SUPPORTED_SCHEMA_VERSIONS", "Subscription",
+        "UNATTRIBUTED", "USAGE_EVENTS", "UsageFilter", "UsageTotals", "UsageView",
+        "WASTE_LABELS", "bind_attribution", "current_attribution",
+    ],
     "moeka.variants": ["Fingerprint", "Variant"],
 }
 

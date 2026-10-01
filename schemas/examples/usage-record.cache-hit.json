@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.1",
+  "record_id": "c-7f3a92:0",
+  "kind": "cache_hit",
+  "call_id": "c-7f3a92",
+  "attempt": 0,
+  "consumer": "awork-resume",
+  "agent": null,
+  "session": "build-77",
+  "role": "writer",
+  "purpose": "rewrite_bullet",
+  "model": "qwen3:8b",
+  "provider": "ollama",
+  "request_key": "5a07c1d2e9b34f60",
+  "prompt_version": "bullet-v1",
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "usage_source": "none",
+  "cost_usd": 0,
+  "cost_billed": true,
+  "price_source": "cache",
+  "cache_hit": true,
+  "saved_tokens_in": 2100,
+  "saved_tokens_out": 180,
+  "saved_cost_usd": 0,
+  "outcome": "ok",
+  "producer": {
+    "name": "awr.llm",
+    "version": null
+  }
+}

@@ -37,12 +37,17 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from loguru import logger
 
-from nanobot.kernel.frozen import FrozenMap, thaw
+from nanobot.kernel.frozen import FrozenMap
 from nanobot.kernel.ledger import (
+    DOCUMENT_VERSIONS,
+    UNATTRIBUTED,
+    Attribution,
     CallAttribution,
     ModelPricing,
     call_attribution,
+    current_attribution,
     current_call_attribution,
+    sanitize_tags,
 )
 from nanobot.kernel.llm_errors import BudgetExceeded
 from nanobot.kernel.trace import TraceSink, safe_emit
@@ -97,13 +102,20 @@ class CallEstimate:
     worst_case_tokens: int
     worst_case_usd: float | None
     tags: Mapping[str, Any] = field(default_factory=FrozenMap)
+    attribution: Attribution | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.tags, FrozenMap):
             object.__setattr__(self, "tags", FrozenMap(self.tags or {}))
 
     def to_trace(self) -> dict[str, Any]:
+        who = (self.attribution or Attribution()).over(current_attribution())
         return {
+            "consumer": who.consumer or UNATTRIBUTED,
+            "agent": who.agent,
+            "session": who.session,
+            "role": who.role,
+            "purpose": who.purpose,
             "call_id": self.call_id,
             "alias": self.alias,
             "model": self.model,
@@ -113,7 +125,7 @@ class CallEstimate:
             "rounds": self.rounds,
             "worst_case_tokens": self.worst_case_tokens,
             "worst_case_usd": self.worst_case_usd,
-            "tags": thaw(self.tags),
+            "tags": sanitize_tags(self.tags),
         }
 
 
@@ -165,6 +177,7 @@ def build_estimate(
     reprompts: int = 0,
     pricing: ModelPricing | None,
     tags: Mapping[str, Any] | None = None,
+    attribution: Attribution | None = None,
 ) -> CallEstimate:
     """A :class:`CallEstimate` for *rounds* rounds of one prompt.
 
@@ -187,6 +200,7 @@ def build_estimate(
         worst_case_tokens=input_tokens + output_tokens,
         worst_case_usd=price_tokens(pricing, input_tokens, output_tokens),
         tags=FrozenMap(tags or {}),
+        attribution=attribution,
     )
 
 
@@ -302,11 +316,56 @@ class CapBudget:
             slot = _tag_slot(tag, value)
             return self._tag_spent.get(slot, 0.0) + self._tag_reserved.get(slot, 0.0)
 
-    def _refuse(self, estimate: CallEstimate, reason: str) -> BudgetExceeded:
-        return BudgetExceeded(
+    def _refuse(
+        self,
+        estimate: CallEstimate,
+        reason: str,
+        code: str = "other",
+        scope: tuple[str, str | None, Any] | None = None,
+    ) -> BudgetExceeded:
+        exc = BudgetExceeded(
             f"budget refused call: {reason}",
             call_id=estimate.call_id, model=estimate.model, provider=estimate.provider,
         )
+        exc.reason_code = code
+        exc.scope = scope
+        return exc
+
+    def snapshot(self, tag: str | None = None, value: Any = None) -> dict[str, Any]:
+        """The budget in force for the kernel scope, or for one ``(tag, value)``.
+
+        Keys follow ``budget-event.v1``: ``cap_*``, ``spent_*``, ``reserved_*`` and
+        ``remaining_*`` (``None`` = uncapped); remaining is ``max(0, cap - spent - reserved)``.
+        """
+        with self._lock:
+            if tag is None:
+                cap_usd, cap_tokens = self.limit_usd, self.limit_tokens
+                spent_usd, spent_tokens = self._spent_usd, self._spent_tokens
+                reserved_usd, reserved_tokens = self._reserved_usd, self._reserved_tokens
+                scope: dict[str, Any] = {"kind": "kernel", "key": None, "value": None}
+            else:
+                slot = _tag_slot(tag, value)
+                cap_usd, cap_tokens = self.per_tag.get(tag), None
+                spent_usd = self._tag_spent.get(slot, 0.0)
+                spent_tokens = None
+                reserved_usd = self._tag_reserved.get(slot, 0.0)
+                reserved_tokens = None
+                scope = {"kind": "tag", "key": tag, "value": slot[1]}
+        remaining_usd = (
+            None if cap_usd is None else max(0.0, cap_usd - spent_usd - reserved_usd)
+        )
+        remaining_tokens = (
+            None
+            if cap_tokens is None or spent_tokens is None or reserved_tokens is None
+            else max(0, cap_tokens - spent_tokens - reserved_tokens)
+        )
+        return {
+            "scope": scope,
+            "cap_usd": cap_usd, "cap_tokens": cap_tokens,
+            "spent_usd": spent_usd, "spent_tokens": spent_tokens,
+            "reserved_usd": reserved_usd, "reserved_tokens": reserved_tokens,
+            "remaining_usd": remaining_usd, "remaining_tokens": remaining_tokens,
+        }
 
     def admit(self, estimate: CallEstimate) -> _CapReservation:
         slots = tuple(
@@ -317,7 +376,8 @@ class CapBudget:
         with self._lock:
             if usd is None and (self.limit_usd is not None or slots):
                 if not self.allow_unpriced:
-                    raise self._refuse(estimate, "the model has no price under a USD cap")
+                    raise self._refuse(estimate, "the model has no price under a USD cap",
+                                       "unpriced_model")
             amount = usd or 0.0
             if self.limit_usd is not None:
                 exposure = self._spent_usd + self._reserved_usd
@@ -326,6 +386,7 @@ class CapBudget:
                         estimate,
                         f"worst case ${amount:.6f} on top of ${exposure:.6f} exceeds "
                         f"limit_usd=${self.limit_usd:.6f}",
+                        "cap_usd",
                     )
             if self.limit_tokens is not None:
                 used = self._spent_tokens + self._reserved_tokens
@@ -334,6 +395,7 @@ class CapBudget:
                         estimate,
                         f"worst case {tokens} tokens on top of {used} exceeds "
                         f"limit_tokens={self.limit_tokens}",
+                        "cap_tokens",
                     )
             for slot in slots:
                 limit = self.per_tag[slot[0]]
@@ -343,6 +405,8 @@ class CapBudget:
                         estimate,
                         f"worst case ${amount:.6f} on top of ${exposure:.6f} exceeds the "
                         f"{slot[0]}={slot[1]!r} cap ${limit:.6f}",
+                        "cap_tag",
+                        ("tag", slot[0], slot[1]),
                     )
             self._reserved_usd += amount
             self._reserved_tokens += tokens
@@ -367,7 +431,10 @@ class CapBudget:
         with self._lock:
             self._spent_tokens += tokens
             if cost is None:
-                if tokens:
+                # Tokens billed at an unknown price, or a call that timed out or was cancelled
+                # (the provider may have billed it and reported nothing): the reservation stays
+                # as spend at release. Handing it back would let such calls overshoot the cap.
+                if tokens or event.outcome in ("timeout", "cancelled"):
                     reservation.unpriced_usage = True
                 if not reservation.released:
                     self._consume(reservation, 0.0, tokens)
@@ -443,6 +510,41 @@ class Metering:
         self.budget = budget
         self._sink = sink
 
+    def _event(
+        self, kind: str, estimate: CallEstimate, exc: BudgetExceeded | None = None,
+    ) -> dict[str, Any]:
+        """``budget.admit`` / ``budget.refuse``: the estimate's keys plus ``budget-event.v1``."""
+        event: dict[str, Any] = {
+            "event": f"budget.{kind}", **estimate.to_trace(),
+            "schema_version": DOCUMENT_VERSIONS["budget-event"], "kind": kind,
+            "producer": {"name": "moeka", "version": None},
+        }
+        figures: dict[str, Any] = {}
+        snapshot = getattr(self.budget, "snapshot", None)
+        if callable(snapshot):
+            try:
+                scope = getattr(exc, "scope", None)
+                figures = (
+                    snapshot(scope[1], scope[2]) if scope is not None and scope[0] == "tag"
+                    else snapshot()
+                )
+            except Exception:  # noqa: BLE001 - observation never fails the call
+                logger.exception("budget snapshot failed for call {}", estimate.call_id)
+        event.update({
+            "scope": {"kind": "kernel", "key": None, "value": None},
+            "cap_usd": None, "cap_tokens": None, "spent_usd": None, "spent_tokens": None,
+            "reserved_usd": None, "reserved_tokens": None,
+            "remaining_usd": None, "remaining_tokens": None,
+            "worst_case_usd": estimate.worst_case_usd,
+            **figures,
+            "refusal": (
+                {"code": exc.reason_code, "message": str(exc)} if exc is not None else None
+            ),
+        })
+        if exc is not None:
+            event["reason"] = str(exc)
+        return event
+
     def admit(self, estimate: CallEstimate) -> Admission:
         """Admit *estimate* or raise :class:`BudgetExceeded` (``budget.refuse`` emitted)."""
         try:
@@ -452,11 +554,9 @@ class Metering:
                 exc.call_id = estimate.call_id
             exc.model = exc.model or estimate.model
             exc.provider = exc.provider or estimate.provider
-            safe_emit(self._sink, {
-                "event": "budget.refuse", **estimate.to_trace(), "reason": str(exc),
-            })
+            safe_emit(self._sink, self._event("refuse", estimate, exc))
             raise
-        safe_emit(self._sink, {"event": "budget.admit", **estimate.to_trace()})
+        safe_emit(self._sink, self._event("admit", estimate))
         return Admission(self.budget, estimate, reservation)
 
 
@@ -587,6 +687,7 @@ class BudgetedProvider(LLMProvider):
         admission = self._metering.admit(estimate)
         attribution = CallAttribution(
             call_id=estimate.call_id, alias=self._alias, on_event=admission.settle,
+            attribution=current_attribution(),
         )
         try:
             with call_attribution(attribution):

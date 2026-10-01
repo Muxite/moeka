@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moeka.dev/schemas/usage-record.v1.schema.json",
+  "title": "usage-record.v1",
+  "description": "One model call attempt, or one response-cache hit that avoided a call. Content-free: no prompt, response or reasoning text. See ATTRIBUTION.md for field semantics. Additive changes bump the minor in schema_version and keep this major; removed or re-meant fields bump the major and the $id.",
+  "type": "object",
+  "required": [
+    "schema_version", "record_id", "kind", "call_id", "attempt", "consumer",
+    "model", "provider", "tokens_in", "tokens_out", "usage_source",
+    "cost_usd", "cost_billed", "price_source", "cache_hit", "outcome"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string", "pattern": "^1\\.[0-9]+$",
+      "description": "Major is fixed by this schema; minor counts additive changes."
+    },
+    "record_id": {
+      "type": "string", "minLength": 1,
+      "description": "Globally unique within a producer: '<call_id>:<attempt>' (attempt 0 for a cache hit). Referenced by complete-json-call.v1."
+    },
+    "kind": {
+      "enum": ["model_call", "cache_hit"],
+      "description": "model_call: one physical provider attempt. cache_hit: a response cache answered; billed tokens are zero and saved_* say what it avoided."
+    },
+    "call_id": {"type": "string", "minLength": 1, "description": "One logical call; every attempt of it shares this id."},
+    "attempt": {"type": "integer", "minimum": 0, "description": "1-based physical attempt of the logical call; 0 for a cache hit."},
+
+    "consumer": {"type": "string", "minLength": 1, "description": "The program or product on whose behalf the call ran (awork, awork-resume, gateway, rsi-harness). The literal 'unattributed' marks a defect."},
+    "agent": {"type": ["string", "null"], "description": "Agent name (kernel agent spec name, or a pipeline actor)."},
+    "session": {"type": ["string", "null"], "description": "Session or run id: a chat session key, a build id, a rollout id."},
+    "role": {"type": ["string", "null"], "description": "Functional role of the call (maker, checker, extractor, judge...)."},
+    "purpose": {"type": ["string", "null"], "description": "Task type or stage name (extract_claims, fluff_check)."},
+    "slot": {"type": ["string", "null"], "description": "Schema slot being filled, when the call serves one."},
+    "source": {"enum": ["user", "api", "cron", "dream", "system", null], "description": "Coarse legacy origin class; optional."},
+    "tags": {"type": "object", "description": "Host-defined extras. Never the carrier of consumer, agent, session or role."},
+
+    "trace_id": {"type": ["string", "null"]},
+    "parent_call_id": {"type": ["string", "null"], "description": "call_id of the logical call that caused this one (sub-agent, verifier)."},
+    "request_key": {"type": ["string", "null"], "description": "Cache/replay key of the request (opaque; see complete-json-call.v1 key_scheme)."},
+    "prompt_version": {"type": ["string", "null"], "description": "Caller's version label of the prompt template."},
+
+    "started_at_ms": {"type": ["integer", "null"], "minimum": 0, "description": "Unix epoch milliseconds."},
+    "latency_ms": {"type": ["number", "null"], "minimum": 0},
+
+    "model": {"type": "string", "minLength": 1},
+    "provider": {"type": "string", "minLength": 1},
+    "alias": {"type": ["string", "null"], "description": "Host-side model alias or preset name."},
+    "tier": {"type": ["string", "null"], "description": "Cost tier (local, cheap, paid...)."},
+
+    "tokens_in": {"type": "integer", "minimum": 0, "description": "Billed input tokens, INCLUDING cache reads and cache writes. Zero on a cache hit."},
+    "tokens_out": {"type": "integer", "minimum": 0, "description": "Billed output tokens, including reasoning tokens when the provider counts them there."},
+    "tokens_cache_read": {"type": ["integer", "null"], "minimum": 0, "description": "Subset of tokens_in served from the provider prompt cache; null = not reported."},
+    "tokens_cache_write": {"type": ["integer", "null"], "minimum": 0, "description": "Subset of tokens_in written to the provider prompt cache; null = not reported."},
+    "tokens_reasoning": {"type": ["integer", "null"], "minimum": 0, "description": "Hidden reasoning tokens when the provider reports them separately; null = not reported."},
+    "usage_source": {"enum": ["reported", "estimated", "mixed", "none"], "description": "Whether the provider billed these counts or the producer estimated them."},
+
+    "cost_usd": {"type": ["number", "null"], "minimum": 0, "description": "USD cost of this record; null = unknown (never free by default). 0 on a cache hit."},
+    "cost_billed": {"type": "boolean", "description": "True when cost_usd is ground truth (provider-reported usage at a known price, or the local-zero convention)."},
+    "price_source": {
+      "enum": ["provider_reported", "price_table", "local_zero", "cache", "none"],
+      "description": "cache: a response cache answered, cost is zero by construction. provider_reported: the provider returned the cost. price_table: tokens times the producer's price table. local_zero: local tier convention. none: no price known (cost_usd null)."
+    },
+
+    "cache_hit": {"type": "boolean", "description": "A response cache answered; no provider call was made."},
+    "saved_tokens_in": {"type": ["integer", "null"], "minimum": 0, "description": "Input tokens a cache hit avoided; null when not a hit or unknown."},
+    "saved_tokens_out": {"type": ["integer", "null"], "minimum": 0, "description": "Output tokens a cache hit avoided."},
+    "saved_cost_usd": {"type": ["number", "null"], "minimum": 0, "description": "USD a cache hit avoided (original call's cost); null when unknown."},
+
+    "finish_reason": {"type": ["string", "null"]},
+    "outcome": {
+      "enum": ["ok", "truncated", "parse_failure", "error", "cancelled", "timeout"],
+      "description": "ok: usable result. truncated: hit the token limit. parse_failure: replied but not valid for the schema. error/timeout/cancelled: the attempt failed."
+    },
+    "error_kind": {"type": ["string", "null"], "description": "Provider/transport error class when outcome is error or timeout."},
+
+    "waste_label": {
+      "enum": ["retry", "failover", "avoidable_cache_miss", "discarded_draft", "refused_after_admission", null],
+      "description": "Why these tokens did not contribute to the final result, set at the time it was known (kernel-known cases) or by a linked call.waste event (caller-known cases such as a discarded draft)."
+    },
+    "waste_set_by": {"enum": ["kernel", "caller", "consumer", null]},
+
+    "producer": {
+      "type": ["object", "null"],
+      "required": ["name"],
+      "properties": {"name": {"type": "string"}, "version": {"type": ["string", "null"]}},
+      "description": "Software that emitted the record (moeka, awr.llm)."
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "cache_hit"}}},
+      "then": {
+        "properties": {
+          "cache_hit": {"const": true}, "attempt": {"const": 0},
+          "tokens_in": {"const": 0}, "tokens_out": {"const": 0}, "cost_usd": {"const": 0}
+        }
+      },
+      "else": {"properties": {"cache_hit": {"const": false}, "attempt": {"minimum": 1}}}
+    },
+    {
+      "if": {"properties": {"price_source": {"const": "none"}}},
+      "then": {"properties": {"cost_usd": {"type": "null"}, "cost_billed": {"const": false}}}
+    }
+  ],
+  "additionalProperties": true
+}

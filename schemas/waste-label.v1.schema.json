@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moeka.dev/schemas/waste-label.v1.schema.json",
+  "title": "waste-label.v1",
+  "description": "A late label saying that an earlier attempt's tokens did not contribute to the result (a retry that superseded it, a draft a verifier rejected). Records are append-only, so the label is its own document, joined to usage-record.v1 by (call_id, attempt). Idempotent on (call_id, attempt, waste_label). Content-free. In moeka it is the call.waste trace event.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "call_id",
+    "waste_label"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "call_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "description": "The attempt labelled; null labels every attempt of the call that has no label of its own."
+    },
+    "waste_label": {
+      "enum": [
+        "retry",
+        "failover",
+        "avoidable_cache_miss",
+        "discarded_draft",
+        "refused_after_admission"
+      ]
+    },
+    "waste_set_by": {
+      "enum": [
+        "kernel",
+        "caller",
+        "consumer",
+        null
+      ]
+    },
+    "started_at_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Unix epoch milliseconds the label was set."
+    },
+    "consumer": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agent": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "purpose": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "producer": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

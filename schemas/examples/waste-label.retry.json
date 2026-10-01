@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "call_id": "c-7f3a91",
+  "attempt": 1,
+  "waste_label": "retry",
+  "waste_set_by": "kernel",
+  "started_at_ms": 1790000000900,
+  "consumer": "awork",
+  "producer": {
+    "name": "moeka",
+    "version": null
+  }
+}

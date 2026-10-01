@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moeka.dev/schemas/complete-json-call.v1.schema.json",
+  "title": "complete-json-call.v1",
+  "description": "One structured-output completion: the request contract, and optionally its result. Unlike usage-record.v1 this envelope MAY carry content (the prompt and the parsed value); producers that must stay content-free store request/result separately and keep only the refs. The cache key is derived from request fields (key_scheme names how), so a recording made by one producer replays only under the same scheme. Aligned with awork-resume's complete_json(ref, system, prompt, out, prompt_version).",
+  "type": "object",
+  "required": ["schema_version", "request"],
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.[0-9]+$"},
+    "request": {"$ref": "#/$defs/request"},
+    "result": {"$ref": "#/$defs/result"}
+  },
+  "$defs": {
+    "attribution": {
+      "type": "object",
+      "required": ["consumer"],
+      "properties": {
+        "consumer": {"type": "string", "minLength": 1},
+        "agent": {"type": ["string", "null"]},
+        "session": {"type": ["string", "null"]},
+        "role": {"type": ["string", "null"]},
+        "purpose": {"type": ["string", "null"]}
+      }
+    },
+    "request": {
+      "type": "object",
+      "required": ["ref", "system", "prompt", "output_schema", "prompt_version", "sampling", "attribution"],
+      "properties": {
+        "ref": {
+          "type": "object",
+          "required": ["provider", "model"],
+          "properties": {
+            "provider": {"type": "string", "minLength": 1},
+            "model": {"type": "string", "minLength": 1},
+            "family": {"type": ["string", "null"], "description": "Model family, used by a consumer's maker/checker independence rule; opaque to moeka."},
+            "alias": {"type": ["string", "null"], "description": "moeka ModelSpec alias, when the producer is moeka."}
+          },
+          "description": "awork-resume ModelRef(provider, model, family)."
+        },
+        "system": {"type": "string"},
+        "prompt": {"type": "string", "description": "The user message. A multi-message conversation is not part of this contract; use the kernel Request directly."},
+        "output_schema": {"type": "object", "description": "JSON Schema (draft 2020-12 compatible) of the expected object, e.g. pydantic model_json_schema()."},
+        "prompt_version": {"type": "string", "minLength": 1, "description": "Caller's version label of system+prompt template; part of the cache key."},
+        "sampling": {
+          "type": "object",
+          "properties": {
+            "temperature": {"type": ["number", "null"], "minimum": 0, "description": "Cache-keyed calls are temperature 0 by contract."},
+            "max_tokens": {"type": ["integer", "null"], "minimum": 1},
+            "top_p": {"type": ["number", "null"]},
+            "seed": {"type": ["integer", "null"]}
+          }
+        },
+        "attribution": {"$ref": "#/$defs/attribution"},
+        "max_rounds": {"type": ["integer", "null"], "minimum": 1, "description": "Request rounds allowed (awork-resume: 2 = one re-prompt; moeka: 1 + retries)."},
+        "cache_mode": {"enum": ["live", "replay", "off"], "description": "replay: a miss is an error, never a provider call."},
+        "request_key": {"type": ["string", "null"], "description": "Derived cache/replay key; opaque outside key_scheme."},
+        "key_scheme": {
+          "type": "string", "pattern": "^[a-z0-9_.-]+\\.v[0-9]+$", "examples": ["awr.sha256.v1", "moeka.request_key.v1"],
+          "description": "How request_key is computed; open set, a new producer names its own '<name>.v<N>'. awr.sha256.v1: sha256 of canonical JSON {provider, model, system, prompt, schema, prompt_version, max_tokens, t:0}. moeka.request_key.v1: kernel.llm.request_key over messages, alias, model, provider, sampling, schema, retries (and prompt_version when set)."
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["outcome", "usage_record_ids", "cache_hit"],
+      "properties": {
+        "outcome": {"enum": ["ok", "parse_failure", "error", "cache_miss_in_replay", "budget_refused"]},
+        "parsed": {"description": "The validated object; absent unless outcome is ok."},
+        "raw_ref": {
+          "type": ["object", "null"],
+          "required": ["store", "key"],
+          "properties": {
+            "store": {"type": "string", "description": "Where the raw reply text lives (llm_cache, recording, session)."},
+            "key": {"type": "string"},
+            "sha256": {"type": ["string", "null"]}
+          },
+          "description": "Reference to the raw reply text; the text itself is not inlined."
+        },
+        "cache_hit": {"type": "boolean"},
+        "attempts": {"type": "integer", "minimum": 0, "description": "Physical rounds that reached a provider; 0 for a cache hit."},
+        "usage_record_ids": {
+          "type": "array", "items": {"type": "string"},
+          "description": "usage-record.v1 record_id of every attempt (one cache_hit record for a hit). Empty only when no provider was reached and none was recorded (replay miss, pre-admission refusal)."
+        },
+        "final_record_id": {"type": ["string", "null"], "description": "record_id of the attempt that produced parsed."},
+        "budget_event_id": {"type": ["string", "null"], "description": "call_id of the budget-event.v1 when outcome is budget_refused."},
+        "error": {"type": ["object", "null"], "properties": {"kind": {"type": "string"}, "message": {"type": ["string", "null"]}}}
+      }
+    }
+  },
+  "additionalProperties": true
+}
