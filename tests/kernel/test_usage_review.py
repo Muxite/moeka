@@ -566,7 +566,11 @@ def test_r10_unmetered_model_paths_are_inventoried() -> None:
         for p in root.rglob("*.py")
         if endpoint.search(p.read_text()) and not metered.search(p.read_text())
     }
-    assert found == {
+    # The gateway's OpenAI-compatible HTTP API SERVES /v1/chat/completions (inbound route and
+    # its CLI banner); each request becomes an AgentLoop turn whose model calls go through a
+    # metered LLMProvider, so these modules call no model themselves.
+    inbound_routes = {"api/server.py", "cli/commands.py"}
+    assert found - inbound_routes == {
         "core/vec_store.py",  # local embedder: tokens computed, no money
         "providers/image_generation.py",  # billed image generation
         "providers/transcription.py",  # billed speech to text
