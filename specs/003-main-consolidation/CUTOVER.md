@@ -1,7 +1,7 @@
 # Cutover runbook: consolidated branch becomes `main`
 
-**Status**: prepared 2026-10-01, NOT executed. Nothing here has been run against the live checkout, the
-service, `main`, `core-slim` or any remote. The owner runs it.
+**Status**: refreshed 2026-10-01 for plan step M7 (owner-approved: cut over locally after refreshed gates).
+The gate record is in "M7 gate record" at the end. Publishing (G7, `git push`) is NOT part of M7.
 
 Candidate: branch `consolidate/new-main` (worktree `/home/muk/projects/moeka-newmain`), tip recorded in the
 "Verified state" block. It contains both `main` (`54069bb2`) and `core-slim` (`c382d0c9`) as ancestors, so
@@ -9,15 +9,50 @@ Candidate: branch `consolidate/new-main` (worktree `/home/muk/projects/moeka-new
 
 ## Verified state (before cutover)
 
-- Full suite via `scripts/test-docker.sh` at `25e66fa7` (after merging `review/usage`, `review/arch`,
-  `rsi-harness-spec`, `feat/setup-harness`): 9699 passed, 0 failed, 59 skipped (6 min 44 s, image built from
-  this tree). Earlier, at `bc86a31f` before those merges: 9607 passed. Gate G1 compares against `25e66fa7`;
-  the commit that records this line changes only this file.
-- Offline smoke (`scripts/smoke-gateway.sh`, re-run 2026-10-01 at `25e66fa7`): `import moeka` ok, no host module loaded by the kernel import;
-  `nanobot gateway` health `{"status":"ok","process":"alive","ready":true,"websocket":"running"}`; one mock
-  chat turn through the CLI agent and through the HTTP API server (`MOCK-REPLY: smoke ok`).
-- Live checkout at preparation time: `~/projects/moeka` on `main` `54069bb2`, `moeka.service` untouched.
-- Not verified here: a real channel turn (Telegram/Discord) and the WebUI bundle (no bun/npm in the test image).
+- Code tip: `cd03700e` ("add accepted held-out suite 005"), 25 commits after the earlier verified `25e66fa7`;
+  they add spec 005 (multi-instance: per-instance `moeka.sh`, template unit, instance lock, channel token
+  locks, Telegram `Conflict` handling, `${}` workspace fail-fast, config-owned paths, shared budget). Every
+  commit after `cd03700e` on this branch changes only this file.
+- Full suite via `scripts/test-docker.sh` on `cd03700e` (a `git archive` export of exactly that commit, image
+  built from it): see G1 in the gate record. Earlier: 9699 passed at `25e66fa7`, 9607 at `bc86a31f`.
+- Offline smoke (`scripts/smoke-gateway.sh`, 2026-10-01 at `25e66fa7`): `import moeka` ok, no host module loaded by
+  the kernel import; `nanobot gateway` health ok; one mock chat turn through the CLI agent and the HTTP API server.
+  At `cd03700e` the G4 canary below replaces it (real systemd template unit, real gateway, mock provider).
+- `uv.lock` is byte-identical to `main`'s; `pyproject.toml` differs only in packaging (`moeka` sources, tool
+  description files) and pytest settings (`norecursedirs = tests/heldout`, a `docker` marker).
+- Live checkout before cutover: `~/projects/moeka` on `main` `54069bb2`, only `docs/core-map/` untracked.
+- Not verified offline: a real channel turn (Telegram/Discord; checked live at G5/G7) and the WebUI bundle
+  (no bun/npm in the test image; `nanobot/web/dist` is git-ignored and stays as built in the live checkout).
+
+## New runtime behaviour on the live bot (spec 005)
+
+These change what the default instance (`moeka.service`, root `~/.nanobot`) does after the fast-forward:
+
+- **Instance lock**: the gateway holds `flock` on `~/.nanobot/.instance.lock` and writes `~/.nanobot/.instance.json`
+  (`pid`, `hostname`, `started_at`, `argv0`, `mode`, `role`). A second writer on the same state dir (another
+  `nanobot gateway`, `nanobot serve`, one-shot `nanobot agent -m`, or a `moeka.Kernel` with `attach="write"`)
+  exits 3 / raises `InstanceLockedError`. Read-only commands (`nanobot status`, `sessions` listing) still work.
+  `moeka.sh run` additionally holds `~/.nanobot/gateway.lock` and writes `~/.nanobot/moeka.pid`.
+- **Channel token locks**: before Telegram/Discord start, the channel manager takes
+  `<run dir>/channel-locks/<channel>-<sha256[:16]>.lock` (+ a `.json` sidecar without the token); the run dir is
+  `$MOEKA_RUN_DIR`, else `$XDG_RUNTIME_DIR/moeka` (`/run/user/1000/moeka` under the user manager), else `/tmp/moeka-<uid>`. A second
+  process with the same bot token gets `state == "locked"` for that channel only; other channels start.
+- **Telegram `Conflict`**: polling pauses (`polling_state = "conflict"`), one ERROR per episode ("another process
+  is polling this bot token"), one retry after `conflictRetryS` (default 60 s), instead of the old endless loop.
+- **Unexpanded `${...}` workspace exits 2**: the live config has `agents.defaults.workspace = "${MOEKA_WORKSPACE}"`.
+  Under the unit it expands (the unit's `EnvironmentFile=%h/projects/moeka/.env` sets `MOEKA_WORKSPACE` to the
+  absolute `~/.nanobot`, `moeka.sh` re-exports it and passes `--workspace <root>`), so the gateway starts. A
+  bare `nanobot gateway`/`serve`/`agent -m` run WITHOUT that variable and without `--workspace` now exits 2
+  (`UnexpandedWorkspaceError`) instead of silently using `~/.nanobot`.
+- **Env files**: `moeka.sh` loads the repo `.env`/`keys.env` only for the default instance (root `~/.nanobot`) or
+  with `MOEKA_REPO_ENV=1`; then `<root>/.env`, `<root>/keys.env`. An env file can no longer change the instance
+  root (`MOEKA_WORKSPACE` from a file is ignored with a warning). The live bot is the default instance, so it
+  keeps loading the repo files.
+- **Config-owned data dirs (FR-027 to FR-031)**: media, logs, CLI history, bridge and legacy sessions derive from the
+  config file's directory (`~/.nanobot`, as before for the live bot); `nanobot gateway` pins its config path.
+- **File-tool floor**: the agent's file tools can no longer read or write any `keys.env`, the instance lock files,
+  or another instance's root.
+- **`moeka.sh` stop/status** act on this instance only (PID file, `/proc` cmdline, `gateway.lock`; no `pkill -f`).
 
 ## Gates G0-G7 (from `docs/reviews/2026-10-01-architecture-review.md` section 7)
 
@@ -27,7 +62,7 @@ changes; G4 is the canary; G5 is the cutover; G7 is the soak. Spec: FR-012 to FR
 | Gate | Check | Pass |
 |---|---|---|
 | G0 | `git -C ~/projects/moeka rev-parse HEAD` is `54069bb2`, branch `main`, status shows only `docs/core-map/`; no other agent or shell is using that checkout | exact match, recorded with a timestamp |
-| G1 | the tip to cut equals the tip that was tested (the "Verified state" block), or `scripts/test-docker.sh` is re-run on the new tip. `main` and `core-slim` are ancestors; `git diff --stat main consolidate/new-main -- nanobot/{cron,gateway,triggers,channels,bus} bin` is empty | all true; 0 failed |
+| G1 | the tip to cut equals the tip that was tested (the "Verified state" block), or `scripts/test-docker.sh` is re-run on the new tip. `main` and `core-slim` are ancestors; `git diff --stat main consolidate/new-main -- nanobot/{cron,gateway,triggers,channels,bus} bin` lists exactly the spec-005 files: `bin/moeka.sh`, `nanobot/channels/{manager.py,token_lock.py,telegram/runtime.py}`, `nanobot/gateway/{runtime.py,service.py}` | all true; 0 failed; no other file |
 | G2 | parity probes (`docs/reviews/2026-10-01-parity/`) re-run on the exact tip: same tool set (plus `defer_action` only), same exec env keys, same plugin list, live config validates, request body diff limited to tools and prompt | no other difference |
 | G3 | with the service STOPPED: SQLite-backup-API copy (never `cp`) of the session database to two physical disks (root volume and `/mnt/arteta`), plus `memory/`, `cron/jobs.json`, `config.json`, `llm_usage.sqlite3`, the workspace markdown files; `check` each copy and compare session and message counts with the live file; checksum list | counts equal, integrity ok, two disks |
 | G4 | canary: a throwaway bot token, a COPY of the workspace (different `MOEKA_WORKSPACE`, port and `--config`), the candidate code in its own worktree; a history turn, a tool call, `/status`, one heartbeat | replies within 60 s, history used, no ERROR lines, heartbeat fires |
@@ -46,7 +81,7 @@ path builds `AgentLoop` without `host_tools=True` (review risk R4).
 1. Decide the open items in "Owner decisions" below.
 2. `git -C ~/projects/moeka status`: the live checkout has an UNTRACKED `docs/core-map/` (two files). The new
    `main` tracks that directory, so the fast-forward would refuse to overwrite it. Move it aside (do not delete,
-   it holds the only copy of two older drafts): `mv docs/core-map /tmp/core-map.live-untracked`.
+   it holds the only copy of two older drafts): `mv docs/core-map ~/quarantine/moeka-core-map-<UTC>/`.
 3. Backup (gate G3). The `sqlite3` command-line tool is NOT installed on this host; use the Python backup API
    through the existing ops script, never a file copy of a live database:
    - Already done once: a verified backup taken 2026-10-01 (service running, WAL-consistent via the backup API,
@@ -71,7 +106,8 @@ path builds `AgentLoop` without `host_tools=True` (review risk R4).
 
 ## Steps
 
-All in `~/projects/moeka` (the live checkout), as the owner, outside any agent run, after G0-G4 and G6 pass.
+All in `~/projects/moeka` (the live checkout), after G0-G4 pass (M7: run by an agent with the owner's approval in
+the plan; G6 is rehearsed in a separate worktree).
 
 1. Mark the rollback point (a tag is a new ref, nothing moves): `git tag pre-consolidation-main 54069bb2`. Also
    write the sha into the operator notes.
@@ -90,8 +126,12 @@ All in `~/projects/moeka` (the live checkout), as the owner, outside any agent r
    rollback. Check only: `.venv/bin/python -c "import telegram, discord, moeka, nanobot.cli.commands; print('imports OK')"`.
    If the lock ever changes in a later cutover, a sync is followed by `nanobot plugins enable` for every enabled
    channel and the same import check, before the service starts.
-5. Unit and launcher: no change. `moeka.service` keeps `WorkingDirectory=%h/projects/moeka` and
-   `ExecStart=.../bin/moeka.sh run`; `bin/moeka.sh` is byte-identical to `main`'s.
+5. Unit: no change. `moeka.service` keeps `WorkingDirectory=%h/projects/moeka`,
+   `ExecStart=.../bin/moeka.sh run` and its two `EnvironmentFile=` lines (`scripts/moeka.service` is unchanged).
+   The launcher is NOT byte-identical: `bin/moeka.sh` is the spec-005 per-instance script (see "New runtime
+   behaviour"). For the default instance it resolves the root from `MOEKA_WORKSPACE` (set by the unit's
+   `EnvironmentFile`), loads the repo `.env`/`keys.env`, takes `~/.nanobot/gateway.lock`, writes
+   `~/.nanobot/moeka.pid` and execs `nanobot gateway --config ~/.nanobot/config.json --workspace ~/.nanobot`.
 6. Optional dry check before starting: `bin/moeka.sh doctor`, and `.venv/bin/nanobot status`.
 7. Start: `systemctl --user start moeka.service`; `systemctl --user status moeka.service` (G5). Do not
    `enable` it; the owner keeps it disabled.
@@ -111,6 +151,9 @@ All in `~/projects/moeka` (the live checkout), as the owner, outside any agent r
   `python3 -c "import sqlite3,os; print(sqlite3.connect('file:'+os.path.expanduser('~/.nanobot/llm_usage.sqlite3')+'?mode=ro', uri=True).execute('select count(*) from llm_calls').fetchone())"`
   grows.
 - `.venv/bin/python -c "import moeka; print(moeka.Kernel)"`.
+- Instance lock: `~/.nanobot/.instance.json` names the gateway pid; `~/.nanobot/gateway.lock` and
+  `~/.nanobot/moeka.pid` exist; `/run/user/1000/moeka/channel-locks/` holds one `telegram-*.lock` and one `discord-*.lock`.
+- No `UnexpandedWorkspaceError`, no `channel_token_in_use`, no `Conflict` in the journal.
 
 ## Rollback to the old `main`
 
@@ -130,9 +173,18 @@ The old `main` commit `54069bb2` is untouched and tagged in step 1. Rehearsed be
 
 - Pins move once, from `core-slim` `6f80c392` to the new `main` tip (after the owner fast-forwards it). Both
   pins stay valid until then; nothing rebases `core-slim`.
-- The `moeka` package, `nanobot.kernel`, `nanobot.api.complete` (deprecated `MoekaCore`) and `docs/python-sdk.md` are
-  unchanged by the consolidation: the same code as at `core-slim` `c382d0c9`, plus the gateway packages beside it.
+- The `moeka` package and `nanobot.kernel` are NOT the same code as at `core-slim` `c382d0c9` any more:
+  `git diff --stat c382d0c9 cd03700e -- moeka nanobot/kernel nanobot/api/complete.py docs/python-sdk.md` shows
+  22 files, +2338/-103, from the usage review (`kernel/usage.py`, ledger, budget) and spec 005
+  (`kernel/instance_lock.py`, `budget_shared.py`, read-only attach in `kernel.py`). The public API is additive
+  (`moeka.Kernel(..., attach="read_only")`, `moeka.budget.SharedCapBudget`, `moeka.errors.InstanceLockedError`,
+  usage readers); `nanobot.api.complete` is unchanged.
 - Differences a consumer can notice:
+  - A `moeka.Kernel` (default `attach="write"`) takes the instance lock on its state dir. A consumer that points
+    a writer Kernel at the live `~/.nanobot` while the gateway runs gets `InstanceLockedError`; use its own
+    state dir, or `attach="read_only"` for readers.
+  - Data dirs follow the config file's directory (FR-027); a consumer that relied on the process-global
+    config path for `llm_usage.sqlite3` or media must check where they land (plan M12).
   - Base dependencies grew back to `main`'s set (`websockets`, `qrcode`, `croniter`, `questionary`, `packaging`;
     the `core` extra gains `croniter`; new `api` extra). A consumer lock must re-resolve.
   - The build hook (`hatch_build.py`) runs a WebUI build on a NON-editable wheel/sdist build. A consumer that
