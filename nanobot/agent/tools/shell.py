@@ -299,6 +299,10 @@ class ExecTool(Tool):
         r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:history\.jsonl|\.dream_cursor)",
         r"\bdd\b[^|;&<>]*\bof=\S*(?:history\.jsonl|\.dream_cursor)",
         r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",
+        # The usage ledger: forging it would forge what the agent's own calls cost. A hint for
+        # obvious command lines (any tool that names the file); the file floor and
+        # ``kernel.usage.checkpoint()`` are the real defences.
+        r"llm_usage\.sqlite3",
     ]
 
     # Fork bomb: a near-universal foot-gun that is never a legitimate command.

@@ -95,6 +95,8 @@ def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
     roots: list[Path] = []
     for resolved_data in resolved_bases:
         roots.extend(resolved_data / name for name in PROTECTED_READ)
+        # The usage ledger: an agent that can rewrite it can forge what its own calls cost.
+        roots.extend(resolved_data / name for name in _usage_store_filenames())
         roots.append(default_sessions_root(resolved_data))
     resolved_ws = _safe_resolve(workspace) if workspace is not None else None
     if resolved_ws is not None and resolved_ws not in resolved_bases:
@@ -104,6 +106,13 @@ def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
         # host-owned kernel state files (plugin registry, fact store).
         roots.extend(resolved_ws / name for name in _kernel_state_filenames())
     return roots
+
+
+def _usage_store_filenames() -> tuple[str, ...]:
+    """The usage database (``<data_dir>/llm_usage.sqlite3``) and its SQLite sidecars."""
+    from nanobot.llm_usage import USAGE_DB_FILENAME
+
+    return tuple(USAGE_DB_FILENAME + suffix for suffix in ("", "-wal", "-shm", "-journal"))
 
 
 def _kernel_state_filenames() -> tuple[str, ...]:
