@@ -219,7 +219,66 @@ Numbered `005-Q*n*` so they never clash with the log's own Q1-Q16. Implemented w
 - Lands in: `005` FR-003; `bin/moeka.sh` (env loading).
 - Answered 2026-10-01 (agent, recommended default; owner may veto): A. Implemented.
 
+## Spec 006 questions (RSI kernel prerequisites; markers in `006-rsi-kernel-prerequisites/spec.md`)
+
+Open. Testers and implementers build the recommended default unless the owner vetoes.
+
+### 006-Q1. Add `ModelSpec.unsupported_sampling` (host-declared fields the backend ignores)?
+- Spec: `006` FR-033 (K5).
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. Add it: listed fields are dropped and reported under `"drop"`, raised under `"raise"`, on agent and `kernel.llm` paths | a host can make "this backend ignores seed" visible; one optional field |
+  | B. Defer: strict mode covers only what the provider declares | smaller change; a backend that silently ignores `seed` stays invisible |
+
+- Recommended: A. Reason: the local Ollama/vLLM tier is where the harness runs, and that is where a silently ignored
+  seed would corrupt noise estimates.
+- Lands in: `006` FR-032/FR-033; `nanobot/kernel/hostenv.py`, `nanobot/kernel/agent.py`, `nanobot/kernel/llm.py`.
+
+### 006-Q2. Infer `skill.read` from shell commands that name a `SKILL.md`?
+- Spec: `006` FR-039 (K6).
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. No: `exec`/`exec_session`/MCP reads stay invisible; `skill.read` is documented as a lower bound | honest; the event means "content reached the model through a file tool" |
+  | B. Yes, heuristically (`inferred=True`) | more coverage; false positives and negatives (pipes, globs, variables) |
+
+- Recommended: A. Reason: constitution II forbids claiming more than the layer can see.
+- Lands in: `006` FR-039; `nanobot/kernel/trace.py` (`EVENTS` text).
+
+## Spec 007 questions (held-out runner; markers in `007-heldout-runner/spec.md`)
+
+### 007-Q1. Does a round caused by a tester bug count toward the implementer's cap of 4?
+- Spec: `007` FR-035.
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. It counts unless the head runs `rounds --reset --reason tester-bug` (history kept) | the cap stays mechanical; resets are visible to the owner |
+  | B. Never counts (the runner cannot know; the head marks rounds afterwards) | fairer to the implementer; needs a per-round "void" flag and more state |
+
+- Recommended: A.
+- Lands in: `007` FR-032 to FR-035; `scripts/heldout_run.py`.
+
+### 007-Q2. Require an OS sandbox (for example bubblewrap) for every hidden run?
+- Spec: `007` FR-039.
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. No: placement checks, redaction and cleanup only; the limit is stated | works everywhere; protects against accidental exposure, not a hostile implementer |
+  | B. Yes: the copy is the only writable path, no network, suite read-only | resists a hostile implementer; needs bubblewrap and per-profile tuning (uv cache, Docker tests) |
+
+- Recommended: A for agent implementers (cooperative threat model); the RSI harness isolates its mutator in
+  containers already (`004` FR-015).
+- Lands in: `007` FR-039; `scripts/heldout_run.py`.
+
 ## Inconsistencies found while writing the specs (verified 2026-09-30; none edited)
+
+- Spec numbering (2026-10-01): plan step M9 calls the gateway stage-2 spec "spec 006"; that number is now
+  `006-rsi-kernel-prerequisites` (M10). Stage 2 takes the next free number when written.
 
 - Content-free versus replay: U3 says events carry no prompt or response text; U11 needs recorded responses.
   Resolved in `001` by making recordings a separate, host-owned, opt-in artifact (FR-003, FR-011). Owner to confirm.
