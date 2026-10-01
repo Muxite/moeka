@@ -271,7 +271,8 @@ awork-resume: waste label, `key_scheme` field, per-round budget events, billed/e
 
 ## Verification
 
-moeka (`review/usage`): see the run log in the final report for the exact counts; relevant suites run
-locally with `uv run pytest` and the full suite through `scripts/test-docker.sh`. awork-resume: `uv run pytest -q`
-(two e2e files need `pdflatex`; they are skipped where it is absent, so the build-level conformance test was
-not exercised here).
+moeka (`review/usage`): full suite through `scripts/test-docker.sh pytest tests`: 6305 passed, 53 skipped
+(platform skips); `ruff check nanobot tests` clean. awork-resume (`review/usage-adapter`): `uv run pytest -q`:
+2551 passed, 1 skipped. Two awork e2e files need `pdflatex`; where it is absent they skip, so the
+build-level conformance test depends on the environment. No live provider was called: the token and cache
+rules are tested through `LLMUsage` and fakes only.
