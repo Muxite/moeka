@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://moeka.dev/schemas/usage-record.v1.schema.json",
   "title": "usage-record.v1",
-  "description": "One model call attempt, or one response-cache hit that avoided a call. Content-free: no prompt, response or reasoning text. See ATTRIBUTION.md for field semantics. Additive changes bump the minor in schema_version and keep this major; removed or re-meant fields bump the major and the $id. Merge key across producers: (producer.name, record_id). Enum-valued fields may gain values in a minor: readers must treat an unknown value as opaque, not as an error (ATTRIBUTION.md, reader rule).",
+  "description": "One model call attempt, or one response-cache hit that avoided a call. Content-free: no prompt, response or reasoning text. See ATTRIBUTION.md for field semantics. Additive changes bump the minor in schema_version and keep this major; removed or re-meant fields bump the major and the $id.",
   "type": "object",
   "required": [
     "schema_version", "record_id", "kind", "call_id", "attempt", "consumer",
@@ -16,7 +16,7 @@
     },
     "record_id": {
       "type": "string", "minLength": 1,
-      "description": "Unique within a producer: '<call_id>:<attempt>' (attempt 0 for a cache hit). Two producers may collide, so the merge/idempotency key is (producer.name, record_id); a duplicate delivery of the same key is the same record. Referenced by complete-json-call.v1."
+      "description": "Globally unique within a producer: '<call_id>:<attempt>' (attempt 0 for a cache hit). Referenced by complete-json-call.v1."
     },
     "kind": {
       "enum": ["model_call", "cache_hit"],
@@ -32,7 +32,7 @@
     "purpose": {"type": ["string", "null"], "description": "Task type or stage name (extract_claims, fluff_check)."},
     "slot": {"type": ["string", "null"], "description": "Schema slot being filled, when the call serves one."},
     "source": {"enum": ["user", "api", "cron", "dream", "system", null], "description": "Coarse legacy origin class; optional."},
-    "tags": {"type": "object", "description": "Host-defined extras. Never the carrier of consumer, agent, session or role. Producer limits (not validated here, so a reader never rejects a record for them): at most 16 keys of at most 64 characters, scalar values, strings at most 120 characters, 2 KiB serialised. A value that does not fit is dropped, not clipped, and the producer sets the key moeka.tags_truncated to true. Content (prompts, replies, names of people) does not belong in tags."},
+    "tags": {"type": "object", "description": "Host-defined extras. Never the carrier of consumer, agent, session or role."},
 
     "trace_id": {"type": ["string", "null"]},
     "parent_call_id": {"type": ["string", "null"], "description": "call_id of the logical call that caused this one (sub-agent, verifier)."},
@@ -47,11 +47,11 @@
     "alias": {"type": ["string", "null"], "description": "Host-side model alias or preset name."},
     "tier": {"type": ["string", "null"], "description": "Cost tier (local, cheap, paid...)."},
 
-    "tokens_in": {"type": "integer", "minimum": 0, "description": "Billed input tokens, INCLUDING cache reads and cache writes (a provider that reports them separately, as Anthropic does, is normalised by adding them in). Zero on a cache hit."},
-    "tokens_out": {"type": "integer", "minimum": 0, "description": "Billed output tokens, INCLUDING reasoning tokens always: a provider that reports reasoning outside its output count (a total above input plus output) is normalised by adding the excess here. Zero on a cache hit."},
+    "tokens_in": {"type": "integer", "minimum": 0, "description": "Billed input tokens, INCLUDING cache reads and cache writes. Zero on a cache hit."},
+    "tokens_out": {"type": "integer", "minimum": 0, "description": "Billed output tokens, including reasoning tokens when the provider counts them there."},
     "tokens_cache_read": {"type": ["integer", "null"], "minimum": 0, "description": "Subset of tokens_in served from the provider prompt cache; null = not reported."},
     "tokens_cache_write": {"type": ["integer", "null"], "minimum": 0, "description": "Subset of tokens_in written to the provider prompt cache; null = not reported."},
-    "tokens_reasoning": {"type": ["integer", "null"], "minimum": 0, "description": "Hidden reasoning tokens, a SUBSET of tokens_out (never added to it again); null = not reported."},
+    "tokens_reasoning": {"type": ["integer", "null"], "minimum": 0, "description": "Hidden reasoning tokens when the provider reports them separately; null = not reported."},
     "usage_source": {"enum": ["reported", "estimated", "mixed", "none"], "description": "Whether the provider billed these counts or the producer estimated them."},
 
     "cost_usd": {"type": ["number", "null"], "minimum": 0, "description": "USD cost of this record; null = unknown (never free by default). 0 on a cache hit."},
@@ -75,7 +75,7 @@
 
     "waste_label": {
       "enum": ["retry", "failover", "avoidable_cache_miss", "discarded_draft", "refused_after_admission", null],
-      "description": "Why THESE tokens did not contribute to the final result. retry: this attempt was superseded by a later attempt of the same call (the retry that produced the answer is not waste). Set on the record when known at emission, or by a linked waste-label.v1 document keyed by (call_id, attempt) that readers apply (a retry is only known after the attempt ended)."
+      "description": "Why these tokens did not contribute to the final result, set at the time it was known (kernel-known cases) or by a linked call.waste event (caller-known cases such as a discarded draft)."
     },
     "waste_set_by": {"enum": ["kernel", "caller", "consumer", null]},
 

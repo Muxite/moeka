@@ -1,16 +1,18 @@
 {
-  "schema_version": "1.0",
-  "record_id": "c-7f3a91:2",
+  "schema_version": "1.1",
+  "record_id": "c-7f3a91:1",
   "kind": "model_call",
   "call_id": "c-7f3a91",
-  "attempt": 2,
+  "attempt": 1,
   "consumer": "awork",
   "agent": "research",
   "session": "build-2026-10-01-a",
   "role": "extractor",
   "purpose": "extract_claims",
   "slot": null,
-  "tags": {"stage": "ingest"},
+  "tags": {
+    "stage": "ingest"
+  },
   "trace_id": "t-19c2",
   "request_key": "9b1d5e0c44aa81f2",
   "prompt_version": "extract-v3",
@@ -34,9 +36,12 @@
   "saved_tokens_out": null,
   "saved_cost_usd": null,
   "finish_reason": "stop",
-  "outcome": "ok",
+  "outcome": "parse_failure",
   "error_kind": null,
   "waste_label": "retry",
   "waste_set_by": "kernel",
-  "producer": {"name": "moeka", "version": "0.1"}
+  "producer": {
+    "name": "moeka",
+    "version": "0.1"
+  }
 }

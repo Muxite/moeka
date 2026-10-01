@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "kind": "refuse",
   "call_id": "c-7f3a93",
   "ts_ms": 1790000001000,
@@ -11,7 +11,11 @@
   "model": "gpt-5-mini",
   "provider": "openrouter",
   "alias": "cheap",
-  "scope": {"kind": "kernel", "key": null, "value": null},
+  "scope": {
+    "kind": "kernel",
+    "key": null,
+    "value": null
+  },
   "cap_usd": 5.0,
   "cap_tokens": null,
   "spent_usd": 4.99,
@@ -22,6 +26,12 @@
   "remaining_tokens": null,
   "worst_case_usd": 0.02,
   "worst_case_tokens": 9000,
-  "refusal": {"code": "cap_usd", "message": "worst case $0.020000 on top of $4.990000 exceeds limit_usd=$5.000000"},
-  "producer": {"name": "moeka", "version": "0.1"}
+  "refusal": {
+    "code": "cap_usd",
+    "message": "worst case $0.020000 on top of $4.990000 exceeds limit_usd=$5.000000"
+  },
+  "producer": {
+    "name": "moeka",
+    "version": "0.1"
+  }
 }

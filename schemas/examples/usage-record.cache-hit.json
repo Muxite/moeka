@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "record_id": "c-7f3a92:0",
   "kind": "cache_hit",
   "call_id": "c-7f3a92",
@@ -24,5 +24,8 @@
   "saved_tokens_out": 180,
   "saved_cost_usd": 0,
   "outcome": "ok",
-  "producer": {"name": "awr.llm", "version": null}
+  "producer": {
+    "name": "awr.llm",
+    "version": null
+  }
 }
