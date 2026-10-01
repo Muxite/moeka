@@ -2,7 +2,7 @@
 
 **Feature Branch**: `003-main-consolidation`
 **Created**: 2026-09-30
-**Status**: Draft (decided by the owner 2026-09-30; NOT executed; nothing merged or renamed)
+**Status**: Stage 1 executed 2026-10-01 on branch `consolidate/new-main` (kernel base + gateway host on top, tests green, smoke passed); cutover NOT performed (see `CUTOVER.md`); stage 2 (gateway onto `moeka.Kernel`) open
 **Input**: Owner decision 2026-09-30: the kernel lives inside moeka `main`, and the gateway (channels, WebUI,
 Telegram and Discord bot) sits on top as one consumer of it. Source: `.agent/moeka-kernel-design.md` section 12
 ("Branch consolidation") and section 14 risks; system contract section 9.
@@ -110,8 +110,8 @@ after).
 - **FR-009**: the gateway MUST move onto the public kernel API in defined steps, each independently testable,
   with the legacy loop path removed only after the gateway uses the kernel. [NEEDS CLARIFICATION: how the
   gateway moves onto `moeka.Kernel` (today it uses the legacy loop path and passes no plugin registry) and the
-  order of steps; recommended: consolidate first with the gateway unchanged, then migrate the gateway to the
-  kernel API behind a switch (CLARIFY-LOG Q8)]
+  order of steps; executed as option A: consolidate first with the gateway unchanged (done, 2026-10-01), then migrate it to the
+  kernel API behind a switch (stage 2, open; owner to confirm) (CLARIFY-LOG Q8)]
 - **FR-010**: after consolidation, `nanobot.api` on `main` MUST keep the HTTP API server while the legacy
   completion module is removed under `002-kernel-api-for-consumers`.
 - **FR-011**: a consolidation record MUST list, for each top-level path, which branch it came from and why,

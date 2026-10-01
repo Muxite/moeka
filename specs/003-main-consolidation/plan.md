@@ -72,3 +72,37 @@ docs/consolidation-record.md      # per top-level path: source branch and reason
 |---|---|---|
 | Hand merge of shared files | 201 shared files were edited for the slim build | a plain merge deletes the gateway; a file-level take loses one side |
 | Host-side allow-list for ambient reads | gateway packages read process state | exempting silently would void I1 |
+
+## Execution result (2026-10-01)
+
+Direction as decided by the owner: `core-slim` is the base, the gateway comes from `main`. Branch
+`consolidate/new-main` (worktree `/home/muk/projects/moeka-newmain`); `main` is merged in with `-s ours`, so it
+fast-forwards. Per-path record: `docs/consolidation-record.md`. Cutover steps: `CUTOVER.md`.
+
+### Seams as built
+
+- `AgentLoop(host_tools=True)` / `ToolContext.host_tools`: `message`, `cron`, `run_cli_app` register only for host
+  loops (gateway, `serve`, CLI agent). A bare loop and every `moeka.Kernel` agent keep the kernel tool set
+  (`tests/agent/test_registered_tool_names.py`). `tool_contract.md` renders host sections from the registered tool names.
+- Host imports are lazy on the kernel path: automation coordinators in `AgentLoop.__init__`, WebUI helpers in
+  `session/recovery.py` and `utils/restart.py`, `CronSchedule` in `config/schema.py`, `nanobot.cron`/`nanobot.apps`
+  in the `cron` and `cli_apps` tool modules, CLI-app skill aliases in `agent/skills.py` (skipped for a strict env).
+- Config: the `channels`, `transcription`, `api`, `gateway` (+ `heartbeat`), `tools.cliApps`,
+  `webuiAllowRemotePackageInstall` sections and `DreamConfig` scheduling are back; the slim "retired section" strip in
+  `_migrate_config` is gone.
+- Ambient reads: `HOST_AMBIENT_ALLOWLIST` (reasons inline). The WebUI now passes `os.environ` to the sandbox helpers,
+  since the security layer no longer reads the process environment.
+- `conftest.py` keeps the kernel session-root isolation and restores the pairing-store isolation fixture.
+
+### Stage 2 remaining (gateway onto `moeka.Kernel`, FR-009, T014)
+
+- The gateway builds `AgentLoop` through `AgentLoop.from_config` with a `LegacyEnvironment`, with no plugin
+  registry, policy gate or kernel `Budget`; `nanobot/api/server.py` and `runtime.py` use the same path.
+- `/dream` (`command/builtin.py`) and the gateway's scheduled Dream job (`cli/gateway_runtime.py`) keep their own
+  copy of the Dream run; the kernel has `nanobot/agent/dream.py:run_dream`.
+- Host slash commands (`/trigger`, `/pairing`, `/evaluator-prompt`) register on every loop; gate them behind `host_tools`.
+- `search_sessions`/`read_session` use the kernel's `_SessionAccess`, not the WebUI's `WebuiSessionAccess`.
+- `templates/AGENTS.md` (workspace seed) is the kernel one: no reminder/heartbeat section for new workspaces.
+- Duplicate `notification_metadata` (kernel `turn_delivery.py` vs `channels/notification_routes.py`).
+- `Nanobot` SDK facade loads no host tools; `AgentLoop._automation_specs()` loads cron/trigger specs lazily at run time.
+- `basedpyright` strict: 791 errors versus 289 on old `main`.

@@ -91,6 +91,8 @@ the owner may veto any of them.
   | C. Do both in one step | one review; large blast radius on the live bot |
 
 - Recommended: A. Reason: stage 1 is mechanical and testable; stage 2 can ship per channel behind a switch.
+- Status 2026-10-01: stage 1 executed as A on branch `consolidate/new-main` (gateway on the legacy loop path via
+  the deprecated facade seams); the owner still confirms A for stage 2. Open items: `003` plan, "Stage 2 remaining".
 - Lands in: `003` FR-009, T003 and T014.
 
 ## Questions with recommended defaults (no marker)

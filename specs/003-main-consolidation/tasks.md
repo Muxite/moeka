@@ -1,48 +1,51 @@
 ---
-description: "Task list for main consolidation (not executed)"
+description: "Task list for main consolidation (executed 2026-10-01 up to the cutover; cutover not performed)"
 ---
 
 # Tasks: Main Consolidation
 
 **Input**: `specs/003-main-consolidation/spec.md`, `plan.md`
-**Status**: recorded plan; none of these tasks have started. All work happens in worktrees.
+**Status**: executed in worktree `/home/muk/projects/moeka-newmain` on branch `consolidate/new-main` (direction
+changed 2026-09-30 by the owner: `core-slim` is the base, the gateway is carried over from `main`, not the reverse).
+Cutover, consumer pins and the live deploy are NOT done; see `CUTOVER.md`.
 
 ## Phase 1: Setup
 
-- [ ] T001 Record the live checkout branch and HEAD, and `git ls-remote` of `core-slim`, in the consolidation record (SC-003, SC-004)
-- [ ] T002 [P] Run the kernel suite on `core-slim` and the gateway suite on `main` in Docker (`scripts/test-docker.sh`) as the baseline (SC-001)
-- [ ] T003 Decide CLARIFY-LOG Q8 (gateway migration and step order); record in `spec.md`
+- [x] T001 Live checkout recorded before the work: `~/projects/moeka` on `main` `54069bb2`, plus an untracked `docs/core-map/`; `origin/core-slim` is `6f80c392`. Re-checked unchanged after the work.
+- [x] T002 Baselines (bind-mounted image run): `main` 7999 passed / 4 failed (3 `tests/cli/test_commands.py` WebUI-foreground tests need bun/npm, 1 `test_dream` git-config test; both environment-specific), `core-slim` 6223 passed / 1 failed (same dream test). Under `scripts/test-docker.sh` the consolidated tree is 9607 passed, 0 failed.
+- [x] T003 Q8: executed as option A (consolidate first with the gateway on the legacy loop path, migrate later), following the owner's 2026-09-30 direction; the owner still confirms A for stage 2 (noted in `CLARIFY-LOG.md`).
 
 ## Phase 2: Foundational
 
-- [ ] T004 Create a worktree and branch `consolidate/kernel-on-main` from `main` (FR-007, FR-008)
-- [ ] T005 Dry-run both directions (main-based and core-slim-based) and count manual hunks; pick the lower (plan step 4)
-- [ ] T006 Write `docs/consolidation-record.md` skeleton with every top-level path (FR-011, SC-006)
+- [x] T004 Worktree `/home/muk/projects/moeka-newmain`, branch `consolidate/new-main` from `core-slim` (not `consolidate/kernel-on-main` from `main`).
+- [x] T005 Direction measured instead of dry-run: 951 `main`-only files restore by `git checkout main --`; only about 25 shared files had gateway hooks removed (loop, schema, recovery, builtin, cli, templates, ...). `core-slim` base needed far fewer hand hunks than a `main` base (201 modified shared files).
+- [x] T006 `docs/consolidation-record.md` written (per top-level path).
 
 ## Phase 3: Consumer Story 1 - one branch (P1)
 
-- [ ] T007 [US1] Bring kernel-owned paths from `core-slim`: `nanobot/kernel`, `moeka`, `nanobot/llm_usage`, `nanobot/security`, `tests/kernel`, `tests/moeka`, `docs/core-map`, `.agent/` design docs (FR-002)
-- [ ] T008 [US1] Reconcile each shared file under `nanobot/agent/`, `nanobot/agent/tools/`, `nanobot/providers/`, `nanobot/config/`, `nanobot/core/`, `nanobot/cli/`, `nanobot/command/builtin.py`, `nanobot/nanobot.py`; log each in the record (FR-005)
-- [ ] T009 [US1] Keep `nanobot/api/{runtime,server}.py`; keep the legacy `complete.py` until `002` T014 (FR-010)
-- [ ] T010 [US1] Reconcile `CLAUDE.md`, `AGENTS.md`, `docs/README.md` and the "Branching Strategy" section into one description (FR-006)
-- [ ] T011 [US1] Run both suites; fix regressions; list intentional drops (SC-001)
+- [x] T007 Kernel-owned paths are the base (never touched): `nanobot/kernel`, `moeka`, `nanobot/llm_usage`, `nanobot/security`, kernel tests, `docs/core-map`, `.agent/` design docs, specs.
+- [x] T008 Shared files reconciled: gateway hooks restored behind seams (see `plan.md`, "Seams as built"); each decision in `docs/consolidation-record.md`.
+- [x] T009 `nanobot/api/{runtime,server}.py` restored; `complete.py` kept (legacy until `002` T014).
+- [x] T010 `CLAUDE.md`, `AGENTS.md`, `docs/README.md`, `docs/my-tool.md` reconciled; `.agent/deploy-runbook.md` taken from `main`.
+- [x] T011 Both suites run under `scripts/test-docker.sh` (now with a wall-clock cap): 9607 passed, 0 failed, 59 skipped. Intentional test changes: dropped slim "retired section" tests (`test_dream_config_legacy`, `test_retired_cli_apps_config`, three in `test_removed_keys`), replaced the slim CLI assertions in `tests/cli/*` with `main`'s, extended `test_builtin_registry`, `test_registered_tool_names` (host tools only for host loops), prompt-leak test (host-owned files excluded, `tool_contract.md` checked as rendered for a kernel agent), `host_tools=True` in the loop-construction fixtures of three gateway tests.
 
 ## Phase 4: Consumer Story 2 - gateway consumes kernel (P1)
 
-- [ ] T012 [P] [US2] Extend `tests/core/test_import_boundary.py` to probe `import moeka` and `nanobot.kernel` (FR-003)
-- [ ] T013 [US2] Add a reviewed host-side allow-list to `tests/kernel/test_no_ambient_reads.py` for gateway packages, with a reason each (FR-004, SC-002)
-- [ ] T014 [US2] Gateway stage 2 (after T003): move the loop path onto `moeka.Kernel` behind a switch in `nanobot/gateway/`; usage visible in the `001` surface
+- [x] T012 Import boundary: `tests/core/test_import_boundary.py` (already probes `moeka` and `nanobot.kernel`) is green and stricter than `main`'s: the loop, session recovery and config import no `webui`, `cron`, `triggers` or `apps` module.
+- [x] T013 Reviewed host-side allow-list `HOST_AMBIENT_ALLOWLIST` in `tests/kernel/test_no_ambient_reads.py` (9 entries, reason each, guard tests that it never covers kernel code and that every entry still needs it).
+- [ ] T014 [US2] Gateway stage 2: move the loop path onto `moeka.Kernel` behind a switch in `nanobot/gateway/`. NOT started; see `plan.md`, "Stage 2 remaining".
 
 ## Phase 5: Consumer Story 3 - pins (P2)
 
-- [ ] T015 [US3] awork: bump its submodule to the consolidated `main`; run the awork gate command (SC-005)
-- [ ] T016 [US3] RSI harness: bump its submodule; run its pin check (SC-005)
-- [ ] T017 [US3] Confirm `core-slim` `6f80c392` still resolves; do not delete or rebase it (SC-004)
+- [ ] T015 [US3] awork: bump its submodule to the consolidated `main`; run the awork gate command. Waits for the cutover.
+- [ ] T016 [US3] RSI harness: bump its submodule; run its pin check. Waits for the cutover.
+- [x] T017 `core-slim` `c382d0c9` / `origin/core-slim` `6f80c392` still resolve; no branch was rebased, renamed, deleted or pushed. `consolidate/new-main` contains `core-slim` and `main` as ancestors.
 
 ## Phase 6: Story 4 - live service (P1)
 
-- [ ] T018 [US4] After owner approval only: deploy per `.agent/deploy-runbook.md`; verify the live checkout state before and after (SC-003)
+- [ ] T018 [US4] Cutover: owner only, per `CUTOVER.md` (not performed; the live checkout and `moeka.service` were not touched).
+- [x] T019 Offline smoke test in an isolated container (`scripts/smoke-gateway.sh`): `moeka` import, gateway health, mock chat turn through the CLI agent and the HTTP API server.
 
 ## Dependencies
 
-- T003 blocks T014. T005 precedes T007. T011 precedes T015 and T016. T018 requires explicit owner approval.
+- T011 precedes T015 and T016. T018 requires explicit owner approval and precedes T015 and T016.
