@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Build the moeka test image and run the test suite inside Docker.
+# Env: MOEKA_TEST_IMAGE (image tag, default moeka-test), MOEKA_TEST_TIMEOUT (seconds, default 3000).
 # Extra args replace the default command, e.g.:
 #   scripts/test-docker.sh pytest tests/agent/test_vec_store.py -v
 #   scripts/test-docker.sh ruff check nanobot --select F
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-docker build -f Dockerfile.test -t moeka-test .
+IMAGE="${MOEKA_TEST_IMAGE:-moeka-test}"
+# Wall-clock cap for the whole run (seconds); per-test caps live in pyproject.toml.
+LIMIT="${MOEKA_TEST_TIMEOUT:-3000}"
+NAME="moeka-test-$$"
+docker build -f Dockerfile.test -t "$IMAGE" .
 # --add-host: this sandbox has no outbound DNS/network egress at all, but a
 # handful of tests (SSRF-guard behavior in nanobot/channels/dingtalk/tests/
 # test_dingtalk_channel.py and tests/tools/test_tool_validation.py) only need
@@ -20,7 +25,17 @@ docker build -f Dockerfile.test -t moeka-test .
 # nanobot/security/network.py's _BLOCKED_NETWORKS list, so the SSRF guard
 # correctly treats them as ordinary public addresses, exactly like a real
 # public hostname would resolve.
-exec docker run --rm -t \
+# Not `exec`: on a wall-clock timeout the named container is killed explicitly,
+# since killing the docker client alone would leave the tests running.
+trap 'docker kill "$NAME" >/dev/null 2>&1 || true' INT TERM
+set +e
+timeout --signal=TERM "$LIMIT" docker run --rm -t --name "$NAME" \
   --add-host example.com:203.0.113.10 \
   --add-host example.org:203.0.113.11 \
-  moeka-test "$@"
+  "$IMAGE" "$@"
+status=$?
+if [ "$status" -eq 124 ]; then
+  echo "test-docker.sh: timed out after ${LIMIT}s; killing $NAME" >&2
+  docker kill "$NAME" >/dev/null 2>&1 || true
+fi
+exit "$status"
