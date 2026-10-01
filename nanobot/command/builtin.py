@@ -124,6 +124,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         accepts_args=True,
     ),
     BuiltinCommandSpec(
+        "/trigger",
+        "Create named local trigger",
+        "Create a named CLI trigger bound to this chat session.",
+        "zap",
+        "<name>",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
         "/dream",
         "Run Dream",
         "Manually trigger memory consolidation.",
@@ -152,6 +160,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         accepts_args=True,
     ),
     BuiltinCommandSpec(
+        "/evaluator-prompt",
+        "Heartbeat evaluator",
+        "Customize the heartbeat notification gate prompt for this workspace.",
+        "file-text",
+        "[init]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
         "/skill",
         "List skills",
         "List all enabled skills available to the agent.",
@@ -162,6 +178,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Show help",
         "List available slash commands.",
         "circle-help",
+    ),
+    BuiltinCommandSpec(
+        "/pairing",
+        "Manage pairing",
+        "List, approve, deny or revoke pairing requests.",
+        "shield",
+        "[list|approve <code>|deny <code>|revoke <user_id>]",
+        accepts_args=True,
     ),
 )
 
@@ -427,35 +451,75 @@ async def cmd_model(ctx: CommandContext) -> OutboundMessage:
 
 async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
     """Manually trigger a Dream consolidation run."""
+    import time
+
     loop = ctx.loop
     msg = ctx.msg
 
     async def _run_dream():
-        from nanobot.agent.dream import run_dream
+        from nanobot.agent.memory import MemoryStore
 
-        result = await run_dream(loop, commit_prefix="dream: manual run")
-        if result.status == "no_input":
-            await loop.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id,
-                content=_format_dream_no_input_message(),
-                metadata={"render_as": "text"},
-            ))
-            return
-        elapsed = result.elapsed_s
-        if result.status == "completed":
-            if result.changed:
-                content = f"Dream completed in {elapsed:.1f}s."
-            else:
-                content = f"Dream completed in {elapsed:.1f}s; no memory changes."
-        elif result.status == "incomplete":
-            content = (
-                f"Dream did not complete after {elapsed:.1f}s ({result.reason}); "
-                "memory cursor was not advanced."
+        async def _silent(*_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        dream_session_key = MemoryStore.dream_session_key
+        build_dream_commit_message = MemoryStore.build_dream_commit_message
+        prune_dream_sessions = MemoryStore.prune_dream_sessions
+
+        store = loop.context.memory
+        content = ""
+        resp = None
+        diff_body = ""
+        t0 = time.monotonic()
+        try:
+            result = store.build_dream_prompt()
+            if result is None:
+                await loop.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=_format_dream_no_input_message(),
+                    metadata={"render_as": "text"},
+                ))
+                return
+            prompt, last_cursor = result
+            key = dream_session_key()
+            dream_runtime = loop.dream_runtime()
+            resp = await loop.process_direct(
+                prompt,
+                session_key=key,
+                ephemeral=True,
+                tools=store.build_dream_tools(),
+                on_progress=_silent,
+                runtime=dream_runtime,
             )
-        else:
-            content = f"Dream failed after {elapsed:.1f}s: {result.error}"
-        if result.commit_sha:
-            content += f" (commit {result.commit_sha})"
+            elapsed = time.monotonic() - t0
+            # The real file delta grounds the audit record; normal completion
+            # decides whether this history batch has finished processing.
+            diff_body = store.dream_content_diff()
+            completed = MemoryStore.dream_run_completed(resp)
+            if completed:
+                store.set_last_dream_cursor(last_cursor)
+                if diff_body:
+                    content = f"Dream completed in {elapsed:.1f}s."
+                else:
+                    content = f"Dream completed in {elapsed:.1f}s; no memory changes."
+            else:
+                reason = MemoryStore.dream_incompletion_reason(resp)
+                content = (
+                    f"Dream did not complete after {elapsed:.1f}s ({reason}); "
+                    "memory cursor was not advanced."
+                )
+        except Exception as e:
+            elapsed = time.monotonic() - t0
+            content = f"Dream failed after {elapsed:.1f}s: {e}"
+        finally:
+            if store.git.is_initialized():
+                commit_msg = build_dream_commit_message("dream: manual run", diff_body)
+                sha = store.git.auto_commit(commit_msg)
+                if sha:
+                    content += f" (commit {sha})"
+            store.compact_history()
+            store.reindex_memory()  # moeka: refresh VecStore after Dream edits
+            prune_dream_sessions(loop.sessions)
         await loop.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content,
         ))
@@ -499,6 +563,56 @@ async def cmd_dream_prompt(ctx: CommandContext) -> OutboundMessage:
             "Dream memory instructions: nanobot default\n\n"
             f"- Editable file: `{display_path}`\n"
             "- Run `/dream-prompt init` to create an editable copy."
+        )
+
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=content,
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )
+
+
+async def cmd_evaluator_prompt(ctx: CommandContext) -> OutboundMessage:
+    """Show or set up the workspace heartbeat evaluator prompt."""
+    from nanobot.utils.evaluator import (
+        default_evaluator_prompt,
+        evaluator_prompt_file,
+        has_evaluator_prompt_override,
+    )
+
+    workspace = ctx.loop.context.memory.workspace
+    path = evaluator_prompt_file(workspace)
+    display_path = path.relative_to(workspace).as_posix()
+    args = ctx.args.strip().lower()
+
+    if args == "init":
+        if not initialize_workspace_prompt(path, default_evaluator_prompt()):
+            content = (
+                f"Heartbeat evaluator prompt already exists at `{display_path}`.\n\n"
+                "Edit that file, or delete/empty it to return to nanobot's default."
+            )
+        else:
+            content = (
+                f"Created heartbeat evaluator prompt at `{display_path}`.\n\n"
+                "Edit that file to control when the heartbeat notification gate speaks. "
+                "It must still instruct the model to call the `evaluate_notification` tool, "
+                "otherwise the gate fails closed and stays silent. "
+                "Delete or empty it to return to nanobot's default."
+            )
+    elif args:
+        content = "Usage: /evaluator-prompt [init]"
+    elif has_evaluator_prompt_override(workspace):
+        content = (
+            "Heartbeat evaluator prompt: custom for this workspace\n\n"
+            f"- Path: `{display_path}`\n"
+            "- Delete or empty this file to return to nanobot's default."
+        )
+    else:
+        content = (
+            "Heartbeat evaluator prompt: nanobot default\n\n"
+            f"- Editable file: `{display_path}`\n"
+            "- Run `/evaluator-prompt init` to create an editable copy."
         )
 
     return OutboundMessage(
@@ -831,6 +945,19 @@ async def cmd_goal(ctx: CommandContext) -> OutboundMessage | None:
     return None
 
 
+async def cmd_pairing(ctx: CommandContext) -> OutboundMessage:
+    """List, approve, deny or revoke pairing requests."""
+    from nanobot.pairing import PAIRING_COMMAND_META_KEY, handle_pairing_command
+
+    reply = handle_pairing_command(ctx.msg.channel, ctx.args)
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=reply,
+        metadata={PAIRING_COMMAND_META_KEY: True},
+    )
+
+
 async def cmd_skill(ctx: CommandContext) -> OutboundMessage:
     """List all enabled skills (name and description only)."""
     loop = ctx.loop
@@ -850,6 +977,54 @@ async def cmd_skill(ctx: CommandContext) -> OutboundMessage:
         metadata=dict(ctx.msg.metadata or {}),
     )
 
+
+async def cmd_trigger(ctx: CommandContext) -> OutboundMessage:
+    """Create a local trigger bound to the current session."""
+    name = ctx.args.strip()
+    if not name:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=(
+                "Usage: /trigger <name>\n\n"
+                "Create a named local trigger bound to this chat session."
+            ),
+            metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+        )
+
+    from nanobot.triggers.local_store import LocalTriggerStore
+
+    loop = ctx.loop
+    store = loop.local_trigger_store
+    if store is None:
+        store = LocalTriggerStore(loop.workspace)
+
+    from nanobot.session.keys import UNIFIED_SESSION_KEY
+
+    session_key = (
+        ctx.msg.session_key
+        if ctx.key == UNIFIED_SESSION_KEY
+        else ctx.key
+    )
+    trigger = store.create(
+        name=name,
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        session_key=session_key,
+        sender_id="trigger",
+        origin_metadata=dict(ctx.msg.metadata or {}),
+    )
+    command = f'nanobot trigger {trigger.id} "message"'
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=(
+            f"Trigger created: {trigger.name}\n"
+            f"ID: {trigger.id}\n\n"
+            f"Command:\n{command}"
+        ),
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )
 
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
@@ -910,6 +1085,8 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/history ", cmd_history)
     router.exact("/goal", cmd_goal)
     router.prefix("/goal ", cmd_goal)
+    router.exact("/trigger", cmd_trigger)
+    router.prefix("/trigger ", cmd_trigger)
     router.exact("/dream", cmd_dream)
     router.exact("/dream-log", cmd_dream_log)
     router.prefix("/dream-log ", cmd_dream_log)
@@ -917,7 +1094,11 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/dream-restore ", cmd_dream_restore)
     router.exact("/dream-prompt", cmd_dream_prompt)
     router.prefix("/dream-prompt ", cmd_dream_prompt)
+    router.exact("/evaluator-prompt", cmd_evaluator_prompt)
+    router.prefix("/evaluator-prompt ", cmd_evaluator_prompt)
     router.exact("/skill", cmd_skill)
     router.exact("/help", cmd_help)
+    router.exact("/pairing", cmd_pairing)
+    router.prefix("/pairing ", cmd_pairing)
     router.exact(USER_SHELL_COMMAND, cmd_user_shell)
     router.prefix(f"{USER_SHELL_COMMAND} ", cmd_user_shell)

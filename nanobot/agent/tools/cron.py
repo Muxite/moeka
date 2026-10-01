@@ -63,7 +63,7 @@ class CronTool(Tool):
 
     @classmethod
     def enabled(cls, ctx: ToolContext) -> bool:
-        return ctx.cron_service is not None
+        return ctx.host_tools and ctx.cron_service is not None
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:

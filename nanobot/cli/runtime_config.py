@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.text import Text
@@ -13,10 +14,12 @@ __all__ = [
     "_load_config_for_cli",
     "_load_inspection_config",
     "_load_runtime_config",
+    "_migrate_cron_store",
     "_model_display",
     "_print_agent_start_error",
     "_print_config_error",
     "_print_model_setup_steps",
+    "_print_runtime_config_validation_error",
     "_provider_setup_error",
 ]
 
@@ -41,17 +44,46 @@ def _print_config_error(error: Exception) -> None:
         console.print(f"[dim]Check again after editing: {escape(command)}[/dim]")
 
 
+def _print_runtime_config_validation_error(
+    error: ValidationError,
+    *,
+    config_path: Path,
+    summary: str,
+    path_prefix: tuple[str | int, ...],
+    retry_command: str,
+) -> None:
+    """Render a runtime-owned Pydantic config error without exposing input values."""
+    from nanobot.config.errors import ConfigIssue, ConfigLoadError, validation_issues
+
+    issues = tuple(
+        ConfigIssue(
+            path=(*path_prefix, *issue.path),
+            message=issue.message,
+        )
+        for issue in validation_issues(error)
+    )
+    diagnostic = ConfigLoadError(
+        config_path,
+        kind="invalid_schema",
+        summary=summary,
+        issues=issues,
+    )
+    console.print(Text(str(diagnostic), style="red"))
+    console.print(f"[dim]Fix the listed setting, then retry: {escape(retry_command)}[/dim]")
+
+
 def _status_command(config_path: Path) -> str:
     return f'nanobot status --config "{config_path}"'
 
 
 def _print_model_setup_steps(config_path: Path) -> None:
     """Show the shortest setup routes shared by Status and Agent startup."""
+    config_arg = f'--config "{config_path}"'
     console.print(
-        f"  Edit:  [cyan]{escape(str(config_path))}[/cyan] and set "
-        "agents.defaults.model plus a providers.<name>.apiKey"
+        f"  WebUI: run [cyan]nanobot webui {escape(config_arg)}[/cyan], "
+        "then open Settings → Models"
     )
-    console.print("  OAuth: run [cyan]nanobot provider login <provider>[/cyan]")
+    console.print(f"  CLI:   run [cyan]nanobot onboard --wizard {escape(config_arg)}[/cyan]")
     console.print(f"  Check: [cyan]{escape(_status_command(config_path))}[/cyan]")
 
 
@@ -127,6 +159,19 @@ def _load_inspection_config(
     if workspace:
         loaded.agents.defaults.workspace = workspace
     return display_path, loaded
+
+
+def _migrate_cron_store(config: "Config") -> None:
+    """One-time migration: move legacy global cron store into the workspace."""
+    from nanobot.config.paths import get_cron_dir
+
+    legacy_path = get_cron_dir() / "jobs.json"
+    new_path = config.workspace_path / "cron" / "jobs.json"
+    if legacy_path.is_file() and not new_path.exists():
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        shutil.move(str(legacy_path), str(new_path))
 
 
 def _provider_setup_error(config: Config) -> str | None:

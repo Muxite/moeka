@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.runtime_control import RuntimeControl
     from nanobot.bus.queue import MessageBus
     from nanobot.config.schema import ProviderConfig, ToolsConfig
+    from nanobot.cron.service import CronService
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.variants import Variant
     from nanobot.providers.factory import ProviderSnapshot
@@ -82,6 +83,7 @@ class ToolContext:
     workspace: str
     bus: MessageBus | None = None
     subagent_manager: SubagentManager | None = None
+    cron_service: CronService | None = None
     exec_session_manager: ExecSessionManager | None = None
     sessions: SessionManager | None = None
     file_state_store: FileStates | None = None
@@ -97,3 +99,6 @@ class ToolContext:
     # The loop's ``Variant`` (Task 8): ``ToolLoader`` applies its description overrides
     # to each tool it builds; file tools may read its ``builtin_skills_dir``.
     variant: Variant | None = None
+    # Gateway-owned tools (message, cron, run_cli_app) load only when the host loop
+    # (gateway, serve, CLI agent) opts in; a bare kernel agent never gets them.
+    host_tools: bool = False

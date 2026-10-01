@@ -180,7 +180,12 @@ class ContextBuilder:
 
         parts.append(self._behavioral_guidelines())
         roots = getattr(self, "_template_roots", ())
-        parts.append(render_template("agent/tool_contract.md", roots=roots))
+        parts.append(render_template(
+            "agent/tool_contract.md", roots=roots,
+            # Host-owned tools (message, cron, run_cli_app) get their guidance only
+            # when the loop actually registered them (set by AgentLoop).
+            tools=sorted(getattr(self, "registered_tools", ())),
+        ))
 
         project_path = root.expanduser().resolve()
         if project_path != self.workspace.expanduser().resolve():

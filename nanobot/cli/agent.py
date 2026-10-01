@@ -15,6 +15,7 @@ from nanobot import __logo__
 from nanobot.cli.log_control import _set_nanobot_logs
 from nanobot.cli.runtime_config import (
     _load_runtime_config,
+    _migrate_cron_store,
     _model_display,
     _print_agent_start_error,
 )
@@ -28,12 +29,13 @@ _CLASSIC_DEPENDENCIES = {
         "nanobot.utils.restart",
         "consume_restart_notice_from_env",
     ),
+    "is_default_workspace": ("nanobot.config.paths", "is_default_workspace"),
     "sync_workspace_templates": ("nanobot.utils.helpers", "sync_workspace_templates"),
 }
 
 
 def __getattr__(name: str) -> Any:
-    """Resolve patchable agent dependencies lazily to keep ``--help`` startup light."""
+    """Preserve patchable classic-agent symbols without loading them for the TUI."""
     dependency = _CLASSIC_DEPENDENCIES.get(name)
     if dependency is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -68,13 +70,52 @@ def agent(
         False,
         "--classic",
         "--no-tui",
-        hidden=True,
-        help="Accepted for compatibility; the Python prompt is the only interactive mode",
+        help="Use the classic Python prompt instead of the native terminal UI",
+    ),
+    theme: str = typer.Option(
+        "auto",
+        "--theme",
+        help="Terminal UI appearance: auto, dark, or light",
     ),
 ):
     """Chat in the terminal or send one message non-interactively."""
-    del classic  # compatibility no-op since the native TUI was removed
     runtime_config = _load_runtime_config(config, workspace)
+    theme = theme.strip().lower()
+    if theme not in {"auto", "dark", "light"}:
+        raise typer.BadParameter("must be auto, dark, or light", param_hint="--theme")
+    native_tui = message is None and not classic
+    if native_tui:
+        from nanobot.cli.tui_launcher import TuiSessionError, TuiUnavailableError, launch_tui
+        from nanobot.config.loader import get_config_path
+
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise typer.BadParameter(
+                "the native TUI requires an interactive terminal; use --message for "
+                "one-shot input or --classic for the legacy prompt",
+                param_hint="terminal",
+            )
+        if not markdown:
+            raise typer.BadParameter("--no-markdown requires --classic", param_hint="--no-markdown")
+        if logs:
+            raise typer.BadParameter("--logs requires --classic", param_hint="--logs")
+        try:
+            exit_code = launch_tui(
+                runtime_config,
+                config_path=get_config_path().resolve(strict=False),
+                workspace_override=workspace,
+                session_id=session_id,
+                theme=theme,
+            )
+        except TuiSessionError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--session") from exc
+        except TuiUnavailableError as exc:
+            console.print(f"[red]Native TUI unavailable: {exc}[/red]")
+            console.print("[dim]Use `nanobot agent --classic` only if you want the old prompt.[/dim]")
+            raise typer.Exit(1) from exc
+        else:
+            if exit_code:
+                raise typer.Exit(exit_code)
+            return
 
     from nanobot.agent.hooks import create_file_edit_activity_hook
     from nanobot.agent.tools.mcp import MCPProvider
@@ -87,6 +128,7 @@ def agent(
     from nanobot.bus.queue import MessageBus
     from nanobot.cli import terminal as cli_terminal
     from nanobot.cli.stream import ThinkingSpinner
+    from nanobot.cron.service import CronService
     from nanobot.providers.factory import make_provider
     from nanobot.providers.image_generation import image_gen_provider_configs
     from nanobot.utils.helpers import sanitize_surrogates as _sanitize_surrogates
@@ -98,6 +140,7 @@ def agent(
     agent_loop_class = _classic_dependency("AgentLoop")
     stream_renderer_class = _classic_dependency("StreamRenderer")
     consume_restart_notice_from_env = _classic_dependency("consume_restart_notice_from_env")
+    is_default_workspace = _classic_dependency("is_default_workspace")
     sync_workspace_templates = _classic_dependency("sync_workspace_templates")
 
     session_id = session_id or "cli:direct"
@@ -112,6 +155,13 @@ def agent(
 
     bus = MessageBus()
 
+    # Preserve existing single-workspace installs, but keep custom workspaces clean.
+    if is_default_workspace(runtime_config.workspace_path):
+        _migrate_cron_store(runtime_config)
+
+    # Create cron service with workspace-scoped store
+    cron_store_path = runtime_config.workspace_path / "cron" / "jobs.json"
+    cron = CronService(cron_store_path)
     tools = ToolRegistry()
     mcp_provider = MCPProvider.from_config(runtime_config, tools)
 
@@ -122,6 +172,8 @@ def agent(
             runtime_config,
             bus,
             provider=provider,
+            cron_service=cron,
+            host_tools=True,
             image_generation_provider_configs=image_gen_provider_configs(runtime_config),
             hook_factories=[create_file_edit_activity_hook],
             tool_registry=tools,
@@ -157,7 +209,7 @@ def agent(
             reasoning: bool = False,
             **_kwargs: Any,
         ) -> None:
-            ch = runtime_config.display
+            ch = agent_loop.channels_config
 
             if _kwargs.get("reasoning_end"):
                 if ch and not ch.show_reasoning:
@@ -290,7 +342,7 @@ def agent(
                         if await cli_terminal._maybe_print_interactive_progress(
                             msg,
                             None,
-                            runtime_config.display,
+                            agent_loop.channels_config,
                             renderer,
                             reasoning_buffer,
                         ):

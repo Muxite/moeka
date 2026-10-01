@@ -134,6 +134,7 @@ class SubagentManager:
         max_policy_denials: int = DEFAULT_MAX_POLICY_DENIALS,
         child_policy: "PermissionPolicy | None" = None,
         variant: "Variant | None" = None,
+        host_tools: bool = False,
         plugin_registry: "PluginRegistry | None" = None,
     ):
         self.env = env
@@ -142,6 +143,7 @@ class SubagentManager:
         self.plugin_registry = plugin_registry
         # The parent loop's Variant (Task 8): children see the same overrides.
         self.variant = variant
+        self.host_tools = host_tools
         # The parent loop's gate policy; None means DefaultPolicy(). Each run gets
         # ``policy.attenuate(requested, narrower=child_policy)`` (I4, ``_child_policy``).
         self.policy = policy
@@ -280,6 +282,7 @@ class SubagentManager:
             ),
             env=self.env,
             variant=getattr(self, "variant", None),
+            host_tools=getattr(self, "host_tools", False),
         )
         ToolLoader(plugin_registry=getattr(self, "plugin_registry", None)).load(
             ctx, registry, scope="subagent",

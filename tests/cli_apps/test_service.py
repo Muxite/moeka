@@ -16,7 +16,7 @@ from nanobot.apps.cli.service import CliAppError, CliAppManager, CliAppsRuntimeC
 
 @pytest.fixture(autouse=True)
 def _isolate_plugin_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agent_plugins, "get_config_path", lambda: tmp_path / "config/config.json")
+    monkeypatch.setattr(agent_plugins, "_legacy_config_path", lambda: tmp_path / "config/config.json")
 
 
 def _write_cache(path: Path, registry: dict) -> None:

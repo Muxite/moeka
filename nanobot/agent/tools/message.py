@@ -92,6 +92,10 @@ class MessageTool(Tool):
         )
 
     @classmethod
+    def enabled(cls, ctx: ToolContext) -> bool:
+        return ctx.host_tools
+
+    @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
         send_callback = ctx.bus.publish_outbound if ctx.bus else None
         return cls(

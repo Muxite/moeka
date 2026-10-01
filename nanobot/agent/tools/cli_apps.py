@@ -68,7 +68,7 @@ class CliAppsTool(Tool):
 
     @classmethod
     def enabled(cls, ctx: ToolContext) -> bool:
-        return ctx.config.cli_apps.enable
+        return ctx.host_tools and ctx.config.cli_apps.enable
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:

@@ -485,6 +485,7 @@ def _run_gateway(
         model=provider_snapshot.model,
         context_window_tokens=provider_snapshot.context_window_tokens,
         cron_service=cron,
+        host_tools=True,
         session_manager=session_manager,
         image_generation_provider_configs=image_gen_provider_configs(config),
         provider_snapshot_loader=_load_gateway_provider_snapshot,

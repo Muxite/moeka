@@ -27,9 +27,6 @@ _RESOLVE_PATH: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
 _current_config_path: Path | None = None
 _schema_refs_ready = False
 
-# Top-level config sections owned by the removed chat runtime; ignored on load.
-_RETIRED_TOP_LEVEL_KEYS = ("channels", "gateway", "api", "heartbeat", "transcription")
-
 
 def _as_config_object(value: object) -> dict[str, Any] | None:
     """Narrow an untrusted JSON configuration value to an object."""
@@ -465,19 +462,6 @@ def _env_replace(match: re.Match[str]) -> str:
 
 def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
     """Migrate old config formats to current."""
-    # Sections of the removed chat runtime (channels, gateway, HTTP API, heartbeat,
-    # audio transcription). Old config files keep loading; the values are dropped,
-    # not migrated. Config forbids unknown top-level keys, so strip them here.
-    retired = [key for key in _RETIRED_TOP_LEVEL_KEYS if key in data]
-    if retired:
-        logger.warning(
-            "Config: retired top-level section(s) {} are ignored by this version and "
-            "will be removed from config.json if the config is saved",
-            ", ".join(retired),
-        )
-        for key in retired:
-            data.pop(key, None)
-
     # Move tools.exec.restrictToWorkspace → tools.restrictToWorkspace
     tools_value = data.get("tools", {})
     if not isinstance(tools_value, dict):
