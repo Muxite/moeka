@@ -911,7 +911,9 @@ def test_triage_text_and_json(h, tmp_path):
     assert "  - nested bullet of FR-002" in p.stdout and "FR-003" not in p.stdout
     q = h.run("triage", "--repo-name", "demo", "--feature", FEATURE, "--round", "1",
               "--spec", str(spec), "--json")
-    data = json.loads(q.stdout)
+    obj = json.loads(q.stdout)
+    assert set(obj) == {"schema", "entries"} and obj["schema"] == "heldout-triage.v1"
+    data = obj["entries"]
     assert len(data) == 2 and set(data[0]) == {"id", "nodeid", "assertion", "spec"}
     assert data[0]["spec"] == hr.extract_requirement(SPEC_MD, "FR-002")
     assert len(json.loads((h.report_root / "rounds.json").read_text())["rounds"]) == 1
@@ -973,3 +975,53 @@ def test_api_load_id_map(tmp_path):
 def test_main_in_process_version(capsys):
     assert hr.main(["--version"]) == 0
     assert capsys.readouterr().out.startswith(f"heldout-run {hr.VERSION} sha256:")
+
+
+@pytest.mark.parametrize("body", [
+    "[]", '"x"', "null", '{"t": "FR-001"}', '{"t": [1]}', '{"t": {"a": 1}}', '{"t": null}',
+    '{"map": []}', '{"map": "x"}', '{"map": null}', '{"map": ["FR-001"]}',
+    '{"map": {"t": "FR-001"}}', '{"map": {"t": [1]}}', '{"map": {"t": null}}',
+    '{"map": {"map": {"t": ["FR-001"]}}}', '{"map": {"t": ["FR-001"]}, "extra": 1}',
+])
+def test_malformed_json_maps_are_e_map(tmp_path, body):
+    m = tmp_path / "m.json"
+    m.write_text(body)
+    with pytest.raises(hr.HeldoutError) as ei:
+        hr.load_id_map(m)
+    assert ei.value.code == "E_MAP"
+
+
+@pytest.mark.parametrize("body", [
+    "MAP = ['FR-001']\n", "MAP = {'t': 'FR-001'}\n", "MAP = {'t': [1]}\n", "MAP = {1: ['FR-001']}\n",
+    "MAP = {'t': {'FR-001'}}\n", "X = 1\n", "MAP = {\n", "MAP: dict\n",
+])
+def test_malformed_py_maps_are_e_map(tmp_path, body):
+    m = tmp_path / "fr_report.py"
+    m.write_text(body)
+    with pytest.raises(hr.HeldoutError):
+        hr.load_id_map(m)
+
+
+def test_unreadable_map_is_e_map(tmp_path):
+    with pytest.raises(hr.HeldoutError):
+        hr.load_id_map(tmp_path / "missing.json")
+    d = tmp_path / "dir.json"
+    d.mkdir()
+    with pytest.raises(hr.HeldoutError):
+        hr.load_id_map(d)
+    b = tmp_path / "bin.json"
+    b.write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(hr.HeldoutError):
+        hr.load_id_map(b)
+
+
+def test_wrapped_json_map_is_accepted(tmp_path):
+    m = tmp_path / "m.json"
+    m.write_text('{"map": {"t": ["FR-001", "FR-001", "SC-002"]}}')
+    assert hr.load_id_map(m) == {"t": ("FR-001", "SC-002")}
+
+
+def test_malformed_wrapped_spec_map_refuses_run(h):
+    h.suite({**UNMARKED, "SPEC-MAP.json": '{"map": ["FR-001"]}'})
+    p = h.run_wt()
+    assert (p.returncode, p.stderr, p.stdout) == (2, "heldout-run: error E_MAP\n", "")

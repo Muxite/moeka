@@ -168,11 +168,9 @@ def _is_id(value) -> bool:
 
 
 def _normalise_ids(value) -> tuple[str, ...]:
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, (list, tuple, set, frozenset)) and all(isinstance(v, str) for v in value):
-        items = sorted(value) if isinstance(value, (set, frozenset)) else list(value)
-        return tuple(dict.fromkeys(items))
+    # Documented shape: a list of id strings (a tuple is accepted from a .py literal).
+    if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+        return tuple(dict.fromkeys(value))
     raise HeldoutError("E_MAP")
 
 
@@ -227,7 +225,10 @@ def load_id_map(path) -> dict[str, tuple[str, ...]]:
             obj = json.loads(text)
         except ValueError:
             raise HeldoutError("E_MAP") from None
-        if isinstance(obj, dict) and isinstance(obj.get("map"), dict):
+        if isinstance(obj, dict) and "map" in obj:
+            # Wrapped form {"map": {...}}: the wrapper holds only the map, and it must be an object.
+            if set(obj) != {"map"} or not isinstance(obj["map"], dict):
+                raise HeldoutError("E_MAP")
             obj = obj["map"]
     return _validate_map(obj)
 
@@ -1372,8 +1373,8 @@ def _cmd_triage(a, out) -> int:
             }
         )
     if a.json:
-        # heldout-triage.v1: a JSON list of {id, nodeid, assertion, spec}; pure JSON, no banner.
-        out.write(json.dumps(entries, indent=2) + "\n")
+        # heldout-triage.v1: exactly one JSON object; no banner line in JSON mode.
+        out.write(json.dumps({"schema": TRIAGE_SCHEMA, "entries": entries}, indent=2) + "\n")
         return 0
     lines = ["PRIVATE TRIAGE: not for the implementer"]
     for e in entries:
