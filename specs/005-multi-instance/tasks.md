@@ -194,6 +194,11 @@ directory. Feedback arrives as failing FR ids with counts only.
 - [x] T039 Run `scripts/test-docker.sh`, `scripts/smoke-gateway.sh` and the docker-marked tests; confirm SC-009
   (live checkout `git status` and `~/.config/systemd/user/moeka.service` bytes unchanged); report the results with
   their numbers.
+  Result 2026-10-01: `scripts/test-docker.sh` 9844 passed, 64 skipped (baseline 9699/59; the 5 new skips are
+  the docker-marked tests, which passed on the host: `tests/integration/test_containers.py` 5 passed).
+  `scripts/smoke-gateway.sh`: health ok, CLI and API mock turns ok, second writer refused with exit 3.
+  SC-009: `~/.config/systemd/user/moeka.service` untouched (mtime 2026-06-02); the live checkout was never
+  written (its `git status` shows a pre-existing untracked `docs/core-map/`).
 
 ---
 
