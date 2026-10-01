@@ -403,3 +403,46 @@ def test_replay_does_not_delay_a_refusal(tmp_path: Path) -> None:
     finally:
         blocker.execute("ROLLBACK")
         blocker.close()
+
+
+def test_close_while_locked_then_lock_freed_persists_via_next_object(tmp_path: Path) -> None:
+    import threading
+
+    data = tmp_path / "data"
+    budget = SharedCapBudget(data, "job", limit_usd=1.0, lock_timeout_s=0.2)
+    kernel = Kernel(_env(tmp_path, "s", data=data), budget=budget)
+    res = budget.admit(_estimate(0.3))
+    blocker = sqlite3.connect(data / "llm_usage.sqlite3", isolation_level=None,
+                              check_same_thread=False)
+    blocker.execute("BEGIN IMMEDIATE")
+    budget.settle(res, _event(_estimate(0.3), 0.07))
+    budget.release(res)
+    # The lock is freed while close() is retrying: the bounded wait outlasts lock_timeout_s.
+    timer = threading.Timer(1.0, lambda: (blocker.execute("ROLLBACK"), blocker.close()))
+    timer.start()
+    kernel.close()
+    timer.join()
+    fresh = SharedCapBudget(data, "job", limit_usd=1.0)
+    assert fresh.spent_usd == pytest.approx(0.07) and fresh.reserved_usd == 0.0
+
+
+def test_writes_left_queued_by_a_closed_kernel_land_with_the_next_object(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    data = tmp_path / "data"
+    monkeypatch.setattr(SharedCapBudget, "FLUSH_MIN_TIMEOUT_S", 0.2)
+    budget = SharedCapBudget(data, "job", limit_usd=1.0, lock_timeout_s=0.1)
+    kernel = Kernel(_env(tmp_path, "s", data=data), budget=budget)
+    res = budget.admit(_estimate(0.3))
+    blocker = sqlite3.connect(data / "llm_usage.sqlite3", isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        budget.settle(res, _event(_estimate(0.3), 0.07))
+        budget.release(res)
+        kernel.close()  # still locked: gives up after its bounded wait, keeps the queue
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+    del budget, kernel
+    fresh = SharedCapBudget(data, "job", limit_usd=1.0)
+    assert fresh.spent_usd == pytest.approx(0.07) and fresh.reserved_usd == 0.0

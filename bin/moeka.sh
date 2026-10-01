@@ -132,16 +132,30 @@ export MOEKA_WORKSPACE="$ROOT"
 MOEKA_WORKSPACE_EXPANDED="$ROOT"   # compat name used by export/import
 
 # Instance kind, name and own systemd unit (FR-012).
+# Compared both as written and with symlinks resolved, so a root reached through a
+# symlinked HOME (or the other way round) still maps to its own unit.
 INSTANCE_KIND="registered"
 INSTANCE_NAME="$(basename -- "$ROOT")"
 UNIT=""
-if [[ "$ROOT" == "$HOME_NORM/.nanobot" ]]; then
+_real() { realpath -m -- "$1" 2>/dev/null || printf '%s' "$1"; }
+ROOT_REAL="$(_real "$ROOT")"
+HOME_REAL="$(_real "$HOME_NORM")"
+_parent="$(dirname -- "$ROOT")"
+_parent_real="$(dirname -- "$ROOT_REAL")"
+_base_real="$(basename -- "$ROOT_REAL")"
+if [[ "$ROOT" == "$HOME_NORM/.nanobot" || "$ROOT_REAL" == "$HOME_REAL/.nanobot" ]]; then
     INSTANCE_KIND="default"; INSTANCE_NAME="default"; UNIT="moeka.service"
-elif [[ "$(dirname -- "$ROOT")" == "$HOME_NORM" && "$INSTANCE_NAME" == .moeka-* ]]; then
-    _n="${INSTANCE_NAME#.moeka-}"
-    if [[ "$_n" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; then
-        INSTANCE_KIND="named"; INSTANCE_NAME="$_n"; UNIT="moeka@${_n}.service"
-    fi
+else
+    for _cand in "$_parent|$INSTANCE_NAME" "$_parent_real|$_base_real"; do
+        _p="${_cand%%|*}"; _b="${_cand#*|}"
+        if [[ ( "$_p" == "$HOME_NORM" || "$_p" == "$HOME_REAL" ) && "$_b" == .moeka-* ]]; then
+            _n="${_b#.moeka-}"
+            if [[ "$_n" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; then
+                INSTANCE_KIND="named"; INSTANCE_NAME="$_n"; UNIT="moeka@${_n}.service"
+                break
+            fi
+        fi
+    done
 fi
 
 # ---------- env loading (FR-003, Q3) -----------------------------------------

@@ -107,26 +107,29 @@ def _abs(path: str | Path) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
 
+def _classify(root: str | Path, home: str | Path | None) -> tuple[str, str]:
+    """``(kind, name)``, comparing as written and with symlinks resolved."""
+    raw_root, raw_home = _abs(root), _abs(home_dir(home))
+    pairs = [(raw_root, raw_home),
+             (Path(os.path.realpath(raw_root)), Path(os.path.realpath(raw_home)))]
+    for root_path, home_path in pairs:
+        if root_path == home_path / ".nanobot":
+            return "default", "default"
+    for root_path, home_path in pairs:
+        if root_path.parent == home_path and root_path.name.startswith(".moeka-"):
+            name = root_path.name[len(".moeka-"):]
+            if NAME_RE.match(name):
+                return "named", name
+    return "registered", raw_root.name
+
+
 def instance_kind(root: str | Path, home: str | Path | None = None) -> str:
     """``"default"``, ``"named"`` or ``"registered"`` for an instance root."""
-    root_path = _abs(root)
-    home_path = _abs(home_dir(home))
-    if root_path == home_path / ".nanobot":
-        return "default"
-    if root_path.parent == home_path and root_path.name.startswith(".moeka-"):
-        if NAME_RE.match(root_path.name[len(".moeka-"):]):
-            return "named"
-    return "registered"
+    return _classify(root, home)[0]
 
 
 def instance_name(root: str | Path, home: str | Path | None = None) -> str:
-    root_path = _abs(root)
-    kind = instance_kind(root_path, home)
-    if kind == "default":
-        return "default"
-    if kind == "named":
-        return root_path.name[len(".moeka-"):]
-    return root_path.name
+    return _classify(root, home)[1]
 
 
 def unit_for(root: str | Path, home: str | Path | None = None) -> str | None:

@@ -28,12 +28,14 @@ clocks disagree (one host, one kernel clock).
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import socket
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +118,23 @@ class _Op:
     unpriced: bool = False
 
 
+# Settles/releases not yet written, shared by every SharedCapBudget object of this
+# process on the same (database, budget_id): a write queued by an object that is gone
+# (its Kernel closed while the database was still locked) is replayed by the next
+# object's next operation, and once more at interpreter exit (FR-048).
+_PENDING: dict[tuple[str, str], list[_Op]] = {}
+_PENDING_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_REGISTRY_LOCK = threading.Lock()
+_LIVE: "weakref.WeakSet[SharedCapBudget]" = weakref.WeakSet()
+
+
+def _shared_queue(key: tuple[str, str]) -> tuple[list[_Op], threading.RLock]:
+    with _REGISTRY_LOCK:
+        queue = _PENDING.setdefault(key, [])
+        lock = _PENDING_LOCKS.setdefault(key, threading.RLock())
+        return queue, lock
+
+
 class SharedCapBudget:
     """A cap :class:`~nanobot.kernel.budget.Budget` whose state lives in the usage store.
 
@@ -154,10 +173,9 @@ class SharedCapBudget:
         self.allow_unpriced = bool(allow_unpriced)
         self.lease_s = float(lease_s)
         self.lock_timeout_s = float(lock_timeout_s)
-        self._lock = threading.RLock()
+        self._pending, self._lock = _shared_queue((str(self.path), budget_id))
         self._conn: sqlite3.Connection | None = None
         self._conn_pid: int | None = None
-        self._pending: list[_Op] = []
         self._sinks: list[TraceSink] = []
         self._holder = f"{socket.gethostname()}:{os.getpid()}:{_now_ms()}"
         # Caps not yet written because the database was locked at construction: the
@@ -171,6 +189,10 @@ class SharedCapBudget:
                 raise
             self._check_caps_readonly(reset_caps)
             self._caps_pending = reset_caps
+        with _REGISTRY_LOCK:
+            _LIVE.add(self)
+        with self._lock:
+            self._replay()  # writes an earlier object of this process left queued
 
     # -- plumbing ---------------------------------------------------------------
 
@@ -595,12 +617,20 @@ class SharedCapBudget:
             reservation.released = True
             self._queue(_Op("release", reservation))
 
-    def flush(self, timeout_s: float | None = None) -> bool:
-        """Write pending settles/releases (retrying until *timeout_s*, default ``lock_timeout_s``).
+    #: Shortest time ``flush()`` keeps retrying (the usage store's close-time bound, FR-051).
+    FLUSH_MIN_TIMEOUT_S = 5.0
 
-        Returns True when nothing is left pending. ``Kernel.close()`` calls this.
+    def flush(self, timeout_s: float | None = None) -> bool:
+        """Write pending settles/releases, retrying while the database stays locked.
+
+        Retries until *timeout_s* (default: ``max(lock_timeout_s, 5)`` seconds) passes,
+        then gives up and keeps the writes queued (their reservations stay counted; the
+        next operation retries again). Returns True when nothing is left pending.
+        ``Kernel.close()`` calls this.
         """
-        deadline = time.monotonic() + (self.lock_timeout_s if timeout_s is None else timeout_s)
+        if timeout_s is None:
+            timeout_s = max(self.lock_timeout_s, self.FLUSH_MIN_TIMEOUT_S)
+        deadline = time.monotonic() + timeout_s
         with self._lock:
             while True:
                 self._replay()
@@ -724,3 +754,20 @@ class SharedCapBudget:
 
 
 __all__ = ["BUDGET_DDL", "SharedCapBudget", "SharedReservation"]
+
+
+@atexit.register
+def _flush_at_exit() -> None:
+    """Last chance for queued settles/releases (bounded: 5 s per budget)."""
+    with _REGISTRY_LOCK:
+        budgets = list(_LIVE)
+    seen: set[tuple[str, str]] = set()
+    for budget in budgets:
+        key = (str(budget.path), budget.budget_id)
+        if key in seen or not budget._pending:
+            continue
+        seen.add(key)
+        try:
+            budget.flush(timeout_s=SharedCapBudget.FLUSH_MIN_TIMEOUT_S)
+        except Exception:  # noqa: BLE001 - interpreter shutdown
+            pass

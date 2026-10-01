@@ -375,3 +375,37 @@ def test_default_instance_disable_names_moeka_service_only(h: Harness) -> None:
     calls = [c for c in h.systemctl_calls() if not c.startswith("loginctl")]
     named = [c for c in calls if c.split()[-1] not in ("daemon-reload",)]
     assert named and all(c.split()[-1] == "moeka.service" for c in named), calls
+
+
+def test_stop_addresses_only_its_own_unit_among_several_active(h: Harness, tmp_path: Path) -> None:
+    default = h.home / ".nanobot"
+    default.mkdir()
+    (default / "config.json").write_text("{}")
+    roots = {n: h.new(n) for n in ("a", "b")}
+    custom = tmp_path / "custom"
+    assert h.run("new", "c", "--workspace", str(custom)).returncode == 0
+    pids = {n: _start(h, r) for n, r in roots.items()}
+    for unit in ("moeka.service", "moeka@a.service", "moeka@b.service"):
+        h.set_unit_active(unit)
+    (h.systemctl_dir / "calls.log").unlink(missing_ok=True)
+    assert h.run(*_ws(roots["a"]), "stop").returncode == 0
+    calls = h.systemctl_calls()
+    assert "--user stop moeka@a.service" in calls
+    assert all(c.split()[-1] == "moeka@a.service" for c in calls), calls
+    assert wait_for(lambda: not alive(pids["a"]), 10) and alive(pids["b"])
+    (h.systemctl_dir / "calls.log").unlink(missing_ok=True)
+    assert h.run(*_ws(custom), "stop").returncode == 0
+    assert h.systemctl_calls() == []  # a registered instance has no unit
+
+
+def test_named_instance_reached_through_a_symlinked_home(h: Harness, tmp_path: Path) -> None:
+    root = h.new("sy")
+    link_home = tmp_path / "home-link"
+    link_home.symlink_to(h.home)
+    h.set_unit_active("moeka@sy.service")
+    env = h.env(HOME=str(link_home))
+    result = h.run("--workspace", str(root), "status", "--json", env=env)
+    assert json.loads(result.stdout)["unit"] == "moeka@sy.service"
+    (h.systemctl_dir / "calls.log").unlink(missing_ok=True)
+    assert h.run("--workspace", str(root), "stop", env=env).returncode == 0
+    assert "--user stop moeka@sy.service" in h.systemctl_calls()

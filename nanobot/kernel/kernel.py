@@ -544,7 +544,11 @@ class Kernel:
         flush = getattr(self._budget, "flush", None)
         if callable(flush):
             try:
-                flush()
+                if flush() is False:
+                    logger.warning(
+                        "kernel: budget writes still pending at close (database locked); "
+                        "their reservations stay counted and are retried on the next use"
+                    )
             except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
                 logger.warning("kernel: flushing the budget failed: {!r}", exc)
         detach = getattr(self._budget, "_detach_trace", None)
