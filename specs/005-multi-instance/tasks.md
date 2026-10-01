@@ -112,6 +112,9 @@ directory. Feedback arrives as failing FR ids with counts only.
   sequence (same refusals and figures), cap mismatch and `reset_caps` (FR-049), lock timeout ->
   `budget_unavailable` (FR-048), lease expiry and `budget.expire` (FR-047), late settle/release true-up (FR-046),
   4-process concurrency invariant (FR-045, SC-004), SIGKILL holder (SC-006).
+  Erratum (head agent, 2026-10-01): US3-1's "exactly 50 admitted" contradicted FR-045; with CapBudget's
+  float arithmetic the $0.50 / $0.01 case admits 49 or 50 (49 x 0.01 = 0.49000000000000027). FR-045 governs;
+  tests assert 49 <= admitted <= 50 and the cap invariant, never a rounding tweak.
 - [ ] T022 [US3] Implement `nanobot/kernel/budget_shared.py` (`SharedCapBudget`, tables via the usage store
   migration in `nanobot/llm_usage/store.py`, retry queue, `flush()`), export it from `moeka/budget.py`, and call
   `budget.flush()` from `Kernel.close()` when present (FR-044..FR-050).

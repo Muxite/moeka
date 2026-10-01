@@ -99,8 +99,10 @@ holds exactly the calls made.
 **Acceptance Scenarios**:
 
 1. **Given** a `SharedCapBudget(data_dir=D, budget_id="job", limit_usd=0.50)` in four processes, **When** each tries
-   50 calls whose worst case is $0.01 and whose settled cost equals the worst case, **Then** exactly 50 calls are
-   admitted in total and 150 are refused with `BudgetExceeded` code `cap_usd`.
+   50 calls whose worst case is $0.01 and whose settled cost equals the worst case, **Then** the budget admits 49 or
+   50 calls in total depending on float accumulation (FR-045 governs: CapBudget's exact arithmetic, no rounding
+   tweak; 49 x 0.01 accumulates to 0.49000000000000027), and every other call is refused with `BudgetExceeded`
+   code `cap_usd`. *(Erratum 2026-10-01, head agent: the earlier "exactly 50" contradicted FR-045.)*
 2. **Given** a process holding an open reservation is killed with SIGKILL, **When** the lease expires, **Then** any
    other process's next admission or snapshot counts that reservation as spent and no longer as reserved.
 
