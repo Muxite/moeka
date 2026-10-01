@@ -6,6 +6,7 @@ refusals, late waste labels). Content-free by construction: neither table holds 
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
@@ -227,7 +228,13 @@ def _record_from_call(row: sqlite3.Row) -> dict[str, Any]:
 
 def _record_from_hit(row: sqlite3.Row) -> dict[str, Any]:
     call_id = row["call_id"] or f"hit-{row['id']}"
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except ValueError:
+        payload = {}
     return {
+        "request_key": payload.get("request_key"),
+        "prompt_version": payload.get("prompt_version"),
         "schema_version": SCHEMA_VERSION,
         "record_id": f"{call_id}:0",
         "kind": "cache_hit", "call_id": call_id, "attempt": 0,

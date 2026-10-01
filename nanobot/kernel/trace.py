@@ -380,7 +380,11 @@ EVENTS: Mapping[str, str] = MappingProxyType({
                    "(one model-router decision)",
     "model.call": "one provider call (ledger): trace_id, slot, tier, model, provider, "
                   "tokens_in, tokens_out, tokens_cache_read, latency_ms, cost_usd, source, "
-                  "usage_source, finish_reason, call_id, alias, attempt, cached, tags",
+                  "usage_source, finish_reason, call_id, alias, attempt, cached, tags; "
+                  "usage-record.v1 fields: schema_version, record_id, kind, consumer, agent, "
+                  "session, role, purpose, tokens_cache_write, tokens_reasoning, price_source, "
+                  "cost_billed, cache_hit, outcome, error_kind, started_at_ms, request_key, "
+                  "prompt_version, waste_label, waste_set_by, producer",
     "fact.recorded": "fact_id, source_kind, source_ref, source_span (the fact's "
                      "source character span)",
     "artifact.proposed": "artifact_id, kind, committed {path: fact id}, provisional",
@@ -388,9 +392,15 @@ EVENTS: Mapping[str, str] = MappingProxyType({
     "paths.overlap_allowed": "work_dir, state_dir (legacy layout shares them)",
     "sampling.dropped": "provider, model, fields (sampling fields the provider rejected)",
     "budget.admit": "call_id, alias, model, provider, prompt_tokens, max_output_tokens, "
-                    "rounds, worst_case_tokens, worst_case_usd, tags",
-    "budget.refuse": "budget.admit keys plus reason",
-    "cache.hit": "call_id, key (16-char prefix), alias, model, tags",
+                    "rounds, worst_case_tokens, worst_case_usd, tags; budget-event.v1 fields: "
+                    "schema_version, kind, consumer, agent, session, role, purpose, scope, "
+                    "cap_*, spent_*, reserved_*, remaining_*, refusal",
+    "budget.refuse": "budget.admit keys plus reason (refusal.code is the typed reason)",
+    "cache.hit": "call_id, key (16-char prefix), alias, model, tags; usage-record.v1 fields "
+                 "(kind cache_hit): schema_version, record_id, consumer, agent, session, role, "
+                 "purpose, tokens_in/out 0, saved_tokens_in, saved_tokens_out, saved_cost_usd",
+    "call.waste": "call_id, attempt, waste_label, waste_set_by (a caller-known waste label "
+                  "applied to an earlier call, e.g. a discarded draft; append-only)",
     "run.started": "session_key, model (agent run began)",
     "iteration": "session_key, iteration, tool_calls, finish_reason, usage (this "
                  "iteration's token delta)",
