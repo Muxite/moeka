@@ -341,6 +341,37 @@ with Kernel(env, budget=budget) as kernel:
   (SQLite, JSON) need not store `parsed` faithfully; an entry whose text no
   longer validates is treated as a miss.
 
+## Usage and spend
+
+`kernel.usage` answers "what did my calls use and cost" from moeka alone (spec 001); no ledger of your own and
+no SQLite reads. Documents follow `schemas/usage-record.v1` and `schemas/budget-event.v1`
+(`schemas/ATTRIBUTION.md` explains every field).
+
+```python
+from moeka.usage import Attribution
+
+kernel = Kernel(env, consumer="awork", budget=CapBudget(limit_usd=5))
+await kernel.llm.generate(
+    msgs, GenerateOptions(attribution=Attribution(agent="writer", session="b1", role="maker",
+                                                   purpose="draft"), prompt_version="draft-v2"))
+
+kernel.usage.total(consumer="awork")                 # UsageTotals: tokens, cost, waste, cache savings
+kernel.usage.totals(["agent"], session="b1")         # grouped
+kernel.usage.records(limit=20, consumer="awork")     # usage-record.v1 documents
+kernel.usage.budget()                                # cap, spent, reserved, remaining (CapBudget)
+sub = kernel.usage.subscribe(on_event)               # live; own thread, bounded queue, never blocks a call
+kernel.usage.label_waste(call_id, "discarded_draft") # caller-known waste, appended as call.waste
+kernel.usage.loss()                                  # store failures, dropped events, subscriber errors
+```
+
+- Attribution is typed: `consumer` (kernel default or per call), `agent`, `session`, `role`, `purpose`.
+  Unset fields fall back to `bind_attribution(...)`, then to the kernel; agent runs bind `agent` and
+  `session` themselves. A call with no consumer is recorded as `unattributed`.
+- A cache hit is its own record (`cache.hit`): zero billed tokens, `saved_tokens_*` and `saved_cost_usd`.
+- A refused call is a `budget.refuse` event with the same attribution and a typed `refusal.code`.
+- `prompt_version` joins the cache key when set. Not implemented yet: cross-process stream, replay
+  recording, protected sink, OpenTelemetry export.
+
 ## Tracing
 
 `kernel.trace` is a `Tracer`: it stamps every kernel event, forwards it to the
