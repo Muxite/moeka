@@ -334,6 +334,22 @@ Purpose: show where each invariant surfaces in the `moeka` package, the only sur
   model" is still the host's choice of `ModelSpec`.
 - Variants and fingerprints (`Variant`, `Agent.fingerprint()`) are the RSI hooks: what the model sees is
   swappable per kernel and identified by one digest.
+- Many instances (spec 005, 2026-10-01):
+  - One writer per state dir. `Kernel(env, attach="write")` (the default) holds an exclusive `flock` on
+    `<state_dir>/.instance.lock` (holder record `.instance.json`) from construction, before anything is created,
+    to `close()`; a second writer, in-process or cross-process, gets `moeka.errors.InstanceLockedError`
+    (`state_dir`, `holder`, `reason` `held`/`lock_unsupported`). `nanobot/kernel/instance_lock.py`.
+  - `attach="read_only"` takes no lock and creates nothing under the state dir or sessions root (read-only
+    SQLite opens, an in-memory empty usage view when no store exists). Sessions, usage, existing memory stores
+    and `kernel.llm` work; every mutation raises `ReadOnlyKernelError`.
+  - `SharedCapBudget(data_dir, budget_id, ...)` (`nanobot/kernel/budget_shared.py`, `moeka.budget`) keeps caps,
+    spend and leased reservations in `<data_dir>/llm_usage.sqlite3`; admission is one `BEGIN IMMEDIATE`
+    transaction over the arithmetic shared with `CapBudget` (`check_admission`); lapsed leases are charged
+    (`budget.expire`); no lock in time fails closed (`budget_unavailable`). `CapBudget` stays in-memory.
+  - `Environment.for_host(data_dir=...)` lets many Kernels (different state dirs) share one usage store; agents
+    sharing an effective `memory_key` emit `kernel.memory_key_shared`.
+  - The floor takes other instances' roots as an argument (`ProtectedFloor.from_paths(paths,
+    other_instance_roots=...)`); discovery is host-side (`nanobot/config/instances.py`).
 
 ## 3b. Usage and observability surface (requirement)
 

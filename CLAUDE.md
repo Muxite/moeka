@@ -42,7 +42,17 @@ Moeka-specific deviations from upstream nanobot:
   not upstream's nested `~/.nanobot/workspace`.
 - **Missing `${VAR}` config references warn, not hard-fail** — `resolve_config_env_vars`
   (`nanobot/config/loader.py`) logs a warning with the dotted field path and leaves the placeholder. See
-  `tests/config/test_env_var_warnings.py`.
+  `tests/config/test_env_var_warnings.py`. Exception (spec 005): an unexpanded or empty workspace makes
+  `Config.workspace_path` raise `UnexpandedWorkspaceError` (no `~/.nanobot` fallback); `nanobot gateway`,
+  `serve` and one-shot `agent -m` exit 2, and `bin/moeka.sh` exits 2 for a root containing `${`.
+- **Multi-instance (spec 005)** — `bin/moeka.sh` acts on one instance (`--workspace`, else `MOEKA_WORKSPACE`,
+  else `~/.nanobot`): stop/status use its PID file, `/proc` cmdline and `gateway.lock`, never process-name
+  matching; `new` assigns disjoint ports and a Unix WebSocket socket (`nanobot/config/instances.py`). Named
+  instances run under the template unit `scripts/moeka@.service` (`scripts/install-service.sh <name>`, which
+  never touches `moeka.service`). Writers (gateway, `serve`, one-shot agent, `moeka.Kernel`) hold the instance
+  lock `<state_dir>/.instance.lock` (second writer: exit 3 / `InstanceLockedError`); Telegram/Discord tokens
+  are locked in the run dir and Telegram `Conflict` pauses polling. Repo `.env`/`keys.env` load only for the
+  default instance (or `MOEKA_REPO_ENV=1`). See `docs/multiple-instances.md`.
 - **Gateway sections are live config** — `channels`, `gateway`, `api`, `heartbeat`, `transcription` belong to the
   host and load normally (the slim-era "retired sections" stripping was removed in the consolidation). Kernel-only
   hosts simply never set them.
