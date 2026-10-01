@@ -957,7 +957,7 @@ def test_api_summarize_and_format():
     assert hr.FEEDBACK_SCHEMA == "heldout-feedback.v1"
     assert re.match(hr.ID_PATTERN, "NFR-123a") and not re.match(hr.ID_PATTERN, "FR-12")
     assert hr.ID_PATTERN.match("SC-001")
-    assert "E_ROUND_CAP" in hr.ERROR_CODES and len(hr.ERROR_CODES) == 12
+    assert "E_ROUND_CAP" in hr.ERROR_CODES and len(hr.ERROR_CODES) == 14  # 12 (007) + 2 (008)
 
 
 def test_api_load_id_map(tmp_path):

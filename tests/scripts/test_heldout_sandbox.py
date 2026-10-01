@@ -444,7 +444,7 @@ def test_heldout_impl_separation(h):
     p = h.run_wt()
     assert p.returncode == 0, (p.stdout, (h.report_root / "round-01" / "pytest.log").read_text())
     assert p.stdout.splitlines() == ["heldout-run: 001-demo round 1/4: passed",
-                                     "total: 0/6 tests failing, 0 skipped; 0/4 ids failing"]
+                                     "total: 0/6 tests failing, 0 skipped; 0/3 ids failing"]
     assert h.report()["meta"]["isolation"] == "full"
     _assert_run_clean(h, h.report())
 
@@ -659,7 +659,8 @@ EVIL = """
             connected.append(host)
         except OSError:
             pass
-    print("EVIL", PHASE, "read", len(blob), "connected", connected)
+    token = ("qqsuite" + "tok9").encode()
+    print("EVIL", PHASE, "suite-text", token in blob, "connected", connected)
     sys.exit(0)
 """
 
@@ -686,10 +687,10 @@ def test_hostile_tree_cannot_exfiltrate(h):
             # {TOKEN} lives in the suite text
 
             @pytest.mark.fr("FR-011")
-            def test_{TOKEN}():
+            def test_exfil():
                 out = subprocess.run([os.environ["HELDOUT_IMPL"], sys.executable, "/work/evil.py",
                                       "test", "{listener.port}"], capture_output=True, text=True)
-                assert "read 0 connected []" in out.stdout, out.stdout + out.stderr
+                assert "suite-text False connected []" in out.stdout, out.stdout + out.stderr
         """})
         sync = f"python3 /work/evil.py sync {listener.port}"
         p = h.run_wt("--sync-cmd", sync, "--keep")
@@ -698,7 +699,7 @@ def test_hostile_tree_cannot_exfiltrate(h):
         listener.close()
     rep = h.report()
     sync_log = (h.report_root / "round-01" / "sync.log").read_text()
-    assert "EVIL sync read 0" in sync_log
+    assert "EVIL sync suite-text False" in sync_log
     assert b"test" not in listener.hits  # nothing from the test phase reached the host
     kept = Path(rep["meta"]["kept_copy"])
     try:

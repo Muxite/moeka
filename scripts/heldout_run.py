@@ -12,12 +12,40 @@ per-test results as JSON lines in ``$HELDOUT_RUN_RECORDS``.
 
 Subcommands: ``run``, ``triage``, ``rounds``, ``check-isolation``; ``--version``.
 
-STATED LIMIT (no adversarial isolation): this runner is not a sandbox. The suite runs in the
-same process as the implementer's code, which can read the suite copy, write outside the copy,
-or tamper with the recorded results, and the feedback counts are themselves a low-bandwidth
-channel. The runner prevents accidental exposure (suite placement, redaction, cleanup), not a
-hostile implementer. No OS sandbox is applied; wrap the runner (for example in bubblewrap or a
-container) when a stronger boundary is needed.
+STATED LIMITS.
+
+Without ``--sandbox`` (``--sandbox none``, the default) this runner is not a sandbox and claims
+no adversarial isolation. The suite runs in the same process as the implementer's code, which
+can read the suite copy, write outside the copy, or tamper with the recorded results, and the
+feedback counts are themselves a low-bandwidth channel. The runner prevents accidental exposure
+(suite placement, redaction, cleanup), not a hostile implementer.
+
+With ``--sandbox docker`` (spec 008) the sync step and pytest run in Docker containers built from
+the embedded ``SANDBOX_DOCKERFILE``. Sandboxed runs isolate the network, the host and the suite
+from the tree's processes and from anything that outlives the run: the sync step sees only the
+copy (uid ``impl``, no suite, no host path); pytest runs as uid ``judge`` with no network, a
+read-only root, and the suite, ``/out``, the records and the plugin readable by ``judge`` only;
+every container, volume and scratch directory is removed when the run ends. Code imported into
+the judge process (a suite that imports implementation modules, a ``sitecustomize.py`` or a
+shadowing module on ``PYTHONPATH``, the tree's own ``.venv`` under the uv profiles) can still read
+the suite and forge results within one run; two random canary tests, a collect-only count and a
+junit/records cross-check detect that only partly (status ``tampered``; ``meta.isolation`` records
+whether tree code was imported). The per-id counts remain a low-bandwidth channel. Docker itself
+is the boundary: no claim is made against kernel or Docker escapes. The sync container uses the
+default bridge network, so it can also reach services the host exposes on that bridge.
+
+Judge/impl separation (FR-011, FR-012). The test container's PID 1 is ``heldout-init``, a small
+root process holding only CAP_SETUID, CAP_SETGID, CAP_SETPCAP and CAP_KILL (everything else is
+dropped, including DAC override). It runs the collect pass and the main pass as uid ``judge`` with
+empty bounding, ambient and permitted sets, so pytest's process tree holds no capability. It also
+serves ``/usr/local/bin/heldout-impl``: a judge process (checked with SO_PEERCRED; impl callers
+are refused) sends argv, environment, working directory and its stdin/stdout/stderr descriptors
+over a unix socket, and the broker forks, drops to uid/gid ``impl`` (no supplementary groups,
+empty capability sets) and execs; the client relays the exit status or signal, and killing the
+client kills the command. Why a broker: the required ``no-new-privileges`` flag disables setuid
+bits and file capabilities, so a setuid helper or a capability-carrying ``setpriv`` cannot work,
+and keeping one privileged process outside pytest's tree is the simplest mechanism that leaves
+pytest, its children and the impl processes with nothing to escalate with.
 
 Standard library only; it never imports moeka, nanobot or awr.
 """
@@ -29,6 +57,7 @@ import ast
 import datetime
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
@@ -36,10 +65,15 @@ import shutil
 import signal
 import subprocess
 import sys
+import queue
+import secrets
+import shlex
 import tarfile
 import tempfile
+import threading
 import time
 import warnings
+import xml.etree.ElementTree as ElementTree
 
 VERSION = "1.0.0"
 
@@ -89,13 +123,16 @@ ERROR_CODES = frozenset(
         "E_SYNC",
         "E_BUSY",
         "E_ROUND_CAP",
+        "E_SANDBOX_UNAVAILABLE",
+        "E_SANDBOX_DOCKER",
     }
 )
-_EXIT_OF_CODE = {"E_SYNC": 3, "E_BUSY": 3, "E_ROUND_CAP": 4}
+_EXIT_OF_CODE = {"E_SYNC": 3, "E_BUSY": 3, "E_ROUND_CAP": 4, "E_SANDBOX_UNAVAILABLE": 3}
 
-STATUSES = ("passed", "failed", "timeout", "collection_error", "infra_error")
-COUNTED_STATUSES = frozenset({"passed", "failed", "timeout", "collection_error"})
-_EXIT_OF_STATUS = {"passed": 0, "failed": 1, "timeout": 3, "collection_error": 3, "infra_error": 3}
+STATUSES = ("passed", "failed", "timeout", "collection_error", "infra_error", "tampered")
+COUNTED_STATUSES = frozenset({"passed", "failed", "timeout", "collection_error", "tampered"})
+_EXIT_OF_STATUS = {"passed": 0, "failed": 1, "timeout": 3, "collection_error": 3, "infra_error": 3,
+                   "tampered": 1}
 
 DEFAULT_CAP = 4
 DEFAULT_SYNC_TIMEOUT = 900.0
@@ -134,12 +171,506 @@ PROFILES = {
 }
 
 LIMIT_TEXT = (
-    "Stated limit: heldout-run is not a sandbox and claims no adversarial isolation. The suite\n"
-    "runs in the same process as the implementer's code, which can read the suite copy, write\n"
-    "outside the copy or tamper with results; the feedback counts are a low-bandwidth channel.\n"
-    "It prevents accidental exposure (placement, redaction, cleanup), not a hostile implementer.\n"
-    "No OS sandbox is applied; wrap the runner when a stronger boundary is needed."
+    "Stated limits. Without --sandbox, heldout-run is not a sandbox and claims no adversarial\n"
+    "isolation: the suite runs in the same process as the implementer's code, which can read the\n"
+    "suite copy, write outside the copy or tamper with results; the feedback counts are a\n"
+    "low-bandwidth channel. It prevents accidental exposure (placement, redaction, cleanup), not\n"
+    "a hostile implementer.\n"
+    "With --sandbox docker, sandboxed runs isolate the network, the host and the suite from the\n"
+    "tree's processes and from anything that outlives the run (sync as uid impl without the\n"
+    "suite; pytest as uid judge, no network, read-only root; heldout-impl runs implementation\n"
+    "processes as uid impl). Code imported into the judge process can still forge results within\n"
+    "one run, which the canaries and count checks detect only partly (status tampered); the\n"
+    "counts are a low-bandwidth channel; Docker itself is the boundary (no claim against kernel\n"
+    "or Docker escapes)."
 )
+
+
+# ---------------------------------------------------------------------------------------------
+# sandbox (spec 008): constants, the embedded image and its two in-image programs
+
+SANDBOX_MODES = ("none", "docker")
+SANDBOX_JUDGE_UID = 10101
+SANDBOX_IMPL_UID = 10102
+SANDBOX_IMPL_PATH = "/usr/local/bin/heldout-impl"
+IMPL_ENV = "HELDOUT_IMPL"
+SANDBOX_DEFAULT_MEMORY = "4g"
+SANDBOX_DEFAULT_CPUS = 2.0
+SANDBOX_PIDS_LIMIT = 4096
+SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+CANARY_LABEL = "CANARY"
+_SANDBOX_LABEL = "heldout-run.id"
+_SANDBOX_CWD = "/tmp/heldout-cwd"
+_SANDBOX_HOME = "/tmp/heldout-home"
+_SANDBOX_PLUGIN = "/out/plugin"
+# Files copied from /out to the private report directory (FR-009), each capped.
+_OUT_FILES = ("junit.xml", "pytest.log", "records.jsonl", "collect.jsonl", "collect.log",
+              "collect-junit.xml")
+_OUT_CAP = 256 << 20
+# In-container launchers (FR-007: syncing disabled) and sync steps (FR-004). awork-resume has
+# no sync step of its own (its ``uv run`` syncs), so sandboxed it syncs like moeka.
+_UV_SYNC = ["uv", "sync", "--project", "{copy}", "--extra", "dev", "-q"]
+_UV_RUN = ["uv", "run", "--project", "/work", "--extra", "dev", "--no-sync", "pytest"]
+SANDBOX_PROFILES = {
+    "moeka": {"sync": _UV_SYNC, "launcher": _UV_RUN},
+    "awork-resume": {"sync": _UV_SYNC, "launcher": _UV_RUN},
+    "generic": {"sync": None, "launcher": ["python3", "-m", "pytest"]},
+}
+# Host-bound environment names never passed into a container (paths, sockets, sessions).
+_HOST_ONLY_ENV = frozenset({
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "PWD", "OLDPWD", "PYTHONPATH", "PYTHONHOME",
+    "PYTHONUSERBASE", "PYTHONSTARTUP", "PYTHONEXECUTABLE", "PYTHONPYCACHEPREFIX", "VIRTUAL_ENV",
+    "VIRTUAL_ENV_PROMPT", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "SHELL", "USER", "LOGNAME", "MAIL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+    "XDG_DATA_HOME", "XDG_STATE_HOME", "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "DISPLAY",
+    "WAYLAND_DISPLAY", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_PYTHON",
+    "UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR", "HELDOUT_ROOT", IMPL_ENV, RECORDS_ENV, ROUND_ENV,
+})
+
+_SANDBOX_INIT = r'''#!/usr/local/bin/python3 -I
+"""heldout-init: PID 1 of a heldout-run test container (the only process holding capabilities).
+
+It runs as root with only CAP_SETUID, CAP_SETGID, CAP_SETPCAP and CAP_KILL (no DAC override).
+It reads one JSON config from stdin, runs each step (the collect pass, then the main pass) as the
+judge user with an empty bounding set, and meanwhile serves /run/heldout/broker.sock: a judge
+process (checked with SO_PEERCRED) passes its stdin/stdout/stderr, argv, environment and working
+directory, and the broker starts that command as the impl user, never as anyone else. Step exit
+codes go to stdout as JSON lines; nothing a step or an impl process writes reaches stdout.
+"""
+import ctypes
+import json
+import os
+import selectors
+import signal
+import socket
+import struct
+import sys
+import time
+
+SOCK = "/run/heldout/broker.sock"
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_UL = ctypes.c_ulong
+PR_CAPBSET_DROP, PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, PR_SET_NO_NEW_PRIVS = 24, 47, 4, 38
+FORWARDED = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1,
+             signal.SIGUSR2, signal.SIGKILL, signal.SIGCONT, signal.SIGSTOP}
+_TERM = []
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def note(text):
+    sys.stderr.write("heldout-init: " + text + "\n")
+    sys.stderr.flush()
+
+
+def drop_to(uid):
+    """Become uid/gid ``uid`` for good: no groups, empty bounding/ambient/permitted sets."""
+    with open("/proc/sys/kernel/cap_last_cap") as fh:
+        last = int(fh.read())
+    for cap in range(last + 1):
+        _LIBC.prctl(PR_CAPBSET_DROP, _UL(cap), _UL(0), _UL(0), _UL(0))
+    _LIBC.prctl(PR_CAP_AMBIENT, _UL(PR_CAP_AMBIENT_CLEAR_ALL), _UL(0), _UL(0), _UL(0))
+    _LIBC.prctl(PR_SET_NO_NEW_PRIVS, _UL(1), _UL(0), _UL(0), _UL(0))
+    os.setgroups([])
+    os.setresgid(uid, uid, uid)
+    os.setresuid(uid, uid, uid)
+    if os.getresuid() != (uid, uid, uid) or os.getresgid() != (uid, uid, uid) or os.getgroups():
+        os._exit(125)
+
+
+def child_defaults():
+    signal.set_wakeup_fd(-1)
+    for sig in (signal.SIGPIPE, signal.SIGXFSZ, signal.SIGTERM, signal.SIGINT, signal.SIGCHLD,
+                signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(sig, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_SETMASK, [])
+    os.setsid()
+
+
+def spawn_step(step, judge):
+    pid = os.fork()
+    if pid:
+        return pid
+    try:
+        child_defaults()
+        drop_to(judge)
+        os.umask(0o022)
+        for path, mode in step.get("mkdirs", []):
+            os.makedirs(path, exist_ok=True)
+            os.chmod(path, mode)
+        log = os.open(step["log"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        null = os.open("/dev/null", os.O_RDONLY)
+        os.dup2(null, 0)
+        os.dup2(log, 1)
+        os.dup2(log, 2)
+        os.closerange(3, 1 << 16)
+        os.chdir(step["cwd"])
+        argv = step["argv"]
+        os.execvpe(argv[0], argv, step["env"])
+    except BaseException as exc:  # noqa: BLE001
+        try:
+            os.write(2, ("heldout-init: step failed to start: %s\n" % type(exc).__name__).encode())
+        finally:
+            os._exit(127)
+
+
+def spawn_impl(req, fds, impl):
+    pid = os.fork()
+    if pid:
+        return pid
+    try:
+        child_defaults()
+        for i in range(3):
+            os.dup2(fds[i], i)
+        os.closerange(3, 1 << 16)
+        drop_to(impl)
+        try:
+            os.chdir(req["cwd"])
+        except OSError:
+            os.chdir("/")
+        argv = [str(a) for a in req["argv"]]
+        env = {str(k): str(v) for k, v in req["env"].items() if k != "HELDOUT_RUN_RECORDS"}
+        os.execvpe(argv[0], argv, env)
+    except FileNotFoundError:
+        os.write(2, b"heldout-impl: command not found\n")
+        os._exit(127)
+    except PermissionError:
+        os.write(2, b"heldout-impl: permission denied\n")
+        os._exit(126)
+    except BaseException:  # noqa: BLE001
+        os.write(2, b"heldout-impl: cannot start command\n")
+        os._exit(126)
+
+
+def other_pids():
+    me = os.getpid()
+    out = []
+    for name in os.listdir("/proc"):
+        if name.isdigit() and int(name) not in (1, me):
+            out.append(int(name))
+    return out
+
+
+class Broker:
+    def __init__(self, cfg):
+        self.judge = int(cfg["judge_uid"])
+        self.impl = int(cfg["impl_uid"])
+        self.sel = selectors.DefaultSelector()
+        self.children = {}  # pid -> conn state
+        self.exited = {}  # pid -> exit code (non-broker children)
+        rfd, wfd = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+        self.wake_r = rfd
+        signal.set_wakeup_fd(wfd)
+        for sig in (signal.SIGCHLD, signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, self._on_signal)
+        self.sel.register(rfd, selectors.EVENT_READ, ("wake", None))
+        try:
+            os.unlink(SOCK)
+        except FileNotFoundError:
+            pass
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.srv.bind(SOCK)
+        os.chmod(SOCK, 0o666)
+        self.srv.listen(64)
+        self.srv.setblocking(False)
+        self.sel.register(self.srv, selectors.EVENT_READ, ("listen", None))
+
+    @staticmethod
+    def _on_signal(signum, frame):
+        if signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            _TERM.append(signum)
+
+    def reap(self):
+        while True:
+            try:
+                pid, status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if pid == 0:
+                return
+            code = os.waitstatus_to_exitcode(status)
+            st = self.children.pop(pid, None)
+            if st is not None:
+                self._finish(st, code)
+            else:
+                self.exited[pid] = code
+
+    def _finish(self, st, code):
+        msg = {"signal": -code} if code < 0 else {"exit": code}
+        conn = st["conn"]
+        try:
+            conn.setblocking(True)
+            conn.settimeout(5)
+            conn.sendall((json.dumps(msg) + "\n").encode())
+        except OSError:
+            pass
+        self._close(conn)
+
+    def _close(self, conn):
+        try:
+            self.sel.unregister(conn)
+        except (KeyError, ValueError):
+            pass
+        conn.close()
+
+    def accept(self):
+        try:
+            conn, _ = self.srv.accept()
+        except OSError:
+            return
+        try:
+            cred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", cred)
+        except OSError:
+            conn.close()
+            return
+        if uid != self.judge:
+            conn.close()
+            return
+        conn.setblocking(False)
+        st = {"conn": conn, "buf": b"", "fds": None, "pid": None}
+        self.sel.register(conn, selectors.EVENT_READ, ("conn", st))
+
+    def readable(self, st):
+        conn = st["conn"]
+        try:
+            if st["fds"] is None:
+                data, fds, _flags, _addr = socket.recv_fds(conn, 1 << 16, 3)
+                st["fds"] = list(fds)
+            else:
+                data = conn.recv(1 << 16)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b""
+        if not data:
+            self._client_gone(st)
+            return
+        st["buf"] += data
+        if len(st["buf"]) > (8 << 20):
+            self._client_gone(st)
+            return
+        while b"\n" in st["buf"]:
+            line, st["buf"] = st["buf"].split(b"\n", 1)
+            line = line.lstrip(b"\0")
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                self._client_gone(st)
+                return
+            if st["pid"] is None:
+                self._start(st, msg)
+            elif isinstance(msg.get("signal"), int) and msg["signal"] in FORWARDED:
+                try:
+                    os.kill(st["pid"], msg["signal"])
+                except OSError:
+                    pass
+
+    def _start(self, st, msg):
+        fds = st["fds"] or []
+        ok = (isinstance(msg, dict) and len(fds) == 3 and isinstance(msg.get("argv"), list)
+              and msg["argv"] and isinstance(msg.get("env"), dict)
+              and isinstance(msg.get("cwd"), str))
+        if not ok:
+            for fd in fds:
+                os.close(fd)
+            self._close(st["conn"])
+            return
+        pid = spawn_impl(msg, fds, self.impl)
+        for fd in fds:
+            os.close(fd)
+        st["fds"] = []
+        st["pid"] = pid
+        self.children[pid] = st
+
+    def _client_gone(self, st):
+        for fd in st["fds"] or []:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        st["fds"] = []
+        pid = st["pid"]
+        if pid is not None and pid in self.children:
+            for target in (-pid, pid):
+                try:
+                    os.kill(target, signal.SIGKILL)
+                except OSError:
+                    pass
+            # the reaper still finds it; nobody to tell
+            st["conn_closed"] = True
+        self._close(st["conn"])
+
+    def poll(self, timeout):
+        for key, _ in self.sel.select(timeout):
+            kind, st = key.data
+            if kind == "wake":
+                try:
+                    while os.read(self.wake_r, 4096):
+                        pass
+                except OSError:
+                    pass
+            elif kind == "listen":
+                self.accept()
+            else:
+                self.readable(st)
+        self.reap()
+
+    def kill_all(self):
+        for _ in range(50):
+            pids = other_pids()
+            if not pids:
+                break
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.02)
+            self.reap()
+        for st in list(self.children.values()):
+            self._close(st["conn"])
+        self.children.clear()
+
+
+def main():
+    cfg = json.loads(sys.stdin.buffer.read() or b"{}")
+    broker = Broker(cfg)
+    judge = broker.judge
+    for step in cfg.get("steps", []):
+        name = step["name"]
+        emit({"event": "start", "step": name, "t": time.time()})
+        pid = spawn_step(step, judge)
+        while pid not in broker.exited and not _TERM:
+            broker.poll(0.5)
+        if _TERM:
+            broker.kill_all()
+            emit({"event": "terminated", "step": name})
+            return 143
+        emit({"event": "exit", "step": name, "rc": broker.exited.pop(pid)})
+        broker.kill_all()
+    emit({"event": "done"})
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001
+        note("failed: %s" % type(exc).__name__)
+        sys.exit(70)
+'''
+
+_SANDBOX_CLIENT = r'''#!/usr/local/bin/python3 -I
+"""heldout-impl CMD [ARGS...]: run CMD as the impl user (uid 10102) via the heldout-init broker.
+
+CMD gets this process's stdin, stdout, stderr, working directory (``/`` when impl cannot enter
+it) and environment minus HELDOUT_RUN_RECORDS; the exit status (or killing signal) is CMD's.
+This client holds no privilege: the broker (PID 1) does the switch and accepts judge callers only.
+"""
+import json
+import os
+import signal
+import socket
+import sys
+
+SOCK = "/run/heldout/broker.sock"
+
+
+def main(argv):
+    if not argv:
+        sys.stderr.write("usage: heldout-impl CMD [ARGS...]\n")
+        return 2
+    env = {k: v for k, v in os.environ.items() if k != "HELDOUT_RUN_RECORDS"}
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = "/"
+    fds = []
+    for i in range(3):
+        try:
+            os.fstat(i)
+            fds.append(i)
+        except OSError:
+            fds.append(os.open("/dev/null", os.O_RDWR))
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(SOCK)
+        socket.send_fds(sock, [b"\0"], fds)
+        sock.sendall(json.dumps({"argv": argv, "env": env, "cwd": cwd}).encode() + b"\n")
+    except OSError:
+        sys.stderr.write("heldout-impl: broker unavailable\n")
+        return 125
+
+    def forward(signum, frame):
+        try:
+            sock.sendall(json.dumps({"signal": signum}).encode() + b"\n")
+        except OSError:
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1,
+                signal.SIGUSR2):
+        signal.signal(sig, forward)
+    buf = b""
+    while b"\n" not in buf:
+        try:
+            chunk = sock.recv(4096)
+        except InterruptedError:
+            continue
+        if not chunk:
+            sys.stderr.write("heldout-impl: broker closed the connection\n")
+            return 125
+        buf += chunk
+    res = json.loads(buf.split(b"\n", 1)[0])
+    if "signal" in res:
+        sig = int(res["signal"])
+        signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+        return 128 + sig
+    return int(res.get("exit", 125))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+'''
+
+SANDBOX_DOCKERFILE = (
+    """# heldout-run sandbox image (spec 008). Written and built by scripts/heldout_run.py.
+FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \\
+    PIP_ROOT_USER_ACTION=ignore
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends git ca-certificates \\
+ && rm -rf /var/lib/apt/lists/*
+RUN pip install "pytest==9.0.2" "uv==0.11.7"
+RUN groupadd -g 10101 judge \\
+ && useradd -u 10101 -g 10101 -M -d /tmp/heldout-home -s /usr/sbin/nologin judge \\
+ && groupadd -g 10102 impl \\
+ && useradd -u 10102 -g 10102 -m -d /home/impl -s /bin/sh impl \\
+ && mkdir -p /work /suite /out /run/heldout \\
+ && chown impl:impl /work && chmod 0755 /work \\
+ && chown judge:judge /suite /out && chmod 0700 /suite /out
+COPY <<"HELDOUT_EOF" /usr/local/sbin/heldout-init
+"""
+    + _SANDBOX_INIT
+    + """HELDOUT_EOF
+COPY <<"HELDOUT_EOF" /usr/local/bin/heldout-impl
+"""
+    + _SANDBOX_CLIENT
+    + """HELDOUT_EOF
+RUN chmod 0755 /usr/local/sbin/heldout-init /usr/local/bin/heldout-impl
+"""
+)
+
+
+def sandbox_image() -> str:
+    """The default sandbox image tag: ``heldout-sandbox:<first 12 hex of sha256(Dockerfile)>``."""
+    return "heldout-sandbox:" + hashlib.sha256(SANDBOX_DOCKERFILE.encode("utf-8")).hexdigest()[:12]
 
 
 class HeldoutError(Exception):
@@ -257,7 +788,14 @@ def _safe_label(label) -> bool:
 
 
 def summarize(records, *, feature, round, cap, status) -> dict:  # noqa: A002
-    """Build the ``heldout-feedback.v1`` object from test records (ids and counts only)."""
+    """Build the ``heldout-feedback.v1`` object from test records (ids and counts only).
+
+    For status ``tampered`` (spec 008 FR-017) the object carries only the schema, feature, round,
+    cap and status: no ids, no counts.
+    """
+    if status == "tampered":
+        return {"schema": FEEDBACK_SCHEMA, "feature": feature, "round": round,
+                "round_cap": cap, "status": status}
     per: dict[str, list[int]] = {}
     tests = failing = skipped = 0
     for rec in records:
@@ -304,6 +842,11 @@ def format_feedback(feedback: dict) -> str:
         feature = "-"
     cap = int(feedback.get("round_cap", DEFAULT_CAP))
     lines = [f"heldout-run: {feature} round {r}/{cap}: {status}"]
+    if status == "tampered":
+        lines.append("status: tampered")
+        if rnd is not None and int(rnd) >= cap:
+            lines.append("round cap reached: escalate to owner")
+        return "\n".join(lines)
     failing = feedback.get("failing") or {}
     for label in sorted((k for k in failing if _safe_label(k)), key=_id_sort_key):
         v = failing[label]
@@ -321,6 +864,11 @@ def format_feedback(feedback: dict) -> str:
 
 def _sanitize_feedback(fb: dict) -> dict:
     """Final redaction guard: only ids/labels, the validated feature and integers survive."""
+    if fb.get("status") == "tampered":
+        clean = {k: fb.get(k) for k in ("schema", "feature", "round", "round_cap", "status")}
+        if not (isinstance(fb["feature"], str) and FEATURE_RX.match(fb["feature"])):
+            clean["feature"] = "-"
+        return clean
     clean = dict(fb)
     clean["failing"] = {
         k: {"failing": int(v["failing"]), "total": int(v["total"])}
@@ -619,6 +1167,18 @@ def _positive_float(text: str) -> float:
     return value
 
 
+def _memory(text: str) -> str:
+    if not re.fullmatch(r"[1-9][0-9]*[bkmgBKMG]?", text):
+        raise ValueError
+    return text
+
+
+def _image_name(text: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}", text):
+        raise ValueError
+    return text
+
+
 def _positive_int(text: str) -> int:
     value = int(text)
     if value < 1:
@@ -671,6 +1231,13 @@ def _build_parser() -> _Parser:
     r.add_argument("--keep", action="store_true")
     r.add_argument("--json", action="store_true")
     r.add_argument("--feedback-file")
+    r.add_argument("--sync-cmd", help="sync step command ({copy} is the copy's path)")
+    r.add_argument("--sandbox", choices=SANDBOX_MODES, default="none",
+                   help="none (default, spec 007 behaviour) or docker (spec 008)")
+    r.add_argument("--sandbox-image", type=_image_name,
+                   help="image to use instead of the built heldout-sandbox:<tag>")
+    r.add_argument("--sandbox-memory", type=_memory, default=SANDBOX_DEFAULT_MEMORY)
+    r.add_argument("--sandbox-cpus", type=_positive_float, default=SANDBOX_DEFAULT_CPUS)
 
     t = sub.add_parser(
         "triage",
@@ -768,6 +1335,7 @@ def _check_placement(bases, *, suite: str, report_dir: str | None, root: str) ->
 class _State:
     def __init__(self):
         self.proc: subprocess.Popen | None = None
+        self.docker: _Docker | None = None
 
 
 def _killpg(pid: int, sig: int) -> None:
@@ -986,6 +1554,576 @@ def _infra_feedback(feature: str, cap: int) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------
+# sandbox (spec 008): docker plumbing, the two phases and tamper detection
+
+
+def _split_cmd(text: str) -> list[str]:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return []
+
+
+_MARKER_TOKEN_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]*|\S")
+
+
+def _marker_exprs(pytest_args) -> list[str]:
+    exprs, args, i = [], list(pytest_args), 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "-m":
+            if i + 1 < len(args):
+                exprs.append(args[i + 1])
+            i += 2
+            continue
+        if arg.startswith("-m") and not arg.startswith("--"):
+            exprs.append(arg[2:].lstrip("=").strip())
+        i += 1
+    return exprs
+
+
+def _selects_docker_marker(pytest_args) -> bool:
+    """True when a ``-m`` expression selects ``docker`` (a ``docker`` term not negated by ``not``)."""
+    for expr in _marker_exprs(pytest_args):
+        prev = None
+        for tok in _MARKER_TOKEN_RX.findall(expr):
+            if tok in ("(", ")"):
+                continue
+            if tok == "docker" and prev != "not":
+                return True
+            prev = tok
+    return False
+
+
+def _narrows_selection(pytest_args) -> bool:
+    """Whether extra pytest arguments may deselect tests (then canaries may be absent)."""
+    for arg in pytest_args:
+        if not arg.startswith("-") or "::" in arg:
+            return True
+        if re.match(r"-[km]", arg) or arg.startswith(
+            ("--deselect", "--lf", "--last-failed", "--sw", "--stepwise", "--ignore",
+             "--pyargs", "--collect-in-virtualenv")
+        ):
+            return True
+    return False
+
+
+def _stops_early(pytest_args) -> bool:
+    for arg in pytest_args:
+        if arg in ("-x", "--exitfirst") or arg.startswith(("--maxfail", "--sw", "--stepwise")):
+            return True
+        if re.fullmatch(r"-[qvsrlx]*x[qvsrlx]*", arg):
+            return True
+    return False
+
+
+class _Docker:
+    """The docker CLI, with every call logged to the private sandbox.log and run cleanup."""
+
+    def __init__(self, exe: str, log_path: str):
+        self.exe = exe
+        self.log_path = log_path
+        self.containers: list[str] = []
+        self.volumes: list[str] = []
+
+    @classmethod
+    def connect(cls, log_path: str) -> "_Docker":
+        exe = shutil.which("docker", path=os.environ.get("PATH") or os.defpath)
+        if not exe:
+            raise HeldoutError("E_SANDBOX_UNAVAILABLE")
+        dk = cls(exe, log_path)
+        p = dk.run(["version", "--format", "{{.Server.Version}}"], timeout=60, capture=True)
+        if p is None or p.returncode != 0 or not p.stdout.strip():
+            raise HeldoutError("E_SANDBOX_UNAVAILABLE")
+        return dk
+
+    def _log(self):
+        fd = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        return os.fdopen(fd, "ab")
+
+    def run(self, args, *, timeout=300.0, capture=False, data: bytes | None = None,
+            check: str | None = None):
+        with self._log() as log:
+            log.write(("$ docker " + " ".join(shlex.quote(x) for x in args[:12]) + "\n").encode())
+            log.flush()
+            try:
+                p = subprocess.run([self.exe, *args], input=data,
+                                   stdin=subprocess.DEVNULL if data is None else None,
+                                   stdout=subprocess.PIPE if capture else log, stderr=log,
+                                   timeout=timeout)
+            except (OSError, subprocess.SubprocessError):
+                p = None
+        if check and (p is None or p.returncode != 0):
+            raise HeldoutError(check)
+        return p
+
+    def popen(self, args, **kw) -> subprocess.Popen:
+        return subprocess.Popen([self.exe, *args], start_new_session=True, **kw)
+
+    def cleanup(self) -> None:
+        while self.containers:
+            self.run(["rm", "-f", "-v", self.containers.pop()], timeout=120)
+        while self.volumes:
+            self.run(["volume", "rm", "-f", self.volumes.pop()], timeout=120)
+
+    def ensure_image(self, image: str, scratch_dir: str, *, build: bool) -> None:
+        p = self.run(["image", "inspect", "--format", "{{.Id}}", image], timeout=60, capture=True)
+        if p is not None and p.returncode == 0:
+            return
+        if not build:
+            self.run(["pull", "-q", image], timeout=1800, check="E_SANDBOX_UNAVAILABLE")
+            return
+        ctx = os.path.join(scratch_dir, "image")
+        os.mkdir(ctx, 0o700)
+        _write_private(os.path.join(ctx, "Dockerfile"), SANDBOX_DOCKERFILE)
+        self.run(["build", "-t", image, "-f", os.path.join(ctx, "Dockerfile"), ctx],
+                 timeout=3600, check="E_SANDBOX_UNAVAILABLE")
+
+    def tar_into(self, container: str, dest: str, fill) -> None:
+        """Stream a tar built by ``fill(tarfile)`` into ``container:dest`` (owners kept)."""
+        with self._log() as log:
+            proc = self.popen(["cp", "-", f"{container}:{dest}"], stdin=subprocess.PIPE,
+                              stdout=log, stderr=log)
+            ok = True
+            try:
+                with tarfile.open(fileobj=proc.stdin, mode="w|", format=tarfile.PAX_FORMAT) as tf:
+                    fill(tf)
+            except (OSError, tarfile.TarError):
+                ok = False
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+                rc = proc.wait()
+        if not ok or rc != 0:
+            raise HeldoutError("E_SANDBOX_UNAVAILABLE")
+
+    def fetch_out(self, container: str, report_dir: str) -> None:
+        """Copy the allowed regular files of ``container:/out`` into the report (FR-009)."""
+        with self._log() as log:
+            proc = self.popen(["cp", f"{container}:/out", "-"], stdout=subprocess.PIPE,
+                              stderr=log)
+            try:
+                with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
+                    for member in tf:
+                        parts = member.name.split("/")
+                        if (len(parts) != 2 or parts[1] not in _OUT_FILES
+                                or not member.isreg()):
+                            continue
+                        src = tf.extractfile(member)
+                        if src is None:
+                            continue
+                        _write_private(os.path.join(report_dir, parts[1]), src.read(_OUT_CAP))
+            except (OSError, tarfile.TarError):
+                pass
+            finally:
+                proc.stdout.close()
+                proc.wait()
+
+
+def _tar_tree(tf: tarfile.TarFile, src: str, uid: int, *, private: bool) -> None:
+    """Add ``src``'s contents (not ``src`` itself) owned by ``uid``; skip special files."""
+
+    def owned(ti: tarfile.TarInfo):
+        if not (ti.isreg() or ti.isdir() or ti.issym()):
+            return None
+        ti.uid = ti.gid = uid
+        ti.uname = ti.gname = ""
+        if ti.isdir():
+            ti.mode = 0o700 if private else (ti.mode & 0o777) | 0o700
+        elif ti.isreg():
+            ti.mode = 0o600 if private else (ti.mode & 0o777) | 0o600
+        return ti
+
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames.sort()
+        for name in sorted(dirnames) + sorted(filenames):
+            path = os.path.join(dirpath, name)
+            arc = os.path.relpath(path, src)
+            tf.add(path, arcname=arc, recursive=False, filter=owned)
+
+
+def _tar_bytes(tf: tarfile.TarFile, name: str, data: bytes, uid: int, mode: int = 0o600) -> None:
+    ti = tarfile.TarInfo(name)
+    ti.size, ti.uid, ti.gid, ti.mode, ti.mtime = len(data), uid, uid, mode, int(time.time())
+    tf.addfile(ti, io.BytesIO(data))
+
+
+def _tar_dir(tf: tarfile.TarFile, name: str, uid: int, mode: int = 0o700) -> None:
+    ti = tarfile.TarInfo(name)
+    ti.type, ti.uid, ti.gid, ti.mode, ti.mtime = tarfile.DIRTYPE, uid, uid, mode, int(time.time())
+    tf.addfile(ti)
+
+
+def _make_canaries() -> list[dict]:
+    """Two canaries with random test and file names (>= 64 random bits each, FR-014)."""
+    out = []
+    for expect in ("failed", "passed"):
+        name = "test_" + secrets.token_hex(12)
+        body = "assert False" if expect == "failed" else "pass"
+        out.append({
+            "name": name,
+            "file": "test_" + secrets.token_hex(12) + ".py",
+            "expect": expect,
+            "source": f"import pytest\n\n\n@pytest.mark.fr({CANARY_LABEL!r})\n"
+                      f"def {name}():\n    {body}\n",
+        })
+    return out
+
+
+def _container_env(a, *, round_n) -> dict[str, str]:
+    """007 FR-012 environment with in-container paths; host-bound names are dropped."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in _HOST_ONLY_ENV and not k.startswith("DOCKER_")}
+    for name in a.unset:
+        env.pop(name, None)
+    pp = [s.replace("{copy}", "/work") for s in PROFILES[a.profile]["pythonpath"]]
+    env.update({
+        "PATH": SANDBOX_PATH,
+        "HOME": _SANDBOX_HOME,
+        "TMPDIR": "/tmp",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": ":".join(pp + [_SANDBOX_PLUGIN]),
+        ROUND_ENV: "-" if round_n is None else str(round_n),
+        IMPL_ENV: SANDBOX_IMPL_PATH,
+        "UV_OFFLINE": "1",
+        "UV_CACHE_DIR": "/tmp/heldout-uv-cache",
+    })
+    return env
+
+
+def _limits(a) -> list[str]:
+    return ["--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--pids-limit", str(SANDBOX_PIDS_LIMIT), "--memory", a.sandbox_memory,
+            "--cpus", f"{a.sandbox_cpus:g}"]
+
+
+def _attach(dk: _Docker, name: str, log_path: str, timeout: float, state: _State):
+    """``docker start -a`` with a wall-clock timeout; (exit code, timed_out)."""
+    with open(log_path, "ab") as log:
+        os.chmod(log_path, 0o600)
+        proc = dk.popen(["start", "-a", name], stdin=subprocess.DEVNULL, stdout=log,
+                        stderr=subprocess.STDOUT)
+        state.proc = proc
+        try:
+            proc.wait(timeout=timeout)
+            return proc.returncode, False
+        except subprocess.TimeoutExpired:
+            dk.run(["kill", name], timeout=60)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            return None, True
+        finally:
+            state.proc = None
+
+
+def _run_sandboxed(a, dk: _Docker, *, state, profile_name, copy, suite, plugin_dir, report_dir,
+                   round_n, meta, id_map) -> dict:
+    sbx = SANDBOX_PROFILES[profile_name]
+    image = a.sandbox_image or sandbox_image()
+    meta["image"] = image
+    dk.ensure_image(image, os.path.dirname(plugin_dir), build=not a.sandbox_image)
+    run_id = secrets.token_hex(8)
+    meta["sandbox_run_id"] = run_id
+    label = ["--label", f"{_SANDBOX_LABEL}={run_id}"]
+    vol = {k: f"heldout-{run_id}-{k}" for k in ("work", "suite", "out")}
+    for v in vol.values():
+        dk.volumes.append(v)
+        dk.run(["volume", "create", *label, v], timeout=120, check="E_SANDBOX_UNAVAILABLE")
+
+    def fill_work(tf):
+        _tar_tree(tf, copy, SANDBOX_IMPL_UID, private=False)
+
+    # Build phase (FR-004, FR-005): untrusted code, network, the copy only.
+    if a.sync_cmd is not None:
+        sync = _split_cmd(a.sync_cmd)
+    else:
+        sync = sbx["sync"]
+    work_filled = False
+    if sync and not a.no_sync:
+        build = f"heldout-{run_id}-build"
+        dk.containers.append(build)
+        dk.run(["create", "--name", build, *label, "--user",
+                f"{SANDBOX_IMPL_UID}:{SANDBOX_IMPL_UID}", *_limits(a), "--network", "bridge",
+                "-v", f"{vol['work']}:/work", "-w", "/work", "-e", "HOME=/home/impl",
+                "-e", "UV_LINK_MODE=copy", image, *[x.replace("{copy}", "/work") for x in sync]],
+               timeout=300, check="E_SANDBOX_UNAVAILABLE")
+        dk.tar_into(build, "/work", fill_work)
+        work_filled = True
+        rc, to = _attach(dk, build, os.path.join(report_dir, "sync.log"), a.sync_timeout, state)
+        dk.run(["rm", "-f", "-v", build], timeout=120)
+        dk.containers.remove(build)
+        if to or rc != 0:
+            raise HeldoutError("E_SYNC")
+
+    # Test phase (FR-006..FR-008): no network, read-only root, judge and impl separated.
+    canaries = _make_canaries()
+    test = f"heldout-{run_id}-test"
+    dk.containers.append(test)
+    dk.run(["create", "--name", test, *label, "--user", "0:0", "--cap-drop", "ALL",
+            *[x for cap in ("SETUID", "SETGID", "SETPCAP", "KILL") for x in ("--cap-add", cap)],
+            *_limits(a)[2:], "--security-opt", "no-new-privileges", "--network", "none",
+            "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
+            "--tmpfs", "/run/heldout:rw,nosuid,nodev,noexec,mode=0755",
+            "-v", f"{vol['work']}:/work", "-v", f"{vol['suite']}:/suite",
+            "-v", f"{vol['out']}:/out", "-i", image, "/usr/local/sbin/heldout-init"],
+           timeout=300, check="E_SANDBOX_UNAVAILABLE")
+    if not work_filled:
+        dk.tar_into(test, "/work", fill_work)
+
+    def fill_suite(tf):
+        _tar_tree(tf, suite, SANDBOX_JUDGE_UID, private=True)
+        for c in canaries:
+            _tar_bytes(tf, c["file"], c["source"].encode(), SANDBOX_JUDGE_UID)
+
+    def fill_out(tf):
+        _tar_dir(tf, "plugin", SANDBOX_JUDGE_UID)
+        with open(os.path.join(plugin_dir, "heldout_run.py"), "rb") as fh:
+            _tar_bytes(tf, "plugin/heldout_run.py", fh.read(), SANDBOX_JUDGE_UID)
+
+    dk.tar_into(test, "/suite", fill_suite)
+    dk.tar_into(test, "/out", fill_out)
+
+    launcher = list(sbx["launcher"])
+    targets = ["/suite"] + [f"/suite/{c['file']}" for c in canaries]
+    plugin_args = ["-p", "no:cacheprovider", "-p", "heldout_run"]
+    main_cmd = launcher + targets + ["-q", *plugin_args, "--junitxml=/out/junit.xml"]
+    main_cmd += list(a.pytest_arg)
+    collect_cmd = launcher + targets + ["--collect-only", "-q", *plugin_args,
+                                        "--junitxml=/out/collect-junit.xml"] + list(a.pytest_arg)
+    meta["pytest_command"] = main_cmd
+    meta["collect_command"] = collect_cmd
+    env = _container_env(a, round_n=round_n)
+    cwd = _SANDBOX_CWD if PROFILES[profile_name]["cwd"] == "@scratch" else "/work"
+    mkdirs = [[_SANDBOX_HOME, 0o700]] + ([[_SANDBOX_CWD, 0o755]] if cwd == _SANDBOX_CWD else [])
+    config = {
+        "judge_uid": SANDBOX_JUDGE_UID,
+        "impl_uid": SANDBOX_IMPL_UID,
+        "steps": [
+            {"name": "collect", "argv": collect_cmd, "cwd": cwd, "log": "/out/collect.log",
+             "mkdirs": mkdirs, "env": dict(env, **{RECORDS_ENV: "/out/collect.jsonl"})},
+            {"name": "main", "argv": main_cmd, "cwd": cwd, "log": "/out/pytest.log",
+             "mkdirs": mkdirs, "env": dict(env, **{RECORDS_ENV: "/out/records.jsonl"})},
+        ],
+    }
+    timeout = a.timeout if a.timeout else PROFILES[profile_name]["timeout"]
+    rcs, timed_out = _drive_test_container(dk, test, config, timeout, state)
+
+    # FR-009: copy /out, then remove the container, the suite copy, /out and the copy.
+    dk.fetch_out(test, report_dir)
+    dk.cleanup()
+
+    return _judge(a, report_dir=report_dir, canaries=canaries, rcs=rcs, timed_out=timed_out,
+                  id_map=id_map, meta=meta)
+
+
+def _drive_test_container(dk: _Docker, name: str, config: dict, timeout: float, state):
+    """Run heldout-init; the timeout runs from the start of each pytest pass (FR-008)."""
+    events: queue.Queue = queue.Queue()
+    with dk._log() as log:
+        proc = dk.popen(["start", "-a", "-i", name], stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=log)
+    state.proc = proc
+
+    def reader():
+        for line in proc.stdout:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                events.put(obj)
+        events.put(None)
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    try:
+        proc.stdin.write(json.dumps(config).encode())
+        proc.stdin.close()
+    except OSError:
+        pass
+    rcs: dict[str, int] = {}
+    timed_out = False
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                dk.run(["stop", "-t", str(int(KILL_GRACE_S)), name], timeout=KILL_GRACE_S + 60)
+                dk.run(["kill", name], timeout=60)
+                break
+            try:
+                ev = events.get(timeout=min(remaining, 1.0))
+            except queue.Empty:
+                continue
+            if ev is None:
+                break
+            if ev.get("event") == "start":
+                deadline = time.monotonic() + timeout
+            elif ev.get("event") == "exit" and isinstance(ev.get("rc"), int):
+                rcs[str(ev.get("step"))] = ev["rc"]
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    finally:
+        state.proc = None
+    t.join(10)
+    return rcs, timed_out
+
+
+def _junit_key(nodeid: str) -> tuple[str, str]:
+    """The (classname, name) pytest's junitxml derives from a node id."""
+    path, bracket, params = nodeid.partition("[")
+    names = path.split("::")
+    names[0] = re.sub(r"\.py$", "", names[0].replace("/", "."))
+    names[-1] += bracket + params
+    return ".".join(names[:-1]), names[-1]
+
+
+def _junit_outcomes(path: str):
+    try:
+        root = ElementTree.parse(path).getroot()
+    except (OSError, ElementTree.ParseError, ValueError):
+        return None
+    out = []
+    for tc in root.iter("testcase"):
+        tags = [child.tag for child in tc]
+        if "failure" in tags or "error" in tags:
+            outcome = "failed"
+        elif "skipped" in tags:
+            sk = tc.find("skipped")
+            outcome = "passed" if sk is not None and sk.get("type") == "pytest.xfail" else "skipped"
+        else:
+            outcome = "passed"
+        out.append(((tc.get("classname") or "", tc.get("name") or ""), outcome))
+    return out
+
+
+def _final_outcomes(records_path: str) -> dict[str, str]:
+    """nodeid -> outcome for every test with a final (teardown) result."""
+    _c, order, reports, _e, _f = _read_records(records_path)
+    out = {}
+    for nodeid in order:
+        phases = reports.get(nodeid, [])
+        if any(p.get("when") == "teardown" for p in phases):
+            out[nodeid] = _outcome(phases, False)[0]
+    return out
+
+
+def _tamper_reasons(a, *, report_dir, canaries, rcs) -> list[str]:
+    """The FR-016 checks (plus exit-status consistency); an empty list means none fired."""
+    reasons = []
+    main = os.path.join(report_dir, "records.jsonl")
+    collected, _order, _reports, _errors, finished = _read_records(main)
+    finals = _final_outcomes(main)
+    c_collected, _o, _r, _e, c_finished = _read_records(os.path.join(report_dir,
+                                                                     "collect.jsonl"))
+    if finished is None:
+        reasons.append("main pass recorded no session finish")
+    if rcs.get("collect") != 0 or c_finished is None:
+        reasons.append("collect-only pass did not finish cleanly")
+    expected = len(c_collected)
+    any_failed = any(o == "failed" for o in finals.values())
+    if len(finals) != expected and not (
+        _stops_early(a.pytest_arg) and any_failed and len(finals) < expected
+    ):
+        reasons.append(f"{len(finals)} results recorded, {expected} collected")
+    narrowed = _narrows_selection(a.pytest_arg)
+    for c in canaries:
+        nodeids = [n for n in finals if n.endswith("::" + c["name"])]
+        outcome = finals[nodeids[0]] if nodeids else "missing"
+        c["outcome"] = outcome
+        in_collect = any(n.endswith("::" + c["name"]) for n in c_collected)
+        if not in_collect and narrowed:
+            continue
+        if c["expect"] == "failed" and outcome in ("passed", "missing"):
+            reasons.append("failing canary " + outcome)
+        if c["expect"] == "passed" and outcome in ("failed", "missing"):
+            reasons.append("passing canary " + outcome)
+    if rcs.get("main") == 0 and any_failed:
+        reasons.append("pytest exit status 0 with failures recorded")
+    junit = _junit_outcomes(os.path.join(report_dir, "junit.xml"))
+    if junit is None:
+        reasons.append("junit file missing or unreadable")
+    else:
+        mine: dict = {}
+        for nodeid, outcome in finals.items():
+            mine.setdefault(_junit_key(nodeid), []).append(outcome)
+        theirs: dict = {}
+        for key, outcome in junit:
+            if outcome == "skipped" and key not in mine:
+                continue  # a collection-level skip: junit lists it, the plugin does not
+            theirs.setdefault(key, []).append(outcome)
+        if {k: sorted(v) for k, v in mine.items()} != {k: sorted(v) for k, v in theirs.items()}:
+            reasons.append("junit and records disagree")
+    return reasons
+
+
+def _judge(a, *, report_dir, canaries, rcs, timed_out, id_map, meta) -> dict:
+    records = os.path.join(report_dir, "records.jsonl")
+    tests_all, _has, collect_errors, _fin = _build_tests(records, id_map, timed_out)
+    names = {c["name"] for c in canaries}
+    files = {c["file"] for c in canaries}
+
+    def is_canary(t):
+        return t["key"] in names and any(f in t["nodeid"] for f in files)
+
+    tests = [t for t in tests_all if not is_canary(t)]
+    finals = _final_outcomes(records)
+    for c in canaries:
+        hits = [n for n in finals if n.endswith("::" + c["name"])]
+        c["outcome"] = finals[hits[0]] if hits else "missing"
+    isolation = "partial"
+    for rec in _iter_records(records):
+        if rec.get("type") == "isolation":
+            mods = rec.get("work_modules")
+            isolation = "partial" if mods else "full"
+            meta["work_modules"] = mods if isinstance(mods, list) else None
+    meta["isolation"] = isolation
+    rc = rcs.get("main")
+    _c, _o, reports, _e, _f = _read_records(records)
+    has_reports = bool(set(reports) - {t["nodeid"] for t in tests_all if is_canary(t)})
+    if timed_out:
+        status = "timeout"
+    elif rc is None:
+        raise HeldoutError("E_SANDBOX_UNAVAILABLE")
+    elif collect_errors or rc in (2, 3, 4, 5) or not has_reports:
+        status = "collection_error"
+    else:
+        reasons = _tamper_reasons(a, report_dir=report_dir, canaries=canaries, rcs=rcs)
+        meta["tamper_reasons"] = reasons
+        if reasons:
+            status = "tampered"
+        elif rc in (0, 1) and not any(t["outcome"] == "failed" for t in tests):
+            status = "passed"
+        else:
+            status = "failed"
+    report_canaries = [{"name": c["name"], "file": c["file"], "expect": c["expect"],
+                        "outcome": c["outcome"]} for c in canaries]
+    return {"tests": tests, "canaries": report_canaries, "status": status, "rc": rc}
+
+
+def _iter_records(path: str):
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                yield rec
+
+
+# ---------------------------------------------------------------------------------------------
 # run
 
 
@@ -993,6 +2131,10 @@ def _cmd_run(a, out) -> int:
     _check_names(a.repo_name, a.feature)
     if bool(a.worktree) == bool(a.repo) or bool(a.repo) != bool(a.ref):
         raise HeldoutError("E_USAGE")
+    if a.sync_cmd is not None and not _split_cmd(a.sync_cmd):
+        raise HeldoutError("E_USAGE")
+    if a.sandbox == "docker" and _selects_docker_marker(a.pytest_arg):
+        raise HeldoutError("E_SANDBOX_DOCKER")
     profile = PROFILES[a.profile]
     root = _heldout_root(a.heldout_root)
     suite = os.path.abspath(a.suite) if a.suite else os.path.join(root, a.repo_name, a.feature)
@@ -1101,8 +2243,12 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
         "status": None,
         "pytest_exit_code": None,
         "error": None,
+        "sandbox": a.sandbox,
+        "image": None,
+        "isolation": None,
     }
     tests: list[dict] = []
+    canaries: list[dict] = []
     status = "infra_error"
     error_code = None
     base = copy = None
@@ -1119,6 +2265,9 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
             except ValueError:  # not the main thread
                 pass
         base = tempfile.mkdtemp(prefix="heldout-run-", dir=scratch)
+        if a.sandbox == "docker":
+            # Checked before anything is copied (FR-003).
+            state.docker = _Docker.connect(os.path.join(report_dir, "sandbox.log"))
         copy = tempfile.mkdtemp(prefix="heldout-copy-", dir=scratch)
         plugin_dir = os.path.join(base, "plugin")
         work = os.path.join(base, "work")
@@ -1135,14 +2284,17 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
             else:
                 _copy_filtered(tree, copy)
             _rmtree(os.path.join(copy, ".git"))
-            dest = os.path.join(copy, suite_rel)
-            if os.path.lexists(dest):
-                if os.path.isdir(dest) and not os.path.islink(dest):
-                    _rmtree(dest)
-                else:
-                    os.unlink(dest)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            _copy_filtered(suite, dest)
+            if a.sandbox != "docker":
+                # Unsandboxed (007 FR-009): the suite sits inside the copy. Sandboxed (008
+                # FR-006): it never does; it goes to the judge-only /suite.
+                dest = os.path.join(copy, suite_rel)
+                if os.path.lexists(dest):
+                    if os.path.isdir(dest) and not os.path.islink(dest):
+                        _rmtree(dest)
+                    else:
+                        os.unlink(dest)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                _copy_filtered(suite, dest)
             with open(os.path.join(plugin_dir, "heldout_run.py"), "wb") as fh:
                 fh.write(_runner_bytes())
         except HeldoutError:
@@ -1150,52 +2302,63 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
         except OSError:
             raise HeldoutError("E_SYNC") from None
 
-        env = dict(os.environ)
-        for name in a.unset:
-            env.pop(name, None)
-        inherited = env.get("PYTHONPATH")
-        pp = _expand(profile["pythonpath"], copy) + [plugin_dir]
-        pp += [inherited] if inherited else []
-        env["PYTHONPATH"] = os.pathsep.join(pp)
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env[RECORDS_ENV] = records
-        env[ROUND_ENV] = "-" if round_n is None else str(round_n)
-        env["TMPDIR"] = child_tmp
-        cwd = work if profile["cwd"] == "@scratch" else profile["cwd"].replace("{copy}", copy)
+        if a.sandbox == "docker":
+            res = _run_sandboxed(a, state.docker, state=state, profile_name=a.profile,
+                                 copy=copy, suite=suite, plugin_dir=plugin_dir,
+                                 report_dir=report_dir, round_n=round_n, meta=meta,
+                                 id_map=id_map)
+            tests, canaries, status = res["tests"], res["canaries"], res["status"]
+            meta["pytest_exit_code"] = res["rc"]
+        else:
+            env = dict(os.environ)
+            for name in a.unset:
+                env.pop(name, None)
+            env.pop(IMPL_ENV, None)  # set only in sandboxed runs (008 FR-012)
+            inherited = env.get("PYTHONPATH")
+            pp = _expand(profile["pythonpath"], copy) + [plugin_dir]
+            pp += [inherited] if inherited else []
+            env["PYTHONPATH"] = os.pathsep.join(pp)
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env[RECORDS_ENV] = records
+            env[ROUND_ENV] = "-" if round_n is None else str(round_n)
+            env["TMPDIR"] = child_tmp
+            cwd = work if profile["cwd"] == "@scratch" else profile["cwd"].replace("{copy}", copy)
 
-        if profile["sync"] and not a.no_sync:
-            sync_log = os.path.join(report_dir, "sync.log")
-            with open(sync_log, "wb") as log:
-                os.chmod(sync_log, 0o600)
+            sync_cmd = _split_cmd(a.sync_cmd) if a.sync_cmd is not None else profile["sync"]
+            if sync_cmd and not a.no_sync:
+                sync_log = os.path.join(report_dir, "sync.log")
+                with open(sync_log, "wb") as log:
+                    os.chmod(sync_log, 0o600)
+                    try:
+                        rc, to = _run_group(_expand(sync_cmd, copy), cwd=work, env=env,
+                                            log_fh=log, timeout=a.sync_timeout, state=state)
+                    except OSError:
+                        rc, to = None, False
+                if to or rc != 0:
+                    raise HeldoutError("E_SYNC")
+
+            launcher = [
+                sys.executable if s == "@python" else s for s in _expand(profile["launcher"], copy)
+            ]
+            junit = os.path.join(report_dir, "junit.xml")
+            cmd = launcher + [
+                dest, "-q", "-p", "no:cacheprovider", "-p", "heldout_run", f"--junitxml={junit}",
+            ] + list(a.pytest_arg)
+            meta["pytest_command"] = cmd
+            timeout = a.timeout if a.timeout else profile["timeout"]
+            pytest_log = os.path.join(report_dir, "pytest.log")
+            with open(pytest_log, "wb") as log:
+                os.chmod(pytest_log, 0o600)
                 try:
-                    rc, to = _run_group(_expand(profile["sync"], copy), cwd=work, env=env,
-                                        log_fh=log, timeout=a.sync_timeout, state=state)
+                    rc, timed_out = _run_group(cmd, cwd=cwd, env=env, log_fh=log,
+                                               timeout=timeout, state=state)
                 except OSError:
-                    rc, to = None, False
-            if to or rc != 0:
-                raise HeldoutError("E_SYNC")
-
-        launcher = [
-            sys.executable if s == "@python" else s for s in _expand(profile["launcher"], copy)
-        ]
-        junit = os.path.join(report_dir, "junit.xml")
-        cmd = launcher + [
-            dest, "-q", "-p", "no:cacheprovider", "-p", "heldout_run", f"--junitxml={junit}",
-        ] + list(a.pytest_arg)
-        meta["pytest_command"] = cmd
-        timeout = a.timeout if a.timeout else profile["timeout"]
-        pytest_log = os.path.join(report_dir, "pytest.log")
-        with open(pytest_log, "wb") as log:
-            os.chmod(pytest_log, 0o600)
-            try:
-                rc, timed_out = _run_group(cmd, cwd=cwd, env=env, log_fh=log, timeout=timeout,
-                                           state=state)
-            except OSError:
-                raise HeldoutError("E_SYNC") from None
-        meta["pytest_exit_code"] = rc
-        tests, has_reports, collect_errors, _finished = _build_tests(records, id_map, timed_out)
-        status = _decide_status(timed_out=timed_out, rc=rc, has_reports=has_reports,
-                                collect_errors=collect_errors, tests=tests)
+                    raise HeldoutError("E_SYNC") from None
+            meta["pytest_exit_code"] = rc
+            tests, has_reports, collect_errors, _finished = _build_tests(records, id_map,
+                                                                         timed_out)
+            status = _decide_status(timed_out=timed_out, rc=rc, has_reports=has_reports,
+                                    collect_errors=collect_errors, tests=tests)
     except HeldoutError as exc:
         status, error_code = "infra_error", exc.code
     except _Interrupted:
@@ -1213,6 +2376,8 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
         try:
             if state.proc is not None and state.proc.poll() is None:
                 _killpg(state.proc.pid, signal.SIGKILL)
+            if state.docker is not None:
+                state.docker.cleanup()
             _rmtree(base)
             if not a.keep:
                 _rmtree(copy)
@@ -1240,7 +2405,8 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
         if not os.path.exists(os.path.join(report_dir, "pytest.log")):
             _write_private(os.path.join(report_dir, "pytest.log"), "")
         _write_json_atomic(os.path.join(report_dir, "report.json"),
-                           {"schema": REPORT_SCHEMA, "meta": meta, "tests": tests})
+                           {"schema": REPORT_SCHEMA, "meta": meta, "tests": tests,
+                            "canaries": canaries})
         _write_json_atomic(os.path.join(report_dir, "feedback.json"), _sanitize_feedback(fb))
         if counted and status in COUNTED_STATUSES:
             state_doc["cap"] = a.cap
@@ -1249,7 +2415,7 @@ def _run_locked(a, out, *, profile, root, suite, tree, commit, report_root, expl
                     "n": round_n,
                     "started_at": meta["started_at"],
                     "status": status,
-                    "failing_ids": list(fb["failing"]),
+                    "failing_ids": list(fb.get("failing") or {}),
                     "tree": tree_info,
                 }
             )
@@ -1505,8 +2671,22 @@ def pytest_runtest_logreport(report):
     )
 
 
+def _work_modules() -> list[str]:
+    found = []
+    for name, mod in list(sys.modules.items()):
+        path = getattr(mod, "__file__", None)
+        if not isinstance(path, str):
+            spec = getattr(mod, "__spec__", None)
+            path = getattr(spec, "origin", None)
+        if isinstance(path, str) and (path == "/work" or path.startswith("/work/")):
+            found.append(name)
+    return sorted(found)[:200]
+
+
 def pytest_sessionfinish(session, exitstatus):
     if os.environ.get(RECORDS_ENV):
+        if os.environ.get(IMPL_ENV):  # sandboxed run (008 FR-013); computed in this process
+            _emit_record({"type": "isolation", "work_modules": _work_modules()})
         _emit_record({"type": "finish", "exitstatus": int(exitstatus)})
 
 
