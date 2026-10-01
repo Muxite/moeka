@@ -7,8 +7,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 docker build -f Dockerfile.test -t moeka-test .
 # --add-host: this sandbox has no outbound DNS/network egress at all, but a
-# handful of tests (SSRF-guard behavior in tests/tools/test_tool_validation.py)
-# only need example.com/example.org to *resolve* -- validate_url_target()'s DNS check,
+# handful of tests (SSRF-guard behavior in nanobot/channels/dingtalk/tests/
+# test_dingtalk_channel.py and tests/tools/test_tool_validation.py) only need
+# example.com/example.org to *resolve* -- validate_url_target()'s DNS check,
 # not an actual network round-trip; every real HTTP call in those tests goes
 # through a fake in-test HTTP client. Baking a fixed hosts(5) entry into
 # Dockerfile.test itself does not work: Docker regenerates each container's
