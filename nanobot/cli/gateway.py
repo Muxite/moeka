@@ -260,12 +260,13 @@ def create_gateway_app(
         # Spec 005: one gateway config per process (FR-031) and one writer per
         # state dir (FR-033), both before anything is written.
         _pin_gateway_config(_resolved_config_selector(config))
+        from nanobot.cli.runtime_config import _acquire_writer_lock
+
+        _acquire_writer_lock(cfg, role="gateway", if_exists=True)
         instance = instance_for_selectors(workspace=workspace, config=config)
         unconfigured_provider_error = None
         if validate_startup_config is not None:
             unconfigured_provider_error = validate_startup_config(cfg)
-        from nanobot.cli.runtime_config import _acquire_writer_lock
-
         _acquire_writer_lock(cfg, role="gateway")
         try:
             run_gateway(

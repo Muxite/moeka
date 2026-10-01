@@ -200,31 +200,51 @@ def _provider_setup_error(config: Config) -> str | None:
     return None
 
 
-def _acquire_writer_lock(config: Config, *, role: str) -> object:
+def _acquire_writer_lock(config: Config, *, role: str, if_exists: bool = False) -> object | None:
     """Take the instance lock on the config's state dir (the flat layout's workspace).
 
     One writer per state dir (spec 005 FR-033): a second gateway / serve / one-shot
     agent on the same workspace exits 3 with the holder on stderr, before anything is
     written. The lock is released when the CLI command's context closes (or the
     process exits, SIGKILL included).
+
+    ``if_exists=True`` is the early check right after config load: it locks only an
+    existing workspace (nobody can hold a lock in a directory that does not exist,
+    and a command that fails validation must not create it). Calling again later is
+    a no-op once this command holds the lock.
     """
     import sys
 
     from nanobot.kernel.instance_lock import InstanceLockedError, acquire_instance_lock
 
+    workspace = config.workspace_path
     try:
-        lock = acquire_instance_lock(config.workspace_path, mode="write", role=role)
+        key = workspace.resolve()
+    except OSError:
+        key = workspace
+    held = _HELD_LOCKS.get(key)
+    if held is not None and getattr(held, "held", False):
+        return held
+    if if_exists and not workspace.is_dir():
+        return None
+    try:
+        lock = acquire_instance_lock(workspace, mode="write", role=role)
     except InstanceLockedError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise typer.Exit(3) from exc
+    _HELD_LOCKS[key] = lock
     import click
 
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
-        ctx.call_on_close(lock.release)
-    _HELD_LOCKS.append(lock)
+        def _release() -> None:
+            lock.release()
+            if _HELD_LOCKS.get(key) is lock:
+                del _HELD_LOCKS[key]
+
+        ctx.call_on_close(_release)
     return lock
 
 
-# Held for the process lifetime when no click context owns them.
-_HELD_LOCKS: list[object] = []
+# Locks this CLI process holds, by resolved state dir (released with the command).
+_HELD_LOCKS: dict[Path, object] = {}

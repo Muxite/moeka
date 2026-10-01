@@ -118,6 +118,10 @@ def agent(
                 raise typer.Exit(exit_code)
             return
 
+    # One-shot and --classic agents are writers (spec 005 FR-033, Q2): refuse early
+    # when another writer holds an existing workspace.
+    _acquire_writer_lock(runtime_config, role="agent", if_exists=True)
+
     from nanobot.agent.hooks import create_file_edit_activity_hook
     from nanobot.agent.tools.mcp import MCPProvider
     from nanobot.agent.tools.registry import ToolRegistry

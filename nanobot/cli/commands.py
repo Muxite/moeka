@@ -372,6 +372,7 @@ def serve(
     _set_nanobot_logs(verbose)
 
     runtime_config = _load_runtime_config(config, workspace)
+    _acquire_writer_lock(runtime_config, role="serve", if_exists=True)
     api_cfg = runtime_config.api
     host = host if host is not None else api_cfg.host
     port = port if port is not None else api_cfg.port

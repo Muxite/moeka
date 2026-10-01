@@ -662,9 +662,13 @@ class Config(BaseSettings):
         guessed instance root would put one instance's files into another's
         directory (spec 005 FR-025).
         """
-        ws = _expand_set_env_refs(self.agents.defaults.workspace)
+        raw = self.agents.defaults.workspace
+        ws = _expand_set_env_refs(raw)
         if "${" in ws:
             raise UnexpandedWorkspaceError(ws)
+        if not ws.strip():
+            # ``${MOEKA_WORKSPACE}`` expanded from an empty variable: the same failure.
+            raise UnexpandedWorkspaceError(raw or "${MOEKA_WORKSPACE}")
         return Path(ws).expanduser()
 
     def match_provider(
