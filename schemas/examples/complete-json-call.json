@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "request": {
+    "ref": {"provider": "ollama", "model": "qwen3:8b", "family": "qwen"},
+    "system": "Extract claims. Reply with JSON only.",
+    "prompt": "Led a team of 4 to ship the billing rewrite.",
+    "output_schema": {
+      "type": "object",
+      "properties": {"claims": {"type": "array", "items": {"type": "string"}}},
+      "required": ["claims"]
+    },
+    "prompt_version": "extract-v3",
+    "sampling": {"temperature": 0, "max_tokens": 2048},
+    "attribution": {"consumer": "awork-resume", "session": "build-77", "role": "extractor", "purpose": "extract_claims"},
+    "max_rounds": 2,
+    "cache_mode": "live",
+    "request_key": "9b1d5e0c44aa81f29b1d5e0c44aa81f29b1d5e0c44aa81f29b1d5e0c44aa81f2",
+    "key_scheme": "awr.sha256.v1"
+  },
+  "result": {
+    "outcome": "ok",
+    "parsed": {"claims": ["Led a team of 4", "Shipped the billing rewrite"]},
+    "raw_ref": {"store": "llm_cache", "key": "9b1d5e0c44aa81f29b1d5e0c44aa81f29b1d5e0c44aa81f29b1d5e0c44aa81f2", "sha256": null},
+    "cache_hit": false,
+    "attempts": 2,
+    "usage_record_ids": ["c-7f3a95:1", "c-7f3a95:2"],
+    "final_record_id": "c-7f3a95:2"
+  }
+}

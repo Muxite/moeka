@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "kind": "admit",
+  "call_id": "c-7f3a94",
+  "consumer": "awork-resume",
+  "scope": {"kind": "kernel"},
+  "cap_usd": 2.0,
+  "cap_tokens": null,
+  "spent_usd": 0.4,
+  "reserved_usd": 0.01,
+  "remaining_usd": 1.59,
+  "remaining_tokens": null,
+  "worst_case_usd": 0.01,
+  "refusal": null,
+  "producer": {"name": "awr.llm", "version": null}
+}
