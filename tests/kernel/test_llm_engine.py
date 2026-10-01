@@ -47,9 +47,10 @@ class RecordingSink:
 MAIN = ModelSpec(name="main", model="fake-main", provider="openai", price_in=1.0, price_out=2.0)
 
 
-def _env(tmp_path, *, trace=None) -> Environment:
+def _env(tmp_path, *, trace=None, state: str = "state", data_dir=None) -> Environment:
     return Environment.for_host(
-        state_dir=tmp_path / "state",
+        state_dir=tmp_path / state,
+        data_dir=data_dir,
         work_dir=tmp_path / "work",
         credentials={"oa": "sk-test"},
         providers=[
@@ -157,7 +158,10 @@ def test_kernel_close_releases_the_usage_store(tmp_path) -> None:
 def test_closing_one_kernel_keeps_a_shared_usage_store_open(tmp_path) -> None:
     from nanobot.llm_usage import get_llm_usage_store
 
-    first, second = Kernel(_env(tmp_path)), Kernel(_env(tmp_path))  # one state_dir
+    # One writer per state dir (spec 005): two state dirs sharing one data dir.
+    shared = tmp_path / "data"
+    first = Kernel(_env(tmp_path, state="state-a", data_dir=shared))
+    second = Kernel(_env(tmp_path, state="state-b", data_dir=shared))
     try:
         for kernel in (first, second):
             kernel.llm.register_provider(

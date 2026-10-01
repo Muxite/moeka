@@ -177,8 +177,11 @@ class VecStore:
         *,
         log_retrievals: bool = False,
         embedder: Embedder | None = None,
+        read_only: bool = False,
     ) -> None:
         self._db_path = db_path
+        # Read-only: open an existing file ``mode=ro``, no schema setup (spec 005).
+        self._read_only = read_only
         # An injected embedder names the model the stored vectors come from.
         self._embedder = embedder
         self._model_name = embedder.model_name if embedder is not None else model_name
@@ -843,7 +846,12 @@ class VecStore:
             )
         try:
             conn = self._connection()
-            self._ensure_schema(conn)
+            if self._read_only:
+                self._fts_available = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = 'documents_fts'"
+                ).fetchone() is not None
+            else:
+                self._ensure_schema(conn)
         except Exception as exc:
             logger.exception("VecStore: failed to open vec.db")
             self.init_error = exc
@@ -851,6 +859,29 @@ class VecStore:
         return vec_importable and embed_importable and self._vec_loaded
 
     def _connection(self) -> sqlite3.Connection:
+        if self._conn is None and self._read_only:
+            from urllib.parse import quote
+
+            conn = sqlite3.connect(
+                f"file:{quote(str(self._db_path))}?mode=ro", uri=True,
+                check_same_thread=False, timeout=30.0,
+            )
+            conn.row_factory = sqlite3.Row
+            with suppress(sqlite3.DatabaseError):
+                conn.execute("PRAGMA busy_timeout=10000")
+                conn.execute("PRAGMA query_only=ON")
+            try:
+                import sqlite_vec
+
+                conn.enable_load_extension(True)
+                try:
+                    sqlite_vec.load(conn)
+                finally:
+                    conn.enable_load_extension(False)
+                self._vec_loaded = True
+            except (ImportError, AttributeError, sqlite3.Error):
+                self._vec_loaded = False
+            self._conn = conn
         if self._conn is None:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             # timeout + busy_timeout + WAL mirror SessionManager._conn() in
@@ -907,8 +938,9 @@ class VecStore:
         if conn is None:
             return
         try:
-            with suppress(sqlite3.Error):
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if not self._read_only:
+                with suppress(sqlite3.Error):
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
             with suppress(sqlite3.Error):
                 conn.close()

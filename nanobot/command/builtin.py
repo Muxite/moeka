@@ -250,6 +250,12 @@ async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
             os.execv(sys.executable, argv)
             return
         if mode == "spawn":
+            # The replacement process is the next writer of this state dir (spec 005):
+            # hand the instance lock over before it starts.
+            from nanobot.kernel.instance_lock import held_locks
+
+            for lock in held_locks():
+                lock.release()
             kwargs: dict[str, Any] = {}
             if sys.platform == "win32":
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

@@ -44,9 +44,12 @@ OTHER = ModelSpec(name="other", model="fake-other", provider="openai")
 SCHEMA = {"type": "object", "properties": {"a": {"type": "integer"}}}
 
 
-def _env(tmp_path, sink) -> Environment:
+def _env(tmp_path, sink, state: str = "state") -> Environment:
     return Environment.for_host(
-        state_dir=tmp_path / "state",
+        state_dir=tmp_path / state,
+        # Spec 005: one writer per state dir; extra kernels in one test get their
+        # own state dir and share the first one's data dir (usage store).
+        data_dir=None if state == "state" else tmp_path / "state" / "data",
         work_dir=tmp_path / "work",
         credentials={"oa": "sk-test"},
         providers=[ProviderSpec(name="openai", credential="oa")],
@@ -235,7 +238,7 @@ def test_request_key_includes_spec_sampling_defaults(tmp_path, sink) -> None:
     cold = ModelSpec(
         name="main", model="fake-main", provider="openai", sampling=Sampling(temperature=0.1),
     )
-    with Kernel(_env(tmp_path, sink)) as a, Kernel(_env(tmp_path, sink)) as b:
+    with Kernel(_env(tmp_path, sink)) as a, Kernel(_env(tmp_path, sink, "state-b")) as b:
         _fake(a, default="x", spec=hot)
         _fake(b, default="x", spec=cold)
         request = Request([user("q")])

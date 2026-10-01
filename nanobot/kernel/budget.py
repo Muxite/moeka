@@ -246,6 +246,126 @@ def _tag_slot(key: str, value: Any) -> tuple[str, Hashable]:
     return key, value
 
 
+def refusal(
+    estimate: CallEstimate,
+    reason: str,
+    code: str = "other",
+    scope: tuple[str, str | None, Any] | None = None,
+) -> BudgetExceeded:
+    """The :class:`BudgetExceeded` a cap budget raises for *estimate*."""
+    exc = BudgetExceeded(
+        f"budget refused call: {reason}",
+        call_id=estimate.call_id, model=estimate.model, provider=estimate.provider,
+    )
+    exc.reason_code = code
+    exc.scope = scope
+    return exc
+
+
+def admission_slots(
+    per_tag: Mapping[str, float], estimate: CallEstimate,
+) -> tuple[tuple[str, Hashable], ...]:
+    """The ``(tag, value)`` scopes of *estimate* that a ``per_tag`` cap applies to."""
+    return tuple(_tag_slot(key, estimate.tags[key]) for key in per_tag if key in estimate.tags)
+
+
+def check_admission(
+    *,
+    limit_usd: float | None,
+    limit_tokens: int | None,
+    per_tag: Mapping[str, float],
+    allow_unpriced: bool,
+    estimate: CallEstimate,
+    exposure_usd: float,
+    used_tokens: int,
+    tag_exposure: Callable[[tuple[str, Hashable]], float],
+) -> tuple[float, int, tuple[tuple[str, Hashable], ...]]:
+    """The cap arithmetic shared by :class:`CapBudget` and ``SharedCapBudget``.
+
+    *exposure_usd* is spent plus reserved USD, *used_tokens* spent plus reserved
+    tokens, *tag_exposure(slot)* the same for one tag scope. Returns the amount to
+    reserve ``(usd, tokens, slots)`` or raises :class:`BudgetExceeded` with the
+    ``budget-event.v1`` reason code (``unpriced_model``, ``cap_usd``, ``cap_tokens``,
+    ``cap_tag``).
+    """
+    slots = admission_slots(per_tag, estimate)
+    usd = estimate.worst_case_usd
+    tokens = estimate.worst_case_tokens
+    if usd is None and (limit_usd is not None or slots):
+        if not allow_unpriced:
+            raise refusal(estimate, "the model has no price under a USD cap", "unpriced_model")
+    amount = usd or 0.0
+    if limit_usd is not None:
+        if exposure_usd + amount > limit_usd:
+            raise refusal(
+                estimate,
+                f"worst case ${amount:.6f} on top of ${exposure_usd:.6f} exceeds "
+                f"limit_usd=${limit_usd:.6f}",
+                "cap_usd",
+            )
+    if limit_tokens is not None:
+        if used_tokens + tokens > limit_tokens:
+            raise refusal(
+                estimate,
+                f"worst case {tokens} tokens on top of {used_tokens} exceeds "
+                f"limit_tokens={limit_tokens}",
+                "cap_tokens",
+            )
+    for slot in slots:
+        limit = per_tag[slot[0]]
+        exposure = tag_exposure(slot)
+        if exposure + amount > limit:
+            raise refusal(
+                estimate,
+                f"worst case ${amount:.6f} on top of ${exposure:.6f} exceeds the "
+                f"{slot[0]}={slot[1]!r} cap ${limit:.6f}",
+                "cap_tag",
+                ("tag", slot[0], slot[1]),
+            )
+    return amount, tokens, slots
+
+
+def budget_figures(
+    *,
+    cap_usd: float | None,
+    cap_tokens: int | None,
+    spent_usd: float,
+    spent_tokens: int | None,
+    reserved_usd: float,
+    reserved_tokens: int | None,
+    scope: dict[str, Any],
+) -> dict[str, Any]:
+    """``budget-event.v1`` snapshot figures (remaining = ``max(0, cap - spent - reserved)``)."""
+    remaining_usd = (
+        None if cap_usd is None else max(0.0, cap_usd - spent_usd - reserved_usd)
+    )
+    remaining_tokens = (
+        None
+        if cap_tokens is None or spent_tokens is None or reserved_tokens is None
+        else max(0, cap_tokens - spent_tokens - reserved_tokens)
+    )
+    return {
+        "scope": scope,
+        "cap_usd": cap_usd, "cap_tokens": cap_tokens,
+        "spent_usd": spent_usd, "spent_tokens": spent_tokens,
+        "reserved_usd": reserved_usd, "reserved_tokens": reserved_tokens,
+        "remaining_usd": remaining_usd, "remaining_tokens": remaining_tokens,
+    }
+
+
+def settle_charge(event: LedgerEvent) -> tuple[int, float | None, bool]:
+    """``(tokens, cost_usd, unpriced_usage)`` of one settled attempt.
+
+    An attempt that used tokens without a price, or that timed out or was cancelled
+    (the provider may have billed it and reported nothing), marks its reservation so
+    the remainder is charged at release instead of handed back (Q1).
+    """
+    tokens = event.tokens_in + event.tokens_out
+    cost = event.cost_usd
+    unpriced = cost is None and bool(tokens or event.outcome in ("timeout", "cancelled"))
+    return tokens, cost, unpriced
+
+
 @dataclass(eq=False)
 class _CapReservation:
     call_id: str
@@ -258,6 +378,11 @@ class _CapReservation:
 
 class CapBudget:
     """Reference :class:`Budget`: hard caps on spend plus outstanding reservations.
+
+    In-memory and per process: its spend lives in this object only, so N processes
+    (or N containers) each get the whole cap. Use
+    :class:`~nanobot.kernel.budget_shared.SharedCapBudget` (``moeka.budget``) for one
+    cap across processes on a shared data dir.
 
     - ``limit_usd``: total USD cap; ``limit_tokens``: total token cap.
     - ``per_tag``: ``{tag_key: usd_limit}`` caps every distinct value of that tag
@@ -323,13 +448,7 @@ class CapBudget:
         code: str = "other",
         scope: tuple[str, str | None, Any] | None = None,
     ) -> BudgetExceeded:
-        exc = BudgetExceeded(
-            f"budget refused call: {reason}",
-            call_id=estimate.call_id, model=estimate.model, provider=estimate.provider,
-        )
-        exc.reason_code = code
-        exc.scope = scope
-        return exc
+        return refusal(estimate, reason, code, scope)
 
     def snapshot(self, tag: str | None = None, value: Any = None) -> dict[str, Any]:
         """The budget in force for the kernel scope, or for one ``(tag, value)``.
@@ -351,63 +470,23 @@ class CapBudget:
                 reserved_usd = self._tag_reserved.get(slot, 0.0)
                 reserved_tokens = None
                 scope = {"kind": "tag", "key": tag, "value": slot[1]}
-        remaining_usd = (
-            None if cap_usd is None else max(0.0, cap_usd - spent_usd - reserved_usd)
+        return budget_figures(
+            cap_usd=cap_usd, cap_tokens=cap_tokens, spent_usd=spent_usd,
+            spent_tokens=spent_tokens, reserved_usd=reserved_usd,
+            reserved_tokens=reserved_tokens, scope=scope,
         )
-        remaining_tokens = (
-            None
-            if cap_tokens is None or spent_tokens is None or reserved_tokens is None
-            else max(0, cap_tokens - spent_tokens - reserved_tokens)
-        )
-        return {
-            "scope": scope,
-            "cap_usd": cap_usd, "cap_tokens": cap_tokens,
-            "spent_usd": spent_usd, "spent_tokens": spent_tokens,
-            "reserved_usd": reserved_usd, "reserved_tokens": reserved_tokens,
-            "remaining_usd": remaining_usd, "remaining_tokens": remaining_tokens,
-        }
 
     def admit(self, estimate: CallEstimate) -> _CapReservation:
-        slots = tuple(
-            _tag_slot(key, estimate.tags[key]) for key in self.per_tag if key in estimate.tags
-        )
-        usd = estimate.worst_case_usd
-        tokens = estimate.worst_case_tokens
         with self._lock:
-            if usd is None and (self.limit_usd is not None or slots):
-                if not self.allow_unpriced:
-                    raise self._refuse(estimate, "the model has no price under a USD cap",
-                                       "unpriced_model")
-            amount = usd or 0.0
-            if self.limit_usd is not None:
-                exposure = self._spent_usd + self._reserved_usd
-                if exposure + amount > self.limit_usd:
-                    raise self._refuse(
-                        estimate,
-                        f"worst case ${amount:.6f} on top of ${exposure:.6f} exceeds "
-                        f"limit_usd=${self.limit_usd:.6f}",
-                        "cap_usd",
-                    )
-            if self.limit_tokens is not None:
-                used = self._spent_tokens + self._reserved_tokens
-                if used + tokens > self.limit_tokens:
-                    raise self._refuse(
-                        estimate,
-                        f"worst case {tokens} tokens on top of {used} exceeds "
-                        f"limit_tokens={self.limit_tokens}",
-                        "cap_tokens",
-                    )
-            for slot in slots:
-                limit = self.per_tag[slot[0]]
-                exposure = self._tag_spent.get(slot, 0.0) + self._tag_reserved.get(slot, 0.0)
-                if exposure + amount > limit:
-                    raise self._refuse(
-                        estimate,
-                        f"worst case ${amount:.6f} on top of ${exposure:.6f} exceeds the "
-                        f"{slot[0]}={slot[1]!r} cap ${limit:.6f}",
-                        "cap_tag",
-                        ("tag", slot[0], slot[1]),
-                    )
+            amount, tokens, slots = check_admission(
+                limit_usd=self.limit_usd, limit_tokens=self.limit_tokens,
+                per_tag=self.per_tag, allow_unpriced=self.allow_unpriced, estimate=estimate,
+                exposure_usd=self._spent_usd + self._reserved_usd,
+                used_tokens=self._spent_tokens + self._reserved_tokens,
+                tag_exposure=lambda slot: (
+                    self._tag_spent.get(slot, 0.0) + self._tag_reserved.get(slot, 0.0)
+                ),
+            )
             self._reserved_usd += amount
             self._reserved_tokens += tokens
             for slot in slots:
@@ -426,15 +505,14 @@ class CapBudget:
             self._tag_reserved[slot] = max(0.0, self._tag_reserved.get(slot, 0.0) - take_usd)
 
     def settle(self, reservation: _CapReservation, event: LedgerEvent) -> None:
-        tokens = event.tokens_in + event.tokens_out
-        cost = event.cost_usd
+        tokens, cost, unpriced = settle_charge(event)
         with self._lock:
             self._spent_tokens += tokens
             if cost is None:
                 # Tokens billed at an unknown price, or a call that timed out or was cancelled
                 # (the provider may have billed it and reported nothing): the reservation stays
                 # as spend at release. Handing it back would let such calls overshoot the cap.
-                if tokens or event.outcome in ("timeout", "cancelled"):
+                if unpriced:
                     reservation.unpriced_usage = True
                 if not reservation.released:
                     self._consume(reservation, 0.0, tokens)
@@ -732,8 +810,13 @@ __all__ = [
     "CapBudget",
     "Metering",
     "ResponseCache",
+    "admission_slots",
+    "budget_figures",
     "build_estimate",
+    "check_admission",
     "count_images",
     "price_tokens",
     "prompt_tokens_of",
+    "refusal",
+    "settle_charge",
 ]

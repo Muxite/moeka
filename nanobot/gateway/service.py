@@ -136,8 +136,9 @@ class GatewayServiceInstaller:
         label = _launchd_label(options.name)
         path = self.home / "Library" / "LaunchAgents" / f"{label}.plist"
         log_stem = _safe_service_name(options.name)
-        stdout_path = self.home / ".nanobot" / "logs" / f"{log_stem}.launchd.log"
-        stderr_path = self.home / ".nanobot" / "logs" / f"{log_stem}.launchd.err.log"
+        logs_dir = _instance_data_dir(options.start) / "logs"
+        stdout_path = logs_dir / f"{log_stem}.launchd.log"
+        stderr_path = logs_dir / f"{log_stem}.launchd.err.log"
         payload = {
             "Label": label,
             "ProgramArguments": build_gateway_command(options.python_executable, options.start),
@@ -213,16 +214,25 @@ def _platform_name() -> str:
     return sys.platform
 
 
+def _instance_data_dir(options: GatewayStartOptions) -> Path:
+    """The instance data dir: the config's directory, else the workspace, else the state home."""
+    if options.config_path:
+        return Path(options.config_path).expanduser().resolve(strict=False).parent
+    if options.workspace:
+        return Path(options.workspace).expanduser().resolve(strict=False)
+    return get_state_home()
+
+
 def _working_directory(options: GatewayStartOptions) -> Path:
     if options.workspace:
         return Path(options.workspace).expanduser()
-    return get_state_home()
+    return _instance_data_dir(options)
 
 
 def _working_directory_text(options: GatewayStartOptions) -> str:
     if options.workspace:
         return os.path.expanduser(options.workspace)
-    return str(get_state_home())
+    return str(_instance_data_dir(options))
 
 
 def _systemd_unit_name(name: str) -> str:

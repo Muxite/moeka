@@ -262,6 +262,9 @@ addopts = "-ra"
 # Generous — the whole suite runs in ~170s, so nothing legitimate is near this.
 timeout = 300
 timeout_method = "thread"
+markers = [
+    "docker: needs a working docker daemon (skipped when docker is unavailable)",
+]
 
 [tool.coverage.run]
 source = ["nanobot"]

@@ -1,6 +1,8 @@
 """Configuration schema using Pydantic."""
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -20,6 +22,36 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.web import WebToolsConfig
     from nanobot.cron.types import CronSchedule
+
+
+class UnexpandedWorkspaceError(ValueError):
+    """``agents.defaults.workspace`` still holds an unexpanded ``${VAR}`` (spec 005 FR-025).
+
+    Raised by :attr:`Config.workspace_path`; CLI entry points turn it into exit code 2
+    before anything is created.
+    """
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+        super().__init__(
+            f"workspace {value!r} contains an unexpanded variable; set MOEKA_WORKSPACE "
+            "(or pass --workspace PATH) to the instance root instead of relying on a default"
+        )
+
+
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_set_env_refs(value: str) -> str:
+    """Expand ``${VAR}`` references whose variable is set; leave the others as-is.
+
+    This is the effective workspace string of a config that was loaded without
+    ``resolve_config_env_vars`` (diagnostic commands): ``${MOEKA_WORKSPACE}`` with the
+    variable set means that path, never a guess.
+    """
+    if "${" not in value:
+        return value
+    return _ENV_REF_RE.sub(lambda m: os.environ.get(m.group(1)) or m.group(0), value)
 
 
 class ChannelsConfig(Base):
@@ -624,15 +656,19 @@ class Config(BaseSettings):
     def workspace_path(self) -> Path:
         """Get expanded workspace path.
 
-        Falls back to the default state home when the workspace string still
-        contains an unexpanded ``${VAR}`` placeholder (e.g. ``MOEKA_WORKSPACE``
-        was not set in the environment).  This prevents a literal directory
-        named ``${MOEKA_WORKSPACE}`` from being created inside the repo.
+        Raises :class:`UnexpandedWorkspaceError` when the workspace string still
+        contains an unexpanded ``${VAR}`` placeholder (e.g. ``MOEKA_WORKSPACE`` was
+        not set in the environment). There is no fallback to the state home: a
+        guessed instance root would put one instance's files into another's
+        directory (spec 005 FR-025).
         """
-        ws = self.agents.defaults.workspace
+        raw = self.agents.defaults.workspace
+        ws = _expand_set_env_refs(raw)
         if "${" in ws:
-            from nanobot.config.loader import get_state_home
-            return get_state_home()
+            raise UnexpandedWorkspaceError(ws)
+        if not ws.strip():
+            # ``${MOEKA_WORKSPACE}`` expanded from an empty variable: the same failure.
+            raise UnexpandedWorkspaceError(raw or "${MOEKA_WORKSPACE}")
         return Path(ws).expanduser()
 
     def match_provider(

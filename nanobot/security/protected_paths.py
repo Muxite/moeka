@@ -9,6 +9,13 @@ must never read or write, whatever ``restrict_to_workspace`` or the
 This is an application-level guard on the file tools only. It does not stop
 ``exec``: a shell command can still reach these paths (see the exec caveat in
 docs/core-map/02-tools.md). Real containment needs OS isolation.
+
+Several instances on one machine (spec 005): every ``keys.env`` (any directory), the
+``.env`` directly inside an instance root, every OTHER instance's root and its
+``<root>-sessions`` sibling are denied for read and write; the lock, PID and socket
+files of the own instance are write-denied. This still covers the file tools only:
+``exec`` can reach all of these, so real separation between instances needs separate
+UIDs, the bwrap sandbox, or containers (docs/multiple-instances.md).
 """
 
 from __future__ import annotations
@@ -56,6 +63,16 @@ PROTECTED_WRITE: tuple[tuple[str, str], ...] = (
     ("memory", "history.jsonl"),
     ("memory", ".dream_cursor"),
     (".nanobot", "workspace-id"),
+)
+
+# READ and WRITE denied wherever they are: secrets files by their last component.
+PROTECTED_BASENAMES: frozenset[str] = frozenset({"keys.env"})
+
+# WRITE denied directly inside an instance root / state dir (spec 005 FR-040): the
+# instance lock and holder record, the gateway PID file and lock, and the run dir
+# (WebSocket socket). Reading stays allowed.
+INSTANCE_WRITE_PROTECTED: tuple[str, ...] = (
+    ".instance.lock", ".instance.json", "moeka.pid", "gateway.lock", "run",
 )
 
 
@@ -136,10 +153,17 @@ def _kernel_state_filenames() -> tuple[str, ...]:
 
 
 def _match(
-    candidate: Path, *, write: bool, roots: list[Path], config_files: Sequence[Path] = (),
+    candidate: Path,
+    *,
+    write: bool,
+    roots: list[Path],
+    config_files: Sequence[Path] = (),
+    write_roots: Sequence[Path] = (),
 ) -> bool:
     posix = candidate.as_posix()
     if _PROC_SECRET_RE.match(posix):
+        return True
+    if candidate.name in PROTECTED_BASENAMES:
         return True
     if any(_is_within(candidate, root) for root in roots):
         return True
@@ -147,7 +171,52 @@ def _match(
         return True
     if write and candidate in config_files:
         return True
+    if write and any(_is_within(candidate, root) for root in write_roots):
+        return True
     return False
+
+
+def _contains_own(root: Path, workspace: Path | None) -> bool:
+    if workspace is None:
+        return False
+    own = _safe_resolve(Path(workspace))
+    if own is None:
+        return False
+    for candidate in (Path(os.path.abspath(Path(root).expanduser())), _safe_resolve(Path(root))):
+        if candidate is not None and _is_within(own, candidate):
+            return True
+    return False
+
+
+def _instance_roots_extras(
+    own_roots: Sequence[Path], other_roots: Sequence[Path],
+) -> tuple[list[Path], list[Path]]:
+    """``(read+write roots, write-only roots)`` for the instance-aware floor (spec 005).
+
+    *own_roots* are this instance's root-like directories (state dir, data dir, the flat
+    layout's workspace): their ``.env`` is denied, their lock/PID/run files write-denied.
+    *other_roots* are other instances' roots: each root and its ``-sessions`` sibling are
+    denied entirely.
+    """
+    from nanobot.session.sqlite_store import default_sessions_root
+
+    deny: list[Path] = []
+    write_only: list[Path] = []
+    for root in own_roots:
+        resolved = _safe_resolve(root)
+        if resolved is None:
+            continue
+        deny.append(resolved / ".env")
+        write_only.extend(resolved / name for name in INSTANCE_WRITE_PROTECTED)
+    for root in other_roots:
+        for candidate in (Path(root), _safe_resolve(Path(root))):
+            if candidate is None:
+                continue
+            candidate = Path(os.path.abspath(candidate))
+            for item in (candidate, default_sessions_root(candidate)):
+                if item not in deny:
+                    deny.append(item)
+    return deny, write_only
 
 
 class ProtectedFloor:
@@ -159,8 +228,32 @@ class ProtectedFloor:
         data_dir: DataDirs,
         workspace: Path | None,
         config_files: Sequence[Path] = (),
+        other_instance_roots: Sequence[Path] = (),
+        instance_roots: Sequence[Path] | None = None,
     ) -> None:
+        """*other_instance_roots*: other instances' roots, denied with their sessions
+        siblings (hosts pass them; the kernel never discovers). *instance_roots*: this
+        instance's root-like dirs (default: the data dirs and *workspace*)."""
         self._roots = _protected_roots(data_dir, workspace)
+        if instance_roots is None:
+            if data_dir is None:
+                bases: list[Path] = []
+            elif isinstance(data_dir, Path):
+                bases = [data_dir]
+            else:
+                bases = list(data_dir)
+            instance_roots = [*bases, *([workspace] if workspace is not None else [])]
+        # "Other" means a root that neither equals nor contains the agent's own work dir:
+        # a host passing every discovered root never locks the agent out of its own.
+        others = [
+            root for root in other_instance_roots
+            if not _contains_own(root, workspace)
+        ]
+        deny, write_only = _instance_roots_extras(instance_roots, others)
+        for root in deny:
+            if root not in self._roots:
+                self._roots.append(root)
+        self._write_roots: list[Path] = list(dict.fromkeys(write_only))
         self._config_files: list[Path] = []
         for cfg in config_files:
             resolved = _safe_resolve(cfg)
@@ -175,6 +268,7 @@ class ProtectedFloor:
         *,
         extra_data_dirs: Sequence[Path] = (),
         config_files: Sequence[Path] = (),
+        other_instance_roots: Sequence[Path] = (),
     ) -> ProtectedFloor:
         """Floor for a host's ``Paths`` (the agent's file tools run in ``work_dir``).
 
@@ -188,7 +282,15 @@ class ProtectedFloor:
         carry the legacy ambient roots (``default_data_dirs()``/``default_config_files()``).
         """
         bases: list[Path] = [paths.data_dir, *extra_data_dirs]
-        floor = cls(data_dir=bases, workspace=paths.work_dir, config_files=config_files)
+        # The instance's own root-like dirs: the state dir and data dirs, plus the work
+        # dir in the flat layout (where it is the instance root).
+        own: list[Path] = [paths.state_dir, *bases]
+        if paths.overlaps:
+            own.append(paths.work_dir)
+        floor = cls(
+            data_dir=bases, workspace=paths.work_dir, config_files=config_files,
+            other_instance_roots=other_instance_roots, instance_roots=own,
+        )
         extra = [paths.sessions_root]
         extra.extend(paths.state_dir / name for name in _kernel_state_filenames())
         if not paths.overlaps:
@@ -207,6 +309,7 @@ class ProtectedFloor:
             logical = None
         if logical is not None and _match(
             logical, write=write, roots=self._roots, config_files=self._config_files,
+            write_roots=self._write_roots,
         ):
             return True
         if not resolve:
@@ -214,6 +317,7 @@ class ProtectedFloor:
         resolved = _safe_resolve(Path(path))
         return resolved is not None and _match(
             resolved, write=write, roots=self._roots, config_files=self._config_files,
+            write_roots=self._write_roots,
         )
 
     def reason(self, path: Path, *, write: bool) -> str | None:
@@ -284,6 +388,28 @@ def default_config_files() -> list[Path]:
     return files
 
 
+def default_other_instance_roots(
+    workspace: Path | None, data_dirs: DataDirs = None,
+) -> list[Path]:
+    """Legacy hosts: the other discovered instances (``$HOME`` + registry), never raising.
+
+    "Other" means a root that neither equals nor contains the agent's own work dir
+    (*workspace*, else the first data dir).
+    """
+    own = workspace
+    if own is None:
+        if isinstance(data_dirs, Path):
+            own = data_dirs
+        elif data_dirs:
+            own = list(data_dirs)[0]
+    try:
+        from nanobot.kernel.legacy import legacy_other_instance_roots
+
+        return legacy_other_instance_roots(own)
+    except Exception:  # noqa: BLE001 - the floor never fails open on discovery errors
+        return []
+
+
 def check_protected(
     path: Path,
     *,
@@ -297,10 +423,13 @@ def check_protected(
     (``get_config_path()``) are used. When an explicit *data_dir* is passed the
     config files are skipped: only the given data dirs and *workspace* are checked.
     """
+    legacy = data_dir is None
+    data_dirs = default_data_dirs() if legacy else data_dir
     reason = ProtectedFloor(
-        data_dir=data_dir if data_dir is not None else default_data_dirs(),
+        data_dir=data_dirs,
         workspace=workspace,
-        config_files=default_config_files() if data_dir is None else (),
+        config_files=default_config_files() if legacy else (),
+        other_instance_roots=default_other_instance_roots(workspace, data_dirs) if legacy else (),
     ).reason(path, write=write)
     if reason is not None:
         raise ProtectedPathError(reason)

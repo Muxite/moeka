@@ -63,6 +63,11 @@ def get_data_dir() -> Path:
     return ensure_dir(get_config_path().parent)
 
 
+def _active_data_dir() -> Path:
+    """:func:`get_data_dir` without creating it (the active config file's directory)."""
+    return get_config_path().parent
+
+
 def get_runtime_subdir(name: str) -> Path:
     """Return a named runtime subdirectory under the instance data dir."""
     return ensure_dir(get_data_dir() / name)
@@ -115,16 +120,23 @@ def is_default_workspace(workspace: str | Path | None) -> bool:
     return current.resolve(strict=False) == default.resolve(strict=False)
 
 
-def get_cli_history_path() -> Path:
-    """Return the shared CLI history file path."""
-    return get_state_home() / "history" / "cli_history"
+def get_cli_history_path(data_dir: Path | None = None) -> Path:
+    """Return the CLI history file: ``<data_dir>/history/cli_history``.
+
+    ``data_dir`` defaults to :func:`get_data_dir` (the active config file's
+    directory); callers holding a file-loaded ``Config`` pass its ``runtime_data_dir``.
+    """
+    base = Path(data_dir) if data_dir is not None else _active_data_dir()
+    return base / "history" / "cli_history"
 
 
-def get_bridge_install_dir() -> Path:
-    """Return the shared WhatsApp bridge installation directory."""
-    return get_state_home() / "bridge"
+def get_bridge_install_dir(data_dir: Path | None = None) -> Path:
+    """Return the WhatsApp bridge installation directory: ``<data_dir>/bridge``."""
+    base = Path(data_dir) if data_dir is not None else _active_data_dir()
+    return base / "bridge"
 
 
-def get_legacy_sessions_dir() -> Path:
-    """Return the legacy global session directory used for migration fallback."""
-    return get_state_home() / "sessions"
+def get_legacy_sessions_dir(data_dir: Path | None = None) -> Path:
+    """Return the legacy session directory used for migration fallback: ``<data_dir>/sessions``."""
+    base = Path(data_dir) if data_dir is not None else _active_data_dir()
+    return base / "sessions"

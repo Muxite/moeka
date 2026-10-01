@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
@@ -96,6 +97,7 @@ class Kernel:
         baselines: BaselineRegistry | None = None,
         action_workers: int = 8,
         consumer: str | None = None,
+        attach: str = "write",
     ) -> None:
         if not isinstance(env, Environment):
             raise TypeError(
@@ -138,6 +140,51 @@ class Kernel:
             raise ValueError(f"action_workers must be a positive int, got {action_workers!r}")
         if consumer is not None and (not isinstance(consumer, str) or not consumer.strip()):
             raise ValueError(f"consumer must be a non-empty string, got {consumer!r}")
+        if attach not in ("write", "read_only"):
+            raise ValueError(f"attach must be 'write' or 'read_only', got {attach!r}")
+        # Spec 005: one writer per state dir. The lock comes first, before anything
+        # that creates a file; a refused writer leaves no trace. A read-only attach
+        # takes no lock and creates nothing under the state dir.
+        from nanobot.kernel.instance_lock import ReadOnlyKernelError, acquire_instance_lock
+
+        self._read_only = attach == "read_only"
+        self._instance_lock = None
+        self._lock_finalizer: weakref.finalize | None = None
+        if self._read_only:
+            if not env.paths.state_dir.is_dir():
+                raise ReadOnlyKernelError(
+                    f"cannot attach read-only: state dir {env.paths.state_dir} does not exist"
+                )
+        else:
+            lock = acquire_instance_lock(env.paths.state_dir, mode="write")
+            self._instance_lock = lock
+            # A kernel dropped without close() still frees its state dir.
+            self._lock_finalizer = weakref.finalize(self, lock.release)
+        try:
+            self._init_rest(
+                env, budget=budget, cache=cache, variant=variant, policy=policy,
+                plugins=plugins, max_concurrency=max_concurrency, solvers=solvers,
+                baselines=baselines, action_workers=action_workers, consumer=consumer,
+            )
+        except BaseException:
+            self._release_instance_lock()
+            raise
+
+    def _init_rest(
+        self,
+        env: Environment,
+        *,
+        budget: Budget | None,
+        cache: ResponseCache | None,
+        variant: Variant | None,
+        policy: PermissionPolicy | None,
+        plugins: PluginRegistry | None,
+        max_concurrency: int,
+        solvers: SolverRegistry | None,
+        baselines: BaselineRegistry | None,
+        action_workers: int,
+        consumer: str | None,
+    ) -> None:
         self._consumer = consumer
         self._env = env
         self._tracer = Tracer(env.trace)
@@ -152,6 +199,9 @@ class Kernel:
             consumer=consumer if consumer is not None else env.core.consumer,
         )
         self._budget = budget
+        attach_trace = getattr(budget, "_attach_trace", None)
+        if callable(attach_trace):
+            attach_trace(self._tracer)
         self._cache = cache
         self._max_concurrency = max_concurrency
         # Sync host actions' worker threads (built on first use, shut down on close).
@@ -193,6 +243,29 @@ class Kernel:
     @property
     def env(self) -> Environment:
         return self._env
+
+    @property
+    def read_only(self) -> bool:
+        """True for ``Kernel(env, attach="read_only")`` (no lock; mutating calls refused)."""
+        return self._read_only
+
+    def _refuse_write(self, what: str) -> None:
+        """Raise ``ReadOnlyKernelError`` for *what* on a read-only kernel."""
+        if self._read_only:
+            from nanobot.kernel.instance_lock import ReadOnlyKernelError
+
+            raise ReadOnlyKernelError(
+                f"{what} is not allowed on a read-only Kernel "
+                f"(state dir {self._env.paths.state_dir})"
+            )
+
+    def _release_instance_lock(self) -> None:
+        lock, self._instance_lock = self._instance_lock, None
+        finalizer, self._lock_finalizer = self._lock_finalizer, None
+        if finalizer is not None:
+            finalizer.detach()
+        if lock is not None:
+            lock.release()
 
     @property
     def consumer(self) -> str | None:
@@ -294,7 +367,12 @@ class Kernel:
                 if self._epistemics is None:
                     from nanobot.kernel.epistemics import Epistemics
 
-                    self._epistemics = Epistemics(self._core_env)
+                    if self._read_only:
+                        from nanobot.kernel.epistemics import ReadOnlyEpistemics
+
+                        self._epistemics = ReadOnlyEpistemics(self._core_env)
+                    else:
+                        self._epistemics = Epistemics(self._core_env)
                 epi = self._epistemics
         return epi
 
@@ -317,7 +395,8 @@ class Kernel:
                     self._memory_registry = _MemoryRegistry(
                         self._env.paths.state_dir,
                         embedding_model=vec.embedding_model,
-                        log_retrievals=vec.log_retrievals,
+                        log_retrievals=vec.log_retrievals and not self._read_only,
+                        read_only=self._read_only,
                     )
                 registry = self._memory_registry
         return registry
@@ -332,8 +411,10 @@ class Kernel:
         """The agent for *spec* (one per equal spec; its loop is built on first use)."""
         from nanobot.kernel.agent import Agent, AgentSpec
 
+        self._refuse_write("kernel.agent()")
         if not isinstance(spec, AgentSpec):
             raise TypeError(f"agent() needs an AgentSpec, got {type(spec).__name__}")
+        shared: tuple[str, str, str] | None = None
         with self._agents_lock:
             if self._closed or self._closing:
                 raise RuntimeError("kernel is closed")
@@ -347,10 +428,19 @@ class Kernel:
                             "and default session); set AgentSpec.memory_key to separate "
                             "them", other.name, spec.name, key,
                         )
+                        shared = (key, other.name, spec.name)
                         break
                 agent = Agent(self, spec)
                 self._agents[spec] = agent
-            return agent
+        if shared is not None:
+            from nanobot.kernel.trace import safe_emit
+
+            safe_emit(self._tracer, {
+                "event": "kernel.memory_key_shared",
+                "memory_key": shared[0],
+                "agents": [shared[1], shared[2]],
+            })
+        return agent
 
     def _session_lock(self, key: str) -> asyncio.Lock:
         """The kernel-wide lock for one session key (use on the kernel loop only)."""
@@ -364,6 +454,13 @@ class Kernel:
         with self._agents_lock:
             if self._closed or self._closing:
                 raise RuntimeError("kernel is closed")
+            if self._sessions is None and self._read_only:
+                from nanobot.session.sqlite_store import ReadOnlySessionManager
+
+                paths = self._env.paths
+                self._sessions = ReadOnlySessionManager(  # type: ignore[assignment]
+                    paths.work_dir, sessions_root=paths.sessions_root,
+                )
             if self._sessions is None:
                 from nanobot.session.manager import SessionManager
                 from nanobot.session.sqlite_store import SqliteSessionStore
@@ -434,10 +531,32 @@ class Kernel:
             self._close_action_pool()
             self._close_stores()
             self._close_llm()
+            self._flush_budget()
             self._bridge.stop()
             # Only after stop() returned: a failed stop leaves the kernel open
             # so a later close() can retry.
             self._closed = True
+            # Last: the state dir is free for the next writer once nothing writes.
+            self._release_instance_lock()
+
+    def _flush_budget(self) -> None:
+        """Write a shared budget's pending settles/releases (``SharedCapBudget.flush``)."""
+        flush = getattr(self._budget, "flush", None)
+        if callable(flush):
+            try:
+                if flush() is False:
+                    logger.warning(
+                        "kernel: budget writes still pending at close (database locked); "
+                        "their reservations stay counted and are retried on the next use"
+                    )
+            except Exception as exc:  # noqa: BLE001 - closing must not fail the kernel close
+                logger.warning("kernel: flushing the budget failed: {!r}", exc)
+        detach = getattr(self._budget, "_detach_trace", None)
+        if callable(detach):
+            try:
+                detach(self._tracer)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _action_executor(self) -> ThreadPoolExecutor:
         """The pool sync host actions run on (see ``function_tool.ACTION_EXECUTOR``)."""
@@ -552,6 +671,8 @@ class Kernel:
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "open"
+        if self._read_only:
+            state += ", read-only"
         return f"Kernel({self._env!r}, {state})"
 
 

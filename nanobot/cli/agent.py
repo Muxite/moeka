@@ -14,6 +14,7 @@ from rich.console import Console
 from nanobot import __logo__
 from nanobot.cli.log_control import _set_nanobot_logs
 from nanobot.cli.runtime_config import (
+    _acquire_writer_lock,
     _load_runtime_config,
     _migrate_cron_store,
     _model_display,
@@ -117,6 +118,10 @@ def agent(
                 raise typer.Exit(exit_code)
             return
 
+    # One-shot and --classic agents are writers (spec 005 FR-033, Q2): refuse early
+    # when another writer holds an existing workspace.
+    _acquire_writer_lock(runtime_config, role="agent", if_exists=True)
+
     from nanobot.agent.hooks import create_file_edit_activity_hook
     from nanobot.agent.tools.mcp import MCPProvider
     from nanobot.agent.tools.registry import ToolRegistry
@@ -151,6 +156,9 @@ def agent(
         _print_agent_start_error(exc)
         raise typer.Exit(1) from exc
 
+    # One-shot and --classic agents write the workspace's state: one writer per
+    # state dir (spec 005 FR-033, Q2). The native TUI above talks to the gateway.
+    _acquire_writer_lock(runtime_config, role="agent")
     sync_workspace_templates(runtime_config.workspace_path)
 
     bus = MessageBus()
@@ -270,7 +278,7 @@ def agent(
         # Interactive mode — route through bus like other channels
         from nanobot.bus.events import InboundMessage
 
-        cli_terminal._init_prompt_session()
+        cli_terminal._init_prompt_session(data_dir=runtime_config.runtime_data_dir)
         _model, _preset_tag = _model_display(runtime_config)
         _icon = runtime_config.agents.defaults.bot_icon or __logo__
         console.print(

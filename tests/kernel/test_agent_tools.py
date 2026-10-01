@@ -53,9 +53,12 @@ AGENT = Principal("agent", "agent")
 
 
 def _env(tmp_path: Path, sink: Any, *, offline: bool = False,
-         exec_base_env: dict[str, str] | None = None) -> Environment:
+         exec_base_env: dict[str, str] | None = None, state: str = "state") -> Environment:
     return Environment.for_host(
-        state_dir=tmp_path / "state",
+        state_dir=tmp_path / state,
+        # Spec 005: one writer per state dir; extra kernels in one test get their
+        # own state dir and share the first one's data dir (usage store).
+        data_dir=None if state == "state" else tmp_path / "state" / "data",
         work_dir=tmp_path / "work",
         credentials={"oa": "sk-test"},
         providers=[ProviderSpec(name="openai", credential="oa")],
@@ -97,7 +100,8 @@ def make_kernel(tmp_path, sink):
     def make(fake: FakeProvider | None = None, *, offline: bool = False,
              exec_base_env: dict[str, str] | None = None, **kwargs: Any) -> Kernel:
         kernel = Kernel(
-            _env(tmp_path, sink, offline=offline, exec_base_env=exec_base_env), **kwargs,
+            _env(tmp_path, sink, offline=offline, exec_base_env=exec_base_env,
+                 state="state" if not kernels else f"state-{len(kernels) + 1}"), **kwargs,
         )
         if fake is not None:
             kernel.llm.register_provider("main", fake, MAIN)

@@ -33,10 +33,64 @@ def _as_config_object(value: object) -> dict[str, Any] | None:
     return cast(dict[str, Any], value) if isinstance(value, dict) else None
 
 
+class ConfigPathConflictError(RuntimeError):
+    """The process config path is pinned to another file (spec 005 FR-031)."""
+
+
+# A pinned path cannot be rebound: one gateway per process (``nanobot gateway``).
+_pinned_config_path: Path | None = None
+
+
+def _resolved(path: Path) -> Path:
+    return Path(path).expanduser().resolve(strict=False)
+
+
 def set_config_path(path: Path) -> None:
-    """Set the current config path (used to derive data directory)."""
+    """Set the current config path (used to derive data directory).
+
+    Raises :class:`ConfigPathConflictError` when the path is pinned to a different
+    file (see :func:`pin_config_path`); rebinding the pinned path is a no-op.
+    """
     global _current_config_path
+    if _pinned_config_path is not None:
+        if _resolved(path) != _pinned_config_path:
+            raise ConfigPathConflictError(
+                f"config path is pinned to {_pinned_config_path}; refusing to switch this "
+                f"process to {_resolved(path)} (one gateway config per process)"
+            )
+        return
     _current_config_path = path
+
+
+def pin_config_path(path: Path) -> None:
+    """Bind the process config path to *path* and pin it (FR-031).
+
+    After this, :func:`set_config_path` / :func:`pin_config_path` with a different
+    resolved path raise :class:`ConfigPathConflictError`; the same path is a no-op.
+    """
+    global _current_config_path, _pinned_config_path
+    resolved = _resolved(path)
+    if _pinned_config_path is not None:
+        if resolved != _pinned_config_path:
+            raise ConfigPathConflictError(
+                f"config path is already pinned to {_pinned_config_path}; cannot pin {resolved}"
+            )
+        return
+    _current_config_path = resolved
+    _pinned_config_path = resolved
+
+
+def unpin_config_path() -> None:
+    """Drop the pin and keep the current binding (a host command that pinned it ended)."""
+    global _pinned_config_path
+    _pinned_config_path = None
+
+
+def reset_config_path() -> None:
+    """Clear the process config path binding and its pin (teardown and tests)."""
+    global _current_config_path, _pinned_config_path
+    _current_config_path = None
+    _pinned_config_path = None
 
 
 def get_config_path() -> Path:

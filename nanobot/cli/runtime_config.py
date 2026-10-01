@@ -11,6 +11,7 @@ from rich.text import Text
 from nanobot.config.schema import Config
 
 __all__ = [
+    "_acquire_writer_lock",
     "_load_config_for_cli",
     "_load_inspection_config",
     "_load_runtime_config",
@@ -114,9 +115,31 @@ def _load_config_for_cli(
         raise typer.Exit(1) from exc
 
 
+def _require_expanded_state_home() -> None:
+    """Exit 2 when ``MOEKA_WORKSPACE`` (or a legacy alias) is itself an unexpanded ``${VAR}``.
+
+    The state home is the default instance root and config location; guessing it from
+    a literal ``${...}`` would create that directory (spec 005 US1-3).
+    """
+    import os
+    import sys
+
+    for name in ("MOEKA_WORKSPACE", "MOEKA_STATE", "NANOBOT_HOME"):
+        value = os.environ.get(name)
+        if value and "${" in value:
+            print(
+                f"Error: {name} has an unexpanded variable ({value!r}); set MOEKA_WORKSPACE "
+                "to the instance root or pass --workspace and --config explicitly",
+                file=sys.stderr,
+            )
+            raise typer.Exit(2)
+
+
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import set_config_path
+
+    _require_expanded_state_home()
 
     config_path = None
     if config:
@@ -130,7 +153,21 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
     loaded = _load_config_for_cli(config_path, resolve_env=True)
     if workspace:
         loaded.agents.defaults.workspace = workspace
+    _require_expanded_workspace(loaded)
     return loaded
+
+
+def _require_expanded_workspace(config: Config) -> None:
+    """Exit 2 (before anything is created) when the workspace is an unexpanded ``${VAR}``."""
+    from nanobot.config.schema import UnexpandedWorkspaceError
+
+    try:
+        config.workspace_path
+    except UnexpandedWorkspaceError as exc:
+        import sys
+
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(2) from exc
 
 
 def _load_inspection_config(
@@ -183,3 +220,53 @@ def _provider_setup_error(config: Config) -> str | None:
     except ValueError as exc:
         return str(exc)
     return None
+
+
+def _acquire_writer_lock(config: Config, *, role: str, if_exists: bool = False) -> object | None:
+    """Take the instance lock on the config's state dir (the flat layout's workspace).
+
+    One writer per state dir (spec 005 FR-033): a second gateway / serve / one-shot
+    agent on the same workspace exits 3 with the holder on stderr, before anything is
+    written. The lock is released when the CLI command's context closes (or the
+    process exits, SIGKILL included).
+
+    ``if_exists=True`` is the early check right after config load: it locks only an
+    existing workspace (nobody can hold a lock in a directory that does not exist,
+    and a command that fails validation must not create it). Calling again later is
+    a no-op once this command holds the lock.
+    """
+    import sys
+
+    from nanobot.kernel.instance_lock import InstanceLockedError, acquire_instance_lock
+
+    workspace = config.workspace_path
+    try:
+        key = workspace.resolve()
+    except OSError:
+        key = workspace
+    held = _HELD_LOCKS.get(key)
+    if held is not None and getattr(held, "held", False):
+        return held
+    if if_exists and not workspace.is_dir():
+        return None
+    try:
+        lock = acquire_instance_lock(workspace, mode="write", role=role)
+    except InstanceLockedError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise typer.Exit(3) from exc
+    _HELD_LOCKS[key] = lock
+    import click
+
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        def _release() -> None:
+            lock.release()
+            if _HELD_LOCKS.get(key) is lock:
+                del _HELD_LOCKS[key]
+
+        ctx.call_on_close(_release)
+    return lock
+
+
+# Locks this CLI process holds, by resolved state dir (released with the command).
+_HELD_LOCKS: dict[Path, object] = {}

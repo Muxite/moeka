@@ -1,0 +1,46 @@
+# moeka gateway in a container (spec 005 FR-058). Several instances side by side:
+#
+#   MOEKA_TOKEN_ISSUE_SECRET=... MOEKA_GATEWAY_PORT=18791 MOEKA_WS_PORT=8766 \
+#       docker compose -p a up -d
+#   MOEKA_TOKEN_ISSUE_SECRET=... MOEKA_GATEWAY_PORT=18792 MOEKA_WS_PORT=8767 \
+#       docker compose -p b up -d
+#
+# Each project gets its own named volume (<project>_moeka-data) mounted at /data.
+# Ports are published on 127.0.0.1 only. Provider keys and bot tokens go in an
+# optional ./moeka.env (never baked into the image).
+services:
+  moeka:
+    build: .
+    image: ${MOEKA_IMAGE:-moeka:latest}
+    user: "1000:1000"
+    restart: unless-stopped
+    environment:
+      MOEKA_TOKEN_ISSUE_SECRET: ${MOEKA_TOKEN_ISSUE_SECRET:?set MOEKA_TOKEN_ISSUE_SECRET to a long random value}
+      MOEKA_OLLAMA_API_BASE: ${MOEKA_OLLAMA_API_BASE:-http://host.docker.internal:11434/v1}
+    env_file:
+      - path: ./moeka.env
+        required: false
+    ports:
+      - "127.0.0.1:${MOEKA_GATEWAY_PORT:-18790}:18790"
+      - "127.0.0.1:${MOEKA_WS_PORT:-8765}:8765"
+    volumes:
+      - moeka-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:18790/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  moeka-data: {}

@@ -217,20 +217,26 @@ def protected_floor(env: CoreEnvironment | None, workspace: Path | None) -> Prot
         ProtectedFloor,
         default_config_files,
         default_data_dirs,
+        default_other_instance_roots,
     )
 
     if env is None:
+        data_dirs = default_data_dirs()
         return ProtectedFloor(
-            data_dir=default_data_dirs(), workspace=workspace, config_files=default_config_files(),
+            data_dir=data_dirs, workspace=workspace, config_files=default_config_files(),
+            other_instance_roots=default_other_instance_roots(workspace, data_dirs),
         )
     extra_dirs: list[Path] = []
     config_files: list[Path] = []
+    others: list[Path] = []
     if not env.strict:
         from nanobot.kernel.legacy import legacy_floor_extras
 
         extra_dirs, config_files = legacy_floor_extras()
+        others = default_other_instance_roots(env.paths.work_dir, extra_dirs)
     return ProtectedFloor.from_paths(
         env.paths, extra_data_dirs=extra_dirs, config_files=config_files,
+        other_instance_roots=others,
     )
 
 

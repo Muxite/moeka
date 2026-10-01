@@ -235,6 +235,44 @@ def _sum_rows(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
     return totals
 
 
+# Spec 005: SharedCapBudget's tables (caps, reservations, spend) in the same database.
+BUDGET_DDL = """
+CREATE TABLE IF NOT EXISTS budget_caps (
+    budget_id TEXT PRIMARY KEY,
+    limit_usd REAL,
+    limit_tokens INTEGER,
+    per_tag TEXT NOT NULL DEFAULT '{}',
+    allow_unpriced INTEGER NOT NULL DEFAULT 0,
+    updated_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS budget_reservations (
+    id INTEGER PRIMARY KEY,
+    budget_id TEXT NOT NULL,
+    call_id TEXT,
+    usd REAL NOT NULL,
+    tokens INTEGER NOT NULL,
+    slots TEXT NOT NULL DEFAULT '[]',
+    holder TEXT,
+    created_ms INTEGER NOT NULL,
+    lease_expires_ms INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    unpriced INTEGER NOT NULL DEFAULT 0,
+    expired_charge_usd REAL NOT NULL DEFAULT 0,
+    expired_charge_tokens INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS budget_reservations_open_idx
+    ON budget_reservations(budget_id, state, lease_expires_ms);
+CREATE TABLE IF NOT EXISTS budget_spend (
+    budget_id TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    scope_value TEXT NOT NULL,
+    spent_usd REAL NOT NULL DEFAULT 0,
+    spent_tokens INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (budget_id, scope_key, scope_value)
+);
+"""
+
+
 class LLMUsageStore:
     """A small synchronous WAL database shared by gateway threads/processes."""
 
@@ -315,6 +353,7 @@ class LLMUsageStore:
         old_version = self._migrate(connection)
         connection.executescript(_EVENTS_DDL)
         connection.executescript(_META_DDL)
+        connection.executescript(BUDGET_DDL)
         self._migrate_events(connection)
         if old_version == 3:
             self._fix_v3_retry_labels(connection)
@@ -430,8 +469,36 @@ class LLMUsageStore:
         dt = datetime.fromtimestamp(started_at_ms / 1000, timezone.utc)
         return dt.astimezone(_zone(timezone_name)).date().isoformat()
 
+    #: How long ``close()`` keeps retrying writes still pending (spec 005 FR-051).
+    CLOSE_FLUSH_TIMEOUT_S = 5.0
+
+    def flush(self, timeout_s: float | None = None) -> bool:
+        """Retry pending writes until they land or *timeout_s* passes; True when none left."""
+        deadline = time.monotonic() + (
+            self.CLOSE_FLUSH_TIMEOUT_S if timeout_s is None else timeout_s
+        )
+        delay = 0.01
+        with self._lock:
+            while self._pending:
+                try:
+                    connection = self._connect()
+                    connection.execute("PRAGMA busy_timeout = 1000")
+                    try:
+                        self._flush_pending(connection)
+                    finally:
+                        connection.execute("PRAGMA busy_timeout = 250")
+                except sqlite3.Error:
+                    pass
+                if not self._pending or time.monotonic() >= deadline:
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 0.2)
+            return not self._pending
+
     def close(self) -> None:
         with self._lock:
+            if self._pending:
+                self.flush()
             if self._connection is not None:
                 self._connection.close()
             self._connection = None

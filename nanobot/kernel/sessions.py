@@ -266,6 +266,7 @@ class Session(_LoopCalls):
         ``name`` field marks the speaker. Waits for the key's lock (an in-progress
         run), up to *timeout* seconds if given, then raises :class:`SessionBusyError`.
         """
+        self._kernel._refuse_write("session.append")
         prepared = [_prepare(m) for m in messages]
         return await self._on_loop(self._append(prepared, timeout))
 
@@ -291,6 +292,7 @@ class Session(_LoopCalls):
     def append_sync(self, *messages: Mapping[str, Any],
                     timeout: float | None = None) -> Checkpoint:
         """Blocking :meth:`append`."""
+        self._kernel._refuse_write("session.append_sync")
         prepared = [_prepare(m) for m in messages]
         return self._sync(self._append(prepared, timeout))
 
@@ -300,6 +302,7 @@ class Session(_LoopCalls):
         Raises :class:`SessionBusyError` if the key is in use and
         :class:`CheckpointMismatch` if the checkpoint's prefix has diverged.
         """
+        self._kernel._refuse_write("session.rewind")
         await self._on_loop(self._rewind(to))
 
     async def _rewind(self, to: Checkpoint | int) -> None:
@@ -311,6 +314,7 @@ class Session(_LoopCalls):
 
     def rewind_sync(self, to: Checkpoint | int) -> None:
         """Blocking :meth:`rewind`."""
+        self._kernel._refuse_write("session.rewind_sync")
         self._sync(self._rewind(to))
 
     async def fork(self, at: Checkpoint | int | None = None, *,
@@ -322,6 +326,7 @@ class Session(_LoopCalls):
         the consolidation state that lies within the prefix. Raises
         :class:`SessionBusyError` if this session is in use.
         """
+        self._kernel._refuse_write("session.fork")
         return await self._on_loop(self._fork(at, key))
 
     async def _fork(self, at: Checkpoint | int | None, key: str | None) -> Session:
@@ -342,10 +347,12 @@ class Session(_LoopCalls):
     def fork_sync(self, at: Checkpoint | int | None = None, *,
                   key: str | None = None) -> Session:
         """Blocking :meth:`fork`."""
+        self._kernel._refuse_write("session.fork_sync")
         return self._sync(self._fork(at, key))
 
     async def set_metadata(self, **kv: Any) -> None:
         """Merge *kv* into the metadata and save (waits for the key's lock)."""
+        self._kernel._refuse_write("session.set_metadata")
         await self._on_loop(self._set_metadata(kv))
 
     async def _set_metadata(self, kv: dict[str, Any]) -> None:
@@ -356,6 +363,7 @@ class Session(_LoopCalls):
 
     def set_metadata_sync(self, **kv: Any) -> None:
         """Blocking :meth:`set_metadata`."""
+        self._kernel._refuse_write("session.set_metadata_sync")
         self._sync(self._set_metadata(kv))
 
     def __eq__(self, other: object) -> bool:
@@ -387,6 +395,7 @@ class Sessions(_LoopCalls):
 
         An existing key raises ``ValueError``.
         """
+        self._kernel._refuse_write("sessions.create")
         return await self._on_loop(self._create(key, metadata))
 
     async def _create(self, key: str | None, metadata: Mapping[str, Any] | None) -> Session:
@@ -405,6 +414,7 @@ class Sessions(_LoopCalls):
     def create_sync(self, key: str | None = None,
                     metadata: Mapping[str, Any] | None = None) -> Session:
         """Blocking :meth:`create`."""
+        self._kernel._refuse_write("sessions.create_sync")
         return self._sync(self._create(key, metadata))
 
     def get(self, key: str) -> Session | None:
@@ -413,6 +423,7 @@ class Sessions(_LoopCalls):
 
     def open(self, key: str) -> Session:
         """The handle for *key*, creating (and saving) an empty session if needed."""
+        self._kernel._refuse_write("sessions.open")
         _check_key(key)
 
         def get_or_create() -> None:
@@ -451,6 +462,7 @@ class Sessions(_LoopCalls):
         the metadata are restored as they were; a committed summary's offset is
         recovered from the transcript's latest summary marker.
         """
+        self._kernel._refuse_write("sessions.restore")
         return await self._on_loop(self._restore(snapshot, key))
 
     async def _restore(self, snapshot: SessionSnapshot, key: str | None) -> Session:
@@ -481,10 +493,12 @@ class Sessions(_LoopCalls):
 
     def restore_sync(self, snapshot: SessionSnapshot, *, key: str | None = None) -> Session:
         """Blocking :meth:`restore`."""
+        self._kernel._refuse_write("sessions.restore_sync")
         return self._sync(self._restore(snapshot, key))
 
     async def delete(self, key: str) -> bool:
         """Delete a session; ``True`` if one existed. Refused while the key is in use."""
+        self._kernel._refuse_write("sessions.delete")
         return await self._on_loop(self._delete(key))
 
     async def _delete(self, key: str) -> bool:
@@ -498,6 +512,7 @@ class Sessions(_LoopCalls):
 
     def delete_sync(self, key: str) -> bool:
         """Blocking :meth:`delete`."""
+        self._kernel._refuse_write("sessions.delete_sync")
         return self._sync(self._delete(key))
 
     def __repr__(self) -> str:

@@ -150,6 +150,7 @@ class UsageView:
         self._projection = StoreProjection(kernel)
         self._subs: list[Subscription] = []
         self._lock = threading.Lock()
+        self._empty: Any = None
 
     # -- schema ---------------------------------------------------------------------
 
@@ -170,9 +171,21 @@ class UsageView:
     # -- queries --------------------------------------------------------------------
 
     def _store(self) -> Any:
-        from nanobot.llm_usage import get_llm_usage_store
+        from nanobot.llm_usage import get_llm_usage_store, llm_usage_store_path
 
-        return get_llm_usage_store(data_dir=self._kernel.core_env.paths.data_dir)
+        data_dir = self._kernel.core_env.paths.data_dir
+        if getattr(self._kernel, "read_only", False) and not llm_usage_store_path(
+            data_dir,
+        ).exists():
+            # A read-only attach creates nothing: no store yet reads as an empty one.
+            if self._empty is None:
+                from pathlib import Path
+
+                from nanobot.llm_usage.store import LLMUsageStore
+
+                self._empty = LLMUsageStore(Path(":memory:"))
+            return self._empty
+        return get_llm_usage_store(data_dir=data_dir)
 
     def totals(
         self, group_by: Iterable[str] = (), /, **filters: Any,
@@ -283,6 +296,9 @@ class UsageView:
         for sub in subs:
             sub.close()
         self._projection.close()
+        empty, self._empty = self._empty, None
+        if empty is not None:
+            empty.close()
 
 
 __all__ = ["USAGE_EVENTS", "WASTE_LABELS", "Subscription", "UsageFilter", "UsageTotals", "UsageView"]

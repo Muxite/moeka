@@ -309,9 +309,12 @@ def test_legacy_on_disk_env_is_lazy(tmp_path, monkeypatch):
     monkeypatch.setattr(config_loader, "get_config_path", counting)
     env = LegacyEnvironment.from_config(config)
     assert calls == []
-    _ = env.paths.data_dir
-    _ = env.paths.data_dir
-    assert len(calls) == 1
+    # Spec 005 FR-027: a file-loaded config owns its data dir (its own directory),
+    # never the process-global config path.
+    assert env.paths.data_dir == cfg_path.parent.resolve()
+    assert env.paths.media_dir == cfg_path.parent.resolve() / "media"
+    assert env.paths.logs_dir == cfg_path.parent.resolve() / "logs"
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

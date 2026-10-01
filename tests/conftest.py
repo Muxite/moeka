@@ -61,6 +61,32 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         )
 
 
+def _docker_available() -> bool:
+    import shutil
+    import subprocess
+
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip ``@pytest.mark.docker`` tests when no docker daemon answers (spec 005)."""
+    marked = [item for item in items if item.get_closest_marker("docker") is not None]
+    if not marked or _docker_available():
+        return
+    skip = pytest.mark.skip(reason="docker is unavailable")
+    for item in marked:
+        item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True)
 def _restore_os_environ():
     """Snapshot/restore ``os.environ`` around every test.
@@ -87,6 +113,20 @@ def _restore_os_environ():
     yield
     os.environ.clear()
     os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_config_path():
+    """Restore the process-global config path (and its pin, spec 005) after each test.
+
+    CLI tests bind it with ``set_config_path``; the gateway command pins it. Neither
+    may leak into the next test.
+    """
+    from nanobot.config import loader
+
+    saved = (loader._current_config_path, loader._pinned_config_path)
+    yield
+    loader._current_config_path, loader._pinned_config_path = saved
 
 
 @pytest.fixture(autouse=True)

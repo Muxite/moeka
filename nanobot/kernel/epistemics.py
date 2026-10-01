@@ -225,4 +225,80 @@ class Epistemics:
             self._facts.close()
 
 
-__all__ = ["Epistemics", "FactSource"]
+class ReadOnlyEpistemics:
+    """``kernel.epistemics`` of a read-only Kernel (spec 005 FR-038).
+
+    Writes (``record_fact``, ``propose``, ``answer``) raise ``ReadOnlyKernelError``
+    before touching anything. Reads open the existing stores; when they do not exist
+    yet a read raises too (a read-only attach never creates a file).
+    """
+
+    _WRITES = frozenset({"record_fact", "propose", "answer"})
+
+    def __init__(self, env: CoreEnvironment) -> None:
+        self._env = env
+        self._inner: Epistemics | None = None
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def _refuse(self, what: str) -> Any:
+        from nanobot.kernel.instance_lock import ReadOnlyKernelError
+
+        def refused(*_args: Any, **_kwargs: Any) -> Any:
+            raise ReadOnlyKernelError(
+                f"epistemics.{what} is not allowed on a read-only Kernel "
+                f"(state dir {self._env.paths.state_dir})"
+            )
+
+        return refused
+
+    def _real(self) -> Epistemics:
+        from nanobot.kernel.artifacts import ARTIFACTS_DB_FILENAME
+        from nanobot.kernel.facts import FACTS_DB_FILENAME
+        from nanobot.kernel.instance_lock import ReadOnlyKernelError
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("kernel is closed: epistemics cannot be used")
+            if self._inner is None:
+                state = self._env.paths.state_dir
+                missing = [
+                    name for name in (FACTS_DB_FILENAME, ARTIFACTS_DB_FILENAME)
+                    if not (state / name).is_file()
+                ]
+                if missing:
+                    raise ReadOnlyKernelError(
+                        f"no epistemic store in {state} ({', '.join(missing)} missing); "
+                        "a read-only Kernel cannot create it"
+                    )
+                self._inner = Epistemics(self._env)
+            return self._inner
+
+    def reconcile(
+        self, divergence: Divergence, *, classify: ClassifierFn = default_classifier,
+    ) -> Question | CommitReady:
+        """Pure: nothing is written (same as :meth:`Epistemics.reconcile`)."""
+        return resolve_divergence(divergence, classify=classify)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name in self._WRITES:
+            return self._refuse(name)
+        return getattr(self._real(), name)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            inner, self._inner = self._inner, None
+        if inner is not None:
+            inner.close()
+
+
+__all__ = ["Epistemics", "FactSource", "ReadOnlyEpistemics"]
