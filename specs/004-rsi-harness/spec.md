@@ -2,7 +2,15 @@
 
 **Feature Branch**: `004-rsi-harness`
 **Created**: 2026-09-30
-**Status**: Draft; summary only. Nothing in the harness is built.
+**Status**: Pointer; summary only (corrected 2026-10-03, spec 010 FR-005). The harness is no longer
+"nothing built". What exists:
+- the harness lives in its own repository, **moeka-rsi**, specified there as specs 001-005: 001 skeleton
+  (plan M1-M2), 002 containment and daily start/stop, 003 host model plane are merged on its `main`;
+  004 trust plane is on a branch; 005 is the next slot. Those specs, not this summary, are authoritative
+  for the harness;
+- the kernel side the harness needs is built here: `006-rsi-kernel-prerequisites` (K1-K6),
+  `007-heldout-runner` (`heldout-run`) and `008-heldout-sandbox` (`heldout-run --sandbox docker`);
+- containment is moeka-rsi spec 002 (the RSI VM and its hardened rollout container), not this repo.
 **Input**: The harness is designed on branch `rsi-harness-spec`, which this spec summarises and does not
 replace. Read it with `git show rsi-harness-spec:.agent/rsi-harness-design.md` (spec) and
 `git show rsi-harness-spec:.agent/rsi-harness-impl-plan.md` (milestones M1-M7). That branch is not edited from
@@ -109,7 +117,10 @@ Harness requirements (summary; the design is authoritative):
   explicit environment, offline agent, explicit tool allow-list from the task, and rollout identity as span
   tags.
 - **FR-008**: the harness MUST pin a kernel commit as a submodule and treat it as read-only; a pin bump is its
-  own commit; the pin is `core-slim` `6f80c392` until consolidation (`003`) moves it to `main`.
+  own commit. Corrected 2026-10-03: the pin is NOT `core-slim` `6f80c392`. moeka-rsi `core/` pins the
+  consolidated line (`consolidate/new-main`, now `main`): first `41f2c69d`, bumped to `fe52e31e`
+  ("add accepted held-out suite 008") on 2026-10-01, because K1-K6 and the held-out runner exist only there
+  (moeka-rsi `docs/milestones.md`, spec 001 FR-001). It re-pins to a pushed `main` commit after the G7 soak.
 - **FR-009**: the mutator MUST write only inside a candidate's variant tree; the evaluator, gate, task suite,
   verifiers, supervisor and pinned core MUST be outside its write scope.
 - **FR-010**: verification MUST be deterministic state-diff checks plus held-out tests; no LLM judge in any

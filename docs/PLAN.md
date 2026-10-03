@@ -1,15 +1,24 @@
 # Moeka conversion plan: Docker -> UV + venv
 
-> **STATUS: DONE.** This migration is complete and has been the live setup for
-> some time. The repo has no `Dockerfile`, `docker-compose.yml`, or
-> `entrypoint.sh`; `moeka.sh` is venv-only; the systemd unit and
-> `./bin/moeka.sh enable/disable` flow described in "New architecture" below
-> are what's actually running. This document is kept as a historical record of
-> the migration design and rollback commits, not as an active plan — for
-> current setup instructions see [`README.md`](../README.md) and
-> [`docs/SYSTEMD.md`](SYSTEMD.md). `Dockerfile.test` still exists, but only for
-> running the test suite in isolation (`scripts/test-docker.sh`), not for
-> deployment.
+> **STATUS: DONE (historical).** The migration below made the host venv the live
+> setup: `bin/moeka.sh` is venv-based, and the systemd units (`scripts/moeka.service`,
+> the template `scripts/moeka@.service`) and the `./bin/moeka.sh enable/disable` flow
+> are what runs the live bot. This document is kept as the record of the migration
+> design and rollback commits, not as an active plan; for current setup see
+> [`README.md`](../README.md), [`docs/SYSTEMD.md`](SYSTEMD.md) and
+> [`docs/deployment.md`](deployment.md).
+>
+> Repository facts as of 2026-10-03 (spec 010 FR-005), which differ from what this
+> plan deleted:
+>
+> - a `Dockerfile` and a `compose.yaml` exist again (spec 005 FR-058, commit
+>   `d9287a2e`): an optional container image for running one gateway instance per
+>   container with its state on a `/data` volume, entrypoint
+>   `scripts/container-entrypoint.sh`. It is not the old Docker mode: no nsenter
+>   host bridge, no capability escalation, and the live bot does not use it;
+> - `Dockerfile.test` runs the test suite in isolation (`scripts/test-docker.sh`);
+> - there is still no `docker-compose.yml` and no root `entrypoint.sh`;
+> - `tools.exec.allowSudo` still defaults to false (section 4).
 
 ## Why
 
