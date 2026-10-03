@@ -412,6 +412,10 @@ EVENTS: Mapping[str, str] = MappingProxyType({
                      "tools_used, error",
     "skill.listed": "skills (names rendered into the system prompt), active (always-on "
                     "skills loaded in full)",
+    "capability.selected": "mode (filtered, or all when the index degraded), fallback (None, "
+                           "empty or small), task_types (sorted), requested_output, survivors "
+                           "(count that passed the type filter), selected (skill names listed); "
+                           "one per filtered system-prompt build, next to skill.listed (spec 011)",
     "skill.read": "skill, path (resolved), via (the tool: read_file or grep), call_id "
                   "(the model's tool-call id; joins tool.call.call_id; None outside a "
                   "runner). One per (tool call, skill file) whose successful result returned "

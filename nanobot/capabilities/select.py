@@ -154,32 +154,33 @@ def select(
     k: int = 8,
     ranker: Ranker | None = None,
     kinds: Iterable[str] | None = None,
+    exclude: Iterable[str] = (),
 ) -> Selection:
     """Filter *index* for *typing* in SQL, rank the survivors and pick the first *k*.
 
     ``ranker=None`` uses the deterministic lexical scorer (pass
     ``default_ranker(vec_store)`` for embeddings). *kinds* restricts the selection to
-    ``"skill"`` and/or ``"tool"`` capabilities (``None`` = both); the fallbacks count
-    and list only those.
+    ``"skill"`` and/or ``"tool"`` capabilities (``None`` = both); *exclude* names
+    capabilities listed by other means (always-on skills). The fallbacks count and list
+    only what remains.
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
     kinds = None if kinds is None else tuple(kinds)
+    excluded = frozenset(exclude)
     task_types = task_types_for(typing, ambient)
-    passed = index.filter(task_types, typing.requested_output, allowed_effects, kinds=kinds)
+    filtered = index.filter(task_types, typing.requested_output, allowed_effects, kinds=kinds)
+    passed = [row for row in filtered if row.name not in excluded]
     ordered, scores = rank(passed, query, ranker)
     survivors = tuple(row.name for row in ordered)
 
-    total = index.count(kinds)
+    everything = [row.name for row in index.in_order(kinds) if row.name not in excluded]
     fallback: str | None = None
-    if total <= k:
+    if len(everything) <= k:
         fallback = "small"
     elif not survivors:
         fallback = "empty"
-    if fallback is not None:
-        selected = tuple(row.name for row in index.in_order(kinds))
-    else:
-        selected = survivors[:k]
+    selected = tuple(everything) if fallback is not None else survivors[:k]
     return Selection(
         mode="filtered",
         survivors=survivors,

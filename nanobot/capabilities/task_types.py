@@ -59,7 +59,8 @@ _OUTPUT_WORDS = {
 
 _URL = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
 # An absolute (``/...``) or home-relative (``~/...``) path not glued to a preceding word.
-_PATH = re.compile(r"(?<![\w/~.:\-])(~/[^\s<>\"'`|;,()\[\]{}]*|/[^\s<>\"'`|;,()\[\]{}/][^\s<>\"'`|;,()\[\]{}]*)")
+_PATH_CHARS = r"[^\s<>\"'`|;,()\[\]{}]"
+_PATH = re.compile(rf"(?<![\w/~.:\-])(~/{_PATH_CHARS}*|/(?!/){_PATH_CHARS}+)")
 # A fence: three backticks and an optional language; fences alternate open/close.
 _FENCE = re.compile(r"```([A-Za-z0-9_+.\-]*)")
 _HINT = re.compile(r"\$type:([A-Za-z0-9_/:.\-]+)")

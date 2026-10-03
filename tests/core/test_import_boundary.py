@@ -33,6 +33,11 @@ import nanobot.kernel          # noqa: F401
 import nanobot.core.vec        # noqa: F401
 import nanobot.core.vec_store  # noqa: F401
 import nanobot.api.complete    # noqa: F401
+import nanobot.capabilities.index      # noqa: F401
+import nanobot.capabilities.library    # noqa: F401
+import nanobot.capabilities.manifest   # noqa: F401
+import nanobot.capabilities.select     # noqa: F401
+import nanobot.capabilities.task_types # noqa: F401
 import moeka                   # noqa: F401
 import moeka.llm               # noqa: F401
 import moeka.testing           # noqa: F401

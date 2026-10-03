@@ -4,6 +4,8 @@ Provides four stores:
   - memory_chunks   — MEMORY.md split by section headers
   - history_entries — history.jsonl entries
   - skills          — skill definitions (indexed at startup)
+  - capability_embeddings — spec 011 capability vectors, cached by content
+                      sha256 and model (``rank_capabilities``)
   - documents       — host-supplied text (append-only), optionally split
                       into named *collections* so a host can keep separate
                       corpora in one vec.db
@@ -308,6 +310,75 @@ class VecStore:
         results = self._search_simple_store("skills", query, k)
         self._log_retrieval("skills", caller, query, k, results)
         return results
+
+    # ------------------------------------------------------------------
+    # Capabilities (spec 011 FR-008): embeddings cached by content sha256
+    # ------------------------------------------------------------------
+
+    def capability_vectors(self, items: list[tuple[str, str]]) -> dict[str, np.ndarray]:
+        """Embeddings for ``(content_sha256, text)`` pairs, cached by sha and model.
+
+        Only texts whose sha has no cached vector for the current model are embedded.
+        Empty when the store cannot embed.
+        """
+        if not self._available or not items:
+            return {}
+        import numpy as np
+
+        try:
+            conn = self._connection()
+            shas = sorted({sha for sha, _ in items})
+            cached: dict[str, np.ndarray] = {}
+            for start in range(0, len(shas), 500):
+                chunk = shas[start:start + 500]
+                rows = conn.execute(
+                    "SELECT sha256, vector FROM capability_embeddings WHERE model = ? "
+                    f"AND sha256 IN ({','.join('?' * len(chunk))})",
+                    (self._model_name, *chunk),
+                ).fetchall()
+                cached.update({sha: np.frombuffer(blob, dtype=np.float32) for sha, blob in rows})
+            missing = {sha: text for sha, text in items if sha not in cached}
+            if missing:
+                vectors = self._embed(list(missing.values()))
+                for sha, vector in zip(missing, vectors):
+                    cached[sha] = vector
+                    conn.execute(
+                        "INSERT OR REPLACE INTO capability_embeddings(sha256, model, vector) "
+                        "VALUES (?, ?, ?)",
+                        (sha, self._model_name, vector.astype(np.float32).tobytes()),
+                    )
+                conn.commit()
+            return cached
+        except Exception:
+            logger.exception("VecStore: capability embeddings failed")
+            return {}
+
+    def rank_capabilities(
+        self, query: str, items: list[tuple[str, str]],
+    ) -> dict[str, float] | None:
+        """Cosine similarity of *query* with each ``(content_sha256, text)``, keyed by sha.
+
+        ``None`` when the store cannot embed (the caller falls back to lexical scoring).
+        """
+        if not self._available:
+            return None
+        if not items or not query.strip():
+            return {sha: 0.0 for sha, _ in items}
+        vectors = self.capability_vectors(items)
+        if not vectors:
+            return None
+        try:
+            import numpy as np
+
+            q = self._embed([query])[0]
+            q_norm = float(np.linalg.norm(q)) or 1.0
+            return {
+                sha: float(np.dot(q, vec) / (q_norm * (float(np.linalg.norm(vec)) or 1.0)))
+                for sha, vec in vectors.items()
+            }
+        except Exception:
+            logger.exception("VecStore: capability ranking failed")
+            return None
 
     def _search_simple_store(self, store: str, query: str, k: int) -> list[str]:
         """Shared KNN search over the single-text stores (memory/history/skills)."""
@@ -986,6 +1057,12 @@ class VecStore:
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS capability_embeddings (
+                sha256 TEXT NOT NULL,
+                model TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                PRIMARY KEY (sha256, model)
             );
             CREATE TABLE IF NOT EXISTS retrieval_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
