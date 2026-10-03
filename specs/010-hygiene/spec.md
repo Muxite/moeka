@@ -42,8 +42,9 @@
   - tokens or units when known; local embedding models have tier `local` and cost 0;
   - a recording failure never fails the call.
 - **FR-004 Host tools guard.** `AgentLoop.from_config(..., host_tools=False)` keeps working for kernel hosts. The
-  gateway, `serve` and CLI agent entry points assert after construction that `message`, `cron` and `run_cli_app`
-  are registered, and fail startup with exit 2 and a message naming the missing tools if not. A test builds the
+  gateway and CLI agent entry points assert after construction that `message`, `cron` and `run_cli_app` are
+  registered; `serve` wires no cron service, so it asserts only `message` and `run_cli_app` and must start without
+  `cron`. A failed guard ends startup with exit 2 and a message naming the missing tools. A test builds the
   gateway loop as the gateway does and checks the three tools.
 - **FR-005 Docs.**
   - Bring `docs/PLAN.md`'s repository facts up to date (Dockerfile and compose exist).
