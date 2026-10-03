@@ -14,6 +14,8 @@ from loguru import logger
 from nanobot.runtime_context import RuntimeContextBlock
 
 if TYPE_CHECKING:
+    from nanobot.capabilities.enforce import CertGate, Provenance
+    from nanobot.capabilities.provenance import TrustStore
     from nanobot.kernel.env import CoreEnvironment
 
 # Default builtin skills directory (relative to this file)
@@ -69,8 +71,16 @@ class SkillsLoader:
         allowed_skills: set[str] | None = None,
         inline_skills: list | None = None,
         env: CoreEnvironment | None = None,
+        capabilities: Any = None,
+        trust: TrustStore | None = None,
     ):
         self.workspace = workspace
+        # Spec 012 certificate enforcement: ``capabilities`` (a ``CapabilitiesConfig``
+        # or mapping) wins, else the env's ``capabilities`` config section, else off.
+        # ``trust`` pins a fixed trust store instead of ``capabilities.trust_dirs``.
+        self._capabilities_arg = capabilities
+        self._trust_arg = trust
+        self._cert_gate: CertGate | None = None
         # Host env: ``requires.env`` presence is ``env.credentials.resolve(name,
         # scope="skills")``; ``None`` keeps the legacy process-env check.
         self._env = env
@@ -128,6 +138,8 @@ class SkillsLoader:
                 continue
             if source == "workspace" and not self._workspace_skill_valid(skill_file):
                 continue
+            if source == "workspace" and not self._workspace_provenance(skill_dir).allowed:
+                continue
             entries.append({"name": name, "path": str(skill_file), "source": source})
         return entries
 
@@ -159,6 +171,58 @@ class SkillsLoader:
                 "Skipping workspace skill '{}': {} ({})", warning[0], warning[1], skill_file,
             )
         return False
+
+    @property
+    def cert_gate(self) -> CertGate:
+        """The spec 012 certificate gate for workspace skills (resolved once)."""
+        gate = getattr(self, "_cert_gate", None)
+        if gate is None:
+            from nanobot.capabilities.enforce import CertGate, capabilities_settings
+
+            raw = getattr(self, "_capabilities_arg", None)
+            env = getattr(self, "_env", None)
+            if raw is None and env is not None:
+                try:
+                    raw = env.config.section("capabilities") or None
+                except Exception:  # noqa: BLE001 - a config source never breaks listing
+                    logger.exception("capabilities: reading the config section failed")
+            enforce, trust_dirs = capabilities_settings(raw)
+            gate = CertGate(
+                enforce=enforce, trust_dirs=trust_dirs, trust=getattr(self, "_trust_arg", None),
+            )
+            self._cert_gate = gate
+        return gate
+
+    def _workspace_provenance(self, skill_dir: Path) -> Provenance:
+        """Spec 012 FR-006: the provenance of a workspace skill bundle (and if it loads)."""
+        return self.cert_gate.check(skill_dir, kind="skill", name=skill_dir.name)
+
+    def skill_provenance(self, name: str) -> tuple[str | None, str]:
+        """``(cert_id, cert_status)`` of a listed skill (FR-007); non-workspace: builtin."""
+        entry = next(
+            (item for item in self.list_skills(filter_unavailable=False) if item["name"] == name),
+            None,
+        )
+        if entry is None or entry.get("source") != "workspace":
+            return None, "builtin"
+        provenance = self._workspace_provenance(Path(entry["path"]).parent)
+        return provenance.cert_id, provenance.status
+
+    def workspace_bundle_provenance(self) -> list[tuple[str, Path, Provenance]]:
+        """``(name, bundle dir, provenance)`` for every valid workspace skill bundle,
+        refused ones included (``nanobot capabilities list``)."""
+        out: list[tuple[str, Path, Provenance]] = []
+        base = self.workspace_skills
+        if not base.is_dir():
+            return out
+        for skill_dir in sorted(base.iterdir()):
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_dir.is_dir() or not skill_file.exists():
+                continue
+            if not self._workspace_skill_valid(skill_file):
+                continue
+            out.append((skill_dir.name, skill_dir, self._workspace_provenance(skill_dir)))
+        return out
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """

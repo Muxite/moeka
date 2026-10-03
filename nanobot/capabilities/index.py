@@ -1,7 +1,9 @@
 """The SQLite capability index (spec 011 FR-004, FR-007).
 
 One row per capability plus one row per required input, any-of input, output and
-effect, and a ``(type, ancestor)`` closure table built from the vocabulary.
+effect, and a ``(type, ancestor)`` closure table built from the vocabulary. Each row
+also carries its provenance (spec 012 FR-007): ``cert_id`` (or null) and
+``cert_status`` (``certified``, ``uncertified``, ``refused:<reason>`` or ``builtin``).
 :meth:`CapabilityIndex.sync` makes the index equal to a full list of entries while
 touching only the rows that changed; :meth:`CapabilityIndex.filter` is the
 deterministic type/effect filter, evaluated in SQL.
@@ -23,7 +25,7 @@ from nanobot.capabilities.types import ancestors, closure
 
 CapabilityKind = Literal["skill", "tool"]
 KINDS: tuple[str, ...] = ("skill", "tool")
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 # One lock per database file: loops in one process that share a file serialise their
 # sync-then-filter sequences, so one loop never reads another's half-synced rows.
 _PATH_LOCKS: dict[str, threading.RLock] = {}
@@ -35,6 +37,8 @@ class CapabilityEntry:
     """One capability as the index stores it. ``io=None`` = untyped.
 
     ``io`` may be given as a raw manifest dict; it is normalised with ``parse_io``.
+    ``cert_id`` / ``cert_status`` are the provenance columns (spec 012 FR-007); an entry
+    built without them is a ``builtin`` capability with no certificate.
     """
 
     kind: str
@@ -43,6 +47,8 @@ class CapabilityEntry:
     io: IOSpec | None
     content_sha256: str
     available: bool = True
+    cert_id: str | None = None
+    cert_status: str = "builtin"
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -76,6 +82,12 @@ class IndexedCapability:
     content_sha256: str
     ordinal: int
     typed: bool = field(default=False, compare=False)
+    cert_id: str | None = field(default=None, compare=False)
+    cert_status: str = field(default="builtin", compare=False)
+
+    @property
+    def certified(self) -> bool:
+        return self.cert_status == "certified"
 
 
 _SCHEMA = """
@@ -89,6 +101,8 @@ CREATE TABLE IF NOT EXISTS capabilities (
     available INTEGER NOT NULL,
     content_sha256 TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
+    cert_id TEXT,
+    cert_status TEXT NOT NULL DEFAULT 'builtin',
     UNIQUE (kind, name)
 );
 CREATE TABLE IF NOT EXISTS cap_inputs_all (
@@ -130,7 +144,8 @@ _CHILD_TABLES = ("cap_inputs_all", "cap_inputs_any", "cap_outputs", "cap_effects
 # allowed effects (JSON list), exec allowed (0/1), the task types' ancestor set (JSON
 # list) and the requested output (or NULL).
 _FILTER_SQL = """
-SELECT c.kind, c.name, c.description, c.content_sha256, c.ordinal, c.typed
+SELECT c.kind, c.name, c.description, c.content_sha256, c.ordinal, c.typed,
+       c.cert_id, c.cert_status
 FROM capabilities c
 WHERE (c.available = 1 OR c.kind = 'skill')
   AND (:kinds IS NULL OR c.kind IN (SELECT value FROM json_each(:kinds)))
@@ -177,9 +192,10 @@ def _io_json(io: IOSpec | None) -> str | None:
 
 
 def _row_value(entry: CapabilityEntry, ordinal: int) -> tuple[Any, ...]:
+    """The row's mutable columns; ``ordinal`` is last (an ordinal-only change is silent)."""
     return (
         entry.description, _io_json(entry.io), int(entry.io is not None),
-        int(entry.available), entry.content_sha256, ordinal,
+        int(entry.available), entry.content_sha256, entry.cert_id, entry.cert_status, ordinal,
     )
 
 
@@ -250,7 +266,7 @@ class CapabilityIndex:
                     (row[1], row[2]): row
                     for row in conn.execute(
                         "SELECT id, kind, name, description, io_json, typed, available, "
-                        "content_sha256, ordinal FROM capabilities"
+                        "content_sha256, cert_id, cert_status, ordinal FROM capabilities"
                     )
                 }
                 for key, row in existing.items():
@@ -263,15 +279,17 @@ class CapabilityIndex:
                     if row is None:
                         cursor = conn.execute(
                             "INSERT INTO capabilities(kind, name, description, io_json, typed, "
-                            "available, content_sha256, ordinal) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            "available, content_sha256, cert_id, cert_status, ordinal) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (entry.kind, entry.name, *value),
                         )
                         self._insert_children(int(cursor.lastrowid or 0), entry.io)
                         added += 1
-                    elif tuple(row[3:8]) != value[:5]:
+                    elif tuple(row[3:10]) != value[:7]:
                         conn.execute(
                             "UPDATE capabilities SET description = ?, io_json = ?, typed = ?, "
-                            "available = ?, content_sha256 = ?, ordinal = ? WHERE id = ?",
+                            "available = ?, content_sha256 = ?, cert_id = ?, cert_status = ?, "
+                            "ordinal = ? WHERE id = ?",
                             (*value, row[0]),
                         )
                         for table in _CHILD_TABLES:
@@ -279,10 +297,10 @@ class CapabilityIndex:
                         self._insert_children(row[0], entry.io)
                         updated += 1
                     else:
-                        if row[8] != value[5]:
+                        if row[10] != value[7]:
                             conn.execute(
                                 "UPDATE capabilities SET ordinal = ? WHERE id = ?",
-                                (value[5], row[0]),
+                                (value[7], row[0]),
                             )
                         unchanged += 1
                 conn.commit()
@@ -325,16 +343,17 @@ class CapabilityIndex:
         """Every indexed capability, in ordinal (sync list) order."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT kind, name, description, io_json, available, content_sha256 "
-                "FROM capabilities ORDER BY ordinal, kind, name"
+                "SELECT kind, name, description, io_json, available, content_sha256, "
+                "cert_id, cert_status FROM capabilities ORDER BY ordinal, kind, name"
             ).fetchall()
         return [
             CapabilityEntry(
                 kind=kind, name=name, description=description,
                 io=parse_io(json.loads(io_json)) if io_json is not None else None,
                 content_sha256=sha, available=bool(available),
+                cert_id=cert_id, cert_status=cert_status,
             )
-            for kind, name, description, io_json, available, sha in rows
+            for kind, name, description, io_json, available, sha, cert_id, cert_status in rows
         ]
 
     def child_rows(self) -> dict[str, list[tuple[str, str, str]]]:
@@ -370,7 +389,8 @@ class CapabilityIndex:
     def in_order(self, kinds: Iterable[str] | None = None) -> list[IndexedCapability]:
         """Every capability (of *kinds*) in ordinal order: today's full listing."""
         sql = (
-            "SELECT kind, name, description, content_sha256, ordinal, typed FROM capabilities"
+            "SELECT kind, name, description, content_sha256, ordinal, typed, cert_id, "
+            "cert_status FROM capabilities"
             " WHERE (:kinds IS NULL OR kind IN (SELECT value FROM json_each(:kinds)))"
             " ORDER BY ordinal, kind, name"
         )
@@ -427,10 +447,11 @@ def _kinds_json(kinds: Iterable[str] | None) -> str | None:
 
 
 def _indexed(row: tuple[Any, ...]) -> IndexedCapability:
-    kind, name, description, sha, ordinal, typed = row
+    kind, name, description, sha, ordinal, typed, cert_id, cert_status = row
     return IndexedCapability(
         kind=kind, name=name, description=description, content_sha256=sha,
-        ordinal=int(ordinal), typed=bool(typed),
+        ordinal=int(ordinal), typed=bool(typed), cert_id=cert_id,
+        cert_status=cert_status or "builtin",
     )
 
 

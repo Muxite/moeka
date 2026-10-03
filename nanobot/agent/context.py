@@ -152,6 +152,7 @@ class ContextBuilder:
             allowed_skills=set(allowed_skills) if allowed_skills is not None else None,
             inline_skills=inline_skills,
             env=env,
+            capabilities=capabilities,
         )
         # Capability selection (spec 011 FR-010): ``capabilities`` wins, else the env's
         # ``capabilities`` config section, else the defaults (``selection="all"``).
@@ -371,6 +372,7 @@ class ContextBuilder:
                 kinds=("skill",),
                 # Always-on skills are loaded under "# Active Skills": not counted to k.
                 exclude=self.skills.get_always_skills(),
+                certified_boost=config.certified_boost,
             )
 
     def _trace_capability_selected(self, selection: Selection, listed: list[str]) -> None:

@@ -504,6 +504,16 @@ def _lazy_default(module_path: str, class_name: str) -> Any:
     return getattr(module, class_name)()
 
 
+class ScriptToolsConfig(Base):
+    """Script tools (spec 012 FR-009/FR-010): ``<workspace>/tools-script/<name>/``.
+
+    ``enabled`` registers each valid bundle as the tool ``script_<name>`` (and, when
+    ``capabilities.enforce_certs`` is on, only certified ones). Off by default.
+    """
+
+    enabled: bool = False
+
+
 class ToolsConfig(Base):
     """Tools configuration.
 
@@ -538,6 +548,7 @@ class ToolsConfig(Base):
             "webui_allow_remote_package_install",
         ),
     )  # allow non-local WebUI clients to install optional packages and agent skills
+    script: ScriptToolsConfig = Field(default_factory=lambda: ScriptToolsConfig())
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 
@@ -556,12 +567,27 @@ class CapabilitiesConfig(Base):
     - ``ambient_types``: types every task has besides ``text/query`` (the gateway also
       adds ``host``).
     - ``allowed_effects``: effects a selected capability may declare.
+    - ``enforce_certs`` (spec 012 FR-005/FR-006): workspace skills and script tools load
+      only with a certificate that verifies against the trust store. Off by default:
+      nothing is refused for lack of a certificate.
+    - ``trust_dirs``: extra trust directories (``*.pub`` keys, ``revoked.jsonl``) read
+      after the package's own (empty) one; ``~`` is expanded.
+    - ``certified_boost`` (FR-007): the default ranker multiplies a certified
+      capability's score by ``1 + certified_boost``.
     """
 
     selection: Literal["all", "filtered"] = "all"
     top_k: int = Field(default=8, ge=1, le=64)
     ambient_types: list[str] = Field(default_factory=lambda: ["workspace"])
     allowed_effects: list[str] = Field(default_factory=lambda: list(_CAPABILITY_EFFECTS))
+    enforce_certs: bool = False
+    trust_dirs: list[str] = Field(default_factory=list)
+    certified_boost: float = Field(default=0.10, ge=0.0, le=1.0)
+
+    @field_validator("trust_dirs")
+    @classmethod
+    def _expand_trust_dirs(cls, value: list[str]) -> list[str]:
+        return [str(Path(item).expanduser()) for item in value]
 
     @field_validator("ambient_types")
     @classmethod
