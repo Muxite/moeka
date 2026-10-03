@@ -43,7 +43,9 @@ def _name(req: str) -> str:
 def test_no_new_runtime_dependency():
     data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     deps = {_name(d) for d in data["project"]["dependencies"]}
-    assert deps <= BASE_DEPS, sorted(deps - BASE_DEPS)
+    # Head amendment (2026-10-03): spec 012 NFR-001 later makes `cryptography` explicit (signature
+    # verification); 009 itself adds nothing.
+    assert deps - {"cryptography"} <= BASE_DEPS, sorted(deps - {"cryptography"} - BASE_DEPS)
 
 
 @pytest.mark.fr("NFR-001")
@@ -51,8 +53,11 @@ def test_no_third_party_hash_library_imported():
     """The fingerprint is hashlib's sha256; no hashing package is pulled in for it."""
     banned = re.compile(r"^\s*(import|from)\s+(xxhash|blake3|mmh3|cryptography|nacl|Crypto)\b",
                         re.M)
+    # Head amendment (2026-10-03): spec 012's certificate verification under nanobot/capabilities/
+    # legitimately imports `cryptography`; the key fingerprint must still use hashlib only.
     hits = [str(p.relative_to(REPO)) for p in (REPO / "nanobot").rglob("*.py")
-            if banned.search(p.read_text(encoding="utf-8", errors="replace"))]
+            if banned.search(p.read_text(encoding="utf-8", errors="replace"))
+            and not p.relative_to(REPO).as_posix().startswith("nanobot/capabilities/")]
     assert set(hits) <= BASE_HASH_IMPORTERS, sorted(set(hits) - BASE_HASH_IMPORTERS)
 
 
