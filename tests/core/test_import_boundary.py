@@ -38,6 +38,9 @@ import nanobot.capabilities.library    # noqa: F401
 import nanobot.capabilities.manifest   # noqa: F401
 import nanobot.capabilities.select     # noqa: F401
 import nanobot.capabilities.task_types # noqa: F401
+import nanobot.capabilities.provenance # noqa: F401
+import nanobot.capabilities.enforce    # noqa: F401
+import nanobot.capabilities.script_tool # noqa: F401
 import moeka                   # noqa: F401
 import moeka.llm               # noqa: F401
 import moeka.testing           # noqa: F401
