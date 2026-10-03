@@ -134,6 +134,20 @@ by the `quick_validate.py` script (skills/skill-creator/scripts/quick_validate.p
   (`none`, `read-workspace`, `write-workspace`, `network`, `exec`, `sudo`); types come from
   `nanobot/capabilities/types.yaml`. With `capabilities.selection: "filtered"` the skills summary lists only the
   `capabilities.topK` skills that pass the type/effect filter for the turn; the default `"all"` lists every skill.
+- Spec 012 provenance: a workspace skill bundle may carry `CERT.json` (an Ed25519-signed `moeka.capcert.v1`
+  certificate, `schemas/capability-cert.v1.schema.json`). `nanobot.capabilities.provenance.verify_bundle` checks it
+  against the trust store (package `nanobot/capabilities/trust/`, ships empty, plus `capabilities.trustDirs`).
+  With `capabilities.enforceCerts: true` the loader lists, loads and resolves `$name` only for workspace skills whose
+  certificate verifies (`SkillsLoader._workspace_provenance`, `nanobot/capabilities/enforce.py` `CertGate`); a
+  refusal is logged once per `(name, reason)`. Built-in, inline and plugin skills are never gated. The capability
+  index stores `cert_id`/`cert_status` and the default ranker multiplies a certified capability's score by
+  `1 + capabilities.certifiedBoost`. Moeka only verifies: no module under `nanobot/` handles a private key.
+- Spec 012 script tools: `<workspace>/tools-script/<name>/tool.yaml` (`nanobot/capabilities/script_tool.py`)
+  registers as the tool `script_<name>` when `tools.script.enabled` (and, when enforcing, certified). Each call
+  runs the bundle's `entry` with the canonical JSON arguments on stdin, a scrubbed environment, a process-group
+  timeout, a 1 MiB JSON stdout and, without the `network` effect, `bwrap --unshare-net` when bwrap works; every
+  call emits `script_tool.call`. The file tools never write `CERT.json`, `revoked.jsonl` or a trust dir
+  (`nanobot/security/protected_paths.py`); exec still can, so the real trust root is an OS boundary.
 
 ### 2.3 Validation rules
 

@@ -5,8 +5,13 @@ survivors (FR-008) and applies the fallbacks (FR-009). Ranking never removes a
 survivor; it only orders them, so the filter alone decides what can be selected.
 
 Rankers are ``ranker(query, survivors) -> {name: score}``. Each survivor is a
-:class:`Candidate`: a ``str`` (the name) that also carries ``kind``, ``description``
-and ``content_sha256``. A missing name scores 0.
+:class:`Candidate`: a ``str`` (the name) that also carries ``kind``, ``description``,
+``content_sha256`` and ``cert_status``. A missing name scores 0.
+
+Provenance boost (spec 012 FR-007): with the default ranker (``ranker=None``, the
+lexical scorer, or :func:`vec_ranker` / :func:`default_ranker`), a ``certified``
+capability's score is multiplied by ``1 + certified_boost`` before ordering. A custom
+ranker's scores are used as given.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ if TYPE_CHECKING:
     from nanobot.core.vec_store import VecStore
 
 QUERY_TYPE = "text/query"
+DEFAULT_CERTIFIED_BOOST = 0.10
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
@@ -35,12 +41,14 @@ class Candidate(str):
     kind: str
     description: str
     content_sha256: str
+    cert_status: str
 
     def __new__(cls, row: IndexedCapability) -> Candidate:
         candidate = super().__new__(cls, row.name)
         candidate.kind = row.kind
         candidate.description = row.description
         candidate.content_sha256 = row.content_sha256
+        candidate.cert_status = getattr(row, "cert_status", "builtin")
         return candidate
 
     @property
@@ -115,6 +123,7 @@ def vec_ranker(store: VecStore) -> Ranker:
             return lexical_ranker(query, survivors)
         return {name: float(by_sha.get(name.content_sha256, 0.0)) for name in survivors}
 
+    rank.default_ranker = True  # type: ignore[attr-defined]
     return rank
 
 
@@ -133,13 +142,32 @@ def task_types_for(typing: TaskTyping, ambient: Iterable[str]) -> frozenset[str]
     return types
 
 
+def is_default_ranker(ranker: Ranker | None) -> bool:
+    """Whether *ranker* is the default (lexical or vec) ranker the FR-007 boost applies to."""
+    return (
+        ranker is None
+        or ranker is lexical_ranker
+        or getattr(ranker, "default_ranker", False) is True
+    )
+
+
 def rank(
     survivors: Sequence[IndexedCapability], query: str, ranker: Ranker | None,
+    *, certified_boost: float = 0.0,
 ) -> tuple[list[IndexedCapability], dict[str, float]]:
-    """Order *survivors* by descending score, ties by ``(kind, name)`` ascending."""
+    """Order *survivors* by descending score, ties by ``(kind, name)`` ascending.
+
+    With the default ranker, a certified survivor's score is multiplied by
+    ``1 + certified_boost`` first (spec 012 FR-007).
+    """
     candidates = [Candidate(row) for row in survivors]
     raw = (ranker or lexical_ranker)(query or "", candidates)
     scores = {row.name: float(raw.get(row.name, 0.0)) for row in survivors}
+    if certified_boost and is_default_ranker(ranker):
+        factor = 1.0 + float(certified_boost)
+        for row in survivors:
+            if getattr(row, "cert_status", "builtin") == "certified":
+                scores[row.name] *= factor
     ordered = sorted(survivors, key=lambda row: (-scores[row.name], row.kind, row.name))
     return ordered, scores
 
@@ -155,6 +183,7 @@ def select(
     ranker: Ranker | None = None,
     kinds: Iterable[str] | None = None,
     exclude: Iterable[str] = (),
+    certified_boost: float = DEFAULT_CERTIFIED_BOOST,
 ) -> Selection:
     """Filter *index* for *typing* in SQL, rank the survivors and pick the first *k*.
 
@@ -162,7 +191,8 @@ def select(
     ``default_ranker(vec_store)`` for embeddings). *kinds* restricts the selection to
     ``"skill"`` and/or ``"tool"`` capabilities (``None`` = both); *exclude* names
     capabilities listed by other means (always-on skills). The fallbacks count and list
-    only what remains.
+    only what remains. *certified_boost* (``capabilities.certified_boost``, 0-1) scales
+    certified capabilities' default-ranker scores (spec 012 FR-007).
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
@@ -171,7 +201,7 @@ def select(
     task_types = task_types_for(typing, ambient)
     filtered = index.filter(task_types, typing.requested_output, allowed_effects, kinds=kinds)
     passed = [row for row in filtered if row.name not in excluded]
-    ordered, scores = rank(passed, query, ranker)
+    ordered, scores = rank(passed, query, ranker, certified_boost=certified_boost)
     survivors = tuple(row.name for row in ordered)
 
     everything = [row.name for row in index.in_order(kinds) if row.name not in excluded]
@@ -193,11 +223,13 @@ def select(
 
 
 __all__ = [
+    "DEFAULT_CERTIFIED_BOOST",
     "QUERY_TYPE",
     "Candidate",
     "Ranker",
     "Selection",
     "default_ranker",
+    "is_default_ranker",
     "lexical_ranker",
     "rank",
     "select",

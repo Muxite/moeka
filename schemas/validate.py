@@ -1,6 +1,7 @@
 """Validate a usage document: JSON Schema plus the cross-field rules a schema cannot say.
 
     python schemas/validate.py usage-record record.jsonl      # one document per line
+    python schemas/validate.py capability-cert certs.jsonl    # spec 012 cert objects
     from validate import problems; problems(doc, "usage-record")  # [] when valid
 
 Needs ``jsonschema`` for the schema half (``pip install jsonschema``); the semantic half is
@@ -87,7 +88,8 @@ def problems(doc: dict[str, Any], name: str, *, strict: bool = True) -> list[str
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[1] not in ("usage-record", "budget-event", "waste-label"):
+    names = ("usage-record", "budget-event", "waste-label", "capability-cert")
+    if len(argv) != 3 or argv[1] not in names:
         print(__doc__)
         return 2
     bad = 0

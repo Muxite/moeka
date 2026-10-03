@@ -230,6 +230,8 @@ class ToolLoader:
             registered.extend(
                 self._load_kernel_plugins(ctx, registry, scope, allow_set, deny_set)
             )
+        if scope == "core":
+            registered.extend(_load_script_tools(ctx, registry, allow_set, deny_set))
         return registered
 
     # -- kernel mode -----------------------------------------------------------
@@ -353,6 +355,48 @@ class ToolLoader:
         ):
             raise _PluginRejectedError(f"entry {entry!r} is not a concrete, discoverable Tool")
         return manifest, cls, descriptions
+
+
+def _load_script_tools(
+    ctx: ToolContext,
+    registry: ToolRegistry,
+    allow_set: set[str] | None,
+    deny_set: set[str],
+) -> list[str]:
+    """Register ``<workspace>/tools-script/<name>/`` bundles as ``script_<name>`` (spec 012).
+
+    Only when ``tools.script.enabled``; with ``capabilities.enforce_certs`` only bundles
+    whose certificate verifies. The capabilities settings come from
+    ``ToolContext.capabilities``, else ``env.config.section("capabilities")``. A broken
+    bundle is skipped with a warning, never failing the load.
+    """
+    from nanobot.capabilities.script_tool import build_script_tools, settings_from
+
+    if not settings_from(ctx.config):
+        return []
+    try:
+        from nanobot.capabilities.enforce import CertGate, capabilities_settings
+
+        raw = getattr(ctx, "capabilities", None)
+        if raw is None and ctx.env is not None:
+            raw = ctx.env.config.section("capabilities") or None
+        enforce, trust_dirs = capabilities_settings(raw)
+        tools = build_script_tools(
+            ctx.workspace, CertGate(enforce=enforce, trust_dirs=trust_dirs),
+            env=ctx.env, taken=registry.tool_names,
+        )
+    except Exception:  # noqa: BLE001 - script tools never break the built-in tool load
+        logger.exception("Failed to load script tools from {}", ctx.workspace)
+        return []
+    registered: list[str] = []
+    for tool in tools:
+        if tool.name in deny_set or (allow_set is not None and tool.name not in allow_set):
+            continue
+        _apply_variant(ctx, tool)
+        if registry.register(tool) is False:
+            continue
+        registered.append(tool.name)
+    return registered
 
 
 def _read_descriptions(root: Path, manifest: PluginManifest) -> dict[str, str]:

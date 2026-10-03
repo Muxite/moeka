@@ -329,7 +329,9 @@ class ToolRegistry:
                 tool, result, env=self.gate_env, principal=self.gate_principal,
             )
             if is_tool_error_result(result):
-                return ToolResult.error(str(result) + hint)
+                error_result = ToolResult.error(str(result) + hint)
+                error_result.metadata = dict(getattr(result, "metadata", None) or {})
+                return error_result
             return result
         except Exception as e:
             return ToolResult.error(f"Error executing {name}: {str(e)}" + hint)

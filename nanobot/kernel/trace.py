@@ -424,6 +424,10 @@ EVENTS: Mapping[str, str] = MappingProxyType({
                   "reads through exec, exec_session, MCP or other tools are not seen",
     "mcp.error": "agent, server, error (an agent's MCP server failed to connect; the "
                  "agent runs without its tools)",
+    "script_tool.call": "tool (script_<name>), effects_declared (the manifest's io.effects), "
+                        "sandboxed (ran under bwrap --unshare-net), exit_code (None when it "
+                        "could not start), duration_ms; one per script-tool call, never the "
+                        "arguments or the output (spec 012 FR-011)",
 })
 
 

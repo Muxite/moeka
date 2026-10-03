@@ -2,7 +2,8 @@
 
 ``skill_entries`` reads a ``SkillsLoader``'s listing (today's order, unavailable skills
 included); ``tool_entries`` a tool registry's tools. Both compute ``content_sha256``
-as FR-004 defines it. A skill whose ``io`` block does not parse (only possible for a
+as FR-004 defines it, and the spec 012 provenance columns (workspace skills: the
+loader's certificate gate; script tools: their ``cert_status``; the rest ``builtin``). A skill whose ``io`` block does not parse (only possible for a
 built-in or plugin skill: workspace skills are validated by the loader) is indexed
 untyped, so it is never hidden.
 """
@@ -67,6 +68,10 @@ def skill_entries(loader: SkillsLoader) -> list[CapabilityEntry]:
         available = loader._check_requirements(
             loader._parse_nanobot_metadata(metadata.get("metadata"))
         )
+        cert_id, cert_status = None, "builtin"
+        if item.get("source") == "workspace":
+            provenance = loader._workspace_provenance(Path(item["path"]).parent)
+            cert_id, cert_status = provenance.cert_id, provenance.status
         entries.append(CapabilityEntry(
             kind="skill",
             name=name,
@@ -74,6 +79,8 @@ def skill_entries(loader: SkillsLoader) -> list[CapabilityEntry]:
             io=_skill_io(name, metadata.get("io")),
             content_sha256=sha,
             available=available,
+            cert_id=cert_id,
+            cert_status=cert_status,
         ))
     return entries
 
@@ -96,6 +103,7 @@ def tool_entries(tools: Iterable[Tool]) -> list[CapabilityEntry]:
                 "capabilities: tool '{}' has an invalid io ({}); untyped", tool.name, exc,
             )
             io = None
+        cert_status = getattr(tool, "cert_status", None)
         entries.append(CapabilityEntry(
             kind="tool",
             name=tool.name,
@@ -103,6 +111,8 @@ def tool_entries(tools: Iterable[Tool]) -> list[CapabilityEntry]:
             io=io,
             content_sha256=tool_sha256(tool),
             available=True,
+            cert_id=getattr(tool, "cert_id", None) if isinstance(cert_status, str) else None,
+            cert_status=cert_status if isinstance(cert_status, str) else "builtin",
         ))
     return entries
 
@@ -112,7 +122,8 @@ def entries_signature(entries: Iterable[CapabilityEntry]) -> str:
     digest = hashlib.sha256()
     for entry in entries:
         digest.update(
-            f"{entry.kind}\0{entry.name}\0{entry.content_sha256}\0{int(entry.available)}\n".encode()
+            f"{entry.kind}\0{entry.name}\0{entry.content_sha256}\0{int(entry.available)}"
+            f"\0{entry.cert_id}\0{entry.cert_status}\n".encode()
         )
     return digest.hexdigest()
 

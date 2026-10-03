@@ -102,3 +102,6 @@ class ToolContext:
     # Gateway-owned tools (message, cron, run_cli_app) load only when the host loop
     # (gateway, serve, CLI agent) opts in; a bare kernel agent never gets them.
     host_tools: bool = False
+    # The ``capabilities`` config block (spec 012: ``enforce_certs``, ``trust_dirs``) for
+    # script tools; ``None`` = ``env.config.section("capabilities")``, else defaults.
+    capabilities: Any = None

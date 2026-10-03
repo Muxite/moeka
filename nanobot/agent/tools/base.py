@@ -422,19 +422,25 @@ class ToolResult(str):
     tool's ``output_schema`` is checked against (``nanobot.kernel.typed.validate_result``)
     when present, instead of parsing the text. The text is still what the model sees.
     String operations (``result + hint``) return a plain ``str`` and drop it.
+
+    ``metadata`` (optional) is host-side facts about the call that are not part of the
+    model-visible text (script tools record ``sandboxed``, ``exit_code`` here).
     """
 
     is_error: bool
     structured: Any
     has_structured: bool
+    metadata: dict[str, Any]
 
     def __new__(
         cls, content: str, *, is_error: bool = False, structured: Any = _NO_STRUCTURED,
+        metadata: dict[str, Any] | None = None,
     ) -> ToolResult:
         obj = str.__new__(cls, content)
         obj.is_error = is_error
         obj.structured = None if structured is _NO_STRUCTURED else structured
         obj.has_structured = structured is not _NO_STRUCTURED
+        obj.metadata = dict(metadata) if metadata else {}
         return obj
 
     @classmethod

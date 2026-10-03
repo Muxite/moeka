@@ -1,9 +1,10 @@
-"""``nanobot capabilities list|explain|validate`` (spec 011 FR-013).
+"""``nanobot capabilities list|explain|validate|verify|hash`` (specs 011 FR-013, 012 FR-012).
 
 Read-only inspection of the typed capability library of the active instance
 (``--workspace`` / ``--config`` honoured). Nothing here calls a model or writes the
 instance's capability index: ``explain`` selects over an in-memory index built from
-the live skill and tool lists.
+the live skill and tool lists. ``verify`` checks one bundle's certificate against the
+trust store (public keys only: moeka never signs); ``hash`` prints a bundle hash.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ def _library(config: Config) -> tuple[Any, list[Any]]:
         allowed_skills=(
             set(defaults.allowed_skills) if defaults.allowed_skills is not None else None
         ),
+        capabilities=config.capabilities,
     )
     registry = ToolRegistry()
     # Tools that need a live loop (spawn, goals, ...) fail to build here; that is
@@ -61,7 +63,10 @@ def _library(config: Config) -> tuple[Any, list[Any]]:
     logger.disable("nanobot.agent.tools.loader")
     try:
         ToolLoader().load(
-            ToolContext(config=config.tools, workspace=str(workspace), host_tools=True),
+            ToolContext(
+                config=config.tools, workspace=str(workspace), host_tools=True,
+                capabilities=config.capabilities,
+            ),
             registry,
             allow=defaults.tools_allow,
             deny=defaults.tools_deny,
@@ -77,6 +82,84 @@ def _entries(config: Config) -> list[Any]:
 
     loader, tools = _library(config)
     return skill_entries(loader) + tool_entries(tools)
+
+
+def _list_rows(config: Config) -> list[dict[str, Any]]:
+    """Every capability with its provenance status (spec 012 FR-006).
+
+    The live entries first, then every workspace bundle that did not load: skills
+    refused by the certificate gate and script tools that are refused, invalid or not
+    enabled (``tools.script.enabled``), so each workspace bundle has a status.
+    """
+    from nanobot.capabilities.enforce import CertGate, capabilities_settings
+    from nanobot.capabilities.library import skill_entries, tool_entries
+    from nanobot.capabilities.script_tool import TOOL_PREFIX, scan_script_bundles
+
+    loader, tools = _library(config)
+    entries = skill_entries(loader) + tool_entries(tools)
+    rows = [
+        {
+            "kind": entry.kind,
+            "name": entry.name,
+            "description": entry.description,
+            "io": entry.io.to_dict() if entry.io is not None else "untyped",
+            "available": entry.available,
+            "content_sha256": entry.content_sha256[:12],
+            "cert_id": entry.cert_id,
+            "cert_status": entry.cert_status,
+        }
+        for entry in entries
+    ]
+    present = {(row["kind"], row["name"]) for row in rows}
+    for name, bundle, provenance in loader.workspace_bundle_provenance():
+        if ("skill", name) in present:
+            continue
+        rows.append(_bundle_row("skill", name, bundle / "SKILL.md", provenance.cert_id,
+                                provenance.status, _skill_io(bundle)))
+    enforce, trust_dirs = capabilities_settings(config.capabilities)
+    gate = CertGate(enforce=enforce, trust_dirs=trust_dirs)
+    for bundle in scan_script_bundles(config.workspace_path, gate):
+        if ("tool", TOOL_PREFIX + bundle.name) in present:
+            continue
+        status = bundle.cert_status
+        if bundle.manifest is None:
+            status = "invalid"
+        io = bundle.manifest.io.to_dict() if bundle.manifest is not None else "untyped"
+        description = bundle.manifest.description if bundle.manifest is not None else ""
+        row = _bundle_row("tool", TOOL_PREFIX + bundle.name, bundle.bundle_dir / "tool.yaml",
+                          bundle.cert_id, status, io)
+        row["description"] = description
+        rows.append(row)
+    return rows
+
+
+def _skill_io(bundle: Path) -> Any:
+    from nanobot.capabilities.provenance import bundle_io
+
+    io = bundle_io(bundle, "skill")
+    return io.to_dict() if io is not None else "untyped"
+
+
+def _bundle_row(
+    kind: str, name: str, main_file: Path, cert_id: str | None, status: str, io: Any,
+) -> dict[str, Any]:
+    """A row for a workspace bundle that is not loaded (refused, invalid or disabled)."""
+    import hashlib
+
+    try:
+        sha = hashlib.sha256(main_file.read_bytes()).hexdigest()
+    except OSError:
+        sha = ""
+    return {
+        "kind": kind,
+        "name": name,
+        "description": "",
+        "io": io,
+        "available": False,
+        "content_sha256": sha[:12],
+        "cert_id": cert_id,
+        "cert_status": status,
+    }
 
 
 def _io_text(io: Any) -> str:
@@ -98,26 +181,20 @@ def capabilities_list(
     config: str | None = _CONFIG_OPTION,
     workspace: str | None = _WORKSPACE_OPTION,
 ) -> None:
-    """Print every capability: kind, name, io (or untyped), available, sha256 prefix."""
-    entries = _entries(_load(config, workspace))
+    """Print every capability: kind, name, io (or untyped), available, sha256 prefix and
+    provenance status (certified, uncertified, refused:<reason> or builtin)."""
+    from nanobot.capabilities.manifest import parse_io
+
+    rows = _list_rows(_load(config, workspace))
     if as_json:
-        typer.echo(json.dumps([
-            {
-                "kind": entry.kind,
-                "name": entry.name,
-                "description": entry.description,
-                "io": entry.io.to_dict() if entry.io is not None else "untyped",
-                "available": entry.available,
-                "content_sha256": entry.content_sha256[:12],
-            }
-            for entry in entries
-        ], indent=2, ensure_ascii=False))
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
         return
-    for entry in entries:
-        available = "available" if entry.available else "unavailable"
+    for row in rows:
+        available = "available" if row["available"] else "unavailable"
+        io = None if row["io"] == "untyped" else parse_io(row["io"])
         typer.echo(
-            f"{entry.kind}\t{entry.name}\t{_io_text(entry.io)}\t{available}\t"
-            f"{entry.content_sha256[:12]}"
+            f"{row['kind']}\t{row['name']}\t{_io_text(io)}\t{available}\t"
+            f"{row['content_sha256']}\t{row['cert_status']}"
         )
 
 
@@ -149,6 +226,7 @@ def capabilities_explain(
             allowed_effects=settings.allowed_effects,
             k=k or settings.top_k,
             kinds=("skill",),
+            certified_boost=settings.certified_boost,
         )
     if as_json:
         typer.echo(json.dumps({
@@ -197,3 +275,37 @@ def capabilities_validate(
         typer.echo(f"{invalid} of {len(skill_files)} workspace skill(s) invalid")
         raise typer.Exit(1)
     typer.echo(f"{len(skill_files)} workspace skill(s) valid")
+
+
+@capabilities_app.command("verify")
+def capabilities_verify(
+    bundle_dir: Path = typer.Argument(..., help="A capability bundle directory"),
+    trust_dir: list[str] = typer.Option(
+        [], "--trust-dir", help="A trust dir (repeatable; default: capabilities.trust_dirs)",
+    ),
+    config: str | None = _CONFIG_OPTION,
+) -> None:
+    """Verify a bundle's CERT.json: prints ``ok <cert_id>`` (exit 0) or ``refused <reason>``."""
+    from nanobot.capabilities.provenance import TrustStore, verify_bundle
+
+    dirs = list(trust_dir) if trust_dir else list(_load(config, None).capabilities.trust_dirs)
+    verdict = verify_bundle(bundle_dir, TrustStore.load(dirs))
+    if verdict.ok:
+        typer.echo(f"ok {verdict.cert_id}")
+        return
+    typer.echo(f"refused {verdict.reason}")
+    raise typer.Exit(1)
+
+
+@capabilities_app.command("hash")
+def capabilities_hash(
+    bundle_dir: Path = typer.Argument(..., help="A capability bundle directory"),
+) -> None:
+    """Print the bundle hash (sha256 over every file except CERT.json)."""
+    from nanobot.capabilities.provenance import BundleError, bundle_sha256
+
+    try:
+        typer.echo(bundle_sha256(bundle_dir))
+    except BundleError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc

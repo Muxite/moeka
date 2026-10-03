@@ -215,6 +215,7 @@ def protected_floor(env: CoreEnvironment | None, workspace: Path | None) -> Prot
     """
     from nanobot.security.protected_paths import (
         ProtectedFloor,
+        configured_trust_dirs,
         default_config_files,
         default_data_dirs,
         default_other_instance_roots,
@@ -236,7 +237,7 @@ def protected_floor(env: CoreEnvironment | None, workspace: Path | None) -> Prot
         others = default_other_instance_roots(env.paths.work_dir, extra_dirs)
     return ProtectedFloor.from_paths(
         env.paths, extra_data_dirs=extra_dirs, config_files=config_files,
-        other_instance_roots=others,
+        other_instance_roots=others, trust_dirs=configured_trust_dirs(env),
     )
 
 
