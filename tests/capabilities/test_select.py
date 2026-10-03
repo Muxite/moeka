@@ -34,10 +34,12 @@ def library(extra: int = 12) -> list[CapabilityEntry]:
     items = [
         entry("pdf-summarize", "Summarise a PDF document into markdown notes.", PDF),
         entry("git-analyze", "Analyse a git repository.", GIT),
-        entry("pdf-merge", "Merge PDF files.", IOSpec(("file:pdf",), (), ("file:pdf",), ("write-workspace",))),
+        entry("pdf-merge", "Merge PDF files.",
+              IOSpec(("file:pdf",), (), ("file:pdf",), ("write-workspace",))),
     ]
     items += [
-        entry(f"filler-{i:02d}", f"Unrelated helper number {i}.", IOSpec((), (), ("text",), ("none",)))
+        entry(f"filler-{i:02d}", f"Unrelated helper number {i}.",
+              IOSpec((), (), ("text",), ("none",)))
         for i in range(extra)
     ]
     return items
@@ -205,3 +207,14 @@ def test_vec_ranker_falls_back_to_lexical_when_the_store_cannot_rank():
     store.available = False
     assert default_ranker(store) is lexical_ranker
     assert default_ranker(None) is lexical_ranker
+
+
+def test_exclude_removes_names_before_k_and_from_fallbacks(index):
+    typing = TaskTyping(frozenset({"file:pdf"}))
+    selection = select(index, typing, "summarise pdf", ambient=[], allowed_effects=EFFECTS, k=2,
+                       exclude=["pdf-summarize"])
+    assert "pdf-summarize" not in selection.survivors
+    assert len(selection.selected) == 2
+    small = select(index, typing, "", ambient=[], allowed_effects=EFFECTS, k=14,
+                   exclude=["pdf-summarize"])
+    assert small.fallback == "small" and "pdf-summarize" not in small.selected
