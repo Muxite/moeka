@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -35,6 +36,22 @@ RetryEventCallback = Callable[[str], Awaitable[None]]
 LLMCallObserver = Callable[["LLMCallRecord"], None]
 ProviderCompactionScope = Literal["prior_context", "current_request"]
 RetryStatusCallback = Callable[[RetryStatusEvent], Awaitable[None]]
+# Length of an API-key fingerprint (``key_fp``, spec 009): leading hex chars of sha256.
+KEY_FP_LENGTH = 12
+
+
+def key_fingerprint(key: str | None) -> str | None:
+    """``sha256(key.strip())`` truncated to :data:`KEY_FP_LENGTH` lowercase hex chars.
+
+    ``None`` for no key, or an empty or whitespace-only one. The fingerprint names which
+    key paid for a call without storing the key (spec 009 FR-001).
+    """
+    if not isinstance(key, str):
+        return None
+    stripped = key.strip()
+    if not stripped:
+        return None
+    return hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:KEY_FP_LENGTH]
 
 
 def resolve_stream_idle_timeout_s(
@@ -816,6 +833,14 @@ class LLMProvider(ABC):
         self.generation: GenerationSettings = GenerationSettings()
         self._llm_call_observer: LLMCallObserver | None = None
 
+    @property
+    def key_fp(self) -> str | None:
+        """Fingerprint of the API key this provider sends (``None`` without one).
+
+        Computed on each read, so a later change to ``api_key`` is reflected.
+        """
+        return key_fingerprint(getattr(self, "api_key", None))
+
     def set_llm_call_observer(self, observer: LLMCallObserver | None) -> None:
         """Attach a fail-open observer for each physical retry-managed call."""
         self._llm_call_observer = observer
@@ -899,6 +924,7 @@ class LLMProvider(ABC):
                 usage=usage,
                 error_status_code=response.error_status_code,
                 error_kind=response.error_kind,
+                key_fp=self.key_fp,
             ))
         except Exception:
             logger.exception("LLM call observer failed for {}", self.provider_name)
