@@ -40,6 +40,7 @@ the focused guides first and come back here for exact fields and defaults.
 | Configure credentials and endpoints | [Providers](#providers) |
 | Name and switch model choices | [Model Presets](#model-presets) |
 | Add fallback chains | [Model Fallbacks](#model-fallbacks) |
+| Run moeka on gpt-6-luna and tell which key paid | [Model presets: gpt-6-luna](#model-presets-gpt-6-luna) |
 | Configure voice transcription | [Transcription Settings](#transcription-settings) |
 | Tune channel defaults | [Channel Settings](#channel-settings) |
 | Configure web search and fetch | [Web Tools](#web-tools) |
@@ -1543,6 +1544,59 @@ Use inline objects only when a fallback is not worth naming as a reusable preset
 Failover normally runs when the primary provider returns a fallbackable model/provider error before any answer text has been streamed. Stream-stall timeouts are the recovery exception: if the provider already emitted partial answer text and then stalls, nanobot closes the current stream segment and retries/fails over in a new segment. Typical fallback cases include timeouts, connection errors, 5xx server errors, 429 rate limits, overloads, authentication/permission failures such as invalid or expired credentials, and quota/balance exhaustion. It does not run for malformed requests, content filtering/refusals, or context-length/message-format errors.
 
 If fallback candidates use smaller `contextWindowTokens` values, nanobot builds context using the smallest window in the active chain so every candidate can receive the same prompt.
+
+## Model presets: gpt-6-luna
+
+Moeka runs on `openai/gpt-6-luna` through OpenRouter. The ready preset (snake_case keys are accepted
+alongside the camelCase used elsewhere on this page):
+
+```json
+{"model": "openai/gpt-6-luna", "provider": "openrouter", "tier": "fast", "price_in_per_mtok": 0.10, "price_out_per_mtok": 0.50, "context_window_tokens": 1000000}
+```
+
+Wired into a config:
+
+```json
+{
+  "modelPresets": {
+    "luna": {"model": "openai/gpt-6-luna", "provider": "openrouter", "tier": "fast", "price_in_per_mtok": 0.10, "price_out_per_mtok": 0.50, "context_window_tokens": 1000000}
+  },
+  "agents": {"defaults": {"modelPreset": "luna"}},
+  "providers": {"openrouter": {"apiKey": "${OPENROUTER_API_KEY}"}}
+}
+```
+
+- Prices are USD per million tokens, so the kernel ledger prices a call with 1M input and 1M output
+  tokens at 0.10 + 0.50 = 0.60 USD.
+- `tier: "fast"` places it on the router's escalation ladder (`local`, `fast`, `standard`, `frontier`).
+
+### Which key pays
+
+Two consumers run moeka against OpenRouter, each with its own key, and both key files name the variable
+`OPENROUTER_API_KEY`:
+
+| Consumer | Key file | Variable |
+|---|---|---|
+| moeka gateway | `~/projects/moeka/keys.env` | `OPENROUTER_API_KEY` |
+| moeka development | `~/projects/moeka/keys.env` | `OPENROUTER_API_KEY` |
+| awork's moeka | `~/projects/awork/keys.env` | `OPENROUTER_API_KEY` |
+
+Every recorded call carries `key_fp`, the first 12 hex characters of `sha256` of the key the provider
+sent (surrounding whitespace removed; `null` for OAuth or local providers). The key itself is never
+stored, traced or logged. To see which key paid:
+
+```bash
+nanobot usage keys --workspace ~/.nanobot
+# key_fp  calls  cost_usd  first_call_utc  last_call_utc
+
+# match a key file to rows without printing the key
+set -a; . ~/projects/awork/keys.env; set +a
+nanobot usage keys --workspace ~/.nanobot --fingerprint-env OPENROUTER_API_KEY
+```
+
+`--fingerprint-env VAR` prints the fingerprint of `VAR`'s current value, never the value. In the
+usage API, `key_fp` is a `UsageFilter` field and a `group_by` column of
+`nanobot.llm_usage.query.totals`, and every `usage-record` (1.2) row carries it.
 
 ## Transcription Settings
 
