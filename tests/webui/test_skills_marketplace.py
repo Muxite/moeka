@@ -25,7 +25,7 @@ async def test_search_marketplace_skills_filters_and_marks_installed(
 ) -> None:
     skill_dir = tmp_path / "skills" / "react-testing"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("---\nname: react-testing\n---\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text("---\nname: react-testing\ndescription: the react-testing skill\n---\n", encoding="utf-8")
     seen: dict[str, Any] = {}
 
     class FakeResponse:
@@ -318,7 +318,7 @@ async def test_install_marketplace_skill_uses_official_cli_and_workspace(
             skill_dir = tmp_path / "skills" / "react-testing"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                "---\nname: react-testing\n---\n",
+                "---\nname: react-testing\ndescription: the react-testing skill\n---\n",
                 encoding="utf-8",
             )
             return b"installed", None
@@ -503,7 +503,7 @@ def test_skillhub_download_url_allows_only_pinned_cloud_hosts(
 def test_skillhub_archive_rejects_path_traversal() -> None:
     archive_buffer = io.BytesIO()
     with zipfile.ZipFile(archive_buffer, "w") as archive:
-        archive.writestr("SKILL.md", "---\nname: safe\n---\n")
+        archive.writestr("SKILL.md", "---\nname: safe\ndescription: the safe skill\n---\n")
         archive.writestr("../outside.sh", "#!/bin/sh\n")
     archive_buffer.seek(0)
 
@@ -519,7 +519,7 @@ async def test_install_marketplace_skill_is_idempotent(
 ) -> None:
     skill_dir = tmp_path / "skills" / "already-here"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("---\nname: already-here\n---\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text("---\nname: already-here\ndescription: the already-here skill\n---\n", encoding="utf-8")
     launch = pytest.fail
     monkeypatch.setattr(
         "nanobot.webui.skills_marketplace.asyncio.create_subprocess_exec",

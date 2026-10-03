@@ -346,9 +346,9 @@ class ContextBuilder:
             path = env.paths.data_dir / "capabilities.db" if env is not None else ":memory:"
             index = self._capability_index = CapabilityIndex(path)
         registry = getattr(self, "tool_registry", None)
-        tools = [tool for name in registry.tool_names if (tool := registry.get(name))] if (
-            registry is not None
-        ) else []
+        tools = []
+        if registry is not None:
+            tools = [tool for name in registry.tool_names if (tool := registry.get(name)) is not None]
         entries = skill_entries(self.skills) + tool_entries(tools)
         signature = entries_signature(entries)
         typing = extract(query, [

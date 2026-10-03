@@ -169,7 +169,7 @@ def test_delete_webui_skill_rejects_symlinked_skills_root(
     directory = outside / "custom-skill"
     directory.mkdir(parents=True)
     (directory / "SKILL.md").write_text(
-        "---\nname: custom-skill\n---\n",
+        "---\nname: custom-skill\ndescription: the custom-skill skill\n---\n",
         encoding="utf-8",
     )
     try:
