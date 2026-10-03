@@ -64,6 +64,7 @@ class CliAppsTool(Tool):
 
     config_key = "cli_apps"
     _scopes = {"core", "subagent"}
+    io = {"effects": ["exec"]}  # spec 011 FR-014
 
     @classmethod
     def config_cls(cls):

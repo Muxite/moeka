@@ -226,6 +226,7 @@ class _SearchTool(_FsTool):
 class FindFilesTool(_SearchTool):
     """Find files by path fragment, glob, or type."""
     _scopes = {"core", "subagent"}
+    io = {"effects": ["read-workspace"]}  # spec 011 FR-014
     _MAX_SCAN_PATHS = 500_000
     _MAX_SCAN_SECONDS = 30.0
 
@@ -838,6 +839,7 @@ def _with_deadline(
 class GrepTool(_SearchTool):
     """Search text and document contents using a regex-like pattern."""
     _scopes = {"core", "subagent"}
+    io = {"effects": ["read-workspace"]}  # spec 011 FR-014
 
     _MAX_RESULT_CHARS = 128_000
     _MAX_RENDERED_LINE_CHARS = 2_000

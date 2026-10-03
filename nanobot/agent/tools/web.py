@@ -376,6 +376,7 @@ def _normalize_volcengine_auth_level(value: Any) -> int | None:
 class WebSearchTool(Tool):
     """Search the web using configured provider."""
     _scopes = {"core", "subagent"}
+    io = {"effects": ["network"]}  # spec 011 FR-014
 
     name = "web_search"  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
     description = description_from_file("web_search")  # pyright: ignore[reportAssignmentType]
@@ -1182,6 +1183,7 @@ def _decode_body(response: httpx.Response, body: bytes) -> str:
 class WebFetchTool(Tool):
     """Fetch and extract content from a URL."""
     _scopes = {"core", "subagent"}
+    io = {"effects": ["network"]}  # spec 011 FR-014
 
     name = "web_fetch"  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
     description = description_from_file("web_fetch")  # pyright: ignore[reportAssignmentType]

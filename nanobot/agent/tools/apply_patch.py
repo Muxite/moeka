@@ -86,6 +86,7 @@ def _append_text(content: str, addition: str) -> str:
 class ApplyPatchTool(_FsTool):
     """Apply file edits by providing structured edit instructions."""
     _scopes = {"core", "subagent"}
+    io = {"effects": ["read-workspace", "write-workspace"]}  # spec 011 FR-014
 
     @property
     def name(self) -> str:

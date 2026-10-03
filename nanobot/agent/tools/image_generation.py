@@ -100,6 +100,10 @@ class ImageGenerationTool(Tool):
     """Generate persistent image artifacts through the configured image provider."""
 
     config_key = "image_generation"
+    io = {  # spec 011 FR-014
+        "outputs": ["file:image"],
+        "effects": ["network", "read-workspace", "write-workspace"],
+    }
 
     @classmethod
     def config_cls(cls):

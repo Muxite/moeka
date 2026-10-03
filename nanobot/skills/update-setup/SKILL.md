@@ -1,6 +1,9 @@
 ---
 name: update-setup
 description: "One-time setup wizard for the nanobot upgrade skill. Triggers: setup update, configure update, 设置更新, 初始化更新."
+io:
+  outputs: [none]
+  effects: [read-workspace, write-workspace]
 ---
 
 # Update Setup

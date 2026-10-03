@@ -428,6 +428,7 @@ def _builtin_skill_read_path(path: str, skills_dir: Path | None = None) -> Path 
 class ReadFileTool(_FsTool):
     """Read file contents with optional line-based pagination."""
     _scopes = {"core", "subagent", "memory"}
+    io = {"effects": ["read-workspace"]}  # spec 011 FR-014
 
     _MAX_CHARS = 128_000
     _MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
@@ -733,6 +734,7 @@ class ReadFileTool(_FsTool):
 class WriteFileTool(_FsTool):
     """Write content to a file."""
     _scopes = {"core", "subagent", "memory"}
+    io = {"effects": ["write-workspace"]}  # spec 011 FR-014
 
     @property
     def name(self) -> str:
@@ -1053,6 +1055,7 @@ def _best_window(old_text: str, content: str) -> tuple[float, int, list[str], li
 class EditFileTool(_FsTool):
     """Edit a file by replacing text with fallback matching."""
     _scopes = {"core", "subagent", "memory"}
+    io = {"effects": ["read-workspace", "write-workspace"]}  # spec 011 FR-014
 
     _MAX_EDIT_FILE_SIZE = 1024 * 1024 * 1024  # 1 GiB
     _MARKDOWN_EXTS = frozenset({".md", ".mdx", ".markdown"})
@@ -1292,6 +1295,7 @@ class EditFileTool(_FsTool):
 class ListDirTool(_FsTool):
     """List directory contents with optional recursion."""
     _scopes = {"core", "subagent"}
+    io = {"effects": ["read-workspace"]}  # spec 011 FR-014
 
     _DEFAULT_MAX = 200
     _IGNORE_DIRS = {
