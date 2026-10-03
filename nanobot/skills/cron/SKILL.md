@@ -1,6 +1,10 @@
 ---
 name: cron
 description: Schedule reminders and recurring tasks.
+io:
+  inputs: [host]
+  outputs: [none]
+  effects: [write-workspace]
 ---
 
 # Cron

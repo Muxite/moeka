@@ -39,7 +39,9 @@ from nanobot.utils.helpers import (
 from nanobot.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import VecConfig
+    from nanobot.capabilities.index import CapabilityIndex
+    from nanobot.capabilities.select import Selection
+    from nanobot.config.schema import CapabilitiesConfig, VecConfig
     from nanobot.core.vec_store import VecStore
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.variants import Variant
@@ -120,6 +122,7 @@ class ContextBuilder:
         variant: Variant | None = None,
         memory_dir: Path | None = None,
         inject_memory: bool = True,
+        capabilities: CapabilitiesConfig | Mapping[str, Any] | None = None,
     ):
         self.workspace = workspace
         # ``False`` (kernel agents without ``memory=True``): the prompt gets neither
@@ -150,6 +153,38 @@ class ContextBuilder:
             inline_skills=inline_skills,
             env=env,
         )
+        # Capability selection (spec 011 FR-010): ``capabilities`` wins, else the env's
+        # ``capabilities`` config section, else the defaults (``selection="all"``).
+        self._capabilities_arg = capabilities
+        self._capabilities_config: CapabilitiesConfig | None = None
+        self._capability_index: CapabilityIndex | None = None
+        self._capabilities_degraded = False
+        # Set by AgentLoop: the live tool registry (indexed next to the skills) and the
+        # extra ambient types of a host loop (``("host",)`` for the gateway/CLI).
+        self.tool_registry: ToolRegistry | None = None
+        self.capability_ambient_extra: tuple[str, ...] = ()
+
+    @property
+    def capabilities_config(self) -> CapabilitiesConfig:
+        """The effective ``capabilities`` config block (resolved once)."""
+        cached = getattr(self, "_capabilities_config", None)
+        if cached is None:
+            from nanobot.config.schema import CapabilitiesConfig
+
+            raw: Any = getattr(self, "_capabilities_arg", None)
+            env = getattr(self, "_env", None)
+            if raw is None and env is not None:
+                try:
+                    raw = env.config.section("capabilities") or None
+                except Exception:  # noqa: BLE001 - a config source must never break a turn
+                    logger.exception("capabilities: reading the config section failed")
+            if isinstance(raw, CapabilitiesConfig):
+                cached = raw
+            else:
+                # Anything but a mapping (a test double's attribute) means the defaults.
+                cached = CapabilitiesConfig.model_validate(raw if isinstance(raw, Mapping) else {})
+            self._capabilities_config = cached
+        return cached
 
     def build_system_prompt(
         self,
@@ -163,11 +198,14 @@ class ContextBuilder:
         session_key: str | None = None,
         unified_session: bool = False,
         trace: bool = True,
+        attachments: Sequence[Any] | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills.
 
-        ``trace=False`` skips the ``skill.listed`` event (``variants.fingerprint``
-        renders the prompt without it being a turn).
+        ``trace=False`` skips the ``skill.listed`` and ``capability.selected`` events
+        (``variants.fingerprint`` renders the prompt without it being a turn). With
+        ``capabilities.selection="filtered"``, *query* and *attachments* (file paths or
+        objects with ``.name``/``.mime``) choose which skills the summary lists.
         """
         root = workspace or self.workspace
         if not getattr(self, "inject_memory", True):
@@ -215,8 +253,21 @@ class ContextBuilder:
                 parts.append(f"# Active Skills\n\n{active_content}")
 
         listed: list[str] = []
+        exclude = set(active_skills)
+        selection = None
+        if self.capabilities_config.selection == "filtered":
+            selection = self._select_skills(query, attachments)
+            if selection.mode == "filtered" and selection.fallback is None:
+                # Explicit ``$skill`` references bypass the filter and do not count to k.
+                invoked = self.skills.get_explicitly_invoked_skills(query or "")
+                keep = {*selection.selected, *invoked}
+                exclude |= {
+                    entry["name"]
+                    for entry in self.skills.list_skills(filter_unavailable=False)
+                    if entry["name"] not in keep
+                }
         skills_summary = self.skills.build_skills_summary(
-            exclude=set(active_skills),
+            exclude=exclude,
             workspace=root,
             listed=listed,
         )
@@ -227,6 +278,8 @@ class ContextBuilder:
             ))
         if trace:
             self._trace_skills_listed(active_skills if active_content else [], listed)
+            if selection is not None:
+                self._trace_capability_selected(selection, listed)
 
         if include_memory_recent_history:
             history_section = self._build_history_section(
@@ -256,6 +309,86 @@ class ContextBuilder:
 
         safe_emit(env.trace, {
             "event": "skill.listed", "skills": [*active, *listed], "active": list(active),
+        })
+
+    def _select_skills(self, query: str | None, attachments: Sequence[Any] | None) -> Selection:
+        """Run FR-005 extraction and FR-006 selection over this loop's skills.
+
+        Syncs the index from the live skill and tool lists when they changed. Any
+        failure logs once and degrades this builder to ``selection="all"``
+        (``mode="all"``): selection never breaks a turn.
+        """
+        from nanobot.capabilities.select import Selection
+
+        if not getattr(self, "_capabilities_degraded", False):
+            try:
+                return self._run_selection(query or "", attachments or ())
+            except Exception:  # noqa: BLE001 - FR-015: degrade, never break a turn
+                logger.exception(
+                    "capabilities: selection failed; listing every skill for this loop",
+                )
+                self._capabilities_degraded = True
+        return Selection(
+            mode="all", survivors=(), selected=(), fallback=None, task_types=frozenset(),
+        )
+
+    def _run_selection(self, query: str, attachments: Sequence[Any]) -> Selection:
+        from nanobot.capabilities.index import CapabilityIndex
+        from nanobot.capabilities.library import entries_signature, skill_entries, tool_entries
+        from nanobot.capabilities.select import default_ranker, select
+        from nanobot.capabilities.task_types import Attachment, extract
+
+        config = self.capabilities_config
+        index = getattr(self, "_capability_index", None)
+        if index is None:
+            env = getattr(self, "_env", None)
+            # <state data_dir>/capabilities.db; a builder without an env keeps it in memory.
+            path = env.paths.data_dir / "capabilities.db" if env is not None else ":memory:"
+            index = self._capability_index = CapabilityIndex(path)
+        registry = getattr(self, "tool_registry", None)
+        tools = []
+        if registry is not None:
+            tools = [tool for name in registry.tool_names if (tool := registry.get(name)) is not None]
+        entries = skill_entries(self.skills) + tool_entries(tools)
+        signature = entries_signature(entries)
+        typing = extract(query, [
+            Attachment(name=Path(item).name, mime=mimetypes.guess_type(item)[0])
+            if isinstance(item, (str, Path)) else item
+            for item in attachments
+        ])
+        with index.lock:
+            # Loops sharing the file may have synced a different set: compare the
+            # stored signature, not a local one, so sync runs exactly when needed.
+            if index.get_meta("signature") != signature:
+                index.sync(entries)
+                index.set_meta("signature", signature)
+            return select(
+                index, typing, query,
+                ambient=(*config.ambient_types, *getattr(self, "capability_ambient_extra", ())),
+                allowed_effects=config.allowed_effects,
+                k=config.top_k,
+                ranker=default_ranker(self.vec_store),
+                kinds=("skill",),
+                # Always-on skills are loaded under "# Active Skills": not counted to k.
+                exclude=self.skills.get_always_skills(),
+            )
+
+    def _trace_capability_selected(self, selection: Selection, listed: list[str]) -> None:
+        """Emit ``capability.selected`` (FR-011) next to ``skill.listed``."""
+        env = getattr(self, "_env", None)
+        if env is None:
+            return
+        from nanobot.kernel.trace import safe_emit
+
+        degraded = selection.mode == "all"
+        safe_emit(env.trace, {
+            "event": "capability.selected",
+            "mode": selection.mode,
+            "fallback": selection.fallback,
+            "task_types": sorted(selection.task_types),
+            "requested_output": selection.requested_output,
+            "survivors": len(listed) if degraded else len(selection.survivors),
+            "selected": list(listed) if degraded else list(selection.selected),
         })
 
     def _build_history_section(
@@ -570,6 +703,7 @@ class ContextBuilder:
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
                     unified_session=unified_session,
+                    **({"attachments": list(transcript.media)} if transcript.media else {}),
                 ),
             },
             *transcript.history,

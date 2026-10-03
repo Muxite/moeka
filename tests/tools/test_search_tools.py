@@ -811,9 +811,9 @@ def test_subagent_prompt_respects_disabled_skills(tmp_path: Path) -> None:
     bus = MessageBus()
     skills_dir = tmp_path / "skills"
     (skills_dir / "alpha").mkdir(parents=True)
-    (skills_dir / "alpha" / "SKILL.md").write_text("# Alpha\n\nhidden\n", encoding="utf-8")
+    (skills_dir / "alpha" / "SKILL.md").write_text("---\nname: alpha\ndescription: a\n---\n# Alpha\n\nhidden\n", encoding="utf-8")
     (skills_dir / "beta").mkdir(parents=True)
-    (skills_dir / "beta" / "SKILL.md").write_text("# Beta\n\nshown\n", encoding="utf-8")
+    (skills_dir / "beta" / "SKILL.md").write_text("---\nname: beta\ndescription: b\n---\n# Beta\n\nshown\n", encoding="utf-8")
 
     mgr = SubagentManager(
         workspace=tmp_path,

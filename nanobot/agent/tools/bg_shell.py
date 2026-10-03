@@ -267,6 +267,7 @@ class BackgroundShellTool(Tool):
     conversation. The registry publishes a system-channel inbound message
     when each task exits so the agent re-engages and can notify the user.
     """
+    io = {"effects": ["exec"]}  # spec 011 FR-014
 
     def __init__(self, registry: BackgroundProcessRegistry) -> None:
         self._registry = registry

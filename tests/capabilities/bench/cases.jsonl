@@ -1,0 +1,163 @@
+{"message": "summarise this as markdown", "attachments": [{"name": "report.pdf", "mime": "application/pdf"}], "expected": ["pdf-summarize"], "source": "synthetic"}
+{"message": "can you summarise the attached paper?", "attachments": [{"name": "paper.pdf", "mime": "application/pdf"}], "expected": ["pdf-summarize"], "source": "moeka"}
+{"message": "give me the key points of this pdf in markdown", "attachments": [{"name": "q3-review.pdf", "mime": "application/pdf"}], "expected": ["pdf-summarize"], "source": "synthetic"}
+{"message": "pull the tables out of this pdf into csv", "attachments": [{"name": "invoice.pdf", "mime": "application/pdf"}], "expected": ["pdf-extract-tables"], "source": "synthetic"}
+{"message": "extract tables from /home/muk/docs/statement.pdf", "attachments": [], "expected": ["pdf-extract-tables"], "source": "synthetic"}
+{"message": "merge these pdf files into one", "attachments": [{"name": "a.pdf", "mime": "application/pdf"}, {"name": "b.pdf", "mime": "application/pdf"}], "expected": ["pdf-merge"], "source": "synthetic"}
+{"message": "split this pdf into separate pages", "attachments": [{"name": "scan.pdf", "mime": "application/pdf"}], "expected": ["pdf-split"], "source": "synthetic"}
+{"message": "this scanned pdf has no text, run ocr on it", "attachments": [{"name": "scan.pdf", "mime": "application/pdf"}], "expected": ["pdf-ocr"], "source": "synthetic"}
+{"message": "redact the emails and phone numbers before I share this", "attachments": [{"name": "contract.pdf", "mime": "application/pdf"}], "expected": ["pdf-redact"], "source": "synthetic"}
+{"message": "fill in the form fields: name Muk, date today", "attachments": [{"name": "form.pdf", "mime": "application/pdf"}], "expected": ["pdf-form-fill"], "source": "synthetic"}
+{"message": "compress this pdf, the file size is too big for email", "attachments": [{"name": "portfolio.pdf", "mime": "application/pdf"}], "expected": ["pdf-compress"], "source": "synthetic"}
+{"message": "can u shrink ~/Downloads/thesis.pdf, it's 80MB", "attachments": [], "expected": ["pdf-compress"], "source": "moeka"}
+{"message": "summarise https://arxiv.org/pdf/2401.00001.pdf as markdown", "attachments": [], "expected": ["pdf-summarize"], "source": "synthetic"}
+{"message": "resize this image to 800x600", "attachments": [{"name": "banner.png", "mime": "image/png"}], "expected": ["image-resize"], "source": "synthetic"}
+{"message": "crop and resize the photo for my avatar", "attachments": [{"name": "me.jpg", "mime": "image/jpeg"}], "expected": ["image-resize"], "source": "moeka"}
+{"message": "what does this image show?", "attachments": [{"name": "IMG_2231.jpg", "mime": "image/jpeg"}], "expected": ["image-caption"], "source": "synthetic"}
+{"message": "describe this photo in a short caption", "attachments": [{"name": "sunset.jpeg", "mime": "image/jpeg"}], "expected": ["image-caption"], "source": "synthetic"}
+{"message": "read the text in this screenshot", "attachments": [{"name": "screenshot.png", "mime": "image/png"}], "expected": ["image-ocr"], "source": "synthetic"}
+{"message": "convert this png to webp", "attachments": [{"name": "logo.png", "mime": "image/png"}], "expected": ["image-convert"], "source": "synthetic"}
+{"message": "compress these photos for the web", "attachments": [{"name": "a.jpg", "mime": "image/jpeg"}, {"name": "b.jpg", "mime": "image/jpeg"}], "expected": ["image-compress"], "source": "synthetic"}
+{"message": "strip the GPS location from the exif metadata of this photo", "attachments": [{"name": "holiday.jpg", "mime": "image/jpeg"}], "expected": ["photo-exif"], "source": "synthetic"}
+{"message": "remove the background from this product photo", "attachments": [{"name": "shoe.png", "mime": "image/png"}], "expected": ["image-background-remove"], "source": "synthetic"}
+{"message": "ocr this", "attachments": [{"name": "receipt.jpg", "mime": "image/jpeg"}], "expected": ["image-ocr", "pdf-ocr"], "source": "moeka"}
+{"message": "transcribe this recording", "attachments": [{"name": "meeting.m4a", "mime": "audio/mp4"}], "expected": ["audio-transcribe"], "source": "synthetic"}
+{"message": "can you transcribe the voice note", "attachments": [{"name": "note.ogg", "mime": "audio/ogg"}], "expected": ["audio-transcribe"], "source": "moeka"}
+{"message": "trim the audio between 0:30 and 2:10", "attachments": [{"name": "song.mp3", "mime": "audio/mpeg"}], "expected": ["audio-trim"], "source": "synthetic"}
+{"message": "write show notes and chapters for this podcast episode", "attachments": [{"name": "ep42.mp3", "mime": "audio/mpeg"}], "expected": ["podcast-notes"], "source": "synthetic"}
+{"message": "normalise the loudness of these tracks", "attachments": [{"name": "t1.wav", "mime": "audio/x-wav"}, {"name": "t2.wav", "mime": "audio/x-wav"}], "expected": ["audio-normalize"], "source": "synthetic"}
+{"message": "turn my voice memo into a todo list", "attachments": [{"name": "memo.m4a", "mime": "audio/mp4"}], "expected": ["voice-memo-todo"], "source": "synthetic"}
+{"message": "transcribe /home/muk/audio/interview.flac", "attachments": [], "expected": ["audio-transcribe"], "source": "synthetic"}
+{"message": "transcribe this video", "attachments": [{"name": "talk.mp4", "mime": "video/mp4"}], "expected": ["video-transcribe"], "source": "synthetic"}
+{"message": "transcribe https://www.youtube.com/watch?v=dQw4w9WgXcQ", "attachments": [], "expected": ["video-transcribe"], "source": "moeka"}
+{"message": "cut a clip from 1:00 to 1:30 of this video", "attachments": [{"name": "match.mkv", "mime": "video/x-matroska"}], "expected": ["video-clip"], "source": "synthetic"}
+{"message": "download this youtube video for offline viewing https://youtu.be/abc123", "attachments": [], "expected": ["youtube-download"], "source": "synthetic"}
+{"message": "download https://vimeo.com/123456 so I can watch it on the plane", "attachments": [], "expected": ["youtube-download"], "source": "moeka"}
+{"message": "grab a few thumbnail frames from this video", "attachments": [{"name": "vlog.mov", "mime": "video/quicktime"}], "expected": ["video-thumbnail"], "source": "synthetic"}
+{"message": "generate subtitles for this video", "attachments": [{"name": "lecture.mp4", "mime": "video/mp4"}], "expected": ["video-subtitles"], "source": "synthetic"}
+{"message": "make srt subtitles for https://youtube.com/watch?v=xyz", "attachments": [], "expected": ["video-subtitles"], "source": "synthetic"}
+{"message": "re-encode this video to a smaller size", "attachments": [{"name": "raw.mov", "mime": "video/quicktime"}], "expected": ["video-compress"], "source": "synthetic"}
+{"message": "compress the video, it's too big", "attachments": [{"name": "clip.webm", "mime": "video/webm"}], "expected": ["video-compress"], "source": "moeka"}
+{"message": "extract this zip", "attachments": [{"name": "photos.zip", "mime": "application/zip"}], "expected": ["archive-extract"], "source": "synthetic"}
+{"message": "unpack ~/Downloads/dataset.tar.gz into a folder", "attachments": [], "expected": ["archive-extract"], "source": "synthetic"}
+{"message": "pack /home/muk/projects/site into a zip archive", "attachments": [], "expected": ["archive-create"], "source": "synthetic"}
+{"message": "list what's inside this archive without extracting", "attachments": [{"name": "backup.7z", "mime": "application/x-7z-compressed"}], "expected": ["archive-inspect"], "source": "synthetic"}
+{"message": "convert this word document to markdown", "attachments": [{"name": "spec.docx", "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}], "expected": ["docx-to-markdown"], "source": "synthetic"}
+{"message": "export the sheets of this excel workbook to csv", "attachments": [{"name": "budget.xlsx", "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}], "expected": ["xlsx-to-csv"], "source": "synthetic"}
+{"message": "summarise this slide deck", "attachments": [{"name": "pitch.pptx", "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}], "expected": ["pptx-summary"], "source": "synthetic"}
+{"message": "convert this to pdf", "attachments": [{"name": "letter.docx", "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}], "expected": ["office-to-pdf"], "source": "moeka"}
+{"message": "why is this spreadsheet formula returning an error?", "attachments": [{"name": "sales.xlsx", "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}], "expected": ["spreadsheet-formulas"], "source": "synthetic"}
+{"message": "turn the powerpoint into a pdf", "attachments": [{"name": "deck.pptx", "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}], "expected": ["office-to-pdf"], "source": "synthetic"}
+{"message": "clean up this csv, the dates are a mess and there are duplicate rows", "attachments": [{"name": "export.csv", "mime": "text/csv"}], "expected": ["csv-clean"], "source": "synthetic"}
+{"message": "give me summary statistics of the columns", "attachments": [{"name": "data.csv", "mime": "text/csv"}], "expected": ["csv-stats"], "source": "synthetic"}
+{"message": "plot the revenue column as a bar chart", "attachments": [{"name": "revenue.csv", "mime": "text/csv"}], "expected": ["csv-plot"], "source": "synthetic"}
+{"message": "make a chart from this", "attachments": [{"name": "metrics.csv", "mime": "text/csv"}], "expected": ["csv-plot", "chart-render"], "source": "moeka"}
+{"message": "convert this csv to json", "attachments": [{"name": "users.csv", "mime": "text/csv"}], "expected": ["csv-to-json"], "source": "synthetic"}
+{"message": "join these two csv files on the id column", "attachments": [{"name": "a.csv", "mime": "text/csv"}, {"name": "b.csv", "mime": "text/csv"}], "expected": ["csv-join"], "source": "synthetic"}
+{"message": "validate this json against the schema", "attachments": [{"name": "config.json", "mime": "application/json"}], "expected": ["json-validate"], "source": "synthetic"}
+{"message": "use jq to pull out the names from /tmp/users.json", "attachments": [], "expected": ["json-query"], "source": "synthetic"}
+{"message": "flatten these json records into a csv table", "attachments": [{"name": "records.json", "mime": "application/json"}], "expected": ["json-to-csv"], "source": "synthetic"}
+{"message": "lint this yaml, I think the indentation is wrong", "attachments": [{"name": "compose.yaml", "mime": "application/yaml"}], "expected": ["yaml-lint"], "source": "synthetic"}
+{"message": "convert /etc/app/config.yml to json", "attachments": [], "expected": ["yaml-to-json"], "source": "synthetic"}
+{"message": "diff these two datasets and tell me which rows changed", "attachments": [{"name": "old.csv", "mime": "text/csv"}, {"name": "new.csv", "mime": "text/csv"}], "expected": ["data-diff"], "source": "synthetic"}
+{"message": "load this csv into sqlite and tell me the top 5 customers by revenue", "attachments": [{"name": "orders.csv", "mime": "text/csv"}], "expected": ["sql-from-csv"], "source": "synthetic"}
+{"message": "which month had the highest sales? answer with sql", "attachments": [{"name": "sales.csv", "mime": "text/csv"}], "expected": ["sql-from-csv"], "source": "synthetic"}
+{"message": "render a chart of this json data", "attachments": [{"name": "series.json", "mime": "application/json"}], "expected": ["chart-render"], "source": "synthetic"}
+{"message": "convert this to json", "attachments": [{"name": "x.csv", "mime": "text/csv"}, {"name": "y.yaml", "mime": "application/yaml"}], "expected": ["csv-to-json", "yaml-to-json"], "source": "synthetic"}
+{"message": "lint this python code\n```python\nimport os, sys\nprint( 'x' )\n```", "attachments": [], "expected": ["python-lint"], "source": "synthetic"}
+{"message": "run the tests in /home/muk/projects/moeka and summarise failures", "attachments": [], "expected": ["python-test-runner"], "source": "moeka"}
+{"message": "this function is slow, profile it\n```python\ndef f(n):\n    return sum(i*i for i in range(n))\n```", "attachments": [], "expected": ["python-profile"], "source": "synthetic"}
+{"message": "type-check this python code\n```python\ndef add(a: int, b: int) -> int:\n    return a + b\n```", "attachments": [], "expected": ["python-type-check"], "source": "synthetic"}
+{"message": "explain this command\n```bash\nfind . -name '*.log' -mtime +7 -delete\n```", "attachments": [], "expected": ["shell-explain"], "source": "synthetic"}
+{"message": "what does this script do?\n```sh\nset -euo pipefail\nrsync -a src/ dst/\n```", "attachments": [], "expected": ["shell-explain"], "source": "moeka"}
+{"message": "check this bash script with shellcheck\n```bash\nfor f in $(ls); do echo $f; done\n```", "attachments": [], "expected": ["shell-lint"], "source": "synthetic"}
+{"message": "review this code for bugs\n```javascript\nfunction f(a){ return a == null ? 0 : a.length }\n```", "attachments": [], "expected": ["code-review"], "source": "synthetic"}
+{"message": "explain this code line by line\n```\nfor i in range(3): print(i)\n```", "attachments": [], "expected": ["code-explain"], "source": "synthetic"}
+{"message": "translate this code to rust\n```python\nprint(sum([1,2,3]))\n```", "attachments": [], "expected": ["code-translate"], "source": "synthetic"}
+{"message": "build a regular expression that matches dates like 2026-10-03", "attachments": [], "expected": ["regex-builder"], "source": "synthetic"}
+{"message": "format this sql\n```sql\nselect a,b from t where x=1 order by a\n```", "attachments": [], "expected": ["sql-format"], "source": "synthetic"}
+{"message": "review /home/muk/projects/app/main.py for bugs", "attachments": [], "expected": ["code-review"], "source": "synthetic"}
+{"message": "lint /home/muk/projects/tool/cli.py", "attachments": [], "expected": ["python-lint"], "source": "synthetic"}
+{"message": "triage this log, what failed first?", "attachments": [{"name": "service.log", "mime": null}], "expected": ["log-triage"], "source": "synthetic"}
+{"message": "summarise these logs into a timeline", "attachments": [{"name": "app.log", "mime": null}], "expected": ["log-summarize"], "source": "synthetic"}
+{"message": "look at /var/log/nginx/error.log and find the first failure", "attachments": [], "expected": ["log-triage"], "source": "moeka"}
+{"message": "explain this stack trace\n```\nTraceback (most recent call last):\n  File \"x.py\", line 1\nKeyError: 'a'\n```", "attachments": [], "expected": ["stacktrace-explain"], "source": "synthetic"}
+{"message": "show me recent errors in the systemd journal", "attachments": [], "expected": ["journal-errors"], "source": "moeka"}
+{"message": "generate a table of contents for this markdown", "attachments": [{"name": "README.md", "mime": "text/markdown"}], "expected": ["markdown-toc"], "source": "synthetic"}
+{"message": "lint this markdown file", "attachments": [{"name": "notes.md", "mime": "text/markdown"}], "expected": ["markdown-lint"], "source": "synthetic"}
+{"message": "render this markdown to a pdf", "attachments": [{"name": "essay.md", "mime": "text/markdown"}], "expected": ["markdown-to-pdf"], "source": "synthetic"}
+{"message": "turn ~/notes/plan.md into a pdf", "attachments": [], "expected": ["markdown-to-pdf"], "source": "synthetic"}
+{"message": "render notes.md to a standalone html page", "attachments": [{"name": "notes.md", "mime": "text/markdown"}], "expected": ["markdown-to-html"], "source": "synthetic"}
+{"message": "write a README for /home/muk/projects/gpu-lock", "attachments": [], "expected": ["readme-writer"], "source": "moeka"}
+{"message": "summarise this article https://example.com/blog/post-1", "attachments": [], "expected": ["web-page-summarize"], "source": "synthetic"}
+{"message": "tl;dr of https://news.example.org/2026/10/story", "attachments": [], "expected": ["web-page-summarize"], "source": "moeka"}
+{"message": "scrape the table on https://en.wikipedia.org/wiki/List_of_tallest_buildings into csv", "attachments": [], "expected": ["web-scrape-table"], "source": "synthetic"}
+{"message": "check https://muk.example.com for broken links", "attachments": [], "expected": ["link-check"], "source": "synthetic"}
+{"message": "give me a digest of the latest posts from https://blog.example.com/feed.xml", "attachments": [], "expected": ["rss-digest"], "source": "synthetic"}
+{"message": "save a pdf snapshot of https://example.com/terms for archiving", "attachments": [], "expected": ["web-archive"], "source": "synthetic"}
+{"message": "do an seo audit of https://shop.example.com", "attachments": [], "expected": ["seo-audit"], "source": "synthetic"}
+{"message": "is https://api.example.com up? how fast does it respond", "attachments": [], "expected": ["site-uptime"], "source": "moeka"}
+{"message": "track the price of this product https://store.example.com/item/42", "attachments": [], "expected": ["price-tracker"], "source": "synthetic"}
+{"message": "save this link to my bookmarks with tag reading https://example.com/essay", "attachments": [], "expected": ["bookmark-save"], "source": "synthetic"}
+{"message": "analyse the structure of https://github.com/HKUDS/nanobot", "attachments": [], "expected": ["git-repo-analyze"], "source": "synthetic"}
+{"message": "clone https://gitlab.com/group/project.git and tell me what languages it uses", "attachments": [], "expected": ["git-repo-analyze"], "source": "synthetic"}
+{"message": "review this pull request https://github.com/org/repo/pull/123", "attachments": [], "expected": ["pr-review"], "source": "moeka"}
+{"message": "triage the open issues of https://github.com/org/repo", "attachments": [], "expected": ["github-issues"], "source": "synthetic"}
+{"message": "write a changelog from the git history of /home/muk/projects/moeka", "attachments": [], "expected": ["git-changelog"], "source": "synthetic"}
+{"message": "count lines of code and contributors in /home/muk/projects/nightcall", "attachments": [], "expected": ["repo-stats"], "source": "synthetic"}
+{"message": "audit the dependencies of /home/muk/projects/webapp for vulnerabilities", "attachments": [], "expected": ["dependency-audit"], "source": "synthetic"}
+{"message": "who changed line 40 of /home/muk/projects/moeka/nanobot/agent/loop.py and why? git blame it", "attachments": [], "expected": ["git-blame-explain"], "source": "moeka"}
+{"message": "draft release notes from the commits of https://github.com/org/tool", "attachments": [], "expected": ["release-notes"], "source": "synthetic"}
+{"message": "which folders under /mnt/arteta use the most disk space?", "attachments": [], "expected": ["disk-usage"], "source": "moeka"}
+{"message": "find duplicate files in ~/Pictures", "attachments": [], "expected": ["find-duplicates"], "source": "synthetic"}
+{"message": "rename all files in ~/scans to scan-001.pdf style names", "attachments": [], "expected": ["batch-rename"], "source": "synthetic"}
+{"message": "print the directory tree of /home/muk/projects/site with sizes", "attachments": [], "expected": ["dir-tree"], "source": "synthetic"}
+{"message": "compute sha256 checksums for the files in /data/release and verify them", "attachments": [], "expected": ["file-checksum"], "source": "synthetic"}
+{"message": "sort the photos in ~/camera into year/month folders", "attachments": [], "expected": ["photo-organize"], "source": "synthetic"}
+{"message": "how much disk space does ~/.cache use", "attachments": [], "expected": ["disk-usage"], "source": "moeka"}
+{"message": "check the status of the systemd services on this host", "attachments": [], "expected": ["systemd-status"], "source": "moeka"}
+{"message": "restart the failed services on this box", "attachments": [], "expected": ["systemd-status"], "source": "moeka"}
+{"message": "prune unused docker images and volumes", "attachments": [], "expected": ["docker-cleanup"], "source": "moeka"}
+{"message": "what's using the gpu right now? show utilisation and memory", "attachments": [], "expected": ["gpu-status"], "source": "moeka"}
+{"message": "run the backup job and verify it", "attachments": [], "expected": ["backup-run"], "source": "moeka"}
+{"message": "install ffmpeg with apt", "attachments": [], "expected": ["apt-install"], "source": "synthetic"}
+{"message": "open port 47989 in the ufw firewall", "attachments": [], "expected": ["firewall-rule"], "source": "moeka"}
+{"message": "the wifi keeps dropping, diagnose the network and dns", "attachments": [], "expected": ["network-diagnose"], "source": "moeka"}
+{"message": "search my notes for anything about the jetson install", "attachments": [], "expected": ["notes-search"], "source": "moeka"}
+{"message": "add 'buy hdmi dummy plug' to my todo list", "attachments": [], "expected": ["todo-manager"], "source": "moeka"}
+{"message": "write a journal entry about today's hike", "attachments": [], "expected": ["journal-entry"], "source": "synthetic"}
+{"message": "what todo items are still open?", "attachments": [], "expected": ["todo-manager"], "source": "synthetic"}
+{"message": "translate this paragraph to Thai, keep the tone casual", "attachments": [], "expected": ["translate-text"], "source": "synthetic"}
+{"message": "convert 350 fahrenheit to celsius", "attachments": [], "expected": ["unit-convert"], "source": "synthetic"}
+{"message": "what time is 3pm Toronto in Bangkok?", "attachments": [], "expected": ["timezone-convert"], "source": "moeka"}
+{"message": "convert the meeting time 10am PST to my time zone", "attachments": [], "expected": ["timezone-convert"], "source": "synthetic"}
+{"message": "what's the weather forecast for Toronto tomorrow", "attachments": [], "expected": ["weather-forecast"], "source": "moeka"}
+{"message": "convert 250 USD to THB at today's exchange rate", "attachments": [], "expected": ["currency-convert"], "source": "synthetic"}
+{"message": "define the word 'sonder' with example sentences", "attachments": [], "expected": ["define-word"], "source": "synthetic"}
+{"message": "suggest recipes with eggs, rice and spinach", "attachments": [], "expected": ["recipe-suggest"], "source": "synthetic"}
+{"message": "draft a polite email reply declining the invitation", "attachments": [], "expected": ["email-draft"], "source": "synthetic"}
+{"message": "draft a short social media post announcing the release", "attachments": [], "expected": ["tweet-draft"], "source": "synthetic"}
+{"message": "summarise this text: the quick brown fox jumped over the lazy dog many times", "attachments": [], "expected": ["text-summarize"], "source": "synthetic"}
+{"message": "fix the grammar and spelling: their going too the store tomorow", "attachments": [], "expected": ["grammar-fix"], "source": "synthetic"}
+{"message": "draft an agenda for tomorrow's planning meeting", "attachments": [], "expected": ["meeting-agenda"], "source": "synthetic"}
+{"message": "plan a 3 day trip itinerary to Chiang Mai", "attachments": [], "expected": ["trip-planner"], "source": "synthetic"}
+{"message": "make flashcards from my notes on photosynthesis", "attachments": [], "expected": ["flashcards"], "source": "synthetic"}
+{"message": "what's the latest stock price of NVDA", "attachments": [], "expected": ["stock-quote"], "source": "synthetic"}
+{"message": "solve this step by step: 2x + 7 = 19", "attachments": [], "expected": ["math-solve"], "source": "synthetic"}
+{"message": "make flashcards as a csv", "attachments": [], "expected": ["flashcards"], "source": "synthetic"}
+{"message": "give me the exchange rate as a table", "attachments": [], "expected": ["currency-convert"], "source": "synthetic"}
+{"message": "brainstorm names for my new project", "attachments": [], "expected": ["brainstorm"], "source": "synthetic"}
+{"message": "turn these meeting notes into decisions and action items", "attachments": [], "expected": ["meeting-notes"], "source": "synthetic"}
+{"message": "help me build a daily habit of reading", "attachments": [], "expected": ["habit-coach"], "source": "synthetic"}
+{"message": "write a short poem about autumn rain", "attachments": [], "expected": ["poem-writer"], "source": "synthetic"}
+{"message": "compare these three laptops with a weighted decision matrix", "attachments": [], "expected": ["decision-matrix"], "source": "synthetic"}
+{"message": "prepare questions for my job interview at a robotics startup", "attachments": [], "expected": ["interview-prep"], "source": "synthetic"}
+{"message": "create a weekly workout plan for beginners", "attachments": [], "expected": ["workout-plan"], "source": "synthetic"}
+{"message": "plan a monthly budget from my income and expenses", "attachments": [], "expected": ["budget-planner"], "source": "synthetic"}
+{"message": "summarise this $type:file:pdf", "attachments": [], "expected": ["pdf-summarize"], "source": "synthetic"}
+{"message": "export the tables as csv", "attachments": [{"name": "annual.pdf", "mime": "application/pdf"}], "expected": ["pdf-extract-tables"], "source": "synthetic"}
+{"message": "convert the deck into a pdf", "attachments": [{"name": "deck.pptx", "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}], "expected": ["office-to-pdf"], "source": "synthetic"}
+{"message": "summarise the transcript as markdown", "attachments": [{"name": "ep1.mp3", "mime": "audio/mpeg"}], "expected": ["audio-transcribe", "podcast-notes"], "source": "synthetic"}
+{"message": "give me the issues of https://github.com/org/repo as markdown", "attachments": [], "expected": ["github-issues"], "source": "synthetic"}
+{"message": "scrape https://example.com/prices into a table", "attachments": [], "expected": ["web-scrape-table"], "source": "synthetic"}
+{"message": "render the stats into a chart", "attachments": [{"name": "stats.csv", "mime": "text/csv"}], "expected": ["csv-plot"], "source": "synthetic"}

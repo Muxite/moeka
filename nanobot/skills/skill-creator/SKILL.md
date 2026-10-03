@@ -1,6 +1,9 @@
 ---
 name: skill-creator
 description: Create or update AgentSkills. Use when designing, structuring, or packaging skills with scripts, references, and assets.
+io:
+  outputs: [text/markdown]
+  effects: [read-workspace, write-workspace, exec]
 ---
 
 # Skill Creator
@@ -329,6 +332,8 @@ Write the YAML frontmatter with `name` and `description`:
   - Example description for a `docx` skill: "Comprehensive document creation, editing, and analysis with support for tracked changes, comments, formatting preservation, and text extraction. Use when the agent needs to work with professional documents (.docx files) for: (1) Creating new documents, (2) Modifying or editing content, (3) Working with tracked changes, (4) Adding comments, or any other document tasks"
 
 Keep frontmatter minimal. In `nanobot`, `metadata` and `always` are also supported when needed, but avoid adding extra fields unless they are actually required.
+
+An optional `io` block types the skill so it can be selected by what a task contains: `inputs` (a list of required types, or `{all: [...], any: [...]}`), `outputs` and `effects` (`none`, `read-workspace`, `write-workspace`, `network`, `exec`, `sudo`). Types come from a closed vocabulary such as `file:pdf`, `url/git`, `data/csv`, `text/markdown`. Example: `io: {inputs: [file:pdf], outputs: [text/markdown], effects: [read-workspace]}`. A skill without `io` is never filtered out; an invalid `io` block makes a workspace skill invisible, so check it with `nanobot capabilities validate`.
 
 ##### Body
 

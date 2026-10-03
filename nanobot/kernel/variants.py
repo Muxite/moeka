@@ -362,6 +362,25 @@ def skills_component(loop: Any) -> str:
     return _sha("".join(f"{key}\n{value}\n" for key, value in records))
 
 
+def _capabilities_suffix(loop: Any) -> str:
+    """The ``capabilities`` config block as fingerprint text (spec 011 FR-012).
+
+    Empty for the default block, so a loop that does not use capability selection keeps
+    its pre-011 digest; any other value (selection, top_k, ambient types, allowed
+    effects) changes the ``system_prompt`` component even when the rendered prompt
+    happens to be the same.
+    """
+    config = getattr(getattr(loop, "context", None), "capabilities_config", None)
+    if config is None:
+        return ""
+    from nanobot.config.schema import CapabilitiesConfig
+
+    value = config.model_dump(mode="json")
+    if value == CapabilitiesConfig().model_dump(mode="json"):
+        return ""
+    return "\n\0capabilities=" + _canonical(value)
+
+
 def fingerprint(loop: Any, *, model: str, sampling: Sampling | None) -> Fingerprint:
     """Digest of what *loop*'s model sees: system prompt, tools, model and sampling.
 
@@ -383,7 +402,9 @@ def fingerprint(loop: Any, *, model: str, sampling: Sampling | None) -> Fingerpr
     ``sampling`` is the canonical JSON of its set fields (``None`` is ``null``, which
     differs from ``Sampling()`` because ``None`` means "the model's default");
     ``skills`` is :func:`skills_component` (every byte of the effective skill set,
-    read at call time; ``OSError`` when a counted file cannot be read).
+    read at call time; ``OSError`` when a counted file cannot be read). A non-default
+    ``capabilities`` config block is folded into ``system_prompt`` (spec 011 FR-012;
+    the component set stays these five).
     """
     pairs = _normaliser(loop)
     prompt = loop.context.build_system_prompt(
@@ -391,7 +412,7 @@ def fingerprint(loop: Any, *, model: str, sampling: Sampling | None) -> Fingerpr
     )
     tools = _canonical(loop.tools.get_definitions())
     components = {
-        "system_prompt": _sha(_normalise(prompt, pairs)),
+        "system_prompt": _sha(_normalise(prompt, pairs) + _capabilities_suffix(loop)),
         "tools": _sha(_normalise(tools, pairs)),
         "model": _sha(str(model)),
         "sampling": _sha(_sampling_json(sampling)),

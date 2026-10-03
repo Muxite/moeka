@@ -125,9 +125,15 @@ by the `quick_validate.py` script (skills/skill-creator/scripts/quick_validate.p
 - `get_skill_description` returns frontmatter `description` if a non-empty string, else falls back to the skill
   NAME (agent/skills.py:342-348). So a broken/missing description makes the summary line show just the name, and
   the skill is still listed.
-- The loader does NOT call `valid_skill_metadata` for workspace or builtin skills. In the slim core that function
-  is used only for agent-plugin skills (agent/plugins.py:475). Still, follow its rules for every skill, and run
-  `quick_validate.py` (2.8) because nothing else validates a workspace skill.
+- Spec 011 FR-003: the loader validates every **workspace** skill with
+  `nanobot.capabilities.manifest.validate_skill` (the identity rules below plus a parseable `io` block) and skips
+  an invalid one (not listed, not loadable), logging one warning naming it and the first problem
+  (agent/skills.py `_workspace_skill_valid`). Built-in and plugin skills are not validated at runtime.
+  `nanobot capabilities validate` runs the same check over the workspace and exits 1 on any problem.
+- Optional `io` block (spec 011 FR-002): `inputs` (list, or `{all: [...], any: [...]}`), `outputs`, `effects`
+  (`none`, `read-workspace`, `write-workspace`, `network`, `exec`, `sudo`); types come from
+  `nanobot/capabilities/types.yaml`. With `capabilities.selection: "filtered"` the skills summary lists only the
+  `capabilities.topK` skills that pass the type/effect filter for the turn; the default `"all"` lists every skill.
 
 ### 2.3 Validation rules
 
@@ -138,7 +144,8 @@ Loader-level "identity contract" (agent/skills.py:22,39-48):
 - `description` must be a string, 1 to 1024 characters after strip.
 
 `quick_validate.py` (stricter, the one to run; skills/skill-creator/scripts/quick_validate.py:16-25,102-129,158-188):
-- Allowed frontmatter keys only: `name, description, metadata, always, license, allowed-tools`. Anything else fails.
+- Allowed frontmatter keys only: `name, description, metadata, always, license, allowed-tools, io`. Anything else
+  fails.
 - Name regex `[a-z0-9]+(?:-[a-z0-9]+)*`, max 64, equals folder name.
 - Description: non-empty, no `TODO` / `[todo` text, NO angle brackets `<` or `>`, max 1024 chars.
 - `always`, if present, must be a boolean (skills/skill-creator/scripts/quick_validate.py:186-188).
@@ -209,7 +216,8 @@ Saved as `<workspace>/skills/disk-report/SKILL.md`. (Example is illustrative, no
 
 ### 2.8 Testing that a new skill loads (read-only)
 
-- Format check (the loader does not validate workspace skills, so always run this):
+- Format check (the loader skips invalid workspace skills silently apart from a log warning, so run this, or
+  `nanobot capabilities validate`):
   `python nanobot/skills/skill-creator/scripts/quick_validate.py <skill-dir>` prints "Skill is valid!" and exits 0
   (skills/skill-creator/scripts/quick_validate.py:203-213). It needs only the standard library plus PyYAML. For a
   skill inside the repo you can run it in Docker:

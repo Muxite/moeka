@@ -542,6 +542,46 @@ class ToolsConfig(Base):
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 
 
+_CAPABILITY_EFFECTS = (
+    "none", "read-workspace", "write-workspace", "network", "exec", "sudo",
+)
+
+
+class CapabilitiesConfig(Base):
+    """Capability selection for the skills summary (spec 011 FR-010).
+
+    - ``selection``: ``"all"`` (default) lists every skill, byte-identical to the prompt
+      before spec 011; ``"filtered"`` types the turn (``nanobot.capabilities``) and lists
+      only the ``top_k`` best skills that pass the type/effect filter.
+    - ``ambient_types``: types every task has besides ``text/query`` (the gateway also
+      adds ``host``).
+    - ``allowed_effects``: effects a selected capability may declare.
+    """
+
+    selection: Literal["all", "filtered"] = "all"
+    top_k: int = Field(default=8, ge=1, le=64)
+    ambient_types: list[str] = Field(default_factory=lambda: ["workspace"])
+    allowed_effects: list[str] = Field(default_factory=lambda: list(_CAPABILITY_EFFECTS))
+
+    @field_validator("ambient_types")
+    @classmethod
+    def _known_types(cls, value: list[str]) -> list[str]:
+        from nanobot.capabilities.types import is_type
+
+        unknown = [item for item in value if not is_type(item)]
+        if unknown:
+            raise ValueError(f"unknown capability type(s) {unknown}")
+        return value
+
+    @field_validator("allowed_effects")
+    @classmethod
+    def _known_effects(cls, value: list[str]) -> list[str]:
+        unknown = [item for item in value if item not in _CAPABILITY_EFFECTS]
+        if unknown:
+            raise ValueError(f"unknown effect(s) {unknown}; expected {list(_CAPABILITY_EFFECTS)}")
+        return value
+
+
 class SlotRouteConfig(Base):
     """Routing limits for one schema slot (kernel router, I6).
 
@@ -584,6 +624,7 @@ class Config(BaseSettings):
     )
     profiles: dict[str, AgentProfileConfig] = Field(default_factory=dict)
     router: RouterConfig = Field(default_factory=RouterConfig)
+    capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
 
     def __init__(self, **values: Any) -> None:
         if not type(self).__pydantic_complete__:

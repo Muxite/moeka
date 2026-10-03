@@ -54,6 +54,7 @@ from nanobot.agent.tools.mcp import MCPProvider  # noqa: E402
 from nanobot.agent.tools.registry import ToolRegistry  # noqa: E402
 from nanobot.cli import terminal as cli_terminal  # noqa: E402
 from nanobot.cli.agent import agent  # noqa: E402
+from nanobot.cli.capabilities import capabilities_app  # noqa: E402
 from nanobot.cli.gateway import create_gateway_app  # noqa: E402
 from nanobot.cli.gateway_runtime import _run_gateway  # noqa: E402
 from nanobot.cli.log_control import _set_nanobot_logs  # noqa: E402
@@ -592,6 +593,14 @@ def sessions_migrate(
         raise typer.Exit(1) from exc
 
     console.print(f"[green]Migrated[/green] {escape(str(plan.source))} -> {escape(str(plan.destination))}")
+
+
+# ============================================================================
+# Capability Commands (spec 011)
+# ============================================================================
+
+
+app.add_typer(capabilities_app, name="capabilities")
 
 
 # ============================================================================

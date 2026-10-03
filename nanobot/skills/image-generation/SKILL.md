@@ -1,6 +1,9 @@
 ---
 name: image-generation
 description: Generate images and iteratively edit saved image artifacts.
+io:
+  outputs: [file:image]
+  effects: [network, read-workspace, write-workspace]
 ---
 
 # Image Generation

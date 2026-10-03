@@ -1,6 +1,9 @@
 ---
 name: memory
 description: Search past conversations in the agent's history log.
+io:
+  outputs: [text/markdown]
+  effects: [read-workspace]
 ---
 
 # Memory

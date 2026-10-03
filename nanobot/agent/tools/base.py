@@ -505,6 +505,10 @@ class Tool(ABC):
     # By design, text is JSON: ``{"type": "string"}`` needs JSON-quoted text, and plain
     # prose fails. An empty schema (``{}``) accepts anything, prose included.
     output_schema: dict[str, Any] | None = None
+    # Capability manifest (spec 011 FR-002): the same ``io`` block a skill declares in
+    # its frontmatter (``inputs``/``outputs``/``effects``), normalised by
+    # ``nanobot.capabilities.manifest.parse_io``. ``None`` = untyped.
+    io: dict[str, Any] | None = None
     # A variant's description for THIS instance (Task 8, ``set_description_override``).
     # ``to_schema`` uses it for every tool; ``.description`` shows it for data-file tools.
     _description_override: str | None = None

@@ -258,6 +258,7 @@ class ExecTool(Tool):
     _scopes = {"core", "subagent"}
 
     config_key = "exec"
+    io = {"effects": ["exec"]}  # spec 011 FR-014
 
     @classmethod
     def config_cls(cls):

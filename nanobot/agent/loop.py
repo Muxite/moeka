@@ -117,6 +117,7 @@ from nanobot.utils.runtime import (
 if TYPE_CHECKING:
     from nanobot.agent.dream import DreamRunResult
     from nanobot.config.schema import (
+        CapabilitiesConfig,
         ChannelsConfig,
         Config,
         ProviderConfig,
@@ -357,6 +358,7 @@ class AgentLoop:
         plugin_registry: PluginRegistry | None = None,
         memory_dir: Path | None = None,
         inject_memory: bool = True,
+        capabilities_config: CapabilitiesConfig | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
         from nanobot.kernel.gate import AGENT_PRINCIPAL
@@ -473,7 +475,11 @@ class AgentLoop:
             variant=variant,
             memory_dir=memory_dir,
             inject_memory=inject_memory,
+            capabilities=capabilities_config,
         )
+        # Capability selection (spec 011): a host loop's tasks have the ``host`` ambient type.
+        if host_tools:
+            self.context.capability_ambient_extra = ("host",)
         if session_manager is not None:
             self.sessions = session_manager
         else:
@@ -510,6 +516,8 @@ class AgentLoop:
         # duplicating cleanup in each consumer.
         self.sessions.set_delete_observer(self._file_state_store.discard)
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
+        # Spec 011: the capability index holds this loop's tools next to its skills.
+        self.context.tool_registry = self.tools
         self.tools.configure_gate(
             policy=self.policy, principal=self.principal, env=env, workspace=workspace,
         )
@@ -688,7 +696,7 @@ class AgentLoop:
             tool_registry=tool_registry,
             env=env,
             policy=policy,
-            **extra,
+            **({"capabilities_config": getattr(config, "capabilities", None)} | extra),
         )
 
     def _sync_subagent_runtime_limits(self) -> None:

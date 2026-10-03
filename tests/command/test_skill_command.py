@@ -108,11 +108,10 @@ async def test_skill_command_excludes_disabled(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_skill_command_fallback_description(tmp_path: Path) -> None:
-    ws_skills = tmp_path / "skills"
-    ws_skills.mkdir()
-    _write_skill(ws_skills, "plain", description="", body="# Plain Skill\n")
-
+    # A built-in skill: a workspace skill without a description is skipped by the
+    # loader (spec 011 FR-003), built-ins are not validated at runtime.
     loop = _loop_with_skills(tmp_path)
+    _write_skill(tmp_path / "empty_builtin", "plain", description="", body="# Plain Skill\n")
     out = await cmd_skill(_ctx(loop))
 
     assert "**plain** — plain" in out.content
