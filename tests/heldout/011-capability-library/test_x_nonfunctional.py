@@ -157,7 +157,10 @@ def test_repo_benchmark_test_passes():
 def test_no_new_runtime_dependency():
     data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     deps = set(data["project"]["dependencies"])
-    assert deps <= BASE_DEPENDENCIES, sorted(deps - BASE_DEPENDENCIES)
+    # Head amendment (2026-10-03): spec 012 NFR-001 later makes `cryptography` (already a transitive
+    # dependency) explicit; that one later addition is allowed. 011 itself adds nothing.
+    later = {d for d in deps if d.split(">")[0].split("=")[0].split("<")[0].strip() == "cryptography"}
+    assert deps - later <= BASE_DEPENDENCIES, sorted(deps - later - BASE_DEPENDENCIES)
 
 
 @pytest.mark.fr("NFR-003", "NFR-004")
