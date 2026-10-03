@@ -24,6 +24,7 @@ FIELDS_V1 = {
         "tokens_reasoning", "usage_source", "cost_usd", "cost_billed", "price_source",
         "cache_hit", "saved_tokens_in", "saved_tokens_out", "saved_cost_usd", "finish_reason",
         "outcome", "error_kind", "waste_label", "waste_set_by", "producer",
+        "key_fp",  # 1.2 (spec 009)
     },
     "budget-event": {
         "schema_version", "kind", "call_id", "ts_ms", "consumer", "agent", "session", "role",
@@ -161,6 +162,13 @@ def breaking_changes(old: dict, new: dict, path: str = "$") -> list[str]:
 def test_current_schema_is_a_compatible_evolution_of_1_0(name: str) -> None:
     old = json.loads((FROZEN / f"{name}.1.0.schema.json").read_text())
     assert breaking_changes(old, load(name)) == []
+
+
+def test_usage_record_1_2_is_a_compatible_evolution_of_1_1() -> None:
+    old = json.loads((FROZEN / "usage-record.1.1.schema.json").read_text())
+    assert breaking_changes(old, load("usage-record")) == []
+    assert "key_fp" not in old["properties"]
+    assert load("usage-record")["properties"]["key_fp"]["pattern"] == "^[0-9a-f]{12}$"
 
 
 def test_breaking_change_detector_detects() -> None:

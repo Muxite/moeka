@@ -44,6 +44,7 @@ Test it with `schemas/validate.py` (`problems(doc, "usage-record")`: the schema 
 | `started_at_ms`, `latency_ms` | none per call | gap: time `transport.chat` in the adapter |
 | `model`, `provider` | `ref.model`, `ref.provider` (`ollama`, `openrouter`) | direct |
 | `alias`, `tier` | none; `tier = "local"` when provider is `ollama` | adapter |
+| `key_fp` (1.2) | first 12 hex chars of `sha256` of the OpenRouter key the transport sends (stripped); null for ollama | optional; null (moeka fills it from the provider, never the key) |
 | `tokens_in` | `RawReply.prompt_tokens` | direct (OpenRouter's prompt_tokens includes cached) |
 | `tokens_out` | `RawReply.completion_tokens` | direct |
 | `tokens_cache_read`, `tokens_cache_write`, `tokens_reasoning` | not carried by `RawReply` | null (unknown, not zero); fill if transport starts reading them |
