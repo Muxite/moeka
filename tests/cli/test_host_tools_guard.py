@@ -90,6 +90,21 @@ def test_tools_the_config_turns_off_are_not_expected(tmp_path: Path) -> None:
     assert expected_host_tools(config) == []
 
 
+def test_serve_guard_does_not_expect_cron(tmp_path: Path) -> None:
+    """``serve`` builds its loop without a cron service (spec 010 FR-004 as amended)."""
+    config = _config(tmp_path)
+    loop = AgentLoop.from_config(
+        config, MessageBus(), provider=_provider(), host_tools=True,
+        tool_registry=ToolRegistry(),
+    )
+    assert "cron" not in loop.tools.tool_names
+    assert expected_host_tools(config, with_cron=False) == ["message", "run_cli_app"]
+    require_host_tools(loop, config, entry="nanobot serve", with_cron=False)  # no exit
+    with pytest.raises(typer.Exit) as exc:
+        require_host_tools(loop, config, entry="nanobot gateway")
+    assert exc.value.exit_code == 2
+
+
 def test_every_host_entry_point_calls_the_guard() -> None:
     """gateway, serve and the CLI agent each check after building their loop."""
     sites = {
@@ -108,3 +123,7 @@ def test_every_host_entry_point_calls_the_guard() -> None:
             if kw.arg == "entry" and isinstance(kw.value, ast.Constant)
         ]
         assert entries == [entry], rel
+        with_cron = [
+            kw.value.value for call in calls for kw in call.keywords if kw.arg == "with_cron"
+        ]
+        assert with_cron == ([False] if entry == "nanobot serve" else []), rel

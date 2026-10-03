@@ -6,6 +6,9 @@ those tools silently missing (architecture review 2026-10-01, R4). The gateway, 
 and the CLI agent call :func:`require_host_tools` right after building the loop; a
 missing tool fails startup with exit 2 and names the tools.
 
+``serve`` wires no cron service, so it passes ``with_cron=False`` and ``cron`` is not
+expected there; the gateway and the CLI agent require all three.
+
 A tool the config deliberately turns off is not expected: ``run_cli_app`` when
 ``tools.cliApps.enable`` is false, and any tool in ``agents.defaults.toolsDeny`` or left out
 of a set ``agents.defaults.toolsAllow``.
@@ -21,8 +24,8 @@ HOST_TOOLS: tuple[str, ...] = ("message", "cron", "run_cli_app")
 EXIT_MISSING_HOST_TOOLS = 2
 
 
-def expected_host_tools(config: Any) -> list[str]:
-    """The host tools *config* expects a host loop to register."""
+def expected_host_tools(config: Any, *, with_cron: bool = True) -> list[str]:
+    """The host tools *config* expects a host loop to register (``cron`` only *with_cron*)."""
     defaults = config.agents.defaults
     deny = set(defaults.tools_deny or ())
     allow = set(defaults.tools_allow) if defaults.tools_allow is not None else None
@@ -32,19 +35,24 @@ def expected_host_tools(config: Any) -> list[str]:
             continue
         if name == "run_cli_app" and not config.tools.cli_apps.enable:
             continue
+        if name == "cron" and not with_cron:
+            continue
         expected.append(name)
     return expected
 
 
-def missing_host_tools(loop: Any, config: Any) -> list[str]:
+def missing_host_tools(loop: Any, config: Any, *, with_cron: bool = True) -> list[str]:
     """Expected host tools that *loop* did not register."""
     registered = set(loop.tools.tool_names)
-    return [name for name in expected_host_tools(config) if name not in registered]
+    return [
+        name for name in expected_host_tools(config, with_cron=with_cron)
+        if name not in registered
+    ]
 
 
-def require_host_tools(loop: Any, config: Any, *, entry: str) -> None:
+def require_host_tools(loop: Any, config: Any, *, entry: str, with_cron: bool = True) -> None:
     """Exit 2 with a message naming the missing host tools, if any."""
-    missing = missing_host_tools(loop, config)
+    missing = missing_host_tools(loop, config, with_cron=with_cron)
     if not missing:
         return
     typer.echo(
