@@ -11,7 +11,7 @@
   ],
   "properties": {
     "schema": {"const": "moeka.capcert.v1"},
-    "kind": {"enum": ["skill", "script-tool"]},
+    "kind": {"enum": ["skill", "script-tool", "kernel-patch"]},
     "name": {
       "description": "The bundle's directory name (skill naming rule).",
       "type": "string",

@@ -364,3 +364,13 @@ def test_public_api_has_no_sign_function():
     for module in (provenance, enforce, script_tool):
         assert not any(name == "sign" or name.startswith("sign_") for name in dir(module))
     assert not hasattr(TrustStore, "sign")
+
+
+def test_kernel_patch_kind_is_allowed(tmp_path):
+    """moeka-rsi spec 005: kernel-scope certs use kind kernel-patch."""
+    from nanobot.capabilities.provenance import CERT_KINDS
+
+    assert "kernel-patch" in CERT_KINDS
+    schema = json.loads((Path(__file__).resolve().parents[2] / "schemas"
+                         / "capability-cert.v1.schema.json").read_text())
+    assert "kernel-patch" in schema["properties"]["kind"]["enum"]

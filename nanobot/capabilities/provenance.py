@@ -42,7 +42,7 @@ CERT_FILENAME = "CERT.json"
 REVOKED_FILENAME = "revoked.jsonl"
 PUBKEY_SUFFIX = ".pub"
 CERT_SCHEMA = "moeka.capcert.v1"
-CERT_KINDS: tuple[str, ...] = ("skill", "script-tool")
+CERT_KINDS: tuple[str, ...] = ("skill", "script-tool", "kernel-patch")
 CERT_SCOPES: tuple[str, ...] = ("capabilities", "kernel")
 LOADABLE_SCOPE = "capabilities"
 # The package's own trust directory: ships empty; hosts add ``capabilities.trust_dirs``.
