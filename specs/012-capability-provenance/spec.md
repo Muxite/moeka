@@ -39,12 +39,13 @@ write without changing kernel Python code. Moeka never signs: it has no code pat
   `"moeka.capcert.v1"`, `kind` ∈ {`skill`, `script-tool`}, `name` (the bundle's directory name), `bundle_sha256`
   (64 hex), `io` (the normalised IOSpec as `{inputs_all, inputs_any, outputs, effects}` lists), `scores` (object,
   free-form numbers), `lineage` (`{"parent": cert id | null}`), `verifier` (`{"version": str, "suite": str}`),
-  `issued_at` (RFC 3339 UTC), `key_id` (16 hex), `scope` ∈ {`capabilities`} (reserved for later scopes). All required;
+  `issued_at` (RFC 3339 UTC), `key_id` (16 hex), `scope` ∈ {`capabilities`, `kernel`} (`kernel` = a kernel-scope patch cert from the
+  RSI loop, never loadable as a capability). All required;
   no extra properties.
 - **FR-002 Verify.** `nanobot.capabilities.provenance.verify_bundle(bundle_dir, trust) -> Verdict` where
   `Verdict(ok: bool, reason: str, cert_id: str | None)`. `ok` is true only if all hold, else `reason` is exactly one of
   the codes: `no-cert`, `bad-json`, `bad-schema`, `unknown-key` (no trusted key with `key_id`), `bad-signature`,
-  `name-mismatch`, `kind-mismatch`, `hash-mismatch` (recomputed bundle hash ≠ `bundle_sha256`), `io-mismatch` (the
+  `name-mismatch`, `kind-mismatch`, `scope-mismatch` (cert `scope` is not `capabilities`), `hash-mismatch` (recomputed bundle hash ≠ `bundle_sha256`), `io-mismatch` (the
   bundle's own `io` block, normalised, ≠ `cert.io`), `revoked`, `bad-bundle` (BundleError). The checks run in the
   order listed, and the first failure is the reason.
 - **FR-003 Trust store.** `nanobot.capabilities.provenance.TrustStore.load(dirs) -> TrustStore` reads public keys and
