@@ -142,3 +142,14 @@ Hidden tests may use only:
 - **SC-003** A script tool without `network` cannot open a TCP connection when bwrap is present, and that test is
   skipped with a recorded reason when bwrap is absent.
 - **SC-004** No private-key handling exists in moeka source (FR-004).
+
+## Amendment 2026-10-03 (head clarifications)
+
+- **FR-010 "bwrap available" means usable.** Probe once per process by running a trivial
+  `bwrap --unshare-net … true`, and cache the result. On hosts where unprivileged user namespaces are restricted
+  (jifan: AppArmor; `--unshare-net` fails with "loopback: Failed RTM_NEWADDR"), the probe fails. The tool then runs
+  unsandboxed with `sandboxed: false` in its result metadata and trace event. Network containment for RSI-authored
+  tools comes from L0's docker `--network none` verification (moeka-rsi spec 004) and from certificate gating,
+  not from this best-effort sandbox.
+- **FR-002 `bad-bundle` position.** An unhashable bundle (symlink, fifo, socket) gives `bad-bundle` at the point
+  where the bundle hash is computed, that is, before `hash-mismatch`, `io-mismatch` and `revoked`.
