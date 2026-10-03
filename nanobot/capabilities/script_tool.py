@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from loguru import logger
 
-from nanobot.agent.tools.base import Schema, Tool, ToolResult, capability_request
+from nanobot.agent.tools.base import Tool, ToolResult, capability_request
 from nanobot.capabilities.manifest import IOSpec, ManifestError, parse_io
 from nanobot.capabilities.provenance import canonical_json
 
@@ -437,19 +437,18 @@ class ScriptTool(Tool):
                 f"Error: script tool '{name}' stdout is not one JSON value (exit code "
                 f"{exit_code})\nstderr (last {STDERR_TAIL_CHARS} chars):\n{_tail(stderr)}"
             )
-        schema = self.manifest.output_schema
-        if schema:
-            violations = Schema.schema_violations(value, schema, integral_floats=True)
-            if violations:
-                details = "; ".join(v.describe() for v in violations)
-                return fail(
-                    f"Error: script tool '{name}' output does not match its output_schema: "
-                    f"{details}"
-                )
-        return self._result(
+        result = self._result(
             json.dumps(value, ensure_ascii=False), error=False, sandboxed=sandboxed,
             exit_code=exit_code, duration_ms=duration, structured=value, has_structured=True,
         )
+        # The existing typed-call check (the registry runs it after every call too):
+        # same validator, same RESULT_SCHEMA_MARKER error shaping, same trace event.
+        from nanobot.kernel.typed import validate_result
+
+        checked = validate_result(self, result, env=self._env)
+        if checked is not result:
+            checked.metadata = dict(result.metadata)
+        return checked
 
     async def _run(
         self, argv: list[str], home: Path, stdin: bytes,

@@ -201,11 +201,15 @@ async def test_output_schema_is_checked(tmp_path, no_bwrap):
     schema = {"type": "object", "properties": {"count": {"type": "integer"}},
               "required": ["count"]}
     tool = ScriptTool(make_script(tmp_path, "typed", script, output_schema=schema))
+    from nanobot.kernel.typed import RESULT_SCHEMA_MARKER
+
     result = await tool.execute()
-    assert result.is_error and "output_schema" in result
+    assert result.is_error and RESULT_SCHEMA_MARKER in result and "count" in result
+    assert result.metadata["exit_code"] == 0
     registry = ToolRegistry()
     registry.register(tool)
-    assert (await registry.execute("script_typed", {})).is_error
+    via_registry = await registry.execute("script_typed", {})
+    assert via_registry.is_error and RESULT_SCHEMA_MARKER in via_registry
     good = ScriptTool(make_script(tmp_path, "typed2", "#!/bin/sh\necho '{\"count\": 2}'\n",
                                   output_schema=schema))
     assert json.loads(await good.execute()) == {"count": 2}
