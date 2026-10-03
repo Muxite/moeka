@@ -16,6 +16,12 @@ Several instances on one machine (spec 005): every ``keys.env`` (any directory),
 files of the own instance are write-denied. This still covers the file tools only:
 ``exec`` can reach all of these, so real separation between instances needs separate
 UIDs, the bwrap sandbox, or containers (docs/multiple-instances.md).
+
+Capability trust (spec 012 FR-008): every file named ``CERT.json`` or ``revoked.jsonl``
+and everything inside a trust dir (the package's ``nanobot/capabilities/trust/`` plus
+the configured ``capabilities.trust_dirs``) are write-denied. Stated limit: an agent with
+unrestricted exec can still write them; the real protection for the trust root is the
+OS boundary (owned by another uid). This only prevents writes through the file tools.
 """
 
 from __future__ import annotations
@@ -68,12 +74,46 @@ PROTECTED_WRITE: tuple[tuple[str, str], ...] = (
 # READ and WRITE denied wherever they are: secrets files by their last component.
 PROTECTED_BASENAMES: frozenset[str] = frozenset({"keys.env"})
 
+# WRITE denied wherever they are (spec 012 FR-008): capability certificates and
+# revocation lists. Reading stays allowed.
+TRUST_WRITE_BASENAMES: frozenset[str] = frozenset({"CERT.json", "revoked.jsonl"})
+
 # WRITE denied directly inside an instance root / state dir (spec 005 FR-040): the
 # instance lock and holder record, the gateway PID file and lock, and the run dir
 # (WebSocket socket). Reading stays allowed.
 INSTANCE_WRITE_PROTECTED: tuple[str, ...] = (
     ".instance.lock", ".instance.json", "moeka.pid", "gateway.lock", "run",
 )
+
+
+def builtin_trust_dir() -> Path:
+    """The package's capability trust dir (``nanobot/capabilities/trust/``)."""
+    return Path(__file__).resolve().parent.parent / "capabilities" / "trust"
+
+
+def _trust_roots(trust_dirs: Sequence[Path | str]) -> list[Path]:
+    """The package trust dir plus *trust_dirs*, each as given (absolute) and resolved."""
+    roots: list[Path] = []
+    for item in (builtin_trust_dir(), *trust_dirs):
+        raw = Path(str(item)).expanduser()
+        for candidate in (Path(os.path.abspath(raw)), _safe_resolve(raw)):
+            if candidate is not None and candidate not in roots:
+                roots.append(candidate)
+    return roots
+
+
+def configured_trust_dirs(env: object | None) -> list[Path]:
+    """``capabilities.trust_dirs`` from a host env's config (``[]`` when unavailable)."""
+    if env is None:
+        return []
+    try:
+        section = env.config.section("capabilities") or {}  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - the package trust dir is still protected
+        return []
+    dirs = section.get("trust_dirs") if isinstance(section, dict) else None
+    if not isinstance(dirs, (list, tuple)):
+        return []
+    return [Path(str(item)).expanduser() for item in dirs if str(item).strip()]
 
 
 class ProtectedPathError(WorkspaceBoundaryError):
@@ -169,6 +209,8 @@ def _match(
         return True
     if write and tuple(candidate.parts[-2:]) in PROTECTED_WRITE:
         return True
+    if write and candidate.name in TRUST_WRITE_BASENAMES:
+        return True
     if write and candidate in config_files:
         return True
     if write and any(_is_within(candidate, root) for root in write_roots):
@@ -230,10 +272,13 @@ class ProtectedFloor:
         config_files: Sequence[Path] = (),
         other_instance_roots: Sequence[Path] = (),
         instance_roots: Sequence[Path] | None = None,
+        trust_dirs: Sequence[Path | str] = (),
     ) -> None:
         """*other_instance_roots*: other instances' roots, denied with their sessions
         siblings (hosts pass them; the kernel never discovers). *instance_roots*: this
-        instance's root-like dirs (default: the data dirs and *workspace*)."""
+        instance's root-like dirs (default: the data dirs and *workspace*).
+        *trust_dirs*: configured capability trust dirs, write-denied with the package's
+        own trust dir (spec 012 FR-008)."""
         self._roots = _protected_roots(data_dir, workspace)
         if instance_roots is None:
             if data_dir is None:
@@ -253,6 +298,7 @@ class ProtectedFloor:
         for root in deny:
             if root not in self._roots:
                 self._roots.append(root)
+        write_only.extend(_trust_roots(trust_dirs))
         self._write_roots: list[Path] = list(dict.fromkeys(write_only))
         self._config_files: list[Path] = []
         for cfg in config_files:
@@ -269,6 +315,7 @@ class ProtectedFloor:
         extra_data_dirs: Sequence[Path] = (),
         config_files: Sequence[Path] = (),
         other_instance_roots: Sequence[Path] = (),
+        trust_dirs: Sequence[Path | str] = (),
     ) -> ProtectedFloor:
         """Floor for a host's ``Paths`` (the agent's file tools run in ``work_dir``).
 
@@ -290,6 +337,7 @@ class ProtectedFloor:
         floor = cls(
             data_dir=bases, workspace=paths.work_dir, config_files=config_files,
             other_instance_roots=other_instance_roots, instance_roots=own,
+            trust_dirs=trust_dirs,
         )
         extra = [paths.sessions_root]
         extra.extend(paths.state_dir / name for name in _kernel_state_filenames())

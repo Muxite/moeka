@@ -29,6 +29,7 @@ from nanobot.config_base import Base
 from nanobot.security.protected_paths import (
     ProtectedFloor,
     ProtectedPathError,
+    configured_trust_dirs,
     default_config_files,
     default_data_dirs,
     default_other_instance_roots,
@@ -212,6 +213,8 @@ class _FsTool(Tool):
         )
         tool._trace_sink = env.trace if env is not None else None
         tool._builtin_skills_dir = skills_dir
+        # Spec 012 FR-008: configured capability trust dirs are write-protected too.
+        tool._trust_dirs = configured_trust_dirs(env)
         return tool
 
     @property
@@ -271,7 +274,7 @@ class _FsTool(Tool):
             )
             return ProtectedFloor.from_paths(
                 self._paths, extra_data_dirs=extra_dirs, config_files=config_files,
-                other_instance_roots=others,
+                other_instance_roots=others, trust_dirs=getattr(self, "_trust_dirs", ()),
             )
         data_dirs = default_data_dirs()
         return ProtectedFloor(
@@ -279,6 +282,7 @@ class _FsTool(Tool):
             workspace=self._workspace,
             config_files=default_config_files(),
             other_instance_roots=default_other_instance_roots(self._workspace, data_dirs),
+            trust_dirs=getattr(self, "_trust_dirs", ()),
         )
 
     def _check_floor(self, resolved: Path, *, write: bool) -> Path:
