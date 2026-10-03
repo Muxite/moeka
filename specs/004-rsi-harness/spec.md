@@ -2,8 +2,7 @@
 
 **Feature Branch**: `004-rsi-harness`
 **Created**: 2026-09-30
-**Status**: Pointer; summary only (corrected 2026-10-03, spec 010 FR-005). The harness is no longer
-"nothing built". What exists:
+**Status**: Pointer; summary only (corrected 2026-10-03, spec 010 FR-005). What is built:
 - the harness lives in its own repository, **moeka-rsi**, specified there as specs 001-005: 001 skeleton
   (plan M1-M2), 002 containment and daily start/stop, 003 host model plane are merged on its `main`;
   004 trust plane is on a branch; 005 is the next slot. Those specs, not this summary, are authoritative
