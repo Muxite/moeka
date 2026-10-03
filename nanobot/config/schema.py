@@ -107,6 +107,10 @@ class DreamConfig(Base):
         default=None,
         validation_alias=AliasChoices("modelOverride", "model", "model_override"),
     )  # Model preset name for Dream sessions
+    # Spec 010 FR-001: "pending" stages Dream's skill creates/merges in
+    # ``<workspace>/skills-pending/`` for ``nanobot capabilities accept``; "direct" writes
+    # ``skills/`` as before.
+    skill_writes: Literal["pending", "direct"] = "pending"
 
     def build_schedule(self, timezone: str) -> CronSchedule:
         """Build the runtime schedule, preferring the legacy cron override if present."""
@@ -559,6 +563,9 @@ class CapabilitiesConfig(Base):
     """
 
     selection: Literal["all", "filtered"] = "all"
+    # Spec 010 FR-002: lint workspace skills at load. "warn" logs once per skill and finding
+    # code; "refuse" skips a skill with any finding; "off" does not lint.
+    lint: Literal["off", "warn", "refuse"] = "warn"
     top_k: int = Field(default=8, ge=1, le=64)
     ambient_types: list[str] = Field(default_factory=lambda: ["workspace"])
     allowed_effects: list[str] = Field(default_factory=lambda: list(_CAPABILITY_EFFECTS))

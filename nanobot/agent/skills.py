@@ -69,8 +69,13 @@ class SkillsLoader:
         allowed_skills: set[str] | None = None,
         inline_skills: list | None = None,
         env: CoreEnvironment | None = None,
+        lint_mode: str = "warn",
     ):
         self.workspace = workspace
+        # Spec 010 FR-002 (``capabilities.lint``): "warn" logs workspace-skill lint findings
+        # once per skill and code, "refuse" skips a skill with findings, "off" skips lint.
+        # ``skills-pending/`` (Dream's staging dir, FR-001) is never listed or loaded.
+        self.lint_mode = lint_mode
         # Host env: ``requires.env`` presence is ``env.credentials.resolve(name,
         # scope="skills")``; ``None`` keeps the legacy process-env check.
         self._env = env
@@ -87,6 +92,9 @@ class SkillsLoader:
         # FR-003 validation of workspace skills: path -> ((mtime_ns, size), problems).
         self._validation_cache: dict[str, tuple[tuple[int, int], list[str]]] = {}
         self._validation_warned: set[tuple[str, str]] = set()
+        # FR-002 lint of workspace skills: path -> ((mtime_ns, size), finding codes).
+        self._lint_cache: dict[str, tuple[tuple[int, int], list[str]]] = {}
+        self._lint_warned: set[tuple[str, str]] = set()
         for skill in inline_skills or []:
             name = self._inline_field(skill, "name")
             if name:
@@ -126,7 +134,10 @@ class SkillsLoader:
             name = skill_dir.name
             if skip_names is not None and name in skip_names:
                 continue
-            if source == "workspace" and not self._workspace_skill_valid(skill_file):
+            if source == "workspace" and not (
+                self._workspace_skill_valid(skill_file)
+                and self._workspace_skill_lint_ok(skill_file)
+            ):
                 continue
             entries.append({"name": name, "path": str(skill_file), "source": source})
         return entries
@@ -159,6 +170,46 @@ class SkillsLoader:
                 "Skipping workspace skill '{}': {} ({})", warning[0], warning[1], skill_file,
             )
         return False
+
+    def workspace_skill_lint_codes(self, skill_file: Path) -> list[str]:
+        """Spec 010 FR-002: the lint finding codes of one workspace ``SKILL.md`` (cached)."""
+        from nanobot.capabilities.lint import finding_codes, lint_file
+
+        try:
+            stat = skill_file.stat()
+        except OSError:
+            return []
+        key = str(skill_file)
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = self._lint_cache.get(key)
+        if cached is None or cached[0] != stamp:
+            cached = (stamp, finding_codes(lint_file(skill_file)))
+            self._lint_cache[key] = cached
+        return cached[1]
+
+    def _workspace_skill_lint_ok(self, skill_file: Path) -> bool:
+        """Apply ``capabilities.lint`` to a workspace skill; False means skip it."""
+        mode = self.lint_mode
+        if mode not in ("warn", "refuse"):
+            return True
+        codes = self.workspace_skill_lint_codes(skill_file)
+        if not codes:
+            return True
+        name = skill_file.parent.name
+        for code in codes:
+            if (name, code) in self._lint_warned:
+                continue
+            self._lint_warned.add((name, code))
+            if mode == "refuse":
+                logger.warning(
+                    "Skipping workspace skill '{}': lint finding {} ({})", name, code, skill_file,
+                )
+            else:
+                logger.warning(
+                    "Workspace skill '{}' has lint finding {} ({}); set capabilities.lint="
+                    "\"refuse\" to skip such skills", name, code, skill_file,
+                )
+        return mode != "refuse"
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """

@@ -34,7 +34,8 @@ Create a skill only when a workflow has appeared at least twice, has concrete re
 - Check the available skill descriptions first; merge new details into an overlapping skill while preserving its useful content.
 - Move reusable operational details out of profile/memory files into the skill, then remove the source copy.
 - Follow `{{ skill_creator_path }}` for format: YAML frontmatter with name and description, under 2000 words, covering when to use it, steps, output format, and an example.
-
+{% if skill_writes_pending %}- Skill writes are staged for owner review: address skills as `skills/<name>/SKILL.md` as usual, but every create or edit there lands in `skills-pending/<name>/` and the live `skills/` directory is not changed. Reading `skills/<name>/` shows your staged copy when one exists. A staged skill is used only after the owner accepts it, and a skill that teaches getting around a command allowlist, deny pattern, sandbox or other guard is rejected.
+{% endif %}
 ## Editing and verification
 
 Use the supplied file tools to read current target files, make focused edits, and verify the results. Create missing canonical files as needed; batch related changes.
