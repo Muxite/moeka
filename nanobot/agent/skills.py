@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import yaml
+from loguru import logger
 
 from nanobot.runtime_context import RuntimeContextBlock
 
@@ -83,6 +84,9 @@ class SkillsLoader:
         # description/metadata), keyed by name. Shadow workspace and builtin
         # skills of the same name.
         self.inline_skills: dict[str, object] = {}
+        # FR-003 validation of workspace skills: path -> ((mtime_ns, size), problems).
+        self._validation_cache: dict[str, tuple[tuple[int, int], list[str]]] = {}
+        self._validation_warned: set[tuple[str, str]] = set()
         for skill in inline_skills or []:
             name = self._inline_field(skill, "name")
             if name:
@@ -122,8 +126,39 @@ class SkillsLoader:
             name = skill_dir.name
             if skip_names is not None and name in skip_names:
                 continue
+            if source == "workspace" and not self._workspace_skill_valid(skill_file):
+                continue
             entries.append({"name": name, "path": str(skill_file), "source": source})
         return entries
+
+    def _workspace_skill_valid(self, skill_file: Path) -> bool:
+        """Spec 011 FR-003: a workspace skill must pass ``validate_skill`` to be listed.
+
+        Results are cached per file (mtime, size), so the many ``list_skills`` calls of
+        one prompt build read each SKILL.md once. One warning per skill and problem.
+        """
+        from nanobot.capabilities.manifest import validate_skill
+
+        try:
+            stat = skill_file.stat()
+        except OSError:
+            return False
+        key = str(skill_file)
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = self._validation_cache.get(key)
+        if cached is None or cached[0] != stamp:
+            cached = (stamp, validate_skill(skill_file))
+            self._validation_cache[key] = cached
+        problems = cached[1]
+        if not problems:
+            return True
+        warning = (skill_file.parent.name, problems[0])
+        if warning not in self._validation_warned:
+            self._validation_warned.add(warning)
+            logger.warning(
+                "Skipping workspace skill '{}': {} ({})", warning[0], warning[1], skill_file,
+            )
+        return False
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """

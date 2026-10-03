@@ -92,8 +92,8 @@ def test_subagent_prompt_keeps_agent_paths_for_selected_project(tmp_path):
     project_skill = project / "skills" / "project-custom" / "SKILL.md"
     global_skill.parent.mkdir(parents=True)
     project_skill.parent.mkdir(parents=True)
-    global_skill.write_text("---\ndescription: global skill\n---\nGlobal", encoding="utf-8")
-    project_skill.write_text("---\ndescription: project skill\n---\nProject", encoding="utf-8")
+    global_skill.write_text("---\nname: global-custom\ndescription: global skill\n---\nGlobal", encoding="utf-8")
+    project_skill.write_text("---\nname: project-custom\ndescription: project skill\n---\nProject", encoding="utf-8")
     manager = SubagentManager(
         workspace=agent_workspace,
         bus=MessageBus(),
@@ -114,7 +114,7 @@ def test_subagent_prompt_keeps_agent_paths_for_selected_project(tmp_path):
 def test_subagent_prompt_uses_relative_paths_in_agent_workspace(tmp_path):
     skill = tmp_path / "skills" / "custom" / "SKILL.md"
     skill.parent.mkdir(parents=True)
-    skill.write_text("---\ndescription: custom skill\n---\nCustom", encoding="utf-8")
+    skill.write_text("---\nname: custom\ndescription: custom skill\n---\nCustom", encoding="utf-8")
     manager = SubagentManager(
         workspace=tmp_path,
         bus=MessageBus(),
