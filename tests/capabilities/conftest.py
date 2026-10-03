@@ -13,3 +13,18 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if item.get_closest_marker("bench") is not None:
             item.add_marker(skip)
+
+
+@pytest.fixture
+def caplog_warnings():
+    """Loguru messages at WARNING and above emitted during the test."""
+    from loguru import logger
+
+    records: list[str] = []
+    handler = logger.add(lambda message: records.append(str(message.record["message"])),
+                         level="WARNING", format="{message}")
+    yield records
+    try:
+        logger.remove(handler)
+    except ValueError:
+        pass

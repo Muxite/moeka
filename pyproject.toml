@@ -50,6 +50,8 @@ dependencies = [
     "dulwich>=0.22.0,<1.0.0",
     "rapidfuzz>=3.14.6,<4.0.0",
     "pyyaml>=6.0,<7.0.0",
+    # Spec 012: Ed25519 verification of capability certificates (public keys only).
+    "cryptography>=44.0.0",
     "filelock>=3.25.2",
     "watchfiles>=1.1.1,<2.0.0",
     "packaging>=24.0",
@@ -85,6 +87,8 @@ core = [
     "dulwich>=0.22.0,<1.0.0",
     "chardet>=3.0.2,<6.0.0",
     "pyyaml>=6.0,<7.0.0",
+    # Spec 012: Ed25519 verification of capability certificates (public keys only).
+    "cryptography>=44.0.0",
     # document ingestion (core.ingest); drop if RAG over files is not needed:
     "pypdf>=5.0.0,<6.0.0",
     "python-docx>=1.1.0,<2.0.0",

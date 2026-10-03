@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moeka.dev/schemas/capability-cert.v1.schema.json",
+  "title": "moeka capability certificate (moeka.capcert.v1)",
+  "description": "The object in CERT.json's \"cert\" field (spec 012 FR-001). CERT.json's \"sig\" is the base64 Ed25519 signature over the canonical JSON of this object; moeka only verifies it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "kind", "name", "bundle_sha256", "io", "scores", "lineage", "verifier",
+    "issued_at", "key_id", "scope"
+  ],
+  "properties": {
+    "schema": {"const": "moeka.capcert.v1"},
+    "kind": {"enum": ["skill", "script-tool"]},
+    "name": {
+      "description": "The bundle's directory name (skill naming rule).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^(?!.*--)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+    },
+    "bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "io": {
+      "description": "The normalised IOSpec (spec 011): every list sorted and unique.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputs_all", "inputs_any", "outputs", "effects"],
+      "properties": {
+        "inputs_all": {"$ref": "#/$defs/strings"},
+        "inputs_any": {"$ref": "#/$defs/strings"},
+        "outputs": {"$ref": "#/$defs/strings"},
+        "effects": {"$ref": "#/$defs/strings"}
+      }
+    },
+    "scores": {
+      "description": "Free-form verifier scores: every value a number.",
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent"],
+      "properties": {
+        "parent": {
+          "description": "The parent certificate's cert id, or null.",
+          "anyOf": [{"type": "string", "pattern": "^[0-9a-f]{16}$"}, {"type": "null"}]
+        }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "suite"],
+      "properties": {
+        "version": {"type": "string"},
+        "suite": {"type": "string"}
+      }
+    },
+    "issued_at": {
+      "description": "RFC 3339 timestamp in UTC (Z or +00:00).",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$"
+    },
+    "key_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+    "scope": {
+      "description": "capabilities = a loadable capability; kernel = a kernel-scope patch cert from the RSI loop, never loadable as a capability.",
+      "enum": ["capabilities", "kernel"]
+    }
+  },
+  "$defs": {
+    "strings": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  }
+}
