@@ -189,6 +189,10 @@ def agent(
     except ValueError as exc:
         _print_agent_start_error(exc)
         raise typer.Exit(1) from exc
+    # Spec 010 FR-004: fail startup (exit 2) if a host tool is missing.
+    from nanobot.cli.host_tools_guard import require_host_tools
+
+    require_host_tools(agent_loop, runtime_config, entry="nanobot agent")
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
         cli_terminal._print_agent_response(

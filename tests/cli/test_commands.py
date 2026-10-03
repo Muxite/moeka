@@ -14,7 +14,6 @@ import pytest
 from typer.testing import CliRunner
 
 from nanobot.agent.memory import MemoryStore
-from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.turn_delivery import TurnDeliveryFactory
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -80,10 +79,16 @@ class _StopGatewayError(RuntimeError):
     pass
 
 
+class _HostTools(dict):
+    """A fake loop's tool map that reports the host tools (spec 010 FR-004 startup check)."""
+
+    tool_names = ["message", "cron", "run_cli_app"]
+
+
 class _GatewayAgentContractStub:
     """Minimal stable AgentLoop surface required by gateway assembly tests."""
 
-    tools = ToolRegistry()
+    tools = _HostTools()
 
     @staticmethod
     def mcp_runtime_status() -> dict[str, str]:
@@ -1554,6 +1559,7 @@ def mock_agent_runtime(tmp_path):
          patch("nanobot.cli.agent.AgentLoop.from_config") as mock_from_config:
         agent_loop = MagicMock()
         agent_loop.channels_config = None
+        agent_loop.tools.tool_names = ["message", "cron", "run_cli_app"]
         agent_loop.process_direct = AsyncMock(
             return_value=OutboundMessage(channel="cli", chat_id="direct", content="mock-response"),
         )
@@ -1635,6 +1641,8 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("nanobot.cron.service.CronService", lambda _store: object())
 
     class _FakeAgentLoop:
+        # Spec 010 FR-004: entry points check the host tools after construction.
+        tools = SimpleNamespace(tool_names=["message", "cron", "run_cli_app"])
         @classmethod
         def from_config(cls, config, bus=None, **extra):
             return cls(**extra)
@@ -1676,6 +1684,8 @@ def test_agent_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: Pa
             seen["cron_store"] = store_path
 
     class _FakeAgentLoop:
+        # Spec 010 FR-004: entry points check the host tools after construction.
+        tools = SimpleNamespace(tool_names=["message", "cron", "run_cli_app"])
         @classmethod
         def from_config(cls, config, bus=None, **extra):
             return cls(**extra)
@@ -1726,6 +1736,8 @@ def test_agent_workspace_override_does_not_migrate_legacy_cron(
             seen["cron_store"] = store_path
 
     class _FakeAgentLoop:
+        # Spec 010 FR-004: entry points check the host tools after construction.
+        tools = SimpleNamespace(tool_names=["message", "cron", "run_cli_app"])
         @classmethod
         def from_config(cls, config, bus=None, **extra):
             return cls(**extra)
@@ -1782,6 +1794,8 @@ def test_agent_custom_config_workspace_does_not_migrate_legacy_cron(
             seen["cron_store"] = store_path
 
     class _FakeAgentLoop:
+        # Spec 010 FR-004: entry points check the host tools after construction.
+        tools = SimpleNamespace(tool_names=["message", "cron", "run_cli_app"])
         @classmethod
         def from_config(cls, config, bus=None, **extra):
             return cls(**extra)
@@ -2152,7 +2166,7 @@ def test_heartbeat_empty_response_is_not_evaluated(
             self.model = "test-model"
             self.provider = kwargs.get("provider", object())
             self.sessions = kwargs["session_manager"]
-            self.tools = {}
+            self.tools = _HostTools()
 
         async def process_direct(self, *_args, **_kwargs):
             return SimpleNamespace(content="")
@@ -2921,6 +2935,8 @@ def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -
             self.on_cleanup: list[object] = []
 
     class _FakeAgentLoop:
+        # Spec 010 FR-004: entry points check the host tools after construction.
+        tools = SimpleNamespace(tool_names=["message", "cron", "run_cli_app"])
         @classmethod
         def from_config(cls, config, bus=None, **extra):
             return cls(workspace=config.workspace_path, **extra)
@@ -3093,7 +3109,7 @@ def test_gateway_unbound_agent_cron_is_skipped(
         def __init__(self, *args, **kwargs) -> None:
             self.model = "test-model"
             self.provider = kwargs.get("provider", object())
-            self.tools = {}
+            self.tools = _HostTools()
             seen["agent"] = self
 
         async def process_direct(self, *_args, **_kwargs):
@@ -3210,7 +3226,7 @@ def test_gateway_bound_cron_runs_as_session_turn(
         def __init__(self, *args, **kwargs) -> None:
             self.model = "test-model"
             self.provider = kwargs.get("provider", object())
-            self.tools = {}
+            self.tools = _HostTools()
             seen["agent"] = self
 
         async def submit_cron_turn(self, msg: InboundMessage):
@@ -3440,7 +3456,7 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
         def __init__(self, *args, **kwargs) -> None:
             self.model = "test-model"
             self.provider = _fake_provider()
-            self.tools = {}
+            self.tools = _HostTools()
             self.context = _FakeContext()
             self.sessions = kwargs["session_manager"]
             self.submit_local_trigger_turn = AsyncMock()

@@ -392,10 +392,16 @@ def serve(
     session_manager = build_default_session_manager(runtime_config.workspace_path)
     tools = ToolRegistry()
     mcp_provider = MCPProvider.from_config(runtime_config, tools)
+    # Like the CLI agent: the ``cron`` tool writes the workspace job store, which the
+    # gateway's scheduler runs (spec 010 FR-004 requires the tool on every host loop).
+    from nanobot.cron.service import CronService
+
+    cron = CronService(runtime_config.workspace_path / "cron" / "jobs.json")
     try:
         agent_loop = AgentLoop.from_config(
             runtime_config, bus,
             session_manager=session_manager,
+            cron_service=cron,
             host_tools=True,
             image_generation_provider_configs=image_gen_provider_configs(runtime_config),
             hook_factories=[create_file_edit_activity_hook],
@@ -404,6 +410,10 @@ def serve(
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
+    # Spec 010 FR-004: fail startup (exit 2) if a host tool is missing.
+    from nanobot.cli.host_tools_guard import require_host_tools
+
+    require_host_tools(agent_loop, runtime_config, entry="nanobot serve")
 
     model_name, preset_tag = _model_display(runtime_config)
     console.print(f"{__logo__} Starting OpenAI-compatible API server")

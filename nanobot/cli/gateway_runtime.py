@@ -498,6 +498,10 @@ def _run_gateway(
         tool_registry=tools,
         recovery_admission=recovery,
     )
+    # Spec 010 FR-004: fail startup (exit 2) if a host tool is missing.
+    from nanobot.cli.host_tools_guard import require_host_tools
+
+    require_host_tools(agent, config, entry="nanobot gateway")
     def _schedule_webui_background(awaitable: Awaitable[None]) -> None:
         agent.schedule_background(cast(Coroutine[Any, Any, None], awaitable))
 

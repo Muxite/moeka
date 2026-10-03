@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -53,6 +54,8 @@ def test_interactive_agent_routes_a_complete_user_turn(
             return None
 
     class _AgentLoop:
+        # Spec 010 FR-004: entry points check the host tools after construction.
+        tools = SimpleNamespace(tool_names=["message", "cron", "run_cli_app"])
         channels_config = None
 
         @classmethod
