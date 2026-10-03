@@ -397,6 +397,7 @@ class Kernel:
                         embedding_model=vec.embedding_model,
                         log_retrievals=vec.log_retrievals and not self._read_only,
                         read_only=self._read_only,
+                        usage_data_dir=self._env.paths.data_dir,
                     )
                 registry = self._memory_registry
         return registry

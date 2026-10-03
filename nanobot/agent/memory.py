@@ -154,6 +154,9 @@ class MemoryStore:
         self._malformed_entry_logged = False  # rate-limit bad history shape warning
         self._oversize_logged = False  # rate-limit oversized-entry warning
         self._dream_prompt_oversize_logged = False
+        # Spec 010 FR-001 (``dream.skill_writes``): "pending" stages Dream's skill writes in
+        # ``<workspace>/skills-pending/``; "direct" writes ``skills/``. Set by AgentLoop.
+        self.dream_skill_writes = "pending"
         self._append_lock = threading.Lock()  # serialize cursor allocation + append
         self._git = GitStore(workspace, tracked_files=[
             "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/.dream_cursor",
@@ -686,13 +689,14 @@ class MemoryStore:
         return has_workspace_prompt_override(self.dream_prompt_file)
 
     @staticmethod
-    def default_dream_prompt() -> str:
+    def default_dream_prompt(skill_writes: str = "pending") -> str:
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 
         return render_template(
             "agent/dream.md",
             strip=True,
             skill_creator_path=str(BUILTIN_SKILLS_DIR / "skill-creator" / "SKILL.md"),
+            skill_writes_pending=skill_writes != "direct",
         )
 
     def _dream_template(self) -> str:
@@ -709,7 +713,7 @@ class MemoryStore:
                     WORKSPACE_PROMPT_MAX_CHARS, original_chars,
                 )
             return text
-        return self.default_dream_prompt()
+        return self.default_dream_prompt(self.dream_skill_writes)
 
     def build_dream_prompt(self, *, max_entries: int = 20) -> tuple[str, int] | None:
         """Build the Dream prompt with unprocessed history context.
@@ -743,8 +747,12 @@ class MemoryStore:
             return ""
         return self._git.summarize_working_tree(list(self._DREAM_CONTENT_PATHS))
 
-    def build_dream_tools(self) -> ToolRegistry:
-        """Build the restricted tool registry used by Dream runs."""
+    def build_dream_tools(self, *, skill_writes: str | None = None) -> ToolRegistry:
+        """Build the restricted tool registry used by Dream runs.
+
+        *skill_writes* (default ``self.dream_skill_writes``): ``"pending"`` maps writes to
+        ``skills/<name>/`` into ``skills-pending/<name>/`` (spec 010 FR-001).
+        """
         from nanobot.agent.plugins import plugin_data_root
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
         from nanobot.agent.tools.apply_patch import ApplyPatchTool
@@ -766,33 +774,55 @@ class MemoryStore:
 
         extra_read = [BUILTIN_SKILLS_DIR] if BUILTIN_SKILLS_DIR.exists() else None
         editable_files = [self.memory_file, self.soul_file, self.user_file]
+        mode = skill_writes or self.dream_skill_writes
+        read_cls: Any = ReadFileTool
+        edit_cls: Any = EditFileTool
+        patch_cls: Any = ApplyPatchTool
+        write_cls: Any = WriteFileTool
+        staging: dict[str, Any] = {}
+        if mode != "direct":
+            from nanobot.agent.dream_tools import (
+                PendingApplyPatchTool,
+                PendingEditFileTool,
+                PendingReadFileTool,
+                PendingWriteFileTool,
+            )
+            from nanobot.capabilities.pending import pending_dir
 
-        tools.register(ReadFileTool(
+            read_cls, edit_cls = PendingReadFileTool, PendingEditFileTool
+            patch_cls, write_cls = PendingApplyPatchTool, PendingWriteFileTool
+            staging = {"skills_root": skills_dir, "pending_root": pending_dir(workspace)}
+
+        tools.register(read_cls(
             workspace=workspace,
             allowed_dir=workspace,
             extra_read_allowed_dirs=extra_read,
             file_states=file_states,
+            **staging,
             **host,
         ))
-        tools.register(EditFileTool(
+        tools.register(edit_cls(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            **staging,
             **host,
         ))
-        tools.register(ApplyPatchTool(
+        tools.register(patch_cls(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            **staging,
             **host,
         ))
-        tools.register(WriteFileTool(
+        tools.register(write_cls(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            **staging,
             **host,
         ))
         return tools

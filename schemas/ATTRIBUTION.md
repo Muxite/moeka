@@ -185,10 +185,13 @@ payload is capped at 8000 characters and is slimmed, never cut mid-JSON.
 ## Not covered (U9 does not hold here)
 
 Everything that reaches a model through an `LLMProvider` is metered, attributed and budget-gated (the
-observer lives in the provider base class). Three paths do not, and a test pins the list so a new one
-fails the build: `providers/image_generation.py` (billed image generation),
-`providers/transcription.py` (billed speech to text), `core/vec_store.py` (the local embedder: tokens
-computed, no money). Their spend is in no record and no budget. A provider called from a plain thread
+observer lives in the provider base class). Three paths call a model without one:
+`providers/image_generation.py` (billed image generation), `providers/transcription.py` (billed speech
+to text) and `core/vec_store.py` (embedding). Since spec 010 (FR-003) each of their calls writes one
+usage row through `nanobot.llm_usage.side_calls.record_side_call` (`purpose` `image`, `transcription`
+or `embedding`, provider, model, `key_fp`; the local embedder is `tier="local"`, cost 0), fail-open.
+They are still NOT budget-gated and carry no attribution beyond `source`; a test pins the module list
+so a new unmetered path fails the build. A provider called from a plain thread
 loses the ambient `bind_attribution` (context variables do not cross threads: use
 `contextvars.copy_context().run`), but keeps the kernel's `consumer`, so it is never `unattributed`;
 `kernel.usage.loss()["unattributed_requests"]` counts the rest.

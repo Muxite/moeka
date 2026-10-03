@@ -57,7 +57,13 @@ Moeka-specific deviations from upstream nanobot:
   host and load normally (the slim-era "retired sections" stripping was removed in the consolidation). Kernel-only
   hosts simply never set them.
 - **Dream** — callable directly (`nanobot/agent/dream.py:run_dream()`, `AgentLoop.run_dream()`); the gateway also
-  schedules it as a cron system job (`DreamConfig.build_schedule`, `nanobot/cli/gateway_runtime.py`).
+  schedules it as a cron system job (`DreamConfig.build_schedule`, `nanobot/cli/gateway_runtime.py`). Spec 010:
+  its skill writes are staged in `<workspace>/skills-pending/` (`dream.skillWrites`, default `pending`;
+  `nanobot/agent/dream_tools.py` maps `skills/<name>/` there) until `nanobot capabilities accept|reject`;
+  workspace skills are linted at load (`capabilities.lint`, default `warn`; `nanobot/capabilities/lint.py`).
+- **Host tools guard (spec 010)** — gateway, `serve` and CLI agent exit 2 at startup if `message`, `cron` or
+  `run_cli_app` is missing (`nanobot/cli/host_tools_guard.py`); `serve` has no cron service, so it checks only
+  `message` and `run_cli_app`.
 - **Dispatcher watchdog** — `ChannelManager._dispatch_with_watchdog` auto-restarts the outbound dispatcher on crashes.
 - **`nanobot channels enable/disable <name>` CLI** — atomic config flip, defined in `nanobot/cli/commands.py`.
 - **Telegram `drop_pending_updates` defaults to True** to avoid stale floods on restart.

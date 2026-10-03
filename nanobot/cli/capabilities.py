@@ -1,10 +1,14 @@
-"""``nanobot capabilities list|explain|validate|verify|hash`` (specs 011 FR-013, 012 FR-012).
+"""``nanobot capabilities list|explain|validate|verify|hash|lint|pending|accept|reject``
+(specs 011 FR-013, 012 FR-012, 010 FR-001/FR-002).
 
-Read-only inspection of the typed capability library of the active instance
-(``--workspace`` / ``--config`` honoured). Nothing here calls a model or writes the
+Inspection of the typed capability library of the active instance (spec 011 FR-013;
+``--workspace`` / ``--config`` honoured). Nothing here calls a model or writes the
 instance's capability index: ``explain`` selects over an in-memory index built from
 the live skill and tool lists. ``verify`` checks one bundle's certificate against the
 trust store (public keys only: moeka never signs); ``hash`` prints a bundle hash.
+Spec 010 adds ``lint`` (FR-002) and the review of Dream's staged skills (FR-001):
+``pending`` lists them, ``accept`` and ``reject`` move one; those two are the only
+commands here that write (inside the workspace).
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ def _library(config: Config) -> tuple[Any, list[Any]]:
             set(defaults.allowed_skills) if defaults.allowed_skills is not None else None
         ),
         capabilities=config.capabilities,
+        lint_mode=config.capabilities.lint,
     )
     registry = ToolRegistry()
     # Tools that need a live loop (spawn, goals, ...) fail to build here; that is
@@ -78,14 +83,36 @@ def _library(config: Config) -> tuple[Any, list[Any]]:
 
 
 def _entries(config: Config) -> list[Any]:
+    return _entries_and_lint(config)[0]
+
+
+def _entries_and_lint(config: Config) -> tuple[list[Any], dict[str, list[str]]]:
+    """Index entries plus each listed workspace skill's lint codes (spec 010 FR-002)."""
     from nanobot.capabilities.library import skill_entries, tool_entries
 
     loader, tools = _library(config)
-    return skill_entries(loader) + tool_entries(tools)
+    return skill_entries(loader) + tool_entries(tools), _skill_lint(loader, config)
+
+
+def _skill_lint(loader: Any, config: Config) -> dict[str, list[str]]:
+    """Each listed workspace skill's lint codes (spec 010 FR-002); empty when lint is off."""
+    lint: dict[str, list[str]] = {}
+    if config.capabilities.lint != "off":
+        for item in loader.list_skills(filter_unavailable=False):
+            if item.get("source") == "workspace":
+                codes = loader.workspace_skill_lint_codes(Path(item["path"]))
+                if codes:
+                    lint[item["name"]] = codes
+    return lint
+
+
+def _lint_text(codes: list[str] | None) -> str:
+    return "lint:" + ",".join(codes) if codes else "-"
 
 
 def _list_rows(config: Config) -> list[dict[str, Any]]:
-    """Every capability with its provenance status (spec 012 FR-006).
+    """Every capability with its lint codes (spec 010 FR-002) and provenance status
+    (spec 012 FR-006).
 
     The live entries first, then every workspace bundle that did not load: skills
     refused by the certificate gate and script tools that are refused, invalid or not
@@ -97,6 +124,7 @@ def _list_rows(config: Config) -> list[dict[str, Any]]:
 
     loader, tools = _library(config)
     entries = skill_entries(loader) + tool_entries(tools)
+    lint = _skill_lint(loader, config)
     rows = [
         {
             "kind": entry.kind,
@@ -105,6 +133,7 @@ def _list_rows(config: Config) -> list[dict[str, Any]]:
             "io": entry.io.to_dict() if entry.io is not None else "untyped",
             "available": entry.available,
             "content_sha256": entry.content_sha256[:12],
+            "lint": lint.get(entry.name, []) if entry.kind == "skill" else [],
             "cert_id": entry.cert_id,
             "cert_status": entry.cert_status,
         }
@@ -114,8 +143,11 @@ def _list_rows(config: Config) -> list[dict[str, Any]]:
     for name, bundle, provenance in loader.workspace_bundle_provenance():
         if ("skill", name) in present:
             continue
-        rows.append(_bundle_row("skill", name, bundle / "SKILL.md", provenance.cert_id,
-                                provenance.status, _skill_io(bundle)))
+        row = _bundle_row("skill", name, bundle / "SKILL.md", provenance.cert_id,
+                          provenance.status, _skill_io(bundle))
+        if config.capabilities.lint != "off":
+            row["lint"] = loader.workspace_skill_lint_codes(bundle / "SKILL.md")
+        rows.append(row)
     enforce, trust_dirs = capabilities_settings(config.capabilities)
     gate = CertGate(enforce=enforce, trust_dirs=trust_dirs)
     for bundle in scan_script_bundles(config.workspace_path, gate):
@@ -157,6 +189,7 @@ def _bundle_row(
         "io": io,
         "available": False,
         "content_sha256": sha[:12],
+        "lint": [],
         "cert_id": cert_id,
         "cert_status": status,
     }
@@ -181,8 +214,12 @@ def capabilities_list(
     config: str | None = _CONFIG_OPTION,
     workspace: str | None = _WORKSPACE_OPTION,
 ) -> None:
-    """Print every capability: kind, name, io (or untyped), available, sha256 prefix and
-    provenance status (certified, uncertified, refused:<reason> or builtin)."""
+    """Print every capability: kind, name, io (or untyped), available, sha256 prefix, lint
+    and provenance status (certified, uncertified, refused:<reason> or builtin).
+
+    The lint column is ``lint:<codes>`` for a workspace skill with lint findings
+    (``capabilities.lint`` warn mode; spec 010 FR-002), else ``-``.
+    """
     from nanobot.capabilities.manifest import parse_io
 
     rows = _list_rows(_load(config, workspace))
@@ -194,7 +231,7 @@ def capabilities_list(
         io = None if row["io"] == "untyped" else parse_io(row["io"])
         typer.echo(
             f"{row['kind']}\t{row['name']}\t{_io_text(io)}\t{available}\t"
-            f"{row['content_sha256']}\t{row['cert_status']}"
+            f"{row['content_sha256']}\t{_lint_text(row['lint'])}\t{row['cert_status']}"
         )
 
 
@@ -309,3 +346,118 @@ def capabilities_hash(
     except BundleError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+
+@capabilities_app.command("lint")
+def capabilities_lint(
+    path: str | None = typer.Argument(
+        None, help="A skill file or a directory of skills (default: the workspace skills)",
+    ),
+    config: str | None = _CONFIG_OPTION,
+    workspace: str | None = _WORKSPACE_OPTION,
+) -> None:
+    """Lint skill text (spec 010 FR-002); print each finding and exit 1 if there is any."""
+    from nanobot.capabilities.lint import lint_file
+
+    if path is not None:
+        root = Path(path).expanduser()
+        if not root.exists():
+            typer.echo(f"Error: {root} does not exist", err=True)
+            raise typer.Exit(2)
+    else:
+        root = _load(config, workspace).workspace_path / "skills"
+    if root.is_file():
+        files = [root]
+    elif root.is_dir():
+        files = sorted(root.rglob("SKILL.md"))
+    else:
+        files = []
+    total = 0
+    for file in files:
+        for finding in lint_file(file):
+            total += 1
+            typer.echo(f"{file}:{finding.line}: {finding.code}: {finding.excerpt}")
+    if total:
+        typer.echo(f"{total} lint finding(s) in {len(files)} file(s)")
+        raise typer.Exit(1)
+    typer.echo(f"no lint findings in {len(files)} file(s)")
+
+
+def _workspace(config: str | None, workspace: str | None) -> Path:
+    return _load(config, workspace).workspace_path
+
+
+@capabilities_app.command("pending")
+def capabilities_pending(
+    as_json: bool = typer.Option(False, "--json", help="Print JSON"),
+    config: str | None = _CONFIG_OPTION,
+    workspace: str | None = _WORKSPACE_OPTION,
+) -> None:
+    """List Dream's staged skills (skills-pending/) with validation and lint results."""
+    from nanobot.capabilities.pending import list_pending
+
+    pending = list_pending(_workspace(config, workspace))
+    if as_json:
+        typer.echo(json.dumps([
+            {
+                "name": skill.name,
+                "path": str(skill.path),
+                "valid": not skill.problems,
+                "problems": skill.problems,
+                "lint": skill.lint_codes,
+                "findings": [
+                    {"code": f.code, "line": f.line, "excerpt": f.excerpt}
+                    for f in skill.findings
+                ],
+                "replaces": skill.replaces,
+            }
+            for skill in pending
+        ], indent=2, ensure_ascii=False))
+        return
+    if not pending:
+        typer.echo("no pending skills")
+        return
+    for skill in pending:
+        valid = "valid" if not skill.problems else "invalid: " + "; ".join(skill.problems)
+        action = "replaces" if skill.replaces else "new"
+        typer.echo(f"{skill.name}\t{action}\t{valid}\t{_lint_text(skill.lint_codes)}")
+        for finding in skill.findings:
+            typer.echo(f"  line {finding.line}: {finding.code}: {finding.excerpt}")
+
+
+@capabilities_app.command("accept")
+def capabilities_accept(
+    name: str = typer.Argument(..., help="The pending skill's name"),
+    force_lint: bool = typer.Option(
+        False, "--force-lint", help="Accept despite lint findings (validation still applies)",
+    ),
+    config: str | None = _CONFIG_OPTION,
+    workspace: str | None = _WORKSPACE_OPTION,
+) -> None:
+    """Move a pending skill into skills/ if it validates and lints clean; exit 1 otherwise."""
+    from nanobot.capabilities.pending import PendingError, accept_pending
+
+    try:
+        skill = accept_pending(_workspace(config, workspace), name, force_lint=force_lint)
+    except PendingError as exc:
+        typer.echo(f"Not accepted: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    note = " (lint findings accepted: " + ",".join(skill.lint_codes) + ")" if skill.findings else ""
+    typer.echo(f"accepted {skill.name}{note}")
+
+
+@capabilities_app.command("reject")
+def capabilities_reject(
+    name: str = typer.Argument(..., help="The pending skill's name"),
+    config: str | None = _CONFIG_OPTION,
+    workspace: str | None = _WORKSPACE_OPTION,
+) -> None:
+    """Move a pending skill to skills-rejected/<date>/."""
+    from nanobot.capabilities.pending import PendingError, reject_pending
+
+    try:
+        target = reject_pending(_workspace(config, workspace), name)
+    except PendingError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"rejected {name} -> {target}")

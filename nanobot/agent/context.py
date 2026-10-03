@@ -160,6 +160,8 @@ class ContextBuilder:
         self._capabilities_config: CapabilitiesConfig | None = None
         self._capability_index: CapabilityIndex | None = None
         self._capabilities_degraded = False
+        # Spec 010 FR-002: workspace skills are linted at load per ``capabilities.lint``.
+        self.skills.lint_mode = self.capabilities_config.lint
         # Set by AgentLoop: the live tool registry (indexed next to the skills) and the
         # extra ambient types of a host loop (``("host",)`` for the gateway/CLI).
         self.tool_registry: ToolRegistry | None = None

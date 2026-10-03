@@ -441,7 +441,7 @@ async def test_dream_scoped_writes_still_work(
     store.write_memory("# Memory\nProject X active\n")
     store.write_soul("# Soul\n")
     store.write_user("# User\n")
-    tools = store.build_dream_tools()
+    tools = store.build_dream_tools(skill_writes="direct")
 
     memory = await tools.execute("write_file", {
         "path": "memory/MEMORY.md", "content": "# Memory\nProject Y active\n",

@@ -688,6 +688,8 @@ class SubagentManager:
             disabled_skills=self.disabled_skills,
             inline_skills=self.inline_skills,
             env=self.env,
+            capabilities=getattr(self, "skills_capabilities", None),
+            lint_mode=getattr(self, "skills_lint_mode", "warn"),
         ).build_skills_summary(workspace=project_workspace)
         history_log = (
             str(agent_workspace / "memory" / "history.jsonl")

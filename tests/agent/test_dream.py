@@ -253,7 +253,7 @@ class TestDreamTools:
 
     @pytest.mark.asyncio
     async def test_dream_can_write_workspace_skills(self, store):
-        tools = store.build_dream_tools()
+        tools = store.build_dream_tools(skill_writes="direct")
         target = store.workspace / "skills" / "demo" / "SKILL.md"
 
         result = await tools.execute(
@@ -269,7 +269,7 @@ class TestDreamTools:
 
     @pytest.mark.asyncio
     async def test_dream_tools_keep_internal_write_scope_under_full_access(self, store):
-        tools = store.build_dream_tools()
+        tools = store.build_dream_tools(skill_writes="direct")
         scope = default_workspace_scope(store.workspace, restrict_to_workspace=False)
         outside = store.workspace.parent / f"{store.workspace.name}-outside"
         outside.mkdir()

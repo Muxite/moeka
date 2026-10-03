@@ -333,6 +333,7 @@ class AgentLoop:
         preset_catalog_loader: preset_helpers.PresetCatalogLoader | None = None,
         model_preset: str | None = None,
         dream_model_preset: str | None = None,
+        dream_skill_writes: str = "pending",
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
         turn_delivery_factory: TurnDeliveryFactory | None = None,
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
@@ -477,6 +478,8 @@ class AgentLoop:
             inject_memory=inject_memory,
             capabilities=capabilities_config,
         )
+        # Spec 010 FR-001: where Dream's skill creates and merges land.
+        self.context.memory.dream_skill_writes = dream_skill_writes
         # Capability selection (spec 011): a host loop's tasks have the ``host`` ambient type.
         if host_tools:
             self.context.capability_ambient_extra = ("host",)
@@ -541,6 +544,10 @@ class AgentLoop:
             plugin_registry=plugin_registry,
             host_tools=host_tools,
         )
+        # Spec 010 FR-002: children list workspace skills under the same lint mode.
+        self.subagents.skills_lint_mode = self.context.skills.lint_mode
+        # Spec 012: and under the same certificate enforcement settings.
+        self.subagents.skills_capabilities = self.context.capabilities_config
         self._unified_session = unified_session
         self._running = False
         self._runtime_context_providers: list[RuntimeContextProvider] = []
@@ -690,6 +697,7 @@ class AgentLoop:
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             dream_model_preset=defaults.dream.model_override,
+            dream_skill_writes=defaults.dream.skill_writes,
             restart_mode=config.gateway.restart_mode,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,

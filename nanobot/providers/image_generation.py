@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextvars
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -277,13 +278,114 @@ def image_gen_provider_configs(config: Config) -> dict[str, ProviderConfig]:
 # ---------------------------------------------------------------------------
 
 
+def _image_usage(raw: object) -> tuple[int | None, int | None, float | None]:
+    """``(input_tokens, output_tokens, cost_usd)`` from a response's ``usage``, if any."""
+    usage = raw.get("usage") if isinstance(raw, dict) else None
+    if not isinstance(usage, dict):
+        return None, None, None
+
+    def count(*names: str) -> int | None:
+        for name in names:
+            value = usage.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return None
+
+    cost = usage.get("cost")
+    cost_usd = (
+        float(cost) if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0
+        else None
+    )
+    return (
+        count("prompt_tokens", "input_tokens"),
+        count("completion_tokens", "output_tokens"),
+        cost_usd,
+    )
+
+
+# Set while a metered ``generate`` runs in this task, so a nested ``super().generate``
+# (or a provider delegating to another one) records once.
+_IMAGE_METERING: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nanobot_image_metering", default=False,
+)
+
+
+def _metered_generate(generate: Any) -> Any:
+    """Wrap a provider's ``generate`` so each call writes one usage row (spec 010 FR-003).
+
+    Nested calls (a subclass calling ``super().generate``) record once, at the outermost
+    wrapper. A missing-key refusal made no call and records nothing. Fail-open.
+    """
+    import functools
+
+    @functools.wraps(generate)
+    async def wrapper(self: ImageGenerationProvider, *args: Any, **kwargs: Any) -> Any:
+        if _IMAGE_METERING.get():
+            return await generate(self, *args, **kwargs)
+        from nanobot.llm_usage.side_calls import now_ms, record_side_call
+
+        started = now_ms()
+        token = _IMAGE_METERING.set(True)
+        ok, result, error = False, None, None
+        try:
+            result = await generate(self, *args, **kwargs)
+            ok = True
+            return result
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            _IMAGE_METERING.reset(token)
+            refused = (
+                isinstance(error, ImageGenerationError)
+                and bool(self.missing_key_message)
+                and str(error) == self.missing_key_message
+            )
+            if not refused and not isinstance(error, asyncio.CancelledError):
+                tokens_in, tokens_out, cost = _image_usage(getattr(result, "raw", None))
+                images = getattr(result, "images", None)
+                record_side_call(
+                    "image",
+                    provider=self.provider_name or type(self).__name__,
+                    model=str(kwargs.get("model") or "unknown"),
+                    started_at_ms=started,
+                    duration_ms=now_ms() - started,
+                    ok=ok,
+                    key=self.api_key,
+                    input_tokens=tokens_in,
+                    output_tokens=tokens_out,
+                    units=len(images) if isinstance(images, list) else None,
+                    unit="images",
+                    cost_usd=cost,
+                    cost_billed=True if cost is not None else None,
+                    data_dir=self.usage_data_dir,
+                )
+
+    wrapper._metered = True  # type: ignore[attr-defined]
+    return wrapper
+
+
 class ImageGenerationProvider(ABC):
-    """Base class for image generation provider clients."""
+    """Base class for image generation provider clients.
+
+    Every concrete ``generate`` is metered (spec 010 FR-003): ``__init_subclass__`` wraps
+    it so each call adds one ``llm_usage`` row (purpose ``image``) under
+    ``usage_data_dir`` (``None`` = the legacy data dir).
+    """
 
     provider_name: str = ""
     model_options: tuple[str, ...] = ()
     missing_key_message: str = ""
     default_timeout: float = _DEFAULT_TIMEOUT_S
+    usage_data_dir: Path | None = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        generate = cls.__dict__.get("generate")
+        if generate is not None and not getattr(generate, "_metered", False) and not getattr(
+            generate, "__isabstractmethod__", False
+        ):
+            cls.generate = _metered_generate(generate)  # type: ignore[method-assign]
 
     def __init__(
         self,

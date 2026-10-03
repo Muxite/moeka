@@ -404,6 +404,11 @@ def serve(
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
+    # Spec 010 FR-004: fail startup (exit 2) if a host tool is missing. ``serve`` wires no
+    # cron service, so ``cron`` is not expected here.
+    from nanobot.cli.host_tools_guard import require_host_tools
+
+    require_host_tools(agent_loop, runtime_config, entry="nanobot serve", with_cron=False)
 
     model_name, preset_tag = _model_display(runtime_config)
     console.print(f"{__logo__} Starting OpenAI-compatible API server")
