@@ -68,6 +68,7 @@ from nanobot.cli.runtime_config import (  # noqa: E402
     _print_model_setup_steps,
     _provider_setup_error,
 )
+from nanobot.cli.usage import usage_app  # noqa: E402
 from nanobot.cli.webui import webui  # noqa: E402
 from nanobot.cli.webui_support import (  # noqa: E402
     _prepare_webui_bundle_for_gateway,
@@ -893,6 +894,13 @@ def status(
 # ============================================================================
 
 app.add_typer(provider_app, name="provider")
+
+
+# ============================================================================
+# Usage
+# ============================================================================
+
+app.add_typer(usage_app, name="usage")
 
 
 if __name__ == "__main__":
