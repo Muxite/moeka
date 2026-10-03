@@ -390,6 +390,7 @@ class MoekaCore:
             db_path,
             model_name=vec_config.embedding_model,
             log_retrievals=getattr(vec_config, "log_retrievals", False),
+            usage_data_dir=env.paths.data_dir if env is not None else None,
         )
 
     @classmethod

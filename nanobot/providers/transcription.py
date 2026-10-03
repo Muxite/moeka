@@ -7,6 +7,8 @@ provider and pass credentials; no config resolution happens here.
 
 import asyncio
 import base64
+import contextvars
+import functools
 import json
 import mimetypes
 from collections.abc import Callable
@@ -535,8 +537,80 @@ def _assemblyai_speech_models(model: str | None) -> list[str]:
     return [part for part in (part.strip() for part in (model or "").split(",")) if part]
 
 
-class AssemblyAITranscriptionProvider:
+class TranscriptionProvider:
+    """Base of the transcription adapters: every ``transcribe`` is metered (spec 010 FR-003).
+
+    ``__init_subclass__`` wraps a subclass's ``transcribe`` so each call that reaches the
+    provider adds one ``llm_usage`` row (purpose ``transcription``, the audio size in
+    ``tags.units``) under ``usage_data_dir`` (``None`` = the legacy data dir). A call that
+    returns early (no API key, missing file) made no request and records nothing; an empty
+    transcript counts as a failed call. Recording is fail-open.
+    """
+
+    provider_name: str = "transcription"
+    api_key: str | None = None
+    model: str = "unknown"
+    usage_data_dir: Path | None = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        transcribe = cls.__dict__.get("transcribe")
+        if transcribe is not None and not getattr(transcribe, "_metered", False):
+            cls.transcribe = _metered_transcribe(transcribe)  # type: ignore[method-assign]
+
+
+_TRANSCRIPTION_METERING: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nanobot_transcription_metering", default=False,
+)
+
+
+def _metered_transcribe(transcribe: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(transcribe)
+    async def wrapper(self: TranscriptionProvider, file_path: str | Path, *args: Any,
+                      **kwargs: Any) -> str:
+        path = Path(file_path)
+        if _TRANSCRIPTION_METERING.get() or not self.api_key or not path.exists():
+            return await transcribe(self, file_path, *args, **kwargs)
+        from nanobot.llm_usage.side_calls import now_ms, record_side_call
+
+        try:
+            size: int | None = path.stat().st_size
+        except OSError:
+            size = None
+        started = now_ms()
+        token = _TRANSCRIPTION_METERING.set(True)
+        text: str = ""
+        cancelled = False
+        try:
+            text = await transcribe(self, file_path, *args, **kwargs)
+            return text
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            _TRANSCRIPTION_METERING.reset(token)
+            if not cancelled:
+                record_side_call(
+                    "transcription",
+                    provider=self.provider_name,
+                    model=str(getattr(self, "model", None) or "unknown"),
+                    started_at_ms=started,
+                    duration_ms=now_ms() - started,
+                    ok=bool(text),
+                    key=self.api_key,
+                    units=size,
+                    unit="audio_bytes",
+                    data_dir=self.usage_data_dir,
+                )
+
+    wrapper._metered = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+class AssemblyAITranscriptionProvider(TranscriptionProvider):
     """Voice transcription provider using AssemblyAI's asynchronous REST API."""
+
+    provider_name = "assemblyai"
 
     def __init__(
         self,
@@ -633,8 +707,10 @@ class AssemblyAITranscriptionProvider:
             return ""
 
 
-class OpenAITranscriptionProvider:
+class OpenAITranscriptionProvider(TranscriptionProvider):
     """Voice transcription provider using OpenAI's Whisper API."""
+
+    provider_name = "openai"
 
     def __init__(
         self,
@@ -671,12 +747,14 @@ class OpenAITranscriptionProvider:
         )
 
 
-class GroqTranscriptionProvider:
+class GroqTranscriptionProvider(TranscriptionProvider):
     """
     Voice transcription provider using Groq's Whisper API.
 
     Groq offers extremely fast transcription with a generous free tier.
     """
+
+    provider_name = "groq"
 
     def __init__(
         self,
@@ -724,8 +802,10 @@ class GroqTranscriptionProvider:
         )
 
 
-class OpenRouterTranscriptionProvider:
+class OpenRouterTranscriptionProvider(TranscriptionProvider):
     """Voice transcription provider using OpenRouter's speech-to-text endpoint."""
+
+    provider_name = "openrouter"
 
     def __init__(
         self,
@@ -764,8 +844,10 @@ class OpenRouterTranscriptionProvider:
         )
 
 
-class XiaomiMiMoTranscriptionProvider:
+class XiaomiMiMoTranscriptionProvider(TranscriptionProvider):
     """Voice transcription provider using Xiaomi MiMo ASR."""
+
+    provider_name = "xiaomi_mimo"
 
     def __init__(
         self,
@@ -804,8 +886,10 @@ class XiaomiMiMoTranscriptionProvider:
         )
 
 
-class StepFunTranscriptionProvider:
+class StepFunTranscriptionProvider(TranscriptionProvider):
     """Voice transcription provider using StepFun ASR SSE endpoint."""
+
+    provider_name = "stepfun"
 
     _DEFAULT_URL = "https://api.stepfun.com/v1/audio/asr/sse"
 

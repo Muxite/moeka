@@ -150,8 +150,11 @@ class DocStore:
         scope: str | None = None,
         _registry: _MemoryRegistry | None = None,
         read_only: bool = False,
+        usage_data_dir: Path | None = None,
     ) -> None:
         self._path = Path(path)
+        # Where embedding usage rows go (spec 010 FR-003); ``None`` = the legacy data dir.
+        self._usage_data_dir = usage_data_dir
         self._read_only = read_only
         self._scope = scope
         self._embedder = embedder
@@ -178,7 +181,10 @@ class DocStore:
         if self._shut:
             raise RuntimeError("kernel is closed: its document stores cannot be used")
         if self._vec is None:
-            kwargs: dict[str, Any] = {"log_retrievals": self._log_retrievals}
+            kwargs: dict[str, Any] = {
+                "log_retrievals": self._log_retrievals,
+                "usage_data_dir": self._usage_data_dir,
+            }
             if self._embedder is not None:
                 kwargs["embedder"] = self._embedder
             if self._read_only:
@@ -381,8 +387,10 @@ class _MemoryRegistry:
         log_retrievals: bool = False,
         capacity: int = DEFAULT_MAX_OPEN,
         read_only: bool = False,
+        usage_data_dir: Path | None = None,
     ) -> None:
         self._root = Path(state_dir) / MEMORY_DIRNAME
+        self._usage_data_dir = usage_data_dir
         self._read_only = read_only
         self._embedding_model = embedding_model
         self._log_retrievals = log_retrievals
@@ -430,7 +438,7 @@ class _MemoryRegistry:
                 store = DocStore(
                     file, embedder=self._embedder_locked(),
                     log_retrievals=self._log_retrievals, scope=name, _registry=self,
-                    read_only=self._read_only,
+                    read_only=self._read_only, usage_data_dir=self._usage_data_dir,
                 )
                 self._handles[file] = store
             return store

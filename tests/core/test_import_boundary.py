@@ -34,6 +34,10 @@ import nanobot.core.vec        # noqa: F401
 import nanobot.core.vec_store  # noqa: F401
 import nanobot.api.complete    # noqa: F401
 import nanobot.capabilities.index      # noqa: F401
+import nanobot.capabilities.lint       # noqa: F401
+import nanobot.capabilities.pending    # noqa: F401
+import nanobot.llm_usage.side_calls    # noqa: F401
+import nanobot.agent.dream_tools       # noqa: F401
 import nanobot.capabilities.library    # noqa: F401
 import nanobot.capabilities.manifest   # noqa: F401
 import nanobot.capabilities.select     # noqa: F401

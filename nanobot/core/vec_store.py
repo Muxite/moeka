@@ -180,8 +180,12 @@ class VecStore:
         log_retrievals: bool = False,
         embedder: Embedder | None = None,
         read_only: bool = False,
+        usage_data_dir: Path | None = None,
     ) -> None:
         self._db_path = db_path
+        # Spec 010 FR-003: each embedding call adds one ``llm_usage`` row (purpose
+        # ``embedding``) to the store under this data dir (``None`` = the legacy data dir).
+        self._usage_data_dir = usage_data_dir
         # Read-only: open an existing file ``mode=ro``, no schema setup (spec 005).
         self._read_only = read_only
         # An injected embedder names the model the stored vectors come from.
@@ -1149,6 +1153,39 @@ class VecStore:
             return None
 
     def _embed(self, texts: list[str]) -> list[np.ndarray]:
+        """Embed *texts*, adding one usage row per call (spec 010 FR-003, fail-open)."""
+        from nanobot.llm_usage.side_calls import now_ms, record_side_call
+
+        started = now_ms()
+        ok = False
+        try:
+            vectors = self._embed_unmetered(texts)
+            ok = True
+            return vectors
+        except ImportError:
+            started = -1  # no backend: nothing was called, nothing to record
+            raise
+        finally:
+            if started >= 0:
+                embedder = self._embedder
+                provider = str(getattr(embedder, "provider", None) or "local")
+                local = provider == "local"
+                record_side_call(
+                    "embedding",
+                    provider=provider,
+                    model=self._model_name,
+                    started_at_ms=started,
+                    duration_ms=now_ms() - started,
+                    ok=ok,
+                    key_fp=getattr(embedder, "key_fp", None),
+                    units=len(texts),
+                    unit="texts",
+                    tier="local" if local else getattr(embedder, "tier", None),
+                    cost_usd=0.0 if local else None,
+                    data_dir=self._usage_data_dir,
+                )
+
+    def _embed_unmetered(self, texts: list[str]) -> list[np.ndarray]:
         if self._embedder is not None:
             vectors = list(self._embedder.embed(texts))
             if not self._embed_dim_checked and vectors:

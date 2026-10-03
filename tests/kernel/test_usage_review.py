@@ -560,7 +560,11 @@ def test_r10_unmetered_model_paths_are_inventoried() -> None:
         r"chat/completions|images/generations|audio/transcriptions|/embeddings|AsyncOpenAI\(|"
         r"AsyncAnthropic\(|messages\.create\(|\.chat\.completions\.create|SentenceTransformer\(",
     )
-    metered = re.compile(r"^class \w+\((?:LLMProvider|OpenAICompatProvider)\)", re.M)
+    # Spec 010 FR-003: image generation, transcription and VecStore embedding write their own
+    # usage rows through ``nanobot.llm_usage.side_calls.record_side_call``.
+    metered = re.compile(
+        r"^class \w+\((?:LLMProvider|OpenAICompatProvider)\)|\brecord_side_call\(", re.M,
+    )
     found = {
         str(p.relative_to(root))
         for p in root.rglob("*.py")
@@ -570,11 +574,7 @@ def test_r10_unmetered_model_paths_are_inventoried() -> None:
     # its CLI banner); each request becomes an AgentLoop turn whose model calls go through a
     # metered LLMProvider, so these modules call no model themselves.
     inbound_routes = {"api/server.py", "cli/commands.py"}
-    assert found - inbound_routes == {
-        "core/vec_store.py",  # local embedder: tokens computed, no money
-        "providers/image_generation.py",  # billed image generation
-        "providers/transcription.py",  # billed speech to text
-    }
+    assert found - inbound_routes == set()
 
 
 # -- R13 the reducer and the store agree ----------------------------------------------------------------------
