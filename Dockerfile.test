@@ -65,6 +65,8 @@ COPY bin/ bin/
 COPY templates/ templates/
 COPY Dockerfile compose.yaml ./
 COPY docs/deployment.md docs/multiple-instances.md docs/
+# Spec 009: the gpt-6-luna preset and key matrix (tests/providers/test_key_fingerprint.py).
+COPY docs/configuration.md docs/
 COPY schemas/ schemas/
 COPY tests/ tests/
 # webui/ itself is git-ignored here (Python tests don't need the frontend

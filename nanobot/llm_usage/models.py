@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
 from nanobot.llm_usage.context import LLMUsageSource
 from nanobot.providers.base import LLMUsage
+
+_KEY_FP_RE = re.compile(r"[0-9a-f]{12}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,8 @@ class LLMCallRecord:
     # Ledger enrichment (Task 14): set by the kernel ledger, never by providers.
     tier: str | None = None
     cost_usd: float | None = None
+    # Fingerprint of the API key that paid (spec 009): 12 hex chars of sha256, never the key.
+    key_fp: str | None = None
 
     @property
     def usage_source(self) -> Literal["reported", "estimated", "mixed", "none"]:
@@ -53,3 +58,8 @@ class LLMCallRecord:
             raise ValueError("LLM usage finish_reason must be non-empty")
         if self.cost_usd is not None and self.cost_usd < 0:
             raise ValueError("LLM usage cost_usd must be non-negative")
+        if self.key_fp is not None and (
+            not isinstance(self.key_fp, str) or not _KEY_FP_RE.fullmatch(self.key_fp)
+        ):
+            # Never echo the value: a key passed here by mistake must not reach a log.
+            raise ValueError("LLM usage key_fp must be 12 lowercase hex characters")

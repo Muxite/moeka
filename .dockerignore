@@ -33,6 +33,8 @@ docs
 # ... and the spec 005 pages checked by tests/docs.
 !docs/deployment.md
 !docs/multiple-instances.md
+# ... and the spec 009 luna preset / key matrix checked by tests/providers.
+!docs/configuration.md
 media
 .assets
 .docs

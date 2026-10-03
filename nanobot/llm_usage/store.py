@@ -22,8 +22,10 @@ from nanobot.llm_usage.models import LLMCallRecord
 SCHEMA_VERSION = 4
 # Columns added after v1, as (name, declaration). v2 (Task 14): the kernel ledger's
 # model tier and USD cost. v3 (spec 001): typed attribution and the rest of the
-# ``usage-record.v1`` event. Migrations only ever ADD nullable columns, so an old row
-# reads back with NULL for them and no data is rewritten.
+# ``usage-record.v1`` event. Spec 009: ``key_fp``, the paying API key's fingerprint (the
+# migration is keyed on the columns present, so ``user_version`` stays 4). Migrations only
+# ever ADD nullable columns, so an old row reads back with NULL for them and no data is
+# rewritten.
 _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tier", "TEXT"),  # v2
     ("cost_usd", "REAL"),  # v2
@@ -47,6 +49,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("cost_billed", "INTEGER"),
     ("tokens_reasoning", "INTEGER"),
     ("tags", "TEXT"),  # v4: bounded host tags (JSON object), so the store round-trips the event
+    ("key_fp", "TEXT"),  # spec 009: sha256 prefix of the API key, never the key
 )
 # Attribution and identity columns a usage event writes (see ``record_event``).
 _EVENT_COLUMNS = (
@@ -545,6 +548,7 @@ class LLMUsageStore:
             _clean_error_kind(call.error_kind),
             call.tier[:32] if call.tier else None,
             _clean_cost(call.cost_usd),
+            call.key_fp,
         )
         columns = [
             "started_at_ms", "duration_ms", "provider", "model", "source", "stream",
@@ -552,7 +556,7 @@ class LLMUsageStore:
             "cache_read_tokens", "cache_write_tokens", "reported_tokens",
             "estimated_tokens", "generation_ms", "measured_output_tokens",
             "ttft_ms", "timed_requests", "error_status_code", "error_kind",
-            "tier", "cost_usd",
+            "tier", "cost_usd", "key_fp",
         ]
         if event is not None:
             values = (*values, *self._event_values(event))

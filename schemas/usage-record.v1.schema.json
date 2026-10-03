@@ -47,6 +47,7 @@
     "provider": {"type": "string", "minLength": 1},
     "alias": {"type": ["string", "null"], "description": "Host-side model alias or preset name."},
     "tier": {"type": ["string", "null"], "description": "Cost tier (local, cheap, paid...)."},
+    "key_fp": {"type": ["string", "null"], "pattern": "^[0-9a-f]{12}$", "description": "Since 1.2. Fingerprint of the API key that paid for the call: the first 12 lowercase hex characters of sha256 of the key (UTF-8, surrounding whitespace removed). Never the key. null when the provider sends no key (OAuth, local) or the producer does not know it, and on a cache hit."},
 
     "tokens_in": {"type": "integer", "minimum": 0, "description": "Billed input tokens, INCLUDING cache reads and cache writes (a provider that reports them separately, as Anthropic does, is normalised by adding them in). Zero on a cache hit."},
     "tokens_out": {"type": "integer", "minimum": 0, "description": "Billed output tokens, INCLUDING reasoning tokens always: a provider that reports reasoning outside its output count (a total above input plus output) is normalised by adding the excess here. Zero on a cache hit."},

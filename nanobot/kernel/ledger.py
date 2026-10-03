@@ -66,11 +66,12 @@ _PER_MTOK = 1_000_000
 
 # Version of the usage-record schema these events speak (``schemas/usage-record.v1``).
 # Additive fields bump the minor; a removed or re-meant field bumps the major.
-SCHEMA_VERSION = "1.1"
+# 1.2 (spec 009): ``key_fp``. Kept equal to ``nanobot.llm_usage.query.SCHEMA_VERSION``.
+SCHEMA_VERSION = "1.2"
 # Versions of ``usage-record`` this kernel EMITS (``kernel.usage.schema_versions()``). It
-# does not translate to older ones: a consumer pinned to 1.0 reads 1.1 under the reader rule
+# does not translate to older ones: a consumer pinned to 1.1 reads 1.2 under the reader rule
 # in ``schemas/ATTRIBUTION.md``.
-SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("1.1",)
+SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("1.2",)
 # Each document versions on its own (a change to one never bumps the others).
 DOCUMENT_VERSIONS: dict[str, str] = {
     "usage-record": SCHEMA_VERSION,
@@ -283,6 +284,8 @@ class LedgerEvent:
     parent_call_id: str | None = None
     waste_label: str | None = None
     waste_set_by: str | None = None
+    # usage-record 1.2: fingerprint of the API key that paid (never the key itself).
+    key_fp: str | None = None
 
     @property
     def record_id(self) -> str:
@@ -552,6 +555,7 @@ class LedgerObserver:
             request_key=call.request_key if call is not None else None,
             prompt_version=call.prompt_version if call is not None else None,
             parent_call_id=call.parent_call_id if call is not None else None,
+            key_fp=record.key_fp,
         )
 
     def event_for(self, record: LLMCallRecord) -> LedgerEvent:

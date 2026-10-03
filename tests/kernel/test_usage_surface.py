@@ -460,6 +460,6 @@ async def test_failing_store_never_fails_calls_and_is_counted(make_kernel, monke
 
 def test_schema_versions_are_reported(make_kernel) -> None:
     kernel, _ = make_kernel()
-    assert kernel.usage.schema_version == SCHEMA_VERSION == "1.1"
+    assert kernel.usage.schema_version == SCHEMA_VERSION == "1.2"
     assert SCHEMA_VERSION in kernel.usage.schema_versions()
     assert UsageFilter(consumer="x").consumer == "x"
