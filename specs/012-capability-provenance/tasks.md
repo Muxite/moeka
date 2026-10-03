@@ -3,7 +3,7 @@
 - [x] T01 FR-001 `schemas/capability-cert.v1.schema.json` (+ `validate.py` name); stdlib mirror
       `cert_schema_problems`, agreement test against `jsonschema`
 - [x] T02 FR-002 `provenance.py`: canonical JSON, `bundle_sha256` / `BundleError`, `Verdict`, `verify_bundle` with
-      the exact reason order (deferred `bad-bundle`); one fixture per reason (SC-001) and order tests
+      the exact reason order (`bad-bundle` at the hash step); one fixture per reason (SC-001) and order tests
 - [x] T03 FR-003 `TrustStore.load` (malformed `.pub` / `revoked.jsonl` lines skipped with warnings, duplicate ids)
       and `TrustStore.from_keys`; empty `nanobot/capabilities/trust/` package dir
 - [x] T04 FR-004 no private-key code under `nanobot/` (grep test), no `sign` in the public API; signer only in

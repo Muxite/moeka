@@ -536,8 +536,8 @@ def verify_bundle(bundle_dir: str | Path, trust: TrustStore) -> Verdict:
     ``bad-json``, ``bad-schema``, ``unknown-key``, ``bad-signature``,
     ``name-mismatch``, ``kind-mismatch``, ``scope-mismatch``, ``hash-mismatch``,
     ``io-mismatch``, ``revoked``, ``bad-bundle``. A bundle that cannot be hashed
-    (``BundleError``) skips the hash comparison and, when every later check passes,
-    is ``bad-bundle``.
+    (``BundleError``: a symlink, fifo or socket in it) is ``bad-bundle``, reported at the
+    hash step, i.e. before ``hash-mismatch``, ``io-mismatch`` and ``revoked``.
     """
     root = Path(os.path.abspath(Path(bundle_dir)))
     cert_file = root / CERT_FILENAME
@@ -569,20 +569,17 @@ def verify_bundle(bundle_dir: str | Path, trust: TrustStore) -> Verdict:
         return Verdict(False, "kind-mismatch", cert_id)
     if cert["scope"] != LOADABLE_SCOPE:
         return Verdict(False, "scope-mismatch", cert_id)
-    bundle_error: BundleError | None = None
     try:
         digest = bundle_sha256(root)
-    except BundleError as exc:
-        bundle_error = exc
-    else:
-        if digest != cert["bundle_sha256"]:
-            return Verdict(False, "hash-mismatch", cert_id)
+    except BundleError:
+        # A bundle with no valid hash fails where the hash is computed.
+        return Verdict(False, "bad-bundle", cert_id)
+    if digest != cert["bundle_sha256"]:
+        return Verdict(False, "hash-mismatch", cert_id)
     if not _io_matches(cert["io"], bundle_io(root, cert["kind"])):
         return Verdict(False, "io-mismatch", cert_id)
     if trust.is_revoked(cert_id):
         return Verdict(False, "revoked", cert_id)
-    if bundle_error is not None:
-        return Verdict(False, "bad-bundle", cert_id)
     return Verdict(True, OK, cert_id)
 
 

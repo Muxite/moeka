@@ -290,13 +290,21 @@ def test_order_first_failure_wins(tmp_path):
         "hash-mismatch"
 
 
-def test_unhashable_bundle_still_reports_earlier_checks(tmp_path):
+def test_unhashable_bundle_is_bad_bundle_at_the_hash_step(tmp_path):
     key = Key()
     bundle = make_skill(tmp_path / "ws", "alpha")
+    cert_id = certify(bundle, key)  # a valid cert for the bundle as it was
     (bundle / "link").symlink_to("SKILL.md")
-    cert_id = certify(bundle, key, bundle_sha256="0" * 64)
-    trust = TrustStore.from_keys([key.public], {cert_id})
-    assert verify_bundle(bundle, trust).reason == "revoked"  # revoked precedes bad-bundle
+    assert verify_bundle(bundle, TrustStore.from_keys([key.public])).reason == "bad-bundle"
+    # bad-bundle is reported where the hash is computed: before io-mismatch and revoked.
+    revoked = TrustStore.from_keys([key.public], {cert_id})
+    assert verify_bundle(bundle, revoked).reason == "bad-bundle"
+    certify(bundle, key, bundle_sha256="0" * 64,
+            io={"inputs_all": [], "inputs_any": [], "outputs": ["any"], "effects": ["exec"]})
+    assert verify_bundle(bundle, TrustStore.from_keys([key.public])).reason == "bad-bundle"
+    # Earlier checks still win over it.
+    certify(bundle, key, bundle_sha256="0" * 64, scope="kernel")
+    assert verify_bundle(bundle, TrustStore.from_keys([key.public])).reason == "scope-mismatch"
 
 
 def test_sig_must_be_a_string_and_cert_an_object(tmp_path):

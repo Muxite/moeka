@@ -26,12 +26,13 @@
 flowchart LR
     A[CERT.json exists] --> B[JSON object] --> C[schema + sig is str] --> D[key id trusted]
     D --> E[Ed25519 signature] --> F[name == dir] --> G[kind == SKILL.md/tool.yaml]
-    G --> H[scope == capabilities] --> I[bundle hash] --> J[io == own io] --> K[not revoked]
-    K --> L[hashable]
+    G --> H[scope == capabilities] --> I[hashable: else bad-bundle] --> J[bundle hash matches]
+    J --> K[io == own io] --> L[not revoked]
 ```
 
-A bundle that raises `BundleError` while hashing skips the hash comparison; `bad-bundle` is reported only when
-the io and revocation checks pass, so the reasons keep the listed order.
+Coordinator clarification: a bundle that raises `BundleError` while hashing (symlink, fifo, socket) is
+`bad-bundle`, reported at the hash step, so before `hash-mismatch`, `io-mismatch` and `revoked`; a symlinked
+bundle with an otherwise valid certificate reports `bad-bundle`.
 
 ## Decisions on spec ambiguities
 
@@ -74,7 +75,7 @@ the io and revocation checks pass, so the reasons keep the listed order.
   bundle read-only, the temp `HOME`, and the workspace (read-only for `read-workspace`, read-write for
   `write-workspace`) only when exported. stderr keeps the last 2000 characters. Errors: `timeout`, stdout over
   1 MiB, non-zero exit (code + stderr tail), non-JSON stdout (exit code + stderr tail), output-schema violation.
-- **"bwrap available"** means a probe sandbox with `--unshare-net --unshare-pid` actually starts (cached per process):
+- **"bwrap available"** (coordinator clarification: usable, not just installed) means a probe sandbox with `--unshare-net --unshare-pid` actually starts (cached per process):
   Docker and userns-restricted hosts (jifan included) ship a `bwrap` that cannot unshare the network, and there the
   tool runs unsandboxed with `sandboxed: false`, as the spec allows. SC-003's test skips with that reason.
 - **Result metadata**: `ToolResult.metadata` (new, optional) carries `tool`, `sandboxed`, `exit_code`, `duration_ms`,
