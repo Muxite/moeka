@@ -120,6 +120,26 @@ async def test_dream_reads_its_staged_copy(tmp_path: Path) -> None:
     assert not (tmp_path / "skills" / "demo").exists()
 
 
+@pytest.mark.parametrize("tool", ["write_file", "edit_file", "apply_patch"])
+async def test_write_inside_skills_pending_lands_exactly_there(tmp_path: Path, tool: str) -> None:
+    store = MemoryStore(tmp_path)
+    tools = store.build_dream_tools()
+    text = SKILL.format(name="demo")
+    args = {
+        "write_file": {"path": "skills-pending/demo/SKILL.md", "content": text},
+        "edit_file": {"path": "skills-pending/demo/SKILL.md", "old_text": "", "new_text": text},
+        "apply_patch": {"edits": [{
+            "path": "skills-pending/demo/SKILL.md", "action": "add", "new_text": text,
+        }]},
+    }[tool]
+    result = await tools.execute(tool, args)
+    target = tmp_path / "skills-pending" / "demo" / "SKILL.md"
+    assert target.read_text(encoding="utf-8") == text, result
+    assert not (tmp_path / "skills-pending" / "skills-pending").exists()
+    assert not (tmp_path / "skills" / "demo").exists()
+    assert sorted(p.name for p in (tmp_path / "skills-pending").iterdir()) == ["demo"]
+
+
 async def test_memory_files_are_not_remapped(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path)
     store.write_soul("# Soul\n- Helpful")

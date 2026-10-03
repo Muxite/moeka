@@ -9,7 +9,9 @@ mode these tools map the target:
 - a read of ``skills/<name>/<rest>`` returns the pending copy when one exists, so Dream
   verifies what it wrote. Without one it reads ``skills/`` as before.
 
-Every other path (``SOUL.md``, ``USER.md``, ``memory/MEMORY.md``) is unchanged.
+A target already inside ``skills-pending/<name>/`` is written exactly there (it is not under
+``skills/``, so it is never remapped twice). Every other path (``SOUL.md``, ``USER.md``,
+``memory/MEMORY.md``) is unchanged.
 """
 
 from __future__ import annotations
@@ -31,6 +33,10 @@ class _PendingSkillsMap:
     def _init_pending(self, skills_root: Path, pending_root: Path) -> None:
         self._skills_root = skills_root.expanduser().resolve(strict=False)
         self._pending_root = pending_root.expanduser().resolve(strict=False)
+        # A target already inside ``skills-pending/`` is written exactly there (no remap).
+        extra = getattr(self, "_extra_write_allowed_dirs", None)
+        if isinstance(extra, list) and self._pending_root not in extra:
+            extra.append(self._pending_root)
 
     def _skill_rel(self, resolved: Path) -> Path | None:
         try:
