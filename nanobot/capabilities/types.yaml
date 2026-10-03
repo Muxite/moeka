@@ -1,0 +1,35 @@
+# Closed type vocabulary for capability manifests (spec 011 FR-001).
+#
+# Each entry is `type: parent`. A type is written `family[/sub][:variant]`; its parent
+# chain ends at `any`. `none` has no parent and is output-only ("effects only").
+# Adding a type here is a vocabulary change: keep parents existing and acyclic.
+types:
+  any: null
+  text: any
+  text/query: text
+  text/markdown: text
+  text/code: text
+  text/code:python: text/code
+  text/code:shell: text/code
+  text/log: text
+  data: any
+  data/json: data
+  data/csv: data
+  data/yaml: data
+  file: any
+  file:pdf: file
+  file:image: file
+  file:audio: file
+  file:video: file
+  file:archive: file
+  file:office: file
+  url: any
+  url/web: url
+  url/git: url
+  url/video: url
+  path: any
+  path/dir: path
+  repo:git: path/dir
+  workspace: any
+  host: any
+  none: null

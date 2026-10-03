@@ -182,6 +182,7 @@ include = [
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
     "nanobot/agent/tools/descriptions/*.txt",
+    "nanobot/capabilities/*.yaml",
     "moeka/**/*.py",
     "nanobot/channels/*/webui/**/*",
     "nanobot/web/dist/**/*",
@@ -266,6 +267,7 @@ timeout = 300
 timeout_method = "thread"
 markers = [
     "docker: needs a working docker daemon (skipped when docker is unavailable)",
+    "bench: timing benchmark; skipped unless selected with -m bench",
 ]
 
 [tool.coverage.run]
