@@ -88,8 +88,9 @@ and `scripts/`; files outside the repo, such as workspace skills, are not in the
 5. Skill format: `python nanobot/skills/skill-creator/scripts/quick_validate.py <skill-dir>` must print
    "Skill is valid!" (needs Python 3 + PyYAML; for a repo skill:
    `scripts/test-docker.sh python nanobot/skills/skill-creator/scripts/quick_validate.py nanobot/skills/<name>`).
-   The skill loader itself does not validate workspace or built-in skills (doc 03 section 2.2), so this script is
-   the only format check.
+   Since spec 011 the loader skips (does not list or load) a workspace skill that fails the identity rules or has
+   an unparseable `io` block, logging one warning; `nanobot capabilities validate` lists every such skill and
+   exits 1. Built-in skills are checked by `tests/capabilities/test_builtin_annotations.py`, not at runtime.
 6. Config: `python -c "from pathlib import Path; from nanobot.config.loader import load_config; load_config(Path('<config.json>'))"`
    must not raise `ConfigLoadError` (doc 04 section 1).
 7. Kernel invariants: `scripts/test-docker.sh pytest tests/kernel -q`. The AST guard
