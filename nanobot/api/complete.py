@@ -14,8 +14,10 @@ Usage::
     from nanobot.api import acomplete
     text = await acomplete("...", model="anthropic/claude-opus-4-5")
 
-Config defaults to ``~/.nanobot/config.json`` (same as the gateway), so provider
-keys and the active model/preset come from the user's existing moeka setup.
+Config is project-scoped: pass ``config``, ``config_dict`` or ``config_path``.
+There is no fallback to a user-wide
+``~/.nanobot/config.json``. ``${VAR}`` placeholders resolve from the caller's
+process environment, so each project loads its own keys.
 """
 from __future__ import annotations
 
@@ -27,6 +29,25 @@ from pathlib import Path
 from typing import Any
 
 from nanobot._deprecation import warn_deprecated
+
+
+def _api_config(
+    config: Any | None, config_dict: dict[str, Any] | None, config_path: str | Path | None,
+) -> Any:
+    """Resolve the explicit config source; never fall back to user-wide state."""
+    from nanobot.config.loader import config_from_sources
+
+
+    if config is None and config_dict is None and config_path is None:
+        raise ValueError(
+            "nanobot.api needs an explicit config: pass config=, config_dict= or "
+            "config_path=. There is no ~/.nanobot/config.json fallback; each "
+            "project passes its own config and loads its own keys."
+        )
+    resolved, _ = config_from_sources(
+        config=config, config_dict=config_dict, config_path=config_path,
+    )
+    return resolved
 
 
 def _usage_payload(model: str | None, usage: Any) -> dict[str, Any]:
@@ -84,15 +105,12 @@ async def _acomplete_response(
     whether a native ``response_format`` attempt was rejected and should fall
     back to the plain parse-retry path.
     """
-    from nanobot.config.loader import config_from_sources
     from nanobot.kernel.llm import aclose_provider as _aclose_provider
     from nanobot.kernel.messages import user_content as _user_content
     from nanobot.providers.base import ProviderCallContext, RequestExtras
     from nanobot.providers.factory import make_provider
 
-    resolved_config, _ = config_from_sources(
-        config=config, config_dict=config_dict, config_path=config_path,
-    )
+    resolved_config = _api_config(config, config_dict, config_path)
     extra: dict[str, Any] = {"env": env} if env is not None else {}
     provider = make_provider(resolved_config, preset_name=preset, model=model, **extra)
 
@@ -152,7 +170,7 @@ async def _acomplete_impl(
             vision-capable models. Sent as OpenAI-style multimodal content.
         config: A pre-built :class:`Config` (pure data; no file read).
         config_dict: A plain dict validated into a ``Config`` in memory.
-        config_path: Path to ``config.json``; defaults to ``~/.nanobot/config.json``.
+        config_path: Path to ``config.json``. One of the three is required.
             Supply at most one of ``config`` / ``config_dict`` / ``config_path``.
         model: Override the resolved model (provider-specific id).
         preset: Named model preset to use instead of the active default.
@@ -238,14 +256,11 @@ async def _acomplete_stream_impl(
     env: Any | None = None,
 ) -> AsyncIterator[str]:
     """:func:`acomplete_stream`'s implementation, unwarned — see that function."""
-    from nanobot.config.loader import config_from_sources
     from nanobot.kernel.llm import aclose_provider as _aclose_provider
     from nanobot.kernel.messages import user_content as _user_content
     from nanobot.providers.factory import make_provider
 
-    resolved_config, _ = config_from_sources(
-        config=config, config_dict=config_dict, config_path=config_path,
-    )
+    resolved_config = _api_config(config, config_dict, config_path)
     extra: dict[str, Any] = {"env": env} if env is not None else {}
     provider = make_provider(resolved_config, preset_name=preset, model=model, **extra)
 

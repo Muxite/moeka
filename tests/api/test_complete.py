@@ -109,3 +109,21 @@ def test_complete_json_refuses_inside_event_loop():
 
     with pytest.raises(RuntimeError, match="await acomplete_json"):
         asyncio.run(attempt())
+
+
+def test_no_config_and_no_env_raises(monkeypatch):
+    """Project-scoped config: no silent fallback to ~/.nanobot/config.json."""
+    _install_stub(monkeypatch, ["unused"])
+    with pytest.raises(ValueError, match="explicit config"):
+        complete("hi")
+
+
+
+def test_config_path_is_used(monkeypatch, tmp_path):
+    import json
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps(_CONFIG))
+    stub = _install_stub(monkeypatch, ["from file config"])
+    assert complete("hi", config_path=cfg) == "from file config"
+    assert len(stub.calls) == 1
