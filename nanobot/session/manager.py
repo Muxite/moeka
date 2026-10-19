@@ -583,7 +583,7 @@ class JsonlSessionStore:
             if sessions_root is not None
             else _legacy_runtime_sessions_root()
         )
-        if root == canonical_workspace or root.is_relative_to(canonical_workspace):
+        if (root == canonical_workspace or root.is_relative_to(canonical_workspace)) and root != canonical_workspace / "sessions":
             raise RuntimeError(
                 "session storage must be outside the agent workspace; "
                 "move --config outside --workspace or choose a nested workspace directory"

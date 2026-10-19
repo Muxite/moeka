@@ -13,12 +13,13 @@ rules that keep them apart (spec `specs/005-multi-instance/`).
   (unit `moeka@<name>.service`).
 - **Registered instance**: any other root created with `moeka.sh new NAME --workspace PATH`;
   its absolute path is appended to `~/.config/moeka/instances` (one path per line). It
-  has no systemd unit.
+  has a stable generated `moeka-path-<hash>.service` unit.
 - **Discovered instances**: the default one when `~/.nanobot/config.json` exists, every
   `~/.moeka-*/config.json`, and every registry line whose `config.json` exists.
   Discovery is a host operation (the `moeka.sh` script, the gateway, the legacy floor
   adapter); kernel code never discovers.
-- Sessions live next to the root, in `<root>-sessions/<id>/sessions.db`.
+- Sessions live inside the protected instance state: `<root>/sessions/<uuid>/sessions.db`.
+  Migrate legacy sibling storage explicitly after backup and shutdown; see [daily agents](daily-agents.md).
 
 ## The control script
 

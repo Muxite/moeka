@@ -158,6 +158,10 @@ else
     done
 fi
 
+if [[ "$INSTANCE_KIND" == "registered" ]]; then
+    UNIT="$(python3 -P "$INSTANCES_PY" kind "$ROOT" | cut -f3)"
+fi
+
 # ---------- env loading (FR-003, Q3) -----------------------------------------
 _load_env_file() {
     local f="$1"
@@ -397,6 +401,10 @@ cmd_run() {
         exit 0
     fi
     echo "$$" > "$PID_FILE"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        command -v setpriv >/dev/null || { err "setpriv is required for NoNewPrivileges"; exit 1; }
+        exec setpriv --no-new-privs "$bin" gateway --config "$CFG" --workspace "$ROOT" "$@"
+    fi
     exec "$bin" gateway --config "$CFG" --workspace "$ROOT" "$@"
 }
 
@@ -602,8 +610,8 @@ cmd_enable() {
             bash "${SCRIPT_DIR}/scripts/install-service.sh" "$INSTANCE_NAME" "$@"
             ;;
         *)
-            err "instance $ROOT is registered at a custom path and has no systemd unit"
-            exit 1
+            bash "${SCRIPT_DIR}/scripts/install-service.sh" --workspace "$ROOT" "$@"
+            return 0
             ;;
     esac
 }
@@ -618,8 +626,8 @@ cmd_disable() {
             ;;
         default) ;;
         *)
-            err "instance $ROOT is registered at a custom path and has no systemd unit"
-            exit 1
+            _systemctl --user disable --now "$UNIT"
+            return 0
             ;;
     esac
     # Default instance: today's behaviour (stop, disable, remove moeka.service).
@@ -978,6 +986,20 @@ case "$CMD" in
     disable)        cmd_disable ;;
     export)         cmd_export "$@" ;;
     import)         cmd_import "$@" ;;
+    update)         cmd_stop
+                    if _systemctl --user is-enabled --quiet "$UNIT" 2>/dev/null; then
+                        _systemctl --user start "$UNIT"
+                    else
+                        cmd_start "$@"
+                    fi ;;
+    clone)          python3 -P "$INSTANCES_PY" clone "$ROOT" "$@" ;;
+    migrate-sessions) python3 - "$ROOT" "$SCRIPT_DIR" <<'PYCODE'
+import sys
+sys.path.insert(0, sys.argv[2])
+from nanobot.config.instances import migrate_sessions
+print(migrate_sessions(sys.argv[1]))
+PYCODE
+                    ;;
     new)            cmd_new "$@" ;;
     telegram-pair)  cmd_telegram_pair "$@" ;;
     help|-h|--help) cmd_help ;;

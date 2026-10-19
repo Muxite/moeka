@@ -113,25 +113,12 @@ def _indexed_workspace_scope_fields(metadata: object) -> dict[str, object]:
 
 
 def default_sessions_root(canonical_workspace: Path) -> Path:
-    """Default ``sessions_root`` when a caller doesn't pass one explicitly.
+    """Instance-owned sessions, protected by the file floor and exec sandbox.
 
-    Upstream's own default is ``get_runtime_subdir("sessions")`` — a
-    subdirectory of ``get_data_dir()`` (``config.json``'s parent). That
-    works for upstream's nested layout (workspace is a subdirectory of the
-    instance data dir), but moeka's ``AgentDefaults.workspace`` defaults to
-    the instance data dir *itself* (``~/.nanobot``, no nested
-    ``~/.nanobot/workspace`` — see CLAUDE.md's "flat workspace layout"
-    deviation), so ``get_data_dir()/sessions`` would be *inside* the
-    workspace for the default install — exactly what ADR-0001 exists to
-    prevent, and it would fail the safety check below on every startup.
-
-    A workspace-relative sibling avoids the collision generically, for any
-    workspace path (default flat layout, a custom ``MOEKA_WORKSPACE``, or
-    an embedding host's arbitrary scoped/ephemeral workspace), without
-    depending on ``config.json``'s location at all: ``<workspace>-sessions``
-    next to ``<workspace>``.
+    Legacy sibling storage requires explicit owner migration with backup and
+    verification (`instances.migrate_sessions`); startup never moves live state.
     """
-    return canonical_workspace.parent / f"{canonical_workspace.name}-sessions"
+    return canonical_workspace / "sessions"
 
 
 class SqliteSessionStore:
@@ -155,11 +142,16 @@ class SqliteSessionStore:
             if sessions_root is not None
             else default_sessions_root(canonical_workspace)
         )
-        if root == canonical_workspace or root.is_relative_to(canonical_workspace):
+        if (root == canonical_workspace or root.is_relative_to(canonical_workspace)) and root != canonical_workspace / "sessions":
             raise RuntimeError(
                 "session storage must be outside the agent workspace; "
                 "move --config outside --workspace or choose a nested workspace directory"
             )
+        if root == default_sessions_root(canonical_workspace):
+            legacy = canonical_workspace.parent / f"{canonical_workspace.name}-sessions"
+            for legacy_db in legacy.glob("*/sessions.db"):
+                if not (root / legacy_db.relative_to(legacy)).is_file():
+                    raise RuntimeError("Legacy sibling sessions exist; stop and run instance session migration first")
         ensure_dir(root)
         with suppress(OSError):
             os.chmod(root, 0o700)

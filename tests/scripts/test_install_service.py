@@ -105,3 +105,17 @@ def test_linger_on_prints_nothing_about_it(h: Harness) -> None:
     result = h.run("c", script=INSTALL_SERVICE, env=_env(h, FAKE_LINGER="yes"))
     assert result.returncode == 0
     assert "enable-linger" not in result.stdout
+
+
+def test_registered_folder_paths_are_quoted_and_percent_escaped(h: Harness) -> None:
+    root = h.root / 'folder with spaces%owner'
+    root.mkdir()
+    (root / 'config.json').write_text('{}')
+    result = h.run('--workspace', str(root), '--dry-run', script=INSTALL_SERVICE, env=_env(h))
+    assert result.returncode == 0, result.stderr
+    escaped = str(root).replace('%', '%%')
+    assert f'Environment="MOEKA_WORKSPACE={escaped}"' in result.stdout
+    assert f'EnvironmentFile=-{escaped}/keys.env' in result.stdout
+    assert f'--workspace "{escaped}" run' in result.stdout
+    assert 'NoNewPrivileges=yes' in result.stdout
+    assert _systemctl(h) == []

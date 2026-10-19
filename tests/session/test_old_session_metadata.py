@@ -61,7 +61,7 @@ def test_session_with_webui_metadata_roundtrips(tmp_path, key, backend):
         mgr.save(sess)
         if backend == "sqlite":
             assert stores[0].db_path.is_file()
-            assert tmp_path not in stores[0].db_path.parents  # sibling dir, not in workspace
+            assert tmp_path / "sessions" in stores[0].db_path.parents  # instance-owned, sandbox masked
 
         again = manager().get_or_create(key)
         assert again.messages[-1]["content"] == "hi"

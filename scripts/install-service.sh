@@ -37,10 +37,12 @@ _loginctl() {
 }
 
 NAME=""
+WORKSPACE=""
 NO_ENABLE=0
 DRY_RUN=0
 while (( $# > 0 )); do
     case "$1" in
+        --workspace) WORKSPACE="$2"; shift 2 ;;
         --no-enable) NO_ENABLE=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -171,7 +173,47 @@ install_named() {
     echo "  Logs:   journalctl --user -u $unit -f"
 }
 
-if [[ -z "$NAME" ]]; then
+install_path() {
+    local root unit content dest
+    root="$(realpath -m "$WORKSPACE")"
+    [[ -f "$root/config.json" ]] || { echo "missing instance config: $root" >&2; exit 1; }
+    unit="$(python3 -P "$REPO_DIR/nanobot/config/instances.py" kind "$root" | cut -f3)"
+    content="$(python3 - "$SCRIPT_DIR/moeka@.service" "$REPO_DIR" "$root" <<'PYRENDER'
+import sys
+from pathlib import Path
+
+def quote(value):
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+
+text = Path(sys.argv[1]).read_text()
+root, repo = sys.argv[3], sys.argv[2]
+lines = []
+for line in text.splitlines():
+    if line.startswith('Environment=MOEKA_WORKSPACE='):
+        line = 'Environment=' + quote('MOEKA_WORKSPACE=' + root)
+    elif line.startswith('EnvironmentFile='):
+        line = 'EnvironmentFile=-' + (root + '/keys.env').replace('%', '%%')
+    elif line.startswith('ExecStart='):
+        line = 'ExecStart=' + quote(repo + '/bin/moeka.sh') + ' --workspace ' + quote(root) + ' run'
+    lines.append(line)
+print('\n'.join(lines))
+PYRENDER
+)"
+    dest="$SERVICE_DIR/$unit"
+    if (( DRY_RUN )); then
+        printf '%s\n' "$content"
+        echo "would install $dest"
+        return
+    fi
+    mkdir -p "$SERVICE_DIR"
+    printf '%s\n' "$content" > "$dest"
+    _systemctl --user daemon-reload
+    if (( ! NO_ENABLE )); then _systemctl --user enable --now "$unit"; fi
+}
+
+if [[ -n "$WORKSPACE" ]]; then
+    install_path
+elif [[ -z "$NAME" ]]; then
     install_default
 else
     install_named "$NAME"

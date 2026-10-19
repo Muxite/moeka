@@ -150,6 +150,16 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
         set_config_path(config_path)
         console.print(f"[dim]Using config: {config_path}[/dim]")
 
+    if config_path is None and workspace:
+        candidate = Path(workspace).expanduser().resolve() / "config.json"
+        if candidate.is_file():
+            config_path = candidate
+            set_config_path(candidate)
+    from nanobot.cli.instance_env import load_instance_environment
+    from nanobot.config.loader import get_config_path
+
+    instance_root = (config_path or get_config_path()).parent
+    load_instance_environment(instance_root)
     loaded = _load_config_for_cli(config_path, resolve_env=True)
     if workspace:
         loaded.agents.defaults.workspace = workspace

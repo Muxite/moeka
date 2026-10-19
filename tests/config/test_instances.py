@@ -30,7 +30,7 @@ def test_kind_name_and_unit(tmp_path: Path) -> None:
     assert inst.unit_for(home / ".moeka-a", home) == "moeka@a.service"
     for root in (tmp_path / "elsewhere" / "ws", home / ".moeka-Bad", home / "x" / ".moeka-a"):
         assert inst.instance_kind(root, home) == "registered"
-        assert inst.unit_for(root, home) is None
+        assert inst.unit_for(root, home).startswith("moeka-path-")
 
 
 def test_name_pattern() -> None:

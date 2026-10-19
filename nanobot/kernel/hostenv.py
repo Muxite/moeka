@@ -198,6 +198,11 @@ def _validate_config(data: Mapping[str, Any]) -> Config:
     return config
 
 
+def validate_config_data(data: Mapping[str, Any]) -> Config:
+    """Validate explicitly supplied config data without reading process settings."""
+    return _validate_config(data)
+
+
 def _preset_dict(spec: ModelSpec) -> dict[str, Any]:
     preset: dict[str, Any] = {"model": spec.model, "provider": spec.provider}
     if spec.max_tokens is not None:

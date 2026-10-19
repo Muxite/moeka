@@ -227,22 +227,21 @@ def test_legacy_loop_sessions_root_unchanged(tmp_path, monkeypatch):
     assert list(default_sessions_root(workspace.resolve()).rglob("sessions.db"))
 
 
-def test_legacy_loop_sessions_root_unchanged_for_symlinked_workspace(tmp_path):
-    """Pre-kernel code used ``default_sessions_root(<unresolved workspace>)``."""
+def test_legacy_loop_sessions_root_uses_canonical_workspace_for_symlink(tmp_path):
+    """Folder-owned sessions use the canonical workspace, including symlink aliases."""
     real = tmp_path / "real" / "ws"
     real.mkdir(parents=True)
     link = tmp_path / "link"
     os.symlink(real, link)
-    old_root = default_sessions_root(link)  # what the pre-kernel loop used
-    assert old_root.resolve() != default_sessions_root(real.resolve())  # the two differ
+    old_root = default_sessions_root(link)
+    assert old_root.resolve() == default_sessions_root(real.resolve())
 
     loop = AgentLoop.from_config(
         _config(link), tool_registry=ToolRegistry(), provider=_provider(),
     )
     loop.sessions.save(loop.sessions.get_or_create("cli:direct"))
-    assert loop.env.paths.sessions_root == old_root.resolve()
-    assert list(old_root.rglob("sessions.db"))
-    assert not default_sessions_root(real).exists()
+    assert loop.env.paths.sessions_root == default_sessions_root(real.resolve())
+    assert list(default_sessions_root(real).rglob("sessions.db"))
     # The default legacy env keeps the loop workspace as configured.
     assert loop.workspace == _config(link).workspace_path
 

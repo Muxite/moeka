@@ -395,7 +395,12 @@ def test_stop_addresses_only_its_own_unit_among_several_active(h: Harness, tmp_p
     assert wait_for(lambda: not alive(pids["a"]), 10) and alive(pids["b"])
     (h.systemctl_dir / "calls.log").unlink(missing_ok=True)
     assert h.run(*_ws(custom), "stop").returncode == 0
-    assert h.systemctl_calls() == []  # a registered instance has no unit
+    from nanobot.config.instances import unit_for
+
+    custom_unit = unit_for(custom, h.home)
+    calls = h.systemctl_calls()
+    assert calls == [f"--user is-active --quiet {custom_unit}"]
+    assert not any(" stop " in f" {call} " for call in calls)
 
 
 def test_named_instance_reached_through_a_symlinked_home(h: Harness, tmp_path: Path) -> None:

@@ -123,3 +123,21 @@ def test_lock_fd_is_not_inherited_by_exec(tmp_path: Path) -> None:
     finally:
         child.kill()
         child.wait()
+
+
+def test_finalizer_can_release_during_another_acquisition(tmp_path, monkeypatch):
+    """GC can invoke an old Kernel's finalizer inside holder-record allocation."""
+    import weakref
+
+    old = acquire_instance_lock(tmp_path / 'old')
+    class Owner:
+        pass
+    owner = Owner()
+    finalize = weakref.finalize(owner, old.release)
+    write_holder = il._write_holder
+    def collect_old(state, record):
+        finalize()
+        write_holder(state, record)
+    monkeypatch.setattr(il, '_write_holder', collect_old)
+    with acquire_instance_lock(tmp_path / 'new'):
+        assert not old.held

@@ -135,7 +135,7 @@ def test_registered_instance_at_custom_path(h: Harness, tmp_path: Path) -> None:
     assert registry.read_text().splitlines() == [str(custom)]
     listed = json.loads(h.run("list", "--json").stdout)
     assert [i["workspace"] for i in listed] == [str(custom)]
-    assert listed[0]["unit"] is None
+    assert listed[0]["unit"].startswith("moeka-path-")
 
 
 def test_socket_path_too_long_exits_2_and_creates_nothing(h: Harness, tmp_path: Path) -> None:

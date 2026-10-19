@@ -79,7 +79,9 @@ class ReadOnlyKernelError(RuntimeError):
 
 
 _REGISTRY: dict[Path, InstanceLock] = {}
-_REGISTRY_LOCK = threading.Lock()
+# GC can run a Kernel finalizer while another acquisition holds this registry.
+# Its release re-enters the registry on the same thread.
+_REGISTRY_LOCK = threading.RLock()
 
 
 def _now_iso() -> str:

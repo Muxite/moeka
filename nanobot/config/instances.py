@@ -23,14 +23,18 @@ import argparse
 import contextlib
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -133,13 +137,76 @@ def instance_name(root: str | Path, home: str | Path | None = None) -> str:
 
 
 def unit_for(root: str | Path, home: str | Path | None = None) -> str | None:
-    """The instance's own systemd user unit (``None`` for a registered instance)."""
+    """The instance's own systemd user unit, including registered folders."""
     kind = instance_kind(root, home)
     if kind == "default":
         return "moeka.service"
     if kind == "named":
         return f"moeka@{instance_name(root, home)}.service"
-    return None
+    digest = hashlib.sha256(str(_abs(root)).encode()).hexdigest()[:16]
+    return f"moeka-path-{digest}.service"
+
+
+def instance_uuid(root: str | Path) -> str:
+    """Stable UUID shared with session namespaces; clones must regenerate it."""
+    marker = _abs(root) / ".nanobot" / "workspace-id"
+    if marker.is_symlink():
+        raise InstanceError("instance identity must not be a symlink")
+    value = marker.read_text().strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", value):
+        raise InstanceError("invalid instance UUID")
+    return value
+
+
+def migrate_sessions(root: str | Path) -> dict[str, Any]:
+    """Copy legacy sibling state with consistent SQLite backups and verification.
+
+    The owner must stop the instance first. Originals remain as rollback backups.
+    """
+    root = _abs(root)
+    if describe(root)["running"]:
+        raise InstanceError("stop the instance before session migration")
+    legacy = root.parent / f"{root.name}-sessions"
+    target = root / "sessions"
+    if legacy.is_symlink() or target.is_symlink():
+        raise InstanceError("session storage must not be a symlink")
+    if not legacy.is_dir():
+        return {"copied": 0, "backup": str(legacy)}
+    if target.exists() and any(target.iterdir()):
+        raise InstanceError(f"migration destination is not empty: {target}")
+    copied = 0
+    with tempfile.TemporaryDirectory(prefix=".sessions-migrate-", dir=root) as tmp:
+        staged = Path(tmp) / "sessions"
+        staged.mkdir(mode=0o700)
+        for src in legacy.rglob("*"):
+            if src.is_symlink():
+                raise InstanceError(f"refusing symlink in legacy sessions: {src}")
+            if not src.is_file() or src.name.endswith(("-wal", "-shm")) or src.name.endswith(".lock"):
+                continue
+            dst = staged / src.relative_to(legacy)
+            dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if dst.exists():
+                raise InstanceError(f"migration destination already exists: {dst}")
+            if src.suffix == ".db":
+                with sqlite3.connect(f"file:{src}?mode=ro", uri=True) as source, sqlite3.connect(dst) as dest:
+                    source.backup(dest)
+                    if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise InstanceError("session backup integrity check failed")
+                    for table in ("sessions", "messages"):
+                        a = source.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                        b = dest.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                        if a != b:
+                            raise InstanceError(f"session backup verification failed: {table}")
+            else:
+                shutil.copy2(src, dst)
+                if hashlib.sha256(src.read_bytes()).digest() != hashlib.sha256(dst.read_bytes()).digest():
+                    raise InstanceError(f"session backup verification failed: {src}")
+            copied += 1
+
+        if target.exists():
+            target.rmdir()
+        os.replace(staged, target)
+    return {"copied": copied, "backup": str(legacy), "destination": str(target)}
 
 
 def socket_path(root: str | Path) -> Path:
@@ -532,7 +599,7 @@ def create_instance(
             if file.is_file():
                 text = file.read_text(encoding="utf-8")
                 file.write_text(
-                    text.replace("{{NAME}}", name).replace("{{USER_NAME}}", name),
+                    text.replace("{{NAME}}", name).replace("{{name}}", name).replace("{{USER_NAME}}", name),
                     encoding="utf-8",
                 )
 
@@ -540,7 +607,13 @@ def create_instance(
         data = read_config(config_file)
         agents = data.setdefault("agents", {})
         defaults = agents.setdefault("defaults", {})
+        state = target / ".nanobot"
+        state.mkdir(mode=0o700, exist_ok=True)
+        (state / "workspace-id").write_text(secrets.token_hex(16) + "\n")
         defaults["workspace"] = str(target)
+        defaults["botName"] = name
+        data["personality"] = {"name": name, "allowSelfEdit": False, "maxWords": 150}
+        data.setdefault("tools", {}).setdefault("exec", {})["allowSudo"] = False
         data.setdefault("gateway", {})["port"] = base
         data.setdefault("api", {})["port"] = base + 1
         channels = data.setdefault("channels", {})
@@ -572,6 +645,41 @@ def create_instance(
             register(target, home_path)
     info = describe(target, home=home_path, env=env)
     return info
+
+
+def clone_instance(source: str | Path, name: str, *, workspace: str | Path | None = None,
+                   home: str | Path | None = None) -> dict[str, Any]:
+    """Clone portable setup with a fresh UUID, ports, credentials and runtime state."""
+    source = _abs(source)
+    if not (source / "config.json").is_file():
+        raise InstanceError(f"source instance not found: {source}")
+    with tempfile.TemporaryDirectory(prefix="moeka-clone-") as tmp:
+        template = Path(tmp)
+        data = read_config(source / "config.json")
+        # Only portable setup crosses the boundary. Provider headers, remote tool
+        # connections and channel credentials require fresh owner provisioning.
+        data["providers"] = {}
+        data["peers"] = []
+        data.pop("peerListener", None)
+        data.pop("peer_listener", None)
+        data["channels"] = {}
+        data["api"] = {"enabled": False}
+        tools = data.get("tools", {})
+        for field in ("mcpServers", "mcp_servers", "web", "browser"):
+            tools.pop(field, None)
+        execution = tools.get("exec", {})
+        for field in ("extraEnv", "extra_env", "env", "envKeys", "env_keys", "extraBinds", "extra_binds"):
+            execution.pop(field, None)
+        execution["allowSudo"] = False
+        _write_json_atomic(template / "config.json", data)
+        for filename in ("SOUL.md", "AGENTS.md", "USER.md"):
+            if (source / filename).is_file():
+                shutil.copy2(source / filename, template / filename)
+        for dirname in ("skills", "tools-script"):
+            if (source / dirname).is_dir():
+                shutil.copytree(source / dirname, template / dirname, symlinks=True)
+        return create_instance(name, template=template, workspace=workspace, home=home)
+
 
 
 # -- CLI -----------------------------------------------------------------------------
@@ -612,6 +720,10 @@ def _main(argv: list[str]) -> int:
     p_new.add_argument("--ws-tcp", action="store_true")
     p_new.add_argument("--template", required=True)
     p_new.add_argument("--keys-example")
+    p_clone = sub.add_parser("clone")
+    p_clone.add_argument("source")
+    p_clone.add_argument("name")
+    p_clone.add_argument("--target")
     p_kind = sub.add_parser("kind")
     p_kind.add_argument("root")
     p_discover = sub.add_parser("roots")
@@ -647,6 +759,9 @@ def _main(argv: list[str]) -> int:
         if args.cmd == "roots":
             roots = [str(r) for r in discover_roots()]
             print(json.dumps(roots) if args.json else "\n".join(roots))
+            return 0
+        if args.cmd == "clone":
+            print(json.dumps(clone_instance(args.source, args.name, workspace=args.target)))
             return 0
         if args.cmd == "new":
             port_base: int | None = None
