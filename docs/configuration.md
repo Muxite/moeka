@@ -1545,6 +1545,35 @@ Failover normally runs when the primary provider returns a fallbackable model/pr
 
 If fallback candidates use smaller `contextWindowTokens` values, nanobot builds context using the smallest window in the active chain so every candidate can receive the same prompt.
 
+### Luna and GPU routing
+
+The optional `modelRouting` block enables the daily Luna/GPU pair. With `enabled: true` and
+`mode: "auto"`, a task starts on Luna. The agent may use `model_select` to send a later model call in
+that task to the local GPU; completed tool results stay in the transcript. A later task starts on the
+automatic route again unless the user saved a session preset with `/model`. A GPU selection probes
+the configured local Ollama endpoint for up to two seconds and waits at most 30 seconds for initial
+inference output. A missing model, unavailable endpoint, overload, or timeout sends the request to
+Luna and records the fallback reason.
+
+```json
+{
+  "modelRouting": {
+    "enabled": true,
+    "mode": "auto",
+    "lunaPreset": "luna",
+    "gpuPreset": "gpu",
+    "gpuApiBase": "http://127.0.0.1:11437/v1",
+    "gpuModel": "gpt-oss:20b",
+    "readinessTimeoutSeconds": 2.0,
+    "firstOutputTimeoutSeconds": 30.0
+  }
+}
+```
+
+When enabled, missing `luna` and `gpu` presets are supplied automatically. Explicit definitions with
+those names take precedence. The GPU provider is `moeka_gpu`, kept separate from a general Ollama
+configuration. `enabled` defaults to false so existing installations keep their configured model.
+
 ## Model presets: gpt-6-luna
 
 Moeka runs on `openai/gpt-6-luna` through OpenRouter. The ready preset (snake_case keys are accepted
@@ -1597,6 +1626,12 @@ nanobot usage keys --workspace ~/.nanobot --fingerprint-env OPENROUTER_API_KEY
 `--fingerprint-env VAR` prints the fingerprint of `VAR`'s current value, never the value. In the
 usage API, `key_fp` is a `UsageFilter` field and a `group_by` column of
 `nanobot.llm_usage.query.totals`, and every `usage-record` (1.2) row carries it.
+
+Usage records also include `requested_preset`, the requested route (`auto`, `luna`, `gpu`, or a
+named preset), while `provider` and `model` report the actual attempt. `fallback_reason` records the
+provider error category that led to a fallback, and `instance_uuid` attributes the call to the
+instance's stable identity without recording its filesystem path. These nullable fields are available
+in `usage-record` 1.3, SQLite rows, and `nanobot.llm_usage.query` filters and groupings.
 
 ## Transcription Settings
 

@@ -44,6 +44,7 @@ Pick the row that matches what you want to accomplish next:
 | Schedule work or create a local trigger | [Automations](./automations.md) |
 | Understand and manage long-term memory | [Memory](./memory.md) |
 | Run nanobot continuously | [Deployment](./deployment.md) |
+| Distribute certified skills or script tools between instances | [Capability transfer](./capability-transfer.md) |
 | Run separate bots or workspaces | [Multiple Instances](./multiple-instances.md) |
 | Call nanobot from Python | [Python SDK](./python-sdk.md) |
 | Expose an OpenAI-compatible endpoint | [OpenAI-Compatible API](./openai-api.md) |

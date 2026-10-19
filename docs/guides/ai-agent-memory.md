@@ -28,7 +28,11 @@ nanobot agent -m "Hello!"
 
 ## Minimal working example
 
-Ask the agent to remember a stable fact in a normal session, then run Dream:
+For an explicit fact, ask the agent to use the `memory` tool with `remember`, then use
+`search` to retrieve it. Search is lexical and works when embedding services are off.
+Each result has an ID and source reference that `correct` and `forget` can target. The
+append-only audit data is stored in `memory/explicit.jsonl` inside that instance's
+workspace. For broader transcript consolidation, run Dream:
 
 ```text
 /dream

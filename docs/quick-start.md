@@ -1,5 +1,10 @@
 # Install and Quick Start
 
+For this Moeka distribution, install with `uv pip install -e .` from the checkout
+and use `moeka` (the `nanobot` alias remains available). Independent daily instances,
+portable skills and Luna/GPU setup are covered in [daily agents](daily-agents.md).
+The upstream installer below installs the upstream distribution.
+
 This guide has one goal: get a normal nanobot reply in your browser. Do not add chat apps, MCP servers, fallback models, or deployment until this path works.
 
 If terminals, Python, or API keys are unfamiliar, use the [beginner walkthrough](./start-without-technical-background.md), which explains each term and screen.

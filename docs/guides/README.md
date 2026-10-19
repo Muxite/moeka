@@ -35,6 +35,7 @@ Use **Settings → Channels** in the WebUI for guided setup. These guides explai
 |---|---|
 | Run from Python | [Python AI agent SDK](./python-ai-agent-sdk.md) |
 | Expose `/v1/chat/completions` | [OpenAI-compatible agent API](./openai-compatible-agent-api.md) |
+| Pair local instances | [Pair local Moeka instances](./paired-agents.md) |
 
 ## Configure and Operate
 
