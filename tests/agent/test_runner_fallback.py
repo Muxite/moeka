@@ -10,9 +10,12 @@ import httpx
 import pytest
 from loguru import logger
 
+from nanobot.agent.context_governance import ContextWindowExceededError
+from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.config.schema import ModelPresetConfig
 from nanobot.events import RetryStatusEvent
 from nanobot.providers.base import (
+    GenerationSettings,
     LLMProvider,
     LLMResponse,
     ProviderCallContext,
@@ -21,6 +24,7 @@ from nanobot.providers.base import (
 from nanobot.providers.conversation_state import ProviderConversationStateController
 from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.providers.openai_responses import resolve_compact_threshold
+from nanobot.utils.llm_runtime import LLMRuntime
 
 
 def _make_response(
@@ -370,6 +374,70 @@ class TestNoFallbackWhenPrimarySucceeds:
         assert result.content == "primary ok"
         assert result.finish_reason == "stop"
         factory.assert_not_called()
+
+
+class TestDedicatedGpuRouting:
+    @pytest.mark.asyncio
+    async def test_readiness_failure_skips_gpu_and_uses_luna(self) -> None:
+        primary = _FakeProvider("moeka_gpu", _make_response("must not call"))
+        luna = _FakeProvider("openrouter", _make_response("Luna response"))
+        readiness = AsyncMock(return_value=False)
+        provider = FallbackProvider(
+            primary,
+            [_fallback("openai/gpt-6-luna", "openrouter")],
+            provider_factory=lambda _preset: luna,
+            primary_readiness_check=readiness,
+        )
+
+        response = await provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+        assert response.content == "Luna response"
+        assert not primary.chat_calls
+        assert len(luna.chat_calls) == 1
+        readiness.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gpu_primary_is_retried_after_its_circuit_opens(self) -> None:
+        primary = _FakeProvider("moeka_gpu", _error_response("temporary overload"))
+        luna = _FakeProvider("openrouter", _make_response("Luna response"))
+        provider = FallbackProvider(
+            primary,
+            [_fallback("openai/gpt-6-luna", "openrouter")],
+            provider_factory=lambda _preset: luna,
+            primary_readiness_check=AsyncMock(return_value=True),
+        )
+        request = {"messages": [{"role": "user", "content": "hello"}]}
+        for _ in range(4):
+            await provider.chat(**request)
+
+        assert len(primary.chat_calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_gpu_stream_with_no_first_output_falls_back_with_deadline(self) -> None:
+        class HangingGpu(_FakeProvider):
+            async def chat_stream(self, **kwargs: Any) -> LLMResponse:
+                self.chat_stream_calls.append(dict(kwargs))
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        primary = HangingGpu("moeka_gpu")
+        luna = _FakeProvider("openrouter", _make_response("Luna response"))
+        provider = FallbackProvider(
+            primary,
+            [_fallback("openai/gpt-6-luna", "openrouter")],
+            provider_factory=lambda _preset: luna,
+            primary_readiness_check=AsyncMock(return_value=True),
+            first_output_timeout_s=0.01,
+        )
+
+        response = await provider.chat_stream(
+            messages=[{"role": "user", "content": "hello"}],
+            on_content_delta=AsyncMock(),
+        )
+
+        assert response.content == "Luna response"
+        assert len(primary.chat_stream_calls) == 1
+        assert len(luna.chat_stream_calls) == 1
 
 
 class _RaisingProvider(LLMProvider):
@@ -1804,3 +1872,90 @@ class TestGenerationForwarded:
         )
         assert fb.generation.temperature == 0.5
         assert fb.generation.max_tokens == 1024
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_before_gpu_call_falls_back_without_replaying_tools() -> None:
+    from nanobot.agent.tools.registry import ToolRegistry
+
+    gpu = _FakeProvider("moeka_gpu", _make_response("GPU must not be called"))
+    luna = _FakeProvider("openrouter", _make_response("continued on Luna"))
+    gpu_runtime = LLMRuntime(
+        provider=gpu,
+        model="gpt-oss:20b",
+        generation=GenerationSettings(max_tokens=2048),
+        context_window_tokens=16_384,
+        model_preset="gpu",
+    )
+    luna_runtime = LLMRuntime(
+        provider=luna,
+        model="openai/gpt-6-luna",
+        generation=GenerationSettings(max_tokens=2048),
+        context_window_tokens=1_000_000,
+        model_preset="luna",
+    )
+    runner = AgentRunner()
+    prepare_calls = 0
+
+    async def prepare_request(state, messages, *, tool_definitions, transcript=None):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if prepare_calls == 1:
+            raise ContextWindowExceededError(
+                session_key="session-1",
+                estimated_tokens=9658,
+                input_budget=5120,
+                source="test counter",
+            )
+        state.messages = list(messages)
+        state.tool_definitions = list(tool_definitions or [])
+        return messages, ProviderCallContext(
+            context_window_tokens=state.config.context_window_tokens,
+        )
+
+    runner.context_governor.prepare_request = prepare_request  # type: ignore[method-assign]
+    tools = ToolRegistry()
+    spec = AgentRunSpec(
+        initial_messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "continue after the completed operation"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "done-1",
+                    "type": "function",
+                    "function": {"name": "write_file", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "done-1",
+                "name": "write_file",
+                "content": "Completed tool result stays in context",
+            },
+        ],
+        tools=tools,
+        runtime=gpu_runtime,
+        max_iterations=1,
+        max_tool_result_chars=4096,
+        context_overflow_fallback_callback=lambda current: (
+            luna_runtime if current.provider.provider_name == "moeka_gpu" else None
+        ),
+        requested_preset="gpu",
+    )
+
+    result = await runner.run(spec)
+
+    assert result.final_content == "continued on Luna"
+    assert not gpu.chat_calls and not gpu.chat_stream_calls
+    assert len(luna.chat_stream_calls) == 1
+    submitted = luna.chat_stream_calls[0]["messages"]
+    assert any(
+        message.get("content") == "Completed tool result stays in context"
+        for message in submitted
+    )
+    assert "context was too small" in submitted[0]["content"]
+    assert spec.runtime is luna_runtime
+    assert spec.requested_preset == "gpu"
+    assert spec.fallback_reason == "context_window"

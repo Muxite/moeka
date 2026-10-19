@@ -7,8 +7,9 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -132,6 +133,8 @@ class FallbackProvider(LLMProvider):
         provider_factory: Callable[[Any], LLMProvider],
         fallback_model_observer: FallbackModelObserver | None = None,
         primary_context_window_tokens: int | None = None,
+        primary_readiness_check: Callable[[], Awaitable[bool]] | None = None,
+        first_output_timeout_s: float | None = None,
     ):
         primary_generation = primary.generation
         self._primary = primary
@@ -141,6 +144,8 @@ class FallbackProvider(LLMProvider):
         self._provider_factory = provider_factory
         self._fallback_model_observer = fallback_model_observer
         self._primary_context_window_tokens = primary_context_window_tokens
+        self._primary_readiness_check = primary_readiness_check
+        self._first_output_timeout_s = first_output_timeout_s
         self._has_fallbacks = bool(fallback_presets)
         self._primary_failures = 0
         self._primary_tripped_at: float | None = None
@@ -216,8 +221,11 @@ class FallbackProvider(LLMProvider):
         look explicit to — or override — a fallback preset.
         """
         context = kw.get("provider_context")
-        request = context.request if isinstance(context, ProviderCallContext) else None
-        defaults = request.default_sampling if request is not None else None
+        if not isinstance(context, ProviderCallContext) or context.request is None:
+            super()._apply_request_extras(kw)
+            return
+        request = context.request
+        defaults = request.default_sampling
         if defaults is None:
             super()._apply_request_extras(kw)
             return
@@ -225,7 +233,9 @@ class FallbackProvider(LLMProvider):
             context, request=replace(request, default_sampling=None),
         )
         super()._apply_request_extras(kw)
-        narrowed = kw["provider_context"]
+        narrowed = cast(ProviderCallContext | None, kw.get("provider_context"))
+        if narrowed is None or narrowed.request is None:
+            return
         kw["provider_context"] = replace(
             narrowed, request=replace(narrowed.request, default_sampling=defaults),
         )
@@ -496,10 +506,21 @@ class FallbackProvider(LLMProvider):
         # continuation, so the incoming primary state remains reusable.
         preserve_primary_state = True
 
-        if self._primary_available():
+        is_gpu_primary = self._primary.provider_name == "moeka_gpu"
+        primary_ready = True
+        if self._primary_readiness_check is not None:
+            try:
+                primary_ready = await self._primary_readiness_check()
+            except Exception as exc:  # readiness is best effort; fallback remains available
+                logger.info("GPU readiness probe failed: {}", type(exc).__name__)
+                primary_ready = False
+        if primary_ready and (self._primary_available() or is_gpu_primary):
             primary_was_attempted = True
             response, primary_exception = await self._call_provider(
-                call, self._primary, kwargs
+                call,
+                self._primary,
+                kwargs,
+                first_output_timeout_s=self._first_output_timeout_s,
             )
             if primary_exception is not None:
                 logger.warning(
@@ -548,6 +569,13 @@ class FallbackProvider(LLMProvider):
                     primary_model, self._primary_failures,
                 )
         else:
+            if not primary_ready:
+                primary_response = LLMResponse(
+                    content="GPU endpoint unavailable after readiness probe",
+                    finish_reason="error",
+                    error_kind="connection",
+                )
+                primary_error = primary_response.content
             logger.debug("Primary model '{}' circuit open; skipping", primary_model)
 
         last_response = primary_response
@@ -629,9 +657,17 @@ class FallbackProvider(LLMProvider):
                 fallback_kwargs.pop("reasoning_effort", None)
             else:
                 fallback_kwargs["reasoning_effort"] = fallback.reasoning_effort
-            fallback_response, fallback_exception = await self._call_provider(
-                call, fallback_provider, fallback_kwargs
+            from nanobot.llm_usage.context import llm_usage_attribution
+
+            failure_kind = (
+                last_response.error_kind
+                if last_response is not None and last_response.error_kind
+                else "unavailable"
             )
+            with llm_usage_attribution(fallback_reason=failure_kind):
+                fallback_response, fallback_exception = await self._call_provider(
+                    call, fallback_provider, fallback_kwargs
+                )
             if fallback_exception is not None:
                 logger.warning(
                     "Fallback '{}' raised {}",
@@ -690,9 +726,48 @@ class FallbackProvider(LLMProvider):
         call: Callable[[LLMProvider, dict[str, Any]], Awaitable[LLMResponse]],
         provider: LLMProvider,
         kwargs: dict[str, Any],
+        *,
+        first_output_timeout_s: float | None = None,
     ) -> tuple[LLMResponse, Exception | None]:
         """Turn provider exceptions into error responses without swallowing cancellation."""
         try:
+            if first_output_timeout_s is not None:
+                original_delta = kwargs.get("on_content_delta")
+                if not callable(original_delta):
+                    return await asyncio.wait_for(
+                        call(provider, kwargs), timeout=first_output_timeout_s
+                    ), None
+                delta_callback = cast(Callable[[str], Awaitable[None]], original_delta)
+                first_output = asyncio.Event()
+
+                async def _track_first_output(text: str) -> None:
+                    if text:
+                        first_output.set()
+                    await delta_callback(text)
+
+                timed_kwargs = {**kwargs, "on_content_delta": _track_first_output}
+
+                async def _invoke() -> LLMResponse:
+                    return await call(provider, timed_kwargs)
+
+                call_task = asyncio.create_task(_invoke())
+                signal_task = asyncio.create_task(first_output.wait())
+                done, _pending = await asyncio.wait(
+                    {call_task, signal_task},
+                    timeout=first_output_timeout_s,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    call_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await call_task
+                    raise TimeoutError(
+                        f"GPU inference produced no output within {first_output_timeout_s:g}s"
+                    )
+                signal_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await signal_task
+                return await call_task, None
             return await call(provider, kwargs), None
         except asyncio.CancelledError:
             raise

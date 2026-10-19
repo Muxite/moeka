@@ -773,7 +773,7 @@ class MemoryStore:
         skills_dir.mkdir(parents=True, exist_ok=True)
 
         extra_read = [BUILTIN_SKILLS_DIR] if BUILTIN_SKILLS_DIR.exists() else None
-        editable_files = [self.memory_file, self.soul_file, self.user_file]
+        editable_files = [self.memory_file, self.user_file]
         mode = skill_writes or self.dream_skill_writes
         read_cls: Any = ReadFileTool
         edit_cls: Any = EditFileTool

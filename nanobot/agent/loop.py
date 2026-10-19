@@ -55,11 +55,11 @@ from nanobot.bus.outbound_events import (
 from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
 from nanobot.command.router import normalize_command_text
-from nanobot.config.schema import AgentDefaults, ModelPresetConfig
+from nanobot.config.schema import AgentDefaults, ModelPresetConfig, ModelRoutingConfig
 from nanobot.events import NO_EVENTS, AgentEvent, EventSink
 from nanobot.llm_usage.context import source_from_request
 from nanobot.providers.base import LLMProvider, LLMUsage, ProviderConversationState
-from nanobot.providers.factory import ProviderSnapshot
+from nanobot.providers.factory import ProviderSnapshot, build_provider_snapshot
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
     RUNTIME_CONTEXT_MESSAGE_META,
@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     from nanobot.kernel.policy import PermissionPolicy
     from nanobot.kernel.registry import PluginRegistry
     from nanobot.kernel.variants import Variant
+    from nanobot.peers import PeerService
     from nanobot.triggers.local_store import LocalTriggerStore
 
 _T = TypeVar("_T")
@@ -169,6 +170,7 @@ class TurnContext:
 
     outbound: OutboundMessage | None = None
     suppress_response: bool = False
+    peer_duplicate: bool = False
 
     events: EventSink = NO_EVENTS
     streaming: bool = False
@@ -263,6 +265,10 @@ class AgentLoop:
     def model_preset(self) -> str | None:
         return self.runtime_resolver.model_preset
 
+    def resolve_runtime_preset(self, name: str) -> LLMRuntime:
+        """Resolve a configured preset for tools such as worker spawning."""
+        return self.runtime_resolver.resolve_preset(name)
+
     @model_preset.setter
     def model_preset(self, name: str | None) -> None:
         self.set_model_preset(name)
@@ -330,6 +336,7 @@ class AgentLoop:
         provider_snapshot_loader: Callable[..., ProviderSnapshot] | None = None,
         provider_signature: tuple[object, ...] | None = None,
         model_presets: dict[str, ModelPresetConfig] | None = None,
+        model_routing: ModelRoutingConfig | None = None,
         preset_catalog_loader: preset_helpers.PresetCatalogLoader | None = None,
         model_preset: str | None = None,
         dream_model_preset: str | None = None,
@@ -360,6 +367,7 @@ class AgentLoop:
         memory_dir: Path | None = None,
         inject_memory: bool = True,
         capabilities_config: CapabilitiesConfig | None = None,
+        peer_service: PeerService | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
         from nanobot.kernel.gate import AGENT_PRINCIPAL
@@ -369,6 +377,7 @@ class AgentLoop:
         defaults = AgentDefaults()
         self.bus = bus
         self.env = env
+        self.peer_service = peer_service
         # Variant (Task 8): prompt templates, skills dir, bootstrap entries and tool
         # descriptions for this loop only; sub-agents inherit it. None = built-ins.
         self.variant = variant
@@ -395,6 +404,7 @@ class AgentLoop:
         self.restart_mode = restart_mode
         self._runtime_model_publisher = runtime_model_publisher
         self.workspace = workspace
+        self.model_routing = model_routing or ModelRoutingConfig()
         initial_model = model or provider.get_default_model()
         self.max_iterations = (
             max_iterations if max_iterations is not None else defaults.max_tool_iterations
@@ -552,6 +562,9 @@ class AgentLoop:
         self._running = False
         self._runtime_context_providers: list[RuntimeContextProvider] = []
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        # Count admitted turns across sessions. Approved capability swaps run only
+        # before the first turn starts while the loop is quiescent.
+        self._active_turn_count = 0
         self._discarding_sessions: set[str] = set()
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._close_lock = asyncio.Lock()
@@ -612,6 +625,11 @@ class AgentLoop:
         self._next_idle_compact_check_at = time.monotonic()
         if model_preset:
             self.set_model_preset(model_preset, publish_update=False)
+        # Owner-approved certified tools are applied before the tool registry loads.
+        # Script tools cannot replace a live registered tool safely.
+        from nanobot.capabilities.transfer import activate_pending_from_env
+
+        activate_pending_from_env(Path(self.workspace), self.env)
         self._register_default_tools(provider_snapshot_loader=provider_snapshot_loader)
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
@@ -641,7 +659,6 @@ class AgentLoop:
         ``variant=`` (via *extra*) is the loop's :class:`~nanobot.kernel.variants.Variant`.
         """
         from nanobot.kernel.legacy import LegacyEnvironment
-        from nanobot.providers.factory import make_provider
 
         # An explicit host env owns the agent's work dir (I2); the legacy adapter
         # keeps ``config.workspace_path`` exactly as before.
@@ -660,12 +677,37 @@ class AgentLoop:
                 sessions_root=sessions_root,
                 store=_default_store,
             )
-        provider = extra.pop("provider", None) or make_provider(config, env=env)
-        resolved = config.resolve_preset()
-        model = extra.pop("model", None) or resolved.model
-        context_window_tokens = extra.pop("context_window_tokens", None) or resolved.context_window_tokens
         provider_snapshot_loader = extra.pop("provider_snapshot_loader", None)
-        preset_snapshot_loader = extra.pop("preset_snapshot_loader", None) or preset_helpers.make_preset_snapshot_loader(
+        if config.model_routing.enabled:
+            route_name = {
+                "auto": config.model_routing.luna_preset,
+                "luna": config.model_routing.luna_preset,
+                "gpu": config.model_routing.gpu_preset,
+            }[config.model_routing.mode]
+            snapshots = preset_helpers.configured_model_presets(config)
+            route_name = route_name if route_name in snapshots else "default"
+            if provider_snapshot_loader is not None:
+                route_snapshot = provider_snapshot_loader(preset_name=route_name)
+            else:
+                route_snapshot = build_provider_snapshot(config, preset_name=route_name, env=env)
+            provider = extra.pop("provider", None) or route_snapshot.provider
+            model = extra.pop("model", None) or route_snapshot.model
+            context_window_tokens = (
+                extra.pop("context_window_tokens", None) or route_snapshot.context_window_tokens
+            )
+        else:
+            from nanobot.providers.factory import make_provider
+
+            route_name = defaults.model_preset
+            provider = extra.pop("provider", None) or make_provider(config, env=env)
+            resolved = config.resolve_preset()
+            model = extra.pop("model", None) or resolved.model
+            context_window_tokens = (
+                extra.pop("context_window_tokens", None) or resolved.context_window_tokens
+            )
+        preset_snapshot_loader = extra.pop(
+            "preset_snapshot_loader", None
+        ) or preset_helpers.make_preset_snapshot_loader(
             config,
             provider_snapshot_loader,
             env,
@@ -695,7 +737,12 @@ class AgentLoop:
             idle_compact_check_interval_seconds=defaults.idle_compact_check_interval_seconds,
             tools_config=config.tools,
             model_presets=preset_helpers.configured_model_presets(config),
-            model_preset=defaults.model_preset,
+            model_routing=config.model_routing,
+            model_preset=(
+                route_name
+                if config.model_routing.enabled and route_name != "default"
+                else defaults.model_preset
+            ),
             dream_model_preset=defaults.dream.model_override,
             dream_skill_writes=defaults.dream.skill_writes,
             restart_mode=config.gateway.restart_mode,
@@ -820,6 +867,8 @@ class AgentLoop:
             timezone=self.context.timezone or "UTC",
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_control=AgentRuntimeControl(self),
+            model_routing=self.model_routing,
+            peer_service=self.peer_service,
             env=self.env,
             variant=self.variant,
             host_tools=self.host_tools,
@@ -1349,6 +1398,10 @@ class AgentLoop:
             session_key=session.key if session is not None else None,
             runtime=runtime,
         )
+        # A persisted selection comes from an explicit owner action such as
+        # ``/model``. Automatic model_select calls may not replace it mid-task.
+        if session is not None and model_preset_from_metadata(session.metadata) is not None:
+            request_ctx.attributes["_user_model_lock"] = True
         active_session_key = session.key if session else request_ctx.session_key
         request_metadata = request_ctx.metadata
         effective_scope = self.workspace_scopes.for_turn(
@@ -1391,90 +1444,131 @@ class AgentLoop:
             )
 
         session_metadata = session.metadata if session is not None else None
+
+        def _consume_selected_runtime() -> LLMRuntime | None:
+            selected = request_ctx.attributes.pop("_model_select_runtime", None)
+            return selected if isinstance(selected, LLMRuntime) else None
+
+        def _consume_requested_preset() -> str | None:
+            selected = request_ctx.attributes.pop("_requested_model_preset", None)
+            return selected if isinstance(selected, str) and selected else None
+
+        def _context_overflow_fallback(current: LLMRuntime) -> LLMRuntime | None:
+            if not self.model_routing.enabled or current.provider.provider_name != "moeka_gpu":
+                return None
+            try:
+                return self.runtime_resolver.resolve_preset(self.model_routing.luna_preset)
+            except (KeyError, ValueError):
+                return None
+
+        requested_preset = (
+            model_preset_from_metadata(session.metadata) if session is not None else None
+        )
+        if requested_preset is None:
+            requested_preset = (
+                self.model_routing.mode
+                if self.model_routing.enabled
+                else (runtime.model_preset or "default")
+            )
+        from nanobot.config.instances import InstanceError, instance_uuid
+
+        try:
+            usage_instance_uuid = instance_uuid(self.workspace)
+        except (InstanceError, OSError, ValueError):
+            usage_instance_uuid = None
+
         if self.planning:
             await self._maybe_plan(transcript_input)
         try:
             for scope in turn_scopes or ():
                 turn_scope_stack.enter_context(scope)
-            hook = build_agent_turn_hook(AgentTurnHookSpec(
-                events=events,
-                streaming=streaming,
-                channel=request_ctx.channel,
-                chat_id=request_ctx.chat_id,
-                message_id=request_ctx.message_id,
-                metadata=request_metadata,
-                attributes=dict(request_ctx.attributes),
-                session_key=active_session_key,
-                workspace=effective_scope.project_path,
-                tool_hint_max_length=self.tool_hint_max_length,
-                registered_hook_factories=self._hook_factories,
-                turn_hook_factories=list(hook_factories or []),
-                registered_hooks=self._extra_hooks,
-                turn_hooks=list(hooks or []),
-                ephemeral=ephemeral,
-                run_extra_hooks_for_ephemeral=run_extra_hooks_for_ephemeral,
-            ))
-            result = await self.runner.run(AgentRunSpec(
-                initial_messages=None,
-                tools=effective_tools,
-                runtime=runtime,
-                max_iterations=self.max_iterations,
-                max_tool_result_chars=self.max_tool_result_chars,
-                transcript_input=transcript_input,
-                transcript_builder=transcript_builder,
-                hook=hook,
-                concurrent_tools=True,
-                workspace=effective_scope.project_path,
-                session_key=session.key if session else None,
-                provider_retry_mode=self.provider_retry_mode,
-                checkpoint_callback=_checkpoint,
-                consolidate_history=(
-                    partial(
-                        self.consolidator.summarize_transcript,
-                        runtime=runtime,
-                        session_key=session.key,
-                        tools=effective_tools.get_definitions(),
-                        generation=history_generation(session.metadata),
-                    )
-                    if session is not None and not ephemeral
-                    else None
-                ),
-                consolidate_provider_compaction=(
-                    partial(
-                        self.consolidator.summarize_provider_compaction,
-                        runtime=runtime,
-                        session_key=session.key,
-                        tools=effective_tools.get_definitions(),
-                        generation=history_generation(session.metadata),
-                    )
-                    if session is not None and not ephemeral
-                    else None
-                ),
-                injection_callback=_drain_pending,
-                limits=self.runner_limits,
-                terminal_injection_callback=_wait_for_pending,
-                continuation_callback=_goal_continue,
-                finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
-                    pending_queue_available=pending_queue is not None and session is not None,
-                    session_metadata=session_metadata,
-                    message_metadata=request_metadata,
-                ),
-                provider_state=provider_state,
-                llm_usage_source=source_from_request(
-                    active_session_key,
+            hook = build_agent_turn_hook(
+                AgentTurnHookSpec(
+                    events=events,
+                    streaming=streaming,
                     channel=request_ctx.channel,
+                    chat_id=request_ctx.chat_id,
+                    message_id=request_ctx.message_id,
                     metadata=request_metadata,
-                ),
-                events=events,
-                policy=self.policy,
-                principal=self.principal,
-                env=self.env,
-                **(
-                    {"max_policy_denials": self.max_policy_denials}
-                    if self.max_policy_denials is not None else {}
-                ),
-                max_tool_errors=self.max_tool_errors,
-            ))
+                    attributes=dict(request_ctx.attributes),
+                    session_key=active_session_key,
+                    workspace=effective_scope.project_path,
+                    tool_hint_max_length=self.tool_hint_max_length,
+                    registered_hook_factories=self._hook_factories,
+                    turn_hook_factories=list(hook_factories or []),
+                    registered_hooks=self._extra_hooks,
+                    turn_hooks=list(hooks or []),
+                    ephemeral=ephemeral,
+                    run_extra_hooks_for_ephemeral=run_extra_hooks_for_ephemeral,
+                )
+            )
+            result = await self.runner.run(
+                AgentRunSpec(
+                    initial_messages=None,
+                    tools=effective_tools,
+                    runtime=runtime,
+                    runtime_update_callback=_consume_selected_runtime,
+                    requested_preset_callback=_consume_requested_preset,
+                    context_overflow_fallback_callback=_context_overflow_fallback,
+                    requested_preset=requested_preset,
+                    instance_uuid=usage_instance_uuid,
+                    max_iterations=self.max_iterations,
+                    max_tool_result_chars=self.max_tool_result_chars,
+                    transcript_input=transcript_input,
+                    transcript_builder=transcript_builder,
+                    hook=hook,
+                    concurrent_tools=True,
+                    workspace=effective_scope.project_path,
+                    session_key=session.key if session else None,
+                    provider_retry_mode=self.provider_retry_mode,
+                    checkpoint_callback=_checkpoint,
+                    consolidate_history=(
+                        partial(
+                            self.consolidator.summarize_transcript,
+                            runtime=runtime,
+                            session_key=session.key,
+                            tools=effective_tools.get_definitions(),
+                            generation=history_generation(session.metadata),
+                        )
+                        if session is not None and not ephemeral
+                        else None
+                    ),
+                    consolidate_provider_compaction=(
+                        partial(
+                            self.consolidator.summarize_provider_compaction,
+                            runtime=runtime,
+                            session_key=session.key,
+                            tools=effective_tools.get_definitions(),
+                            generation=history_generation(session.metadata),
+                        )
+                        if session is not None and not ephemeral
+                        else None
+                    ),
+                    injection_callback=_drain_pending,
+                    limits=self.runner_limits,
+                    terminal_injection_callback=_wait_for_pending,
+                    continuation_callback=_goal_continue,
+                    finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
+                        pending_queue_available=pending_queue is not None and session is not None,
+                        session_metadata=session_metadata,
+                        message_metadata=request_metadata,
+                    ),
+                    provider_state=provider_state,
+                    llm_usage_source=source_from_request(
+                        active_session_key,
+                        channel=request_ctx.channel,
+                        metadata=request_metadata,
+                    ),
+                    events=events,
+                    policy=self.policy,
+                    principal=self.principal,
+                    env=self.env,
+                    max_policy_denials=(
+                        self.max_policy_denials if self.max_policy_denials is not None else 6
+                    ),
+                    max_tool_errors=self.max_tool_errors,
+                )
+            )
         finally:
             turn_scope_stack.close()
             reset_workspace_scope(workspace_token)
@@ -1902,6 +1996,28 @@ class AgentLoop:
 
     async def _process_message(
         self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> OutboundMessage | None:
+        """Admit a turn and apply owner-approved transfers only while quiescent."""
+        if self._active_turn_count == 0:
+            from nanobot.agent.personality import activate as activate_personality
+            from nanobot.capabilities.transfer import activate_pending_from_env
+
+            activate_personality(Path(self.workspace), self.env)
+            activate_pending_from_env(
+                Path(self.workspace),
+                self.env,
+                allow_script_tools=False,
+            )
+        self._active_turn_count += 1
+        try:
+            return await self._process_message_body(*args, **kwargs)
+        finally:
+            self._active_turn_count -= 1
+
+    async def _process_message_body(
+        self,
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
@@ -1986,6 +2102,8 @@ class AgentLoop:
             ctx.events = EventSink(track_output, ctx.events.accepts)
 
         await self._run_turn_stage(ctx, "restore", self._restore_turn)
+        if ctx.peer_duplicate:
+            return None
         await self._run_turn_stage(ctx, "compact", self._compact_session)
         if await self._run_turn_stage(ctx, "command", self._dispatch_command):
             return ctx.outbound
@@ -2100,6 +2218,16 @@ class AgentLoop:
             is_user_turn=ctx.original_user_text is not None,
         )
         await ctx.delivery.started()
+        peer_meta_value = msg.metadata.get("peer")
+        peer_meta = (
+            cast(dict[str, Any], peer_meta_value) if isinstance(peer_meta_value, dict) else None
+        )
+        if self.peer_service is not None and peer_meta is not None:
+            delivery_id = peer_meta.get("delivery_id")
+            if isinstance(delivery_id, str):
+                ctx.peer_duplicate = not await self.peer_service.begin_inbox(delivery_id)
+                if ctx.peer_duplicate:
+                    return
         if ctx.kind is TurnKind.USER:
             self.workspace_scopes.persist_message_scope(session, msg)
 
@@ -2376,25 +2504,36 @@ class AgentLoop:
         )
         if ctx.suppress_response:
             ctx.outbound = None
-            return
-        if ctx.kind is TurnKind.SYSTEM:
+        elif ctx.kind is TurnKind.SYSTEM:
             ctx.outbound = ctx.delivery.background_response(
                 ctx.final_content,
                 stop_reason=ctx.stop_reason,
                 streamed=ctx.streamed_content,
                 latency_ms=ctx.turn_latency_ms,
             )
-            return
-        ctx.outbound = self._assemble_outbound(
-            ctx.delivery.delivery_message,
-            cast(str, ctx.final_content),
-            ctx.stop_reason,
-            ctx.streamed_content,
-            log_content=ctx.require_session().policy.log_content,
-            turn_latency_ms=ctx.turn_latency_ms,
+        else:
+            ctx.outbound = self._assemble_outbound(
+                ctx.delivery.delivery_message,
+                cast(str, ctx.final_content),
+                ctx.stop_reason,
+                ctx.streamed_content,
+                log_content=ctx.require_session().policy.log_content,
+                turn_latency_ms=ctx.turn_latency_ms,
+            )
+            if ctx.ephemeral and ctx.outbound is not None:
+                ctx.outbound.metadata["_stop_reason"] = ctx.stop_reason
+        peer_meta_value = ctx.msg.metadata.get("peer")
+        peer_meta = (
+            cast(dict[str, Any], peer_meta_value) if isinstance(peer_meta_value, dict) else None
         )
-        if ctx.ephemeral and ctx.outbound is not None:
-            ctx.outbound.metadata["_stop_reason"] = ctx.stop_reason
+        if self.peer_service is not None and peer_meta is not None:
+            delivery_id = peer_meta.get("delivery_id")
+            if isinstance(delivery_id, str):
+                await self.peer_service.complete_inbox(
+                    delivery_id,
+                    ctx.final_content or "The peer task completed without a response.",
+                )
+        return
 
     def _sanitize_persisted_blocks(
         self,

@@ -461,3 +461,113 @@ def capabilities_reject(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"rejected {name} -> {target}")
+
+
+transfer_app = typer.Typer(help="Transfer certified skills and script tools between instances")
+capabilities_app.add_typer(transfer_app, name="transfer")
+
+
+def _transfer_configs(
+    source_config: str | None, source_workspace: str | None,
+    destination_config: str | None, destination_workspace: str | None,
+) -> tuple[Config, Config]:
+    return (
+        _load(source_config, source_workspace),
+        _load(destination_config, destination_workspace),
+    )
+
+
+@transfer_app.command("preview")
+def transfer_preview(
+    kind: str = typer.Argument(..., help="skill or script-tool"),
+    name: str = typer.Argument(...),
+    source_config: str | None = typer.Option(None, "--source-config"),
+    source_workspace: str | None = typer.Option(None, "--source-workspace"),
+    destination_config: str | None = typer.Option(None, "--destination-config"),
+    destination_workspace: str | None = typer.Option(None, "--destination-workspace"),
+) -> None:
+    """Preview a transfer after source/destination certificate and effects checks."""
+    from nanobot.capabilities.transfer import TransferError, preview
+
+    source, destination = _transfer_configs(
+        source_config, source_workspace, destination_config, destination_workspace,
+    )
+    try:
+        result = preview(source, destination, kind, name)
+    except TransferError as exc:
+        typer.echo(f"refused: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(result, indent=2))
+
+
+@transfer_app.command("stage")
+def transfer_stage(
+    kind: str = typer.Argument(..., help="skill or script-tool"),
+    name: str = typer.Argument(...),
+    source_config: str | None = typer.Option(None, "--source-config"),
+    source_workspace: str | None = typer.Option(None, "--source-workspace"),
+    destination_config: str | None = typer.Option(None, "--destination-config"),
+    destination_workspace: str | None = typer.Option(None, "--destination-workspace"),
+) -> None:
+    """Prepare a verified transfer; activation is always a separate explicit action."""
+    from nanobot.capabilities.transfer import TransferError, stage
+
+    source, destination = _transfer_configs(
+        source_config, source_workspace, destination_config, destination_workspace,
+    )
+    try:
+        stage_id = stage(source, destination, kind, name)
+    except TransferError as exc:
+        typer.echo(f"refused: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"staged {stage_id}; activate explicitly between turns")
+
+
+@transfer_app.command("activate")
+def transfer_activate(
+    stage_id: str = typer.Argument(...),
+    config: str | None = _CONFIG_OPTION,
+    workspace: str | None = _WORKSPACE_OPTION,
+) -> None:
+    """Approve activation; the destination applies it before a later turn begins."""
+    from nanobot.capabilities.transfer import TransferError, approve_activation
+
+    try:
+        approve_activation(_load(config, workspace), stage_id)
+    except TransferError as exc:
+        typer.echo(f"refused: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"approved {stage_id}; it applies at the next quiescent turn boundary")
+
+
+@transfer_app.command("history")
+def transfer_history(
+    as_json: bool = typer.Option(False, "--json"),
+    config: str | None = _CONFIG_OPTION,
+    workspace: str | None = _WORKSPACE_OPTION,
+) -> None:
+    """List local capability activation history."""
+    from nanobot.capabilities.transfer import history
+
+    rows = history(_workspace(config, workspace))
+    typer.echo(json.dumps(rows, indent=2) if as_json else (
+        "\n".join(f"{row.get('activation_id')}\t{row.get('kind')}\t{row.get('name')}"
+                  for row in rows) or "no transfer history"
+    ))
+
+
+@transfer_app.command("rollback")
+def transfer_rollback(
+    activation_id: str | None = typer.Argument(None),
+    config: str | None = _CONFIG_OPTION,
+    workspace: str | None = _WORKSPACE_OPTION,
+) -> None:
+    """Restore the previous bundle or remove a newly introduced one."""
+    from nanobot.capabilities.transfer import TransferError, rollback
+
+    try:
+        target = rollback(_load(config, workspace), activation_id)
+    except TransferError as exc:
+        typer.echo(f"refused: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"rolled back {target}")

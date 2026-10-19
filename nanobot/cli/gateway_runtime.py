@@ -360,6 +360,7 @@ def _run_gateway(
     from nanobot.channels.manager import ChannelManager
     from nanobot.config.watcher import watch_config_file
     from nanobot.cron.bound_runner import run_bound_cron_job
+    from nanobot.cron.proactive import UnsolicitedDeliveryLimit
     from nanobot.cron.service import CronJobSkippedError, CronService
     from nanobot.cron.session_turns import is_bound_cron_job
     from nanobot.cron.types import CronJob, CronRunResult
@@ -384,6 +385,14 @@ def _run_gateway(
     from nanobot.triggers.local_store import LocalTriggerStore
 
     port = port if port is not None else config.gateway.port
+    from nanobot.agent.skill_seeds import seed_portable_skills
+
+    try:
+        seeded = seed_portable_skills(config.workspace_path)
+        if seeded:
+            logger.info("Installed portable skill seeds: {}", ", ".join(seeded))
+    except OSError:
+        logger.exception("Failed to install portable skill seeds")
     webui_url = _webui_browser_url(config)
     gateway_host_for_browser = _host_for_local_browser(config.gateway.host)
     if health_server_enabled and _tcp_endpoint_reachable(gateway_host_for_browser, port):
@@ -439,6 +448,27 @@ def _run_gateway(
             console.print(f"[red]Error: {exc}[/red]")
             raise typer.Exit(1) from exc
     session_manager = build_default_session_manager(config.workspace_path)
+    peer_service = None
+    if config.peers:
+        from nanobot.peers import PeerService
+
+        identity_path = config.workspace_path / ".nanobot" / "workspace-id"
+        try:
+            instance_id = identity_path.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise RuntimeError(
+                f"paired peers need the instance identity marker at {identity_path}"
+            ) from exc
+        if len(instance_id) != 32 or any(char not in "0123456789abcdef" for char in instance_id):
+            raise RuntimeError(f"invalid instance identity marker at {identity_path}")
+        peer_service = PeerService(
+            instance_id=instance_id,
+            peers=config.peers,
+            listener=config.peer_listener,
+            state_dir=config.workspace_path / "peers",
+            socket_path=config.workspace_path / ".nanobot" / "peer.sock",
+            bus=bus,
+        )
 
     # Use the same runtime identity for foreground and managed gateway processes.
     from nanobot.config.loader import get_config_path
@@ -462,6 +492,9 @@ def _run_gateway(
     # Create cron service with workspace-scoped store
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
+    unsolicited_limit = UnsolicitedDeliveryLimit(
+        config.workspace_path / "cron" / "unsolicited.sqlite3",
+    )
     trigger_store = LocalTriggerStore(config.workspace_path)
 
     turn_delivery_factory = TurnDeliveryFactory(
@@ -497,6 +530,7 @@ def _run_gateway(
         hook_factories=[create_file_edit_activity_hook],
         tool_registry=tools,
         recovery_admission=recovery,
+        peer_service=peer_service,
     )
     # Spec 010 FR-004: fail startup (exit 2) if a host tool is missing.
     from nanobot.cli.host_tools_guard import require_host_tools
@@ -682,6 +716,15 @@ def _run_gateway(
                 )
 
             if should_notify:
+                heartbeat_cfg = config.gateway.heartbeat
+                if not unsolicited_limit.reserve(
+                    timezone=config.agents.defaults.timezone,
+                    max_per_day=heartbeat_cfg.unsolicited_max_per_day,
+                    start_hour=heartbeat_cfg.unsolicited_start_hour,
+                    end_hour=heartbeat_cfg.unsolicited_end_hour,
+                ):
+                    logger.info("Heartbeat: unsolicited delivery deferred by quiet hours or daily limit")
+                    return response
                 logger.info("Heartbeat: completed, delivering response")
                 await _deliver_to_channel(
                     OutboundMessage(channel=channel, chat_id=chat_id, content=response),
@@ -913,6 +956,8 @@ def _run_gateway(
             console.print,
         )
         try:
+            if peer_service is not None:
+                await peer_service.start()
             await cron.start()
             # Re-read once on first admission to close the watcher subscription window.
             agent.runtime_resolver.invalidate()
@@ -1007,6 +1052,8 @@ def _run_gateway(
                     with suppress(asyncio.CancelledError):
                         await shutdown_task
                 cron.stop()
+                if peer_service is not None:
+                    await peer_service.stop()
                 # A gateway exit interrupts ownership of active turns; it is
                 # not the same as the user stopping a turn.  Keep checkpoints
                 # so the next gateway can offer an explicit Continue action.

@@ -142,12 +142,12 @@ async def test_write_inside_skills_pending_lands_exactly_there(tmp_path: Path, t
 
 async def test_memory_files_are_not_remapped(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path)
-    store.write_soul("# Soul\n- Helpful")
+    store.user_file.write_text("# User\n- Helpful")
     tools = store.build_dream_tools()
     result = await tools.execute("edit_file", {
-        "path": "SOUL.md", "old_text": "Helpful", "new_text": "Precise",
+        "path": "USER.md", "old_text": "Helpful", "new_text": "Precise",
     })
-    assert "Precise" in store.soul_file.read_text(encoding="utf-8"), result
+    assert "Precise" in store.user_file.read_text(encoding="utf-8"), result
     assert not (tmp_path / "skills-pending").exists()
 
 

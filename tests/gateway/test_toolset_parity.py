@@ -65,6 +65,7 @@ def test_host_loop_registers_message_cron_and_cli_app_tools(tmp_path: Path) -> N
 def test_loop_without_host_tools_has_none_of_them(tmp_path: Path) -> None:
     names = set(_loop(tmp_path, host_tools=False).tools.tool_names)
     assert not (HOST_TOOLS & names), f"host tools leaked: {sorted(HOST_TOOLS & names)}"
+    assert "memory" in names
 
 
 def test_host_and_bare_loop_differ_by_exactly_the_host_tools(tmp_path: Path) -> None:

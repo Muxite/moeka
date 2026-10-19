@@ -713,6 +713,18 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="11434",
         default_api_base="http://localhost:11434/v1",
     ),
+    # Dedicated endpoint reserved for Moeka's local GPU preset. Keeping a separate
+    # provider name prevents daily-agent requests from inheriting a general Ollama
+    # endpoint used by other projects.
+    ProviderSpec(
+        name="moeka_gpu",
+        keywords=("moeka_gpu",),
+        env_key="OLLAMA_API_KEY",
+        display_name="Moeka GPU (Ollama)",
+        backend="openai_compat",
+        is_local=True,
+        default_api_base="http://127.0.0.1:11437/v1",
+    ),
     # LM Studio (local, OpenAI-compatible)
     ProviderSpec(
         name="lm_studio",

@@ -84,8 +84,7 @@ def test_system_prompt_reflects_current_dream_memory_contract(tmp_path, selected
 
     assert "memory/history.jsonl" in prompt
     assert (
-        "Only Dream memory-consolidation tasks may edit the profile and long-term memory files "
-        "listed above."
+        "Personality editing is disabled for this instance, including Dream tasks."
     ) in prompt
 
 

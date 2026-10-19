@@ -25,6 +25,7 @@ from nanobot.security.workspace_access import current_workspace_scope
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
     from nanobot.agent.tools.context import ToolContext
+    from nanobot.agent.tools.runtime_control import RuntimeControl
     from nanobot.kernel.policy import CapabilityRequest
 
 
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
             minimum=0.0,
             maximum=2.0,
         ),
+        model_preset=StringSchema(
+            description="Optional configured model preset for this worker (for example luna or gpu).",
+        ),
         wait=BooleanSchema(
             description=(
                 "Wait for the subagent and return its result directly. Use this for a "
@@ -55,15 +59,20 @@ if TYPE_CHECKING:
 class SpawnTool(Tool):
     """Tool to spawn a subagent for background task execution."""
 
-    def __init__(self, manager: "SubagentManager"):
+    def __init__(
+        self,
+        manager: "SubagentManager",
+        runtime_control: "RuntimeControl | None" = None,
+    ):
         self._manager = manager
+        self._runtime_control = runtime_control
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
         manager = ctx.subagent_manager
         if manager is None:
             raise RuntimeError("SpawnTool requires an initialized subagent manager")
-        return cls(manager=manager)
+        return cls(manager=manager, runtime_control=ctx.runtime_control)
 
     @property
     def name(self) -> str:
@@ -86,6 +95,7 @@ class SpawnTool(Tool):
         task: str,
         label: str | None = None,
         temperature: float | None = None,
+        model_preset: str | None = None,
         wait: bool = False,
         **kwargs: Any,
     ) -> str:
@@ -97,9 +107,17 @@ class SpawnTool(Tool):
         origin_chat_id = request_ctx.chat_id
         session_key = request_ctx.session_key or f"{origin_channel}:{origin_chat_id}"
         method = self._manager.run_inline if wait else self._manager.spawn
+        runtime = request_ctx.runtime
+        if model_preset:
+            if self._runtime_control is None:
+                return ToolResult.error("Error: model preset selection is unavailable")
+            try:
+                runtime = self._runtime_control.resolve_model_preset(model_preset)
+            except (KeyError, ValueError) as exc:
+                return ToolResult.error(str(exc))
         return await method(
             task=task,
-            runtime=request_ctx.runtime,
+            runtime=runtime,
             label=label,
             origin_channel=origin_channel,
             origin_chat_id=origin_chat_id,

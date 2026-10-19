@@ -246,6 +246,11 @@ class ModelRuntimeResolver:
                 snapshot_signature=("model_override", model),
             )
 
-        base = config.resolve_preset(self.model_preset)
+        selected = self.model_preset
+        base = (
+            self._model_presets[selected]
+            if selected is not None and selected in self._model_presets
+            else config.resolve_preset(selected)
+        )
         preset = base.model_copy(update={"model": model, "provider": "auto"})
         return self.resolve_snapshot(build_provider_snapshot(config, preset=preset, env=self._env))

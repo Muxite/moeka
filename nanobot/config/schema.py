@@ -193,6 +193,21 @@ class ModelPresetConfig(Base):
         )
 
 
+class ModelRoutingConfig(Base):
+    """Runtime policy for the daily Luna/GPU model pair."""
+
+    enabled: bool = False
+    mode: Literal["auto", "luna", "gpu"] = "auto"
+    luna_preset: str = "luna"
+    gpu_preset: str = "gpu"
+    gpu_api_base: str = "http://127.0.0.1:11437/v1"
+    gpu_model: str = "gpt-oss:20b"
+    gpu_context_window_tokens: int = Field(default=16_384, ge=1024, le=131_072)
+    gpu_max_tokens: int = Field(default=2048, ge=1, le=8192)
+    readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
+    first_output_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -220,7 +235,7 @@ class AgentDefaults(Base):
     reasoning_effort: str | None = None  # low / medium / high / xhigh / max / adaptive / none — LLM thinking effort; None preserves the provider default
     timezone: str = "UTC"  # Effective IANA timezone, e.g. "Asia/Shanghai"
     timezone_mode: Literal["auto", "manual"] = "auto"
-    bot_name: str = "nanobot"  # Display name shown in CLI prompts (e.g. "{name} is thinking...")
+    bot_name: str = "Moeka"  # Display name shown in CLI prompts (e.g. "{name} is thinking...")
     bot_icon: str = "🐈"  # Short icon (emoji or text) shown next to the bot name in CLI; "" to omit
     unified_session: bool = False  # Share one session across all channels (single-user multi-device)
     disabled_skills: list[str] = Field(default_factory=list)  # Skill names to exclude from loading (e.g. ["summarize", "skill-creator"])
@@ -419,6 +434,7 @@ class ProvidersConfig(Base):
     opencode: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenCode Zen (canonical provider id)
     opencode_zen: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenCode Zen (curated coding models)
     opencode_go: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenCode Go (low-cost coding models)
+    moeka_gpu: ProviderConfig = Field(default_factory=ProviderConfig)  # Dedicated Moeka Ollama GPU endpoint
 
     @model_validator(mode="after")
     def convert_extra_providers(self):
@@ -455,6 +471,15 @@ class HeartbeatConfig(Base):
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
+    unsolicited_max_per_day: int = Field(default=1, ge=0, le=10)
+    unsolicited_start_hour: int = Field(default=9, ge=0, le=23)
+    unsolicited_end_hour: int = Field(default=21, ge=1, le=24)
+
+    @model_validator(mode="after")
+    def validate_unsolicited_window(self) -> "HeartbeatConfig":
+        if self.unsolicited_start_hour >= self.unsolicited_end_hour:
+            raise ValueError("gateway.heartbeat unsolicited hours must be a same-day window")
+        return self
 
 
 class ApiConfig(Base):
@@ -637,16 +662,65 @@ class RouterConfig(Base):
     slots: dict[str, SlotRouteConfig] = Field(default_factory=dict)
 
 
+class PersonalityConfig(Base):
+    """Owner-controlled personality permission; never editable by agent tools."""
+
+    name: str = "Moeka"
+    allow_self_edit: bool = False
+    max_words: int = Field(default=150, ge=1, le=150)
+
+
+class PeerConfig(Base):
+    """Owner-paired peer endpoint; the secret must be supplied by the owner."""
+
+    id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
+    socket_path: str | None = None
+    url: str | None = None
+    secret: str = Field(repr=False)
+
+    @field_validator("secret")
+    @classmethod
+    def validate_secret(cls, value: str) -> str:
+        # Keep env references intact until the runtime config loader resolves
+        # them; the peer transport performs the fail-closed strength check.
+        if len(value) >= 32 or _ENV_REF_RE.fullmatch(value):
+            return value
+        raise ValueError("peer secret must be at least 32 characters or an environment reference")
+
+    @model_validator(mode="after")
+    def validate_endpoint(self) -> "PeerConfig":
+        if bool(self.socket_path) == bool(self.url):
+            raise ValueError("each peer requires exactly one of socket_path or url")
+        if self.url and not self.url.startswith("https://"):
+            raise ValueError("peer URLs must use https")
+        return self
+
+
+class PeerListenerConfig(Base):
+    """Optional HTTPS inbox listener for peers outside the local machine."""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=11439, ge=1024, le=65535)
+    cert_file: str
+    key_file: str
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
     _source_path: Path | None = PrivateAttr(default=None)
 
+    personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    model_routing: ModelRoutingConfig = Field(
+        default_factory=ModelRoutingConfig,
+        validation_alias=AliasChoices("modelRouting", "model_routing"),
+        serialization_alias="modelRouting",
+    )
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -658,6 +732,8 @@ class Config(BaseSettings):
     profiles: dict[str, AgentProfileConfig] = Field(default_factory=dict)
     router: RouterConfig = Field(default_factory=RouterConfig)
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
+    peers: list[PeerConfig] = Field(default_factory=list)
+    peer_listener: PeerListenerConfig | None = None
 
     def __init__(self, **values: Any) -> None:
         if not type(self).__pydantic_complete__:
@@ -932,6 +1008,8 @@ class Config(BaseSettings):
         p, name = self._match_provider(model, preset=preset, has_credential=has_credential)
         if p and p.api_base:
             return p.api_base
+        if name == "moeka_gpu" and self.model_routing.enabled:
+            return self.model_routing.gpu_api_base
         if name:
             spec = find_by_name(name)
             if spec and spec.default_api_base:

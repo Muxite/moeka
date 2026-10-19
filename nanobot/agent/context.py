@@ -545,6 +545,7 @@ class ContextBuilder:
                 "agent/platform_policy.md", roots=roots, system=system,
             ),
             channel=channel or "",
+            personality_self_edit=bool(self._env and self._env.config.section("personality").get("allow_self_edit", False)),
         )
 
     @staticmethod
@@ -602,6 +603,9 @@ class ContextBuilder:
             file_path = root / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
+                if filename == "SOUL.md":
+                    from nanobot.agent.personality import read_personality
+                    content = read_personality(self.workspace, content, self._env)
                 if filename == "SOUL.md" and self._is_template_content(
                     content,
                     "legacy/SOUL.md",

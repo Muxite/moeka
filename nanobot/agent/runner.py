@@ -22,6 +22,7 @@ from nanobot.agent.context_governance import (
     ContextCompactionState,
     ContextGovernanceConfig,
     ContextGovernor,
+    ContextWindowExceededError,
     HistoryConsolidator,
     ModelRequestState,
     ProviderCompactionConsolidator,
@@ -231,6 +232,12 @@ class AgentRunSpec:
     runtime: LLMRuntime
     max_iterations: int
     max_tool_result_chars: int
+    runtime_update_callback: Callable[[], LLMRuntime | None] | None = None
+    requested_preset_callback: Callable[[], str | None] | None = None
+    context_overflow_fallback_callback: Callable[[LLMRuntime], LLMRuntime | None] | None = None
+    requested_preset: str | None = None
+    fallback_reason: str | None = None
+    instance_uuid: str | None = None
     transcript_input: TranscriptInput | None = None
     transcript_builder: TranscriptBuilder | None = None
     hook: AgentHook | None = None
@@ -556,6 +563,26 @@ class AgentRunner:
             events=spec.events,
         )
 
+        def switch_runtime(updated_runtime: LLMRuntime) -> None:
+            """Switch the next request without discarding transcript/tool results."""
+            nonlocal conversation_state
+            spec.runtime = updated_runtime
+            conversation_state = ProviderConversationStateController(
+                provider=updated_runtime.provider,
+                model=updated_runtime.model,
+                messages=messages,
+                session_id=spec.session_key,
+            )
+            request_state.conversation = conversation_state
+            governance_config.provider = updated_runtime.provider
+            governance_config.model = updated_runtime.model
+            governance_config.context_window_tokens = updated_runtime.context_window_tokens
+            governance_config.max_tokens = updated_runtime.generation.max_tokens
+            request_state.messages = None
+            request_state.tool_definitions = None
+            request_state.usage = None
+            request_state.provider_compaction_applied = False
+
         async def end_length_segment(*, interrupted: bool) -> None:
             nonlocal pending_length_segment
             if pending_length_segment is None:
@@ -571,6 +598,23 @@ class AgentRunner:
                 await hook.on_stream_end(segment_context, resuming=True)
 
         for iteration in range(spec.max_iterations):
+            if spec.requested_preset_callback is not None:
+                requested_preset = spec.requested_preset_callback()
+                if requested_preset is not None:
+                    spec.requested_preset = requested_preset
+            updated_runtime = (
+                spec.runtime_update_callback()
+                if spec.runtime_update_callback is not None
+                else None
+            )
+            if updated_runtime is not None and (
+                updated_runtime.provider is not spec.runtime.provider
+                or updated_runtime.model != spec.runtime.model
+            ):
+                # A model-selection tool may change the next model call while a task is
+                # running. Keep the transcript (including completed tool results), and
+                # discard opaque provider state that belongs to the previous model.
+                switch_runtime(updated_runtime)
             # The session inbox cuts a finite snapshot before every model call.
             # This includes follow-ups that arrived before the first request and
             # messages received while the previous request or tools were running.
@@ -604,6 +648,7 @@ class AgentRunner:
                 request_state=request_state,
                 transcript=messages,
             )
+            conversation_state = request_state.conversation
             assert request_state.messages is not None
             messages_for_model = request_state.messages
             conversation_state.observe_response(response, messages)
@@ -1116,12 +1161,62 @@ class AgentRunner:
         transcript: list[dict[str, Any]] | None,
     ) -> tuple[LLMResponse, LLMUsage]:
         tool_definitions = spec.tools.get_definitions()
-        messages, provider_context = await self.context_governor.prepare_request(
-            request_state,
-            messages,
-            tool_definitions=tool_definitions,
-            transcript=transcript,
-        )
+        try:
+            messages, provider_context = await self.context_governor.prepare_request(
+                request_state,
+                messages,
+                tool_definitions=tool_definitions,
+                transcript=transcript,
+            )
+        except ContextWindowExceededError:
+            fallback_runtime = (
+                spec.context_overflow_fallback_callback(spec.runtime)
+                if spec.context_overflow_fallback_callback is not None
+                else None
+            )
+            if fallback_runtime is None or fallback_runtime is spec.runtime:
+                raise
+            logger.warning(
+                "Model '{}' cannot fit the request in its context window; falling back to '{}'",
+                spec.runtime.model,
+                fallback_runtime.model,
+            )
+            spec.fallback_reason = "context_window"
+            spec.runtime = fallback_runtime
+            fallback_conversation = ProviderConversationStateController(
+                provider=fallback_runtime.provider,
+                model=fallback_runtime.model,
+                messages=messages,
+                session_id=spec.session_key,
+            )
+            request_state.conversation = fallback_conversation
+            request_state.config.provider = fallback_runtime.provider
+            request_state.config.model = fallback_runtime.model
+            request_state.config.context_window_tokens = fallback_runtime.context_window_tokens
+            request_state.config.max_tokens = fallback_runtime.generation.max_tokens
+            request_state.messages = None
+            request_state.tool_definitions = None
+            request_state.usage = None
+            request_state.provider_compaction_applied = False
+            if messages and messages[0].get("role") == "system":
+                content = messages[0].get("content")
+                notice = (
+                    "The selected GPU context was too small for this request, so you are "
+                    "continuing on Luna. Briefly tell the user about this fallback in your reply."
+                )
+                messages[0] = {
+                    **messages[0],
+                    "content": f"{content}\n\n{notice}" if isinstance(content, str) else notice,
+                }
+            return await self._request_model(
+                spec,
+                messages,
+                hook,
+                context,
+                request_state=request_state,
+                malformed_retry=malformed_retry,
+                transcript=transcript,
+            )
         provider_context = _with_turn_extras(provider_context)
 
         kwargs = self._build_request_kwargs(
@@ -1241,8 +1336,15 @@ class AgentRunner:
 
         # Providers bound the wait for each stream event, including reasoning and tool deltas.
         request_started_at = time.perf_counter()
+        from nanobot.llm_usage.context import llm_usage_attribution
+
         try:
-            response = await coro
+            with llm_usage_attribution(
+                requested_preset=spec.requested_preset,
+                fallback_reason=spec.fallback_reason,
+                instance_uuid=spec.instance_uuid,
+            ):
+                response = await coro
         except asyncio.CancelledError:
             _pause_generation()
             await _close_native_reasoning()

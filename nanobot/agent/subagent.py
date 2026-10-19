@@ -549,6 +549,12 @@ class SubagentManager:
             ]
 
             sess_key = origin.get("session_key")
+            from nanobot.config.instances import InstanceError, instance_uuid
+
+            try:
+                usage_instance_uuid = instance_uuid(self.workspace)
+            except (InstanceError, OSError, ValueError):
+                usage_instance_uuid = None
             request_token = bind_request_context(RequestContext(
                 channel=origin["channel"],
                 chat_id=origin["chat_id"],
@@ -575,6 +581,8 @@ class SubagentManager:
                         "llm_usage_source",
                         current_llm_usage_source(),
                     ),
+                    requested_preset=runtime.model_preset or "default",
+                    instance_uuid=usage_instance_uuid,
                     policy=policy,
                     principal=principal,
                     env=self.env,

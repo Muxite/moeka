@@ -76,6 +76,12 @@ def test_kernel_env_ignores_process_env_cap(
 
     monkeypatch.setenv("NANOBOT_MAX_CONCURRENT_REQUESTS", "2")
     # Default kernel test roots live outside the loop workspace (tmp_path).
-    loop = loop_factory(provider=_provider(), patch_deps=True, env=credential_env())
+    # Keep that independent state root in a pytest-managed sibling of the
+    # agent workspace, so SqliteSessionStore can enforce its disjoint-root rule.
+    loop = loop_factory(
+        provider=_provider(),
+        patch_deps=True,
+        env=credential_env(root=tmp_path.parent / f"{tmp_path.name}-kernel-root"),
+    )
 
     assert loop._concurrency_gate is None

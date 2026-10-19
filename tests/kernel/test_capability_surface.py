@@ -57,6 +57,7 @@ EXPECTED_SURFACE: dict[str, frozenset[str]] = {
     "list_dir": frozenset({"fs.read"}),
     "list_exec_sessions": frozenset(),
     "list_sessions": frozenset({"session.read"}),
+    "memory": frozenset({"fs.read", "fs.write"}),
     "read_file": frozenset({"fs.read"}),
     "read_session": frozenset({"session.read"}),
     "search_sessions": frozenset({"session.read"}),

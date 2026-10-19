@@ -13,10 +13,11 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.file_state import FileStates
     from nanobot.agent.tools.runtime_control import RuntimeControl
     from nanobot.bus.queue import MessageBus
-    from nanobot.config.schema import ProviderConfig, ToolsConfig
+    from nanobot.config.schema import ModelRoutingConfig, ProviderConfig, ToolsConfig
     from nanobot.cron.service import CronService
     from nanobot.kernel.env import CoreEnvironment
     from nanobot.kernel.variants import Variant
+    from nanobot.peers import PeerService
     from nanobot.providers.factory import ProviderSnapshot
     from nanobot.security.workspace_access import WorkspaceSandboxStatus
     from nanobot.session.manager import SessionManager
@@ -92,6 +93,8 @@ class ToolContext:
     timezone: str = "UTC"
     workspace_sandbox: WorkspaceSandboxStatus | None = None
     runtime_control: RuntimeControl | None = None
+    model_routing: ModelRoutingConfig | None = None
+    peer_service: PeerService | None = None
     env: CoreEnvironment | None = None
     # Kernel-mode plugin loading only: the instance ``config_cls()`` validated from
     # ``env.config.section(<plugin name>)``. ``None`` for built-ins and legacy loading.

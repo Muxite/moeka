@@ -1,0 +1,31 @@
+# Owner-managed service shared by daily agents and RSI. Never expose Docker to agent tools.
+name: moeka-inference
+services:
+  ollama:
+    image: ollama/ollama:0.35.0
+    container_name: moeka-ollama
+    restart: unless-stopped
+    ports: ['127.0.0.1:11437:11434']
+    environment:
+      OLLAMA_NUM_PARALLEL: '1'
+      OLLAMA_MAX_LOADED_MODELS: '1'
+      OLLAMA_KEEP_ALIVE: '24h'
+      OLLAMA_CONTEXT_LENGTH: '16384'
+    volumes: ['moeka-ollama:/root/.ollama']
+    networks:
+      inference:
+        aliases: [moeka-ollama]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+volumes:
+  moeka-ollama:
+    external: true
+networks:
+  inference:
+    external: true
+    name: moeka-inference

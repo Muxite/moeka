@@ -26,7 +26,35 @@ def default_selection_signature(
 
 
 def configured_model_presets(config: Config) -> dict[str, ModelPresetConfig]:
-    return {**config.model_presets, "default": config.resolve_default_preset()}
+    presets = dict(config.model_presets)
+    routing = config.model_routing
+    if not routing.enabled:
+        return {**presets, "default": config.resolve_default_preset()}
+    presets.setdefault(
+        routing.luna_preset,
+        ModelPresetConfig(
+            model="openai/gpt-6-luna",
+            provider="openrouter",
+            max_tokens=8192,
+            context_window_tokens=1_000_000,
+            temperature=0.1,
+            tier="fast",
+            price_in_per_mtok=0.10,
+            price_out_per_mtok=0.50,
+        ),
+    )
+    presets.setdefault(
+        routing.gpu_preset,
+        ModelPresetConfig(
+            model=routing.gpu_model,
+            provider="moeka_gpu",
+            max_tokens=routing.gpu_max_tokens,
+            context_window_tokens=routing.gpu_context_window_tokens,
+            temperature=0.1,
+            tier="local",
+        ),
+    )
+    return {**presets, "default": config.resolve_default_preset()}
 
 
 def load_model_preset_catalog(

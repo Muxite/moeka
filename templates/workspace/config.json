@@ -31,7 +31,7 @@
     }
   },
   "channels": {
-    "sendProgress": true,
+    "sendProgress": false,
     "sendToolHints": false,
     "sendMaxRetries": 3,
     "telegram": {
@@ -40,7 +40,7 @@
       "allowFrom": [],
       "proxy": null,
       "replyToMessage": false,
-      "reactEmoji": "👀",
+      "reactEmoji": "\ud83d\udc40",
       "groupPolicy": "mention",
       "connectionPoolSize": 32,
       "poolTimeout": 5.0,
@@ -53,8 +53,8 @@
       "allowFrom": [],
       "intents": 37377,
       "groupPolicy": "mention",
-      "readReceiptEmoji": "👀",
-      "workingEmoji": "🔧",
+      "readReceiptEmoji": "\ud83d\udc40",
+      "workingEmoji": "\ud83d\udd27",
       "workingEmojiDelay": 2.0,
       "streaming": true
     }
@@ -91,6 +91,18 @@
       "extraHeaders": null
     }
   },
+  "modelRouting": {
+    "enabled": true,
+    "mode": "auto",
+    "lunaPreset": "luna",
+    "gpuPreset": "gpu",
+    "gpuApiBase": "http://127.0.0.1:11437/v1",
+    "gpuModel": "gpt-oss:20b",
+    "gpuContextWindowTokens": 16384,
+    "gpuMaxTokens": 2048,
+    "readinessTimeoutSeconds": 2.0,
+    "firstOutputTimeoutSeconds": 30.0
+  },
   "api": {
     "host": "127.0.0.1",
     "port": 8900,
@@ -121,12 +133,8 @@
       "enable": true,
       "timeout": 60,
       "pathAppend": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-      "sandbox": "",
-      "allowedEnvKeys": [
-        "ANTHROPIC_API_KEY",
-        "OPENROUTER_API_KEY",
-        "OPENAI_API_KEY"
-      ],
+      "sandbox": "bwrap",
+      "allowedEnvKeys": [],
       "allowSudo": false,
       "allowPatterns": [],
       "denyPatterns": [
@@ -135,8 +143,16 @@
         ">>?\\s*\\S*(?:history\\.jsonl|\\.dream_cursor)"
       ]
     },
-    "restrictToWorkspace": false,
+    "restrictToWorkspace": true,
     "mcpServers": {},
-    "ssrfWhitelist": ["127.0.0.0/8", "::1/128"]
+    "ssrfWhitelist": [
+      "127.0.0.0/8",
+      "::1/128"
+    ]
+  },
+  "personality": {
+    "name": "Moeka",
+    "allowSelfEdit": false,
+    "maxWords": 150
   }
 }

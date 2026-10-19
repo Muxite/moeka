@@ -78,6 +78,18 @@ EXPECTED: dict[str, list[tuple[dict[str, Any], list[CapabilityRequest]]]] = {
     "list_dir": [({"path": "/etc"}, [_req("fs.read", "/etc")])],
     "list_exec_sessions": [({}, [])],
     "list_sessions": [({}, [_req("session.read", "*")])],
+    "memory": [
+        ({"action": "search", "content": "preference"}, [_req("fs.read", "explicit.jsonl")]),
+        ({"action": "remember", "content": "Likes paper notes"}, [
+            _req("fs.read", "explicit.jsonl"), _req("fs.write", "explicit.jsonl"),
+        ]),
+        ({"action": "correct", "memory_id": "id", "content": "Updated fact"}, [
+            _req("fs.read", "explicit.jsonl"), _req("fs.write", "explicit.jsonl"),
+        ]),
+        ({"action": "forget", "memory_id": "id"}, [
+            _req("fs.read", "explicit.jsonl"), _req("fs.write", "explicit.jsonl"),
+        ]),
+    ],
     "read_file": [({"path": "/etc/hosts"}, [_req("fs.read", "/etc/hosts")])],
     "read_session": [({"session_key": "@ops"}, [_req("session.read", "@ops")])],
     "search_sessions": [({"query": "nginx"}, [_req("session.read", "*")])],
@@ -128,6 +140,9 @@ def test_registered_tool_declares_capabilities(name, registered_tools):
     tool = registered_tools[name]
     for params, expected in EXPECTED[name]:
         got = tool.capabilities(params)
+        if name == "memory":
+            got = [CapabilityRequest(item.capability, item.resource.rsplit("/", 1)[-1])
+                   for item in got]
         assert got == expected, f"{name} {params!r}"
         assert all(isinstance(r, CapabilityRequest) for r in got)
 

@@ -98,6 +98,8 @@ class RuntimeControl(Protocol):
         session_key: str | None,
     ) -> LLMRuntime: ...
 
+    def resolve_model_preset(self, name: str) -> LLMRuntime: ...
+
     def set_max_iterations(self, value: int) -> None: ...
 
     def set_context_window_tokens(self, value: int) -> LLMRuntime: ...
@@ -147,6 +149,8 @@ class _RuntimeControlTarget(Protocol):
 
     def set_session_model_preset(self, session_key: str, name: str) -> LLMRuntime: ...
 
+    def resolve_runtime_preset(self, name: str) -> LLMRuntime: ...
+
 
 class AgentRuntimeControl:
     """Allowlisted adapter from agent-loop state to ``RuntimeControl``."""
@@ -190,6 +194,9 @@ class AgentRuntimeControl:
         if session_key is not None:
             return self.__target.set_session_model_preset(session_key, name)
         return self.__target.set_model_preset(name)
+
+    def resolve_model_preset(self, name: str) -> LLMRuntime:
+        return self.__target.resolve_runtime_preset(name)
 
     def set_max_iterations(self, value: int) -> None:
         self.__target.max_iterations = value

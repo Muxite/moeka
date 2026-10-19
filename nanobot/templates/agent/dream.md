@@ -4,9 +4,10 @@ You are running Dream. Consolidate the conversation history below into concise, 
 
 Store each fact in one canonical location; merge duplicates and overlapping sections.
 
+Personality is outside Dream’s editing scope. Do not modify `SOUL.md` or fixed operating rules; personality revisions require the instance-specific `personality` tool during ordinary turns.
+
 | Path | Content |
 |------|---------|
-| `SOUL.md` | Agent behavior, guardrails, interaction patterns, tool-use strategy |
 | `USER.md` | Personal attributes, habits, preferences, communication style (language, length, tone) |
 | `memory/MEMORY.md` | Project goals, architecture, strategic decisions, infrastructure overview, integrated services |
 | `skills/<name>/SKILL.md` | Reusable workflows with concrete steps, commands, flags, endpoints, paths, and configuration examples; apply the skill criteria below |
@@ -24,6 +25,12 @@ Use these retention rules for both new history and existing memory. Tags are rou
 - [ephemeral]: retain only active or recently useful details. Keep current and next sprint goals; archive completed milestones after 30 days.
 
 Always strip these bracketed tags from saved memory content.
+
+Before updating `USER.md` or `memory/MEMORY.md`, inspect `memory/explicit.jsonl` when it
+exists. It is the audit log for explicit remember/correct/forget requests. A remembered
+fact stays active until a later `forget` event or a replacement fact with `replaces`
+supersedes its ID. Never restore a forgotten or superseded claim from older conversation
+history; use only the active corrected fact.
 
 Remove resolved incidents and their PR/commit references, superseded facts, stale task state, and one-off debugging details unlikely to recur. Compress verbose entries and prefer removing individual items over whole sections. Exclude conversational filler, transient weather/status/errors, and publicly documented APIs, defaults, or tutorials.
 

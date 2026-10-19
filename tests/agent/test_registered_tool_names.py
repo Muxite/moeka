@@ -33,6 +33,7 @@ EXPECTED_SLIM_TOOLS = [
     "list_dir",
     "list_exec_sessions",
     "list_sessions",
+    "memory",
     "read_file",
     "read_session",
     "search_sessions",
@@ -78,3 +79,4 @@ def test_host_tools_load_only_for_host_loops(slim_tool_ctx):
     names = set(ToolLoader().load(host_ctx, ToolRegistry()))
     assert {"message", "cron", "run_cli_app"} <= names
     assert names - {"message", "cron", "run_cli_app"} == set(EXPECTED_SLIM_TOOLS)
+    assert "memory" in names

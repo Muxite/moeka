@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from nanobot.config.schema import Config, InlineFallbackConfig, ModelPresetConfig, ProviderConfig
 from nanobot.providers.base import GenerationSettings, LLMProvider, resolve_stream_idle_timeout_s
@@ -105,8 +105,10 @@ def _apply_runtime_settings(provider: LLMProvider, env: CoreEnvironment | None) 
     if hasattr(provider, "request_timeout_s"):
         from nanobot.providers.openai_compat_provider import resolve_openai_compat_timeout_s
 
-        provider.request_timeout_s = resolve_openai_compat_timeout_s(
-            runtime.get("openai_compat_timeout_s")
+        setattr(
+            provider,
+            "request_timeout_s",
+            resolve_openai_compat_timeout_s(runtime.get("openai_compat_timeout_s")),
         )
     if env is not None:
         # Request-extras drops (``sampling.dropped``) go to the host's trace sink.
@@ -119,7 +121,37 @@ def _resolve_model_preset(
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
 ) -> ModelPresetConfig:
-    return preset if preset is not None else config.resolve_preset(preset_name)
+    if preset is not None:
+        return preset
+    if (
+        config.model_routing.enabled
+        and preset_name == config.model_routing.luna_preset
+        and preset_name not in config.model_presets
+    ):
+        return ModelPresetConfig(
+            model="openai/gpt-6-luna",
+            provider="openrouter",
+            max_tokens=8192,
+            context_window_tokens=1_000_000,
+            temperature=0.1,
+            tier="fast",
+            price_in_per_mtok=0.10,
+            price_out_per_mtok=0.50,
+        )
+    if (
+        config.model_routing.enabled
+        and preset_name == config.model_routing.gpu_preset
+        and preset_name not in config.model_presets
+    ):
+        return ModelPresetConfig(
+            model=config.model_routing.gpu_model,
+            provider="moeka_gpu",
+            max_tokens=config.model_routing.gpu_max_tokens,
+            context_window_tokens=config.model_routing.gpu_context_window_tokens,
+            temperature=0.1,
+            tier="local",
+        )
+    return config.resolve_preset(preset_name)
 
 
 def _provider_extra_headers(
@@ -372,9 +404,16 @@ def _inline_fallback_preset(
 
 def _resolve_fallback_presets(config: Config, primary: ModelPresetConfig) -> list[ModelPresetConfig]:
     presets: list[ModelPresetConfig] = []
-    for fallback in config.agents.defaults.fallback_models:
+    candidates = list(config.agents.defaults.fallback_models)
+    if primary.provider == "moeka_gpu" and config.model_routing.enabled:
+        luna_name = config.model_routing.luna_preset
+        candidates = [luna_name, *[item for item in candidates if item != luna_name]]
+    for fallback in candidates:
         if isinstance(fallback, str):
-            presets.append(config.model_presets[fallback])
+            if fallback in config.model_presets:
+                presets.append(config.model_presets[fallback])
+            else:
+                presets.append(_resolve_model_preset(config, preset_name=fallback))
         else:
             presets.append(_inline_fallback_preset(primary, fallback))
     return presets
@@ -408,6 +447,46 @@ def make_provider(
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
     if fallback_presets:
+        readiness_check = None
+        first_output_timeout_s = None
+        if resolved.provider == "moeka_gpu":
+            configured_api_base = (
+                config.providers.moeka_gpu.api_base or config.model_routing.gpu_api_base
+            )
+            readiness_url = configured_api_base.rstrip("/")
+            readiness_url = readiness_url.removesuffix("/v1") + "/api/tags"
+
+            async def _gpu_ready() -> bool:
+                import httpx
+
+                async with httpx.AsyncClient(
+                    timeout=config.model_routing.readiness_timeout_seconds,
+                ) as client:
+                    response = await client.get(readiness_url)
+                    if response.status_code != 200:
+                        return False
+                    try:
+                        payload: object = response.json()
+                    except ValueError:
+                        return False
+                    models = (
+                        cast(dict[str, object], payload).get("models")
+                        if isinstance(payload, dict)
+                        else None
+                    )
+                    if not isinstance(models, list):
+                        return False
+                    expected = {
+                        config.model_routing.gpu_model,
+                        f"{config.model_routing.gpu_model}:latest",
+                    }
+                    return any(
+                        _gpu_tag_matches(item, expected)
+                        for item in cast(list[object], models)
+                    )
+
+            readiness_check = _gpu_ready
+            first_output_timeout_s = config.model_routing.first_output_timeout_seconds
         provider = FallbackProvider(
             primary=provider,
             fallback_presets=fallback_presets,
@@ -415,11 +494,17 @@ def make_provider(
                 config, preset=fb, data_dir=data_dir, env=env,
             ),
             primary_context_window_tokens=resolved.context_window_tokens,
+            primary_readiness_check=readiness_check,
+            first_output_timeout_s=first_output_timeout_s,
         )
 
     if env is not None:
         attach_ledger(provider, env, _ledger_pricing(config, resolved, fallback_presets, env))
     return provider
+
+
+def _gpu_tag_matches(item: object, expected: set[str]) -> bool:
+    return isinstance(item, dict) and cast(dict[str, object], item).get("name") in expected
 
 
 def _ledger_pricing(
