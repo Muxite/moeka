@@ -277,6 +277,48 @@ Open. Testers and implementers build the recommended default unless the owner ve
   containers already (`004` FR-015).
 - Lands in: `007` FR-039; `scripts/heldout_run.py`.
 
+## Spec 013 questions (rollout tracking; listed in `013-rollout-tracking/spec.md` Status)
+
+### 013-Q1. How does a meter record join a kernel record exactly?
+- Spec: `013` FR-006, FR-008.
+- Context: the meter sees the upstream request but not the kernel's `call_id`; today the only shared key is the
+  rollout. Totals per rollout reconcile without it; per-call reconciliation needs a shared id.
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. The kernel sends `X-Moeka-Call-Id` and `X-Moeka-Attempt` request headers when the host opts in (`Environment.for_host(..., usage_headers=True)`); the meter records them as `call_id`/`attempt` | exact per-call join; finds the one bad row; small kernel change; headers never go to a provider unless the host enables them |
+  | B. Totals only, per rollout | no kernel change; a mismatch says "something differs" but not which call |
+
+- Recommended: A, enabled only by the harness (the meter is its own proxy). Reason: constitution VII wants waste
+  located per call, and the opt-in keeps opaque ids away from third-party providers by default.
+- Lands in: `013` FR-006, FR-008; `nanobot/providers/openai_compat_provider.py`; `nanobot/kernel/hostenv.py`.
+
+### 013-Q2. What is an experiment?
+- Spec: `013` Terms, FR-003, FR-010.
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. Optional: minted by whoever enqueues a candidate comparison (`rsi experiment start <name>` returns the id); absent for routine rollouts | no ceremony for routine work; comparisons are explicit and queryable |
+  | B. Mandatory: every rollout belongs to one (a default per day) | always groupable; noise groups with no question behind them |
+
+- Recommended: A.
+- Lands in: `013` FR-003, FR-007, FR-010; moeka-rsi CLI.
+
+### 013-Q3. Should hive ingest rollout records?
+- Spec: `013` FR-015.
+- Options:
+
+  | Option | Effect |
+  |---|---|
+  | A. hive reads `rsi rollouts export` on demand and links spans by `rollout_id`; stores nothing | one source of truth; hive views stay current |
+  | B. hive copies rollout records into its own span store | offline queries in hive; a second copy that can drift |
+  | C. No integration | nothing to build; RSI cost stays invisible in hive |
+
+- Recommended: A (constitution IX: consumers derive usage from the producer, they keep no ledger).
+- Lands in: `013` FR-015; hive.
+
 ## Inconsistencies found while writing the specs (verified 2026-09-30; none edited)
 
 - Spec numbering (2026-10-01): plan step M9 calls the gateway stage-2 spec "spec 006"; that number is now
