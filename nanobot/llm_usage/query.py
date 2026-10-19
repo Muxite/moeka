@@ -15,13 +15,24 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from nanobot.llm_usage.store import LLMUsageStore
 
-SCHEMA_VERSION = "1.2"  # usage-record.v1; 1.2 (spec 009) adds key_fp
+SCHEMA_VERSION = "1.3"  # requested route, fallback category, and stable instance UUID
 REQUEST_KEY_SCHEME = "moeka.request_key.v1"
 
 _SHARED = ("consumer", "agent", "session", "role", "purpose", "model", "provider", "trace_id")
 # Call-only columns: usage events (cache hits, refusals) carry none of them, so grouping by
 # one puts every event under the ``None`` group.
-GROUP_BY_CALLS = (*_SHARED, "tier", "outcome", "waste_label", "alias", "source", "key_fp")
+GROUP_BY_CALLS = (
+    *_SHARED,
+    "tier",
+    "outcome",
+    "waste_label",
+    "alias",
+    "source",
+    "key_fp",
+    "requested_preset",
+    "fallback_reason",
+    "instance_uuid",
+)
 GROUP_BY_EVENTS = _SHARED
 
 
@@ -42,6 +53,9 @@ class UsageFilter:
     since_ms: int | None = None
     until_ms: int | None = None
     key_fp: str | None = None
+    requested_preset: str | None = None
+    fallback_reason: str | None = None
+    instance_uuid: str | None = None
 
     def clauses(self, time_column: str, *, events: bool = False) -> tuple[str, list[object]]:
         """SQL ``WHERE`` text and parameters; *events* for ``llm_usage_events``, which has no
@@ -59,6 +73,14 @@ class UsageFilter:
             else:
                 parts.append("key_fp = ?")
                 params.append(self.key_fp)
+        for name in ("requested_preset", "fallback_reason", "instance_uuid"):
+            value = getattr(self, name)
+            if value is not None:
+                if events:
+                    parts.append("0 = 1")
+                else:
+                    parts.append(f"{name} = ?")
+                    params.append(value)
         if self.since_ms is not None:
             parts.append(f"{time_column} >= ?")
             params.append(self.since_ms)
@@ -261,6 +283,9 @@ def _record_from_call(row: sqlite3.Row) -> dict[str, Any]:
         "started_at_ms": row["started_at_ms"], "latency_ms": row["duration_ms"],
         "model": row["model"], "provider": row["provider"], "alias": row["alias"],
         "tier": row["tier"], "key_fp": row["key_fp"],
+        "requested_preset": row["requested_preset"],
+        "fallback_reason": row["fallback_reason"],
+        "instance_uuid": row["instance_uuid"],
         "tokens_in": row["input_tokens"] or 0, "tokens_out": row["output_tokens"] or 0,
         "tokens_cache_read": row["cache_read_tokens"],
         "tokens_cache_write": row["cache_write_tokens"],
@@ -299,6 +324,7 @@ def _record_from_hit(row: sqlite3.Row) -> dict[str, Any]:
         "started_at_ms": row["ts_ms"],
         "model": row["model"] or "unknown", "provider": row["provider"] or "unknown",
         "alias": row["alias"], "key_fp": None,
+        "requested_preset": None, "fallback_reason": None, "instance_uuid": None,
         "tokens_in": 0, "tokens_out": 0, "usage_source": "none",
         "cost_usd": 0.0, "cost_billed": True, "price_source": "cache",
         "cache_hit": True,

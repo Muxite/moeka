@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 
 from nanobot.llm_usage.context import LLMUsageSource
 from nanobot.llm_usage.models import LLMCallRecord
+from nanobot.llm_usage.query import UsageFilter, records, totals
 from nanobot.llm_usage.store import SCHEMA_VERSION, LLMUsageStore
 from nanobot.providers.base import LLMUsage
 
@@ -139,6 +141,28 @@ def test_usage_payload_aggregates_cache_coverage_sources_and_failures(tmp_path: 
         ("openai", "gpt-5"),
         ("anthropic", "claude-sonnet-4"),
     }
+
+
+def test_routing_attribution_round_trips_and_can_be_filtered(tmp_path: Path) -> None:
+    store = LLMUsageStore(tmp_path / "llm_usage.sqlite3")
+    call = replace(
+        _call("2026-06-03T00:00:00+00:00", provider="openrouter", model="openai/gpt-6-luna"),
+        requested_preset="auto",
+        fallback_reason="timeout",
+        instance_uuid="0123456789abcdef0123456789abcdef",
+    )
+    store.record(call)
+
+    [record] = records(store)
+    assert record["requested_preset"] == "auto"
+    assert record["fallback_reason"] == "timeout"
+    assert record["instance_uuid"] == "0123456789abcdef0123456789abcdef"
+    assert records(store, UsageFilter(requested_preset="gpu")) == []
+    assert totals(store, group_by=("requested_preset", "instance_uuid"))[0].group == {
+        "requested_preset": "auto",
+        "instance_uuid": "0123456789abcdef0123456789abcdef",
+    }
+    store.close()
 
 
 def test_usage_payload_preserves_zero_cache_observation(tmp_path: Path) -> None:

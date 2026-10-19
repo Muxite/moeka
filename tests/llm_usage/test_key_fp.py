@@ -100,8 +100,8 @@ def test_export_rows_carry_key_fp_and_validate(store: LLMUsageStore) -> None:
     store.record(_call(_fp(KEY_A)))
     store.record(_call(None, at=1))
     docs = records(store)
-    assert SCHEMA_VERSION == "1.2" == ledger.SCHEMA_VERSION
-    assert {d["schema_version"] for d in docs} == {"1.2"}
+    assert SCHEMA_VERSION == "1.3" == ledger.SCHEMA_VERSION
+    assert {d["schema_version"] for d in docs} == {"1.3"}
     assert sorted((d["key_fp"] or "") for d in docs) == ["", _fp(KEY_A)]
     for doc in docs:
         assert validate.problems(doc, "usage-record") == []

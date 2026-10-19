@@ -50,6 +50,9 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tokens_reasoning", "INTEGER"),
     ("tags", "TEXT"),  # v4: bounded host tags (JSON object), so the store round-trips the event
     ("key_fp", "TEXT"),  # spec 009: sha256 prefix of the API key, never the key
+    ("requested_preset", "TEXT"),  # 1.3: requested route, distinct from actual model/provider
+    ("fallback_reason", "TEXT"),  # 1.3: bounded error category that triggered failover
+    ("instance_uuid", "TEXT"),  # 1.3: stable instance identity, never a path
 )
 # Attribution and identity columns a usage event writes (see ``record_event``).
 _EVENT_COLUMNS = (
@@ -549,6 +552,9 @@ class LLMUsageStore:
             call.tier[:32] if call.tier else None,
             _clean_cost(call.cost_usd),
             call.key_fp,
+            call.requested_preset,
+            call.fallback_reason,
+            call.instance_uuid,
         )
         columns = [
             "started_at_ms", "duration_ms", "provider", "model", "source", "stream",
@@ -556,7 +562,8 @@ class LLMUsageStore:
             "cache_read_tokens", "cache_write_tokens", "reported_tokens",
             "estimated_tokens", "generation_ms", "measured_output_tokens",
             "ttft_ms", "timed_requests", "error_status_code", "error_kind",
-            "tier", "cost_usd", "key_fp",
+            "tier", "cost_usd", "key_fp", "requested_preset", "fallback_reason",
+            "instance_uuid",
         ]
         if event is not None:
             values = (*values, *self._event_values(event))

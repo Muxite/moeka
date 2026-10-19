@@ -193,9 +193,10 @@ class UsageView:
         """Usage totals for the calls matching *filters*, optionally grouped.
 
         *filters*: ``consumer, agent, session, role, purpose, model, provider, trace_id,
-        call_id, since_ms, until_ms, key_fp``. *group_by*: any of ``consumer, agent, session,
+        call_id, since_ms, until_ms, key_fp, requested_preset, fallback_reason, instance_uuid``.
+        *group_by*: any of ``consumer, agent, session,
         role, purpose, model, provider, trace_id, tier, outcome, waste_label, alias, source,
-        key_fp``.
+        key_fp, requested_preset, fallback_reason, instance_uuid``.
         """
         return totals(self._store(), UsageFilter(**filters), tuple(group_by))
 

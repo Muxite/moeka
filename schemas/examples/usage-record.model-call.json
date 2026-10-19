@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "record_id": "c-7f3a91:1",
   "kind": "model_call",
   "call_id": "c-7f3a91",
@@ -23,6 +23,9 @@
   "alias": "cheap",
   "tier": "cheap",
   "key_fp": "3f9c2a7b1d04",
+  "requested_preset": "auto",
+  "fallback_reason": null,
+  "instance_uuid": "0123456789abcdef0123456789abcdef",
   "tokens_in": 1200,
   "tokens_out": 340,
   "tokens_cache_read": 800,

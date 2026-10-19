@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from dataclasses import dataclass, replace
 from typing import Literal
 
 LLMUsageSource = Literal["user", "api", "cron", "dream", "system"]
@@ -121,3 +122,46 @@ def llm_usage_trace_id(trace_id: str | None) -> Generator[None]:
         yield
     finally:
         reset_llm_usage_trace_id(token)
+
+
+@dataclass(frozen=True, slots=True)
+class LLMUsageAttribution:
+    requested_preset: str | None = None
+    fallback_reason: str | None = None
+    instance_uuid: str | None = None
+
+
+_CURRENT_ATTRIBUTION: ContextVar[LLMUsageAttribution] = ContextVar(
+    "nanobot_llm_usage_attribution",
+    default=LLMUsageAttribution(),
+)
+
+
+def current_llm_usage_attribution() -> LLMUsageAttribution:
+    return _CURRENT_ATTRIBUTION.get()
+
+
+@contextmanager
+def llm_usage_attribution(
+    *,
+    requested_preset: str | None = None,
+    fallback_reason: str | None = None,
+    instance_uuid: str | None = None,
+) -> Generator[None]:
+    """Add request routing identity to nested physical-call records.
+
+    ``None`` fields inherit the surrounding scope, so a fallback can add only its
+    reason while retaining the request's model and instance identity.
+    """
+    current = current_llm_usage_attribution()
+    value = replace(
+        current,
+        requested_preset=requested_preset or current.requested_preset,
+        fallback_reason=fallback_reason or current.fallback_reason,
+        instance_uuid=instance_uuid or current.instance_uuid,
+    )
+    token = _CURRENT_ATTRIBUTION.set(value)
+    try:
+        yield
+    finally:
+        _CURRENT_ATTRIBUTION.reset(token)

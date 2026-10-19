@@ -16,7 +16,7 @@ rules, producer and reader profiles): `validate.py`. Other consumers: `CONFORMAN
 ## Versioning
 
 - Each document versions on its own: `schema_version` is `"<major>.<minor>"`, the major is fixed by the
-  schema file (`*.v1.*` accepts only `1.x`), and the `$id` carries it. Current: `usage-record` 1.2,
+  schema file (`*.v1.*` accepts only `1.x`), and the `$id` carries it. Current: `usage-record` 1.3,
   `budget-event` 1.1, `waste-label` 1.0, `complete-json-call` 1.0 (`kernel.usage.documents()`;
   `kernel.usage.schema_versions()` lists the usage-record versions the kernel emits). The kernel emits
   only its newest version and does not translate down.
@@ -41,6 +41,11 @@ rules, producer and reader profiles): `validate.py`. Other consumers: `CONFORMAN
   tells apart two consumers that both read a variable named `OPENROUTER_API_KEY` from different key
   files. A 1.1 document stays valid; a reader that lags ignores the field. moeka's usage database adds a
   nullable `key_fp` column on first open, and rows written before it read back with `key_fp = null`.
+- usage-record 1.2 to 1.3: adds `requested_preset` (the requested route such as `auto`, `luna` or
+  `gpu`), `fallback_reason` (a bounded provider error category), and `instance_uuid` (the stable
+  instance marker, never a path). `model` and `provider` continue to describe the actual physical
+  attempt. All three fields are nullable; older rows and non-Moeka producers remain valid. The usage
+  database adds nullable columns on first open.
 - usage-record 1.0 to 1.1 (1.0 existed on review branches only): the meaning of `waste_label =
   "retry"` was corrected. 1.0 put it on the attempt that was a retry (attempt 2 of a call), which
   counted the attempt that produced the answer as waste and the one that failed as useful. 1.1 puts it
