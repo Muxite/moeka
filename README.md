@@ -1,3 +1,9 @@
+# Moeka
+
+Moeka is a general AI assistant for conversation and focused work, with independent instances, durable memory, scheduled tasks, portable skills, and Luna/GPU model choices. The `moeka` command is public; `nanobot` remains a compatibility alias.
+
+Start with the [daily-agent setup](docs/daily-agents.md) or [quick start](docs/quick-start.md). Core APIs, terminal clients, WebUI, Telegram and primary providers are included. Other chat integrations install on demand; Discord is also available with `moeka[discord]`.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./images/readme-cover-dark.svg">
   <img alt="nanobot README cover" src="./images/readme-cover-light.svg">

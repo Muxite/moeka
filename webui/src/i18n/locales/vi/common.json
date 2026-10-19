@@ -1,19 +1,19 @@
 {
   "app": {
-    "brand": "nanobot",
+    "brand": "Moeka",
     "loading": {
-      "connecting": "Đang kết nối tới nanobot…",
-      "boot": "Đang tải nanobot…"
+      "connecting": "Đang kết nối tới Moeka…",
+      "boot": "Đang tải Moeka…"
     },
     "error": {
-      "title": "Không thể kết nối tới nanobot",
-      "gatewayHint": "Hãy chắc chắn gateway đang chạy (`nanobot gateway`) và trình duyệt này có thể truy cập địa chỉ WebUI của gateway."
+      "title": "Không thể kết nối tới Moeka",
+      "gatewayHint": "Hãy chắc chắn gateway đang chạy (`moeka gateway`) và trình duyệt này có thể truy cập địa chỉ WebUI của gateway."
     },
     "auth": {
-      "title": "Kết nối với nanobot",
+      "title": "Kết nối với Moeka",
       "label": "Mật khẩu WebUI",
       "helpTitle": "Tìm mật khẩu ở đâu?",
-      "helpConfig": "Trên thiết bị đang chạy nanobot, mở tệp cấu hình, thường nằm tại:",
+      "helpConfig": "Trên thiết bị đang chạy Moeka, mở tệp cấu hình, thường nằm tại:",
       "helpSecret": "Sao chép giá trị của trường này làm mật khẩu:",
       "helpFallback": "Nếu giá trị này trống, hãy dùng <code>channels.websocket.token</code>.",
       "showPassword": "Hiện mật khẩu",
@@ -29,9 +29,9 @@
     },
     "system": {
       "section": "Hệ thống",
-      "restartHint": "Khởi động lại nanobot để áp dụng thay đổi thời gian chạy.",
+      "restartHint": "Khởi động lại Moeka để áp dụng thay đổi thời gian chạy.",
       "restartAction": "Khởi động lại",
-      "restart": "Khởi động lại nanobot",
+      "restart": "Khởi động lại Moeka",
       "restarting": "Đang khởi động lại...",
       "restartEngine": "Khởi động lại bộ máy",
       "restartingEngine": "Đang khởi động lại bộ máy..."
@@ -40,11 +40,11 @@
       "completed": "Khởi động lại hoàn tất sau {{seconds}} giây."
     },
     "documentTitle": {
-      "base": "nanobot",
-      "chat": "{{title}} · nanobot"
+      "base": "Moeka",
+      "chat": "{{title}} · Moeka"
     },
     "meta": {
-      "description": "Giao diện web nanobot — trò chuyện với không gian làm việc nanobot của bạn."
+      "description": "Giao diện web Moeka — trò chuyện với không gian làm việc Moeka của bạn."
     },
     "pairing": {
       "title": "Ghép nối tài khoản trò chuyện của bạn",
@@ -90,7 +90,7 @@
     "timezoneNoMatches": "Không tìm thấy múi giờ phù hợp.",
     "configure": "Cấu hình",
     "exit": {
-      "title": "Khởi động lại nanobot trước khi rời phần cài đặt?",
+      "title": "Khởi động lại Moeka trước khi rời phần cài đặt?",
       "description": "Thay đổi đã được lưu. Khởi động lại để áp dụng.",
       "later": "Khởi động lại sau"
     },
@@ -159,7 +159,7 @@
         "applications": {"title": "Ứng dụng dòng lệnh", "help": ""}
       },
       "save": "Lưu thay đổi", "saving": "Đang lưu…", "discard": "Hủy thay đổi", "saved": "Đã lưu.",
-      "restart": "Khởi động lại nanobot", "restartHelp": "Khởi động lại để áp dụng thay đổi. Tham số dòng lệnh và biến môi trường có thể được ưu tiên.",
+      "restart": "Khởi động lại Moeka", "restartHelp": "Khởi động lại để áp dụng thay đổi. Tham số dòng lệnh và biến môi trường có thể được ưu tiên.",
       "search": "Tìm cài đặt nâng cao", "noResults": "Không có cài đặt phù hợp.", "pending": "Thay đổi chưa lưu",
       "numberError": "Nhập số hợp lệ trong phạm vi cho phép.", "activeModel": "Dùng mô hình hiện tại", "none": "Không có",
       "auto": "Tự động", "manual": "Thủ công", "standard": "Tiêu chuẩn", "persistent": "Liên tục",
@@ -219,7 +219,7 @@
       "language": "Ngôn ngữ",
       "provider": "Nhà cung cấp",
       "model": "Mô hình",
-      "restart": "Khởi động lại nanobot",
+      "restart": "Khởi động lại Moeka",
       "configPath": "Tệp cấu hình",
       "activePreset": "Cấu hình đặt trước đang dùng",
       "gateway": "Gateway",
@@ -292,7 +292,7 @@
       "selectedModelValue": "Được đặt bởi mô hình đã chọn.",
       "brandLogos": "Hiển thị logo nhà cung cấp bên thứ ba và CLI trong Cài đặt.",
       "browserNotifications": "Chỉ thông báo khi trang này ở nền. Mặc định tắt.",
-      "cliAppsCatalog": "Cài các công cụ dòng lệnh mà nanobot có thể dùng trên máy này. Các ứng dụng trên máy tính không bị thay đổi.",
+      "cliAppsCatalog": "Cài các công cụ dòng lệnh mà Moeka có thể dùng trên máy này. Các ứng dụng trên máy tính không bị thay đổi.",
       "cliAppsFilter": "Tìm theo ứng dụng, danh mục hoặc khả năng.",
       "logs": "Mở thư mục nhật ký của ứng dụng trên máy tính.",
       "diagnostics": "Xuất báo cáo chẩn đoán để gửi cho bộ phận hỗ trợ.",
@@ -339,11 +339,11 @@
       "loadError": "Không thể tải cài đặt",
       "unsaved": "Có thay đổi chưa lưu.",
       "upToDate": "Đã cập nhật.",
-      "savedRestart": "Đã lưu. Khởi động lại nanobot để áp dụng.",
+      "savedRestart": "Đã lưu. Khởi động lại Moeka để áp dụng.",
       "restartAfterSaving": "Lưu thay đổi, rồi khởi động lại khi sẵn sàng.",
-      "savedRestartApply": "Đã lưu. Khởi động lại nanobot để áp dụng thay đổi.",
-      "imageProviderRestart": "Đã lưu thay đổi nhà cung cấp ảnh. Khởi động lại nanobot để áp dụng.",
-      "hostRestartAfterSaving": "Sau khi lưu, nanobot sẽ khởi động lại bộ máy.",
+      "savedRestartApply": "Đã lưu. Khởi động lại Moeka để áp dụng thay đổi.",
+      "imageProviderRestart": "Đã lưu thay đổi nhà cung cấp ảnh. Khởi động lại Moeka để áp dụng.",
+      "hostRestartAfterSaving": "Sau khi lưu, Moeka sẽ khởi động lại bộ máy.",
       "hostRestartPending": "Đã lưu. Bộ máy sẽ khởi động lại khi sẵn sàng.",
       "hostApiUnavailable": "Các thao tác này chỉ có trong ứng dụng trên máy tính.",
       "logsOpened": "Đã mở thư mục nhật ký.",
@@ -647,7 +647,7 @@
       "saveCustom": "Lưu máy chủ",
       "configImport": "Nhập mcp.json",
       "importConfig": "Nhập",
-      "restartRequired": "Khởi động lại nanobot để kết nối các công cụ MCP đã cập nhật.",
+      "restartRequired": "Khởi động lại Moeka để kết nối các công cụ MCP đã cập nhật.",
       "toolsFound_one": "{{count}} công cụ",
       "toolsFound_other": "{{count}} công cụ",
       "toolsFound": "{{count}} công cụ",
@@ -684,7 +684,7 @@
       "connected": "Đã kết nối.",
       "connectionFailed": "Kết nối thất bại.",
       "connectionCancelled": "Đã hủy kết nối.",
-      "reloadFailed": "Đã đăng nhập nhưng nanobot không thể kết nối các công cụ. Hãy thử khởi động lại nanobot.",
+      "reloadFailed": "Đã đăng nhập nhưng Moeka không thể kết nối các công cụ. Hãy thử khởi động lại nanobot.",
       "oauthFailed": "Không thể kết nối. Hãy thử đăng nhập lại.",
       "statusMissingDependency": "Cần cài thêm gói",
       "statusComingSoon": "Sắp ra mắt",
@@ -744,14 +744,14 @@
       "autoInstall": "Các gói cần thiết cho máy chủ API sẽ được cài tự động khi khởi động."
     },
     "observability": {
-      "title": "Khả năng quan sát", "configured": "nanobot đã có thông tin xác thực để ghi lại quá trình xử lý.",
+      "title": "Khả năng quan sát", "configured": "Moeka đã có thông tin xác thực để ghi lại quá trình xử lý.",
       "environment": "Đặt LANGFUSE_SECRET_KEY và LANGFUSE_PUBLIC_KEY rồi khởi động lại nanobot.", "enable": "Bật theo dõi quá trình xử lý"
     },
     "legal": {
       "thirdPartyBrands": "Tên sản phẩm, logo và thương hiệu thuộc về chủ sở hữu tương ứng. Việc sử dụng chỉ nhằm nhận diện và không ngụ ý được xác nhận."
     },
     "apps": {
-      "description": "Thêm công cụ vào nanobot, sau đó dùng @ trong cuộc trò chuyện.",
+      "description": "Thêm công cụ vào Moeka, sau đó dùng @ trong cuộc trò chuyện.",
       "cliLabel": "Ứng dụng",
       "mcpLabel": "MCP",
       "channelLabel": "Kênh",
@@ -774,10 +774,10 @@
       "browseApps": "Xem ứng dụng",
       "browseIntegrations": "Xem công cụ MCP",
       "emptyIntegrationsHint": "Thêm máy chủ MCP tùy chỉnh ở bên dưới.",
-      "restartRequired": "Khởi động lại nanobot để áp dụng ứng dụng và công cụ MCP đã cập nhật."
+      "restartRequired": "Khởi động lại Moeka để áp dụng ứng dụng và công cụ MCP đã cập nhật."
     },
     "channels": {
-      "description": "Kết nối nanobot với các ứng dụng trò chuyện. Sau khi cài gói tích hợp, hãy thiết lập thông tin xác thực và các tùy chọn của từng nền tảng.",
+      "description": "Kết nối Moeka với các ứng dụng trò chuyện. Sau khi cài gói tích hợp, hãy thiết lập thông tin xác thực và các tùy chọn của từng nền tảng.",
       "caption": "{{enabled}} đang chạy · {{total}} kênh",
       "searchPlaceholder": "Tìm kênh",
       "backToChannels": "Tất cả kênh",
@@ -785,7 +785,7 @@
       "help": "Trợ giúp",
       "loading": "Đang tải kênh...",
       "empty": "Không có kênh nào phù hợp.",
-      "restartRequired": "Khởi động lại nanobot để áp dụng hỗ trợ kênh đã cập nhật.",
+      "restartRequired": "Khởi động lại Moeka để áp dụng hỗ trợ kênh đã cập nhật.",
       "requires": "Yêu cầu: {{requirements}}",
       "setUp": "Thiết lập",
       "setupGuide": "Hướng dẫn thiết lập",
@@ -882,8 +882,8 @@
       "missingDependency": "Thiếu gói hỗ trợ",
       "installSupport": "Cài gói hỗ trợ",
       "installConfirmTitle": "Cài các gói cần thiết cho {{name}}?",
-      "installConfirmDescription": "nanobot sẽ cài các gói cần thiết rồi bật {{name}}.",
-      "installOnlyConfirmDescription": "nanobot sẽ cài đặt gói hỗ trợ mà {{name}} cần. Bạn có thể kết nối sau khi cài đặt.",
+      "installConfirmDescription": "Moeka sẽ cài các gói cần thiết rồi bật {{name}}.",
+      "installOnlyConfirmDescription": "Moeka sẽ cài đặt gói hỗ trợ mà {{name}} cần. Bạn có thể kết nối sau khi cài đặt.",
       "installConfirmAction": "Cài và bật",
       "installOnlyConfirmAction": "Cài gói hỗ trợ",
       "websocketRequired": "Bắt buộc cho WebUI",
@@ -902,7 +902,7 @@
         "noOutput": "Bản ghi này không lưu nội dung phản hồi."
       },
       "create": "Tạo tự động hóa",
-      "createPrompt": "Bạn muốn nanobot tự động làm gì?",
+      "createPrompt": "Bạn muốn Moeka tự động làm gì?",
       "createInput": "Mô tả tác vụ tự động",
       "errors": {
         "legacyMissingDestination": "Tác vụ tự động cũ này thiếu nơi nhận. Hãy tạo lại từ cuộc trò chuyện liên kết để tiếp tục."
@@ -951,7 +951,7 @@
       "loading": "Đang tải tự động hóa...",
       "noMatches": "Không có tự động hóa phù hợp với chế độ xem này.",
       "empty": "Chưa có tự động hóa.",
-      "emptyHint": "Cho nanobot biết trong cuộc trò chuyện việc bạn muốn thực hiện theo lịch.",
+      "emptyHint": "Cho Moeka biết trong cuộc trò chuyện việc bạn muốn thực hiện theo lịch.",
       "emptyAction": "Mở cuộc trò chuyện",
       "clearFilters": "Xóa bộ lọc",
       "oneShot": "Một lần",
@@ -1070,9 +1070,9 @@
       "proxyLabel": "Proxy mạng",
       "proxySaveBeforeSignIn": "Hãy lưu thay đổi proxy trước khi đăng nhập.",
       "saveProxy": "Lưu proxy",
-      "localCodeHelp": "Hoàn tất đăng nhập trong trình duyệt. nanobot thường tự động hoàn tất; nếu không, hãy dán mã ủy quyền bên dưới.",
+      "localCodeHelp": "Hoàn tất đăng nhập trong trình duyệt. Moeka thường tự động hoàn tất; nếu không, hãy dán mã ủy quyền bên dưới.",
       "remoteCodeHelp": "Chọn Đăng nhập để mở xAI trên máy tính của bạn. Sau khi đăng nhập, hãy dán mã ủy quyền do xAI hiển thị bên dưới.",
-      "localCallbackHelp": "Hoàn tất đăng nhập trong trình duyệt. nanobot thường tự động hoàn tất; nếu không, hãy sao chép URL callback localhost đầy đủ từ thanh địa chỉ và dán vào bên dưới.",
+      "localCallbackHelp": "Hoàn tất đăng nhập trong trình duyệt. Moeka thường tự động hoàn tất; nếu không, hãy sao chép URL callback localhost đầy đủ từ thanh địa chỉ và dán vào bên dưới.",
       "remoteCallbackHelp": "Mở ChatGPT trong trình duyệt này và hoàn tất đăng nhập. Khi trang localhost không tải được, hãy sao chép URL đầy đủ từ thanh địa chỉ và dán vào bên dưới.",
       "authorizationCode": "Mã ủy quyền",
       "callbackUrl": "URL callback đầy đủ",
@@ -1115,7 +1115,7 @@
       "deleteConfirmAction": "Xóa kỹ năng",
       "instructionsTitle": "Hướng dẫn kỹ năng",
       "setupRequired": "Cần thiết lập",
-      "setupDescription": "Cài các gói còn thiếu trên máy chạy nanobot rồi kiểm tra lại.",
+      "setupDescription": "Cài các gói còn thiếu trên máy chạy Moeka rồi kiểm tra lại.",
       "copySetupCommand": "Sao chép lệnh thiết lập",
       "checkAgain": "Kiểm tra lại",
       "marketplaceSearchFailed": "Không thể tìm kiếm trong các kho kỹ năng.",
@@ -1298,7 +1298,7 @@
       "imageQuickActions": {
         "icon": {
           "title": "Thiết kế biểu tượng ứng dụng",
-          "prompt": "Tạo một biểu tượng ứng dụng 1:1 gọn gàng cho nanobot: robot thân thiện, phong cách vector đơn giản, bảng màu xanh trắng dịu, không có chữ."
+          "prompt": "Tạo một biểu tượng ứng dụng 1:1 gọn gàng cho Moeka: robot thân thiện, phong cách vector đơn giản, bảng màu xanh trắng dịu, không có chữ."
         },
         "sticker": {
           "title": "Tạo nhãn dán",
@@ -1455,7 +1455,7 @@
             "description": "Hủy lượt của tác nhân đang chạy trong cuộc trò chuyện này."
           },
           "restart": {
-            "title": "Khởi động lại nanobot",
+            "title": "Khởi động lại Moeka",
             "description": "Khởi động lại tiến trình bot tại chỗ."
           },
           "status": {
@@ -1666,7 +1666,7 @@
     "close": "Đóng xem trước tệp",
     "loading": "Đang tải bản xem trước...",
     "failed": "Không thể xem trước tệp này.",
-    "routeMissing": "Xem trước tệp cần gateway mới nhất. Hãy khởi động lại nanobot gateway rồi thử lại.",
+    "routeMissing": "Xem trước tệp cần gateway mới nhất. Hãy khởi động lại moeka gateway rồi thử lại.",
     "resize": "Đổi kích thước bản xem trước tệp",
     "truncated": "Bản xem trước bị cắt vì tệp này lớn."
   },

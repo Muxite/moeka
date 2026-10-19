@@ -7,10 +7,10 @@ from nanobot.config.schema import AgentDefaults, Config
 
 
 def test_bot_name_and_icon_defaults_preserve_current_branding() -> None:
-    """Default values keep the existing 'nanobot' name and cat icon."""
+    """Default values keep the public Moeka name and cat icon."""
     defaults = AgentDefaults()
 
-    assert defaults.bot_name == "nanobot"
+    assert defaults.bot_name == "Moeka"
     assert defaults.bot_icon == "🐈"
 
 

@@ -318,7 +318,7 @@ def test_onboard_fresh_install(mock_paths):
     assert result.exit_code == 0
     assert "Created config" in result.stdout
     assert "Created workspace" in result.stdout
-    assert "nanobot is ready" in result.stdout
+    assert "Moeka is ready" in result.stdout
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
@@ -331,7 +331,7 @@ def test_onboard_recommends_webui(mock_paths):
     result = runner.invoke(app, ["onboard"])
 
     assert result.exit_code == 0
-    assert "✓ nanobot is ready. Run: nanobot webui" in result.stdout
+    assert "✓ Moeka is ready. Run: moeka webui" in result.stdout
 
 
 def test_onboard_existing_config_refresh(mock_paths):
@@ -479,7 +479,8 @@ def test_onboard_uses_explicit_config_and_workspace_paths(tmp_path, monkeypatch)
     compact_output = stripped_output.replace("\n", "")
     resolved_config = str(config_path.resolve())
     assert resolved_config in compact_output
-    assert f'nanobot webui -c "{resolved_config}"' in result.stdout
+    normalized_output = " ".join(_strip_ansi(result.stdout).split())
+    assert f'moeka webui -c "{resolved_config}"' in normalized_output
 
 
 def test_onboard_wizard_preserves_explicit_config_in_next_steps(tmp_path, monkeypatch):
@@ -501,7 +502,8 @@ def test_onboard_wizard_preserves_explicit_config_in_next_steps(tmp_path, monkey
 
     assert result.exit_code == 0
     resolved_config = str(config_path.resolve())
-    assert f'nanobot webui -c "{resolved_config}"' in result.stdout
+    normalized_output = " ".join(_strip_ansi(result.stdout).split())
+    assert f'moeka webui -c "{resolved_config}"' in normalized_output
 
 
 def test_config_matches_github_copilot_codex_with_hyphen_prefix():

@@ -1,19 +1,19 @@
 {
   "app": {
-    "brand": "nanobot",
+    "brand": "Moeka",
     "loading": {
-      "connecting": "正在连接 nanobot…",
-      "boot": "正在加载 nanobot…"
+      "connecting": "正在连接 Moeka…",
+      "boot": "正在加载 Moeka…"
     },
     "error": {
-      "title": "无法连接到 nanobot",
-      "gatewayHint": "请确认网关已启动（`nanobot gateway`），并且当前浏览器可以访问它的 WebUI 地址。"
+      "title": "无法连接到 Moeka",
+      "gatewayHint": "请确认网关已启动（`moeka gateway`），并且当前浏览器可以访问它的 WebUI 地址。"
     },
     "auth": {
-      "title": "连接到 nanobot",
+      "title": "连接到 Moeka",
       "label": "WebUI 密码",
       "helpTitle": "在哪里找到密码？",
-      "helpConfig": "在运行 nanobot 的设备上打开配置文件，通常位于：",
+      "helpConfig": "在运行 Moeka 的设备上打开配置文件，通常位于：",
       "helpSecret": "复制此字段的值作为密码：",
       "helpFallback": "若该值为空，请使用 <code>channels.websocket.token</code>。",
       "showPassword": "显示密码",
@@ -29,9 +29,9 @@
     },
     "system": {
       "section": "系统",
-      "restartHint": "重启 nanobot 以应用运行时更改。",
+      "restartHint": "重启 Moeka 以应用运行时更改。",
       "restartAction": "重启",
-      "restart": "重启 nanobot",
+      "restart": "重启 Moeka",
       "restarting": "正在重启...",
       "restartEngine": "重启引擎",
       "restartingEngine": "正在重启引擎..."
@@ -40,11 +40,11 @@
       "completed": "重启已完成，用时 {{seconds}} 秒。"
     },
     "documentTitle": {
-      "base": "nanobot",
-      "chat": "{{title}} · nanobot"
+      "base": "Moeka",
+      "chat": "{{title}} · Moeka"
     },
     "meta": {
-      "description": "nanobot Web UI —— 与你的 nanobot 工作区对话。"
+      "description": "Moeka Web UI —— 与你的 Moeka 工作区对话。"
     },
     "pairing": {
       "title": "配对你的聊天账号",
@@ -90,7 +90,7 @@
     "timezoneNoMatches": "没有匹配的时区。",
     "configure": "配置",
     "exit": {
-      "title": "离开设置前重启 nanobot？",
+      "title": "离开设置前重启 Moeka？",
       "description": "更改已保存，重启后生效。",
       "later": "稍后重启"
     },
@@ -259,7 +259,7 @@
         },
         "tools_image_generation_save_dir": {
           "label": "生成图片保存目录",
-          "help": "nanobot 媒体目录内的子目录。请使用相对路径，已有图片不会迁移。"
+          "help": "Moeka 媒体目录内的子目录。请使用相对路径，已有图片不会迁移。"
         }
       },
       "groups": {
@@ -336,7 +336,7 @@
       "saving": "正在保存…",
       "discard": "放弃修改",
       "saved": "已保存。",
-      "restart": "重启 nanobot",
+      "restart": "重启 Moeka",
       "restartHelp": "重启后设置生效。命令行参数和环境变量可能会覆盖这里的设置。",
       "search": "搜索高级设置",
       "noResults": "没有匹配的设置。",
@@ -459,7 +459,7 @@
       "language": "语言",
       "provider": "提供商",
       "model": "模型",
-      "restart": "重启 nanobot",
+      "restart": "重启 Moeka",
       "configPath": "配置文件路径",
       "activePreset": "当前预设",
       "gateway": "网关",
@@ -529,7 +529,7 @@
       "defaultImageSize": "请求生成的图片尺寸，仅对支持此选项的提供商生效。",
       "maxImagesPerTurn": "一次图片生成请求最多生成多少张图片。",
       "timezone": "用于安排任务，以及回复与时间有关的问题。",
-      "cliAppsCatalog": "安装供 nanobot 使用的命令行工具，不会安装或修改对应的桌面应用。",
+      "cliAppsCatalog": "安装供 Moeka 使用的命令行工具，不会安装或修改对应的桌面应用。",
       "cliAppsFilter": "按应用名称、分类或功能搜索。",
       "localServiceAccess": "允许具有“完全访问权限”的 Shell 命令连接本机服务。",
       "webuiDefaultAccess": "对话所属项目未单独设置权限时，使用此权限。",
@@ -579,7 +579,7 @@
       "readyStatus": "就绪",
       "readyTry": "试试 @{{name}}",
       "readyCopied": "已复制",
-      "readyPrompt": "让 nanobot 在这个任务中使用 @{{name}}。",
+      "readyPrompt": "让 Moeka 在这个任务中使用 @{{name}}。",
       "openChat": "返回聊天",
       "unsupported": "暂不支持",
       "unavailable": "不可用",
@@ -626,7 +626,7 @@
       "saveCustom": "保存 MCP 服务",
       "configImport": "导入 mcp.json",
       "importConfig": "导入",
-      "restartRequired": "重启 nanobot 以连接更新后的 MCP 工具。",
+      "restartRequired": "重启 Moeka 以连接更新后的 MCP 工具。",
       "toolsFound_one": "{{count}} 个工具",
       "toolsFound_other": "{{count}} 个工具",
       "toolsFound": "{{count}} 个工具",
@@ -656,14 +656,14 @@
       "preparingSignIn": "正在准备安全登录…",
       "openSignInToContinue": "打开登录页面以继续。",
       "finishSignInInBrowser": "请在浏览器窗口中完成登录。",
-      "manualCallbackRequired": "完成登录后，将回调 URL 粘贴到 nanobot。",
+      "manualCallbackRequired": "完成登录后，将回调 URL 粘贴到 Moeka。",
       "manualCallbackHelp": "授权后，localhost 页面将无法打开。请复制地址栏中的完整 URL 并粘贴到这里。",
       "finishingConnection": "正在完成连接…",
       "activatingTools": "正在启用工具…",
       "connected": "已连接。",
       "connectionFailed": "连接失败。",
       "connectionCancelled": "已取消连接。",
-      "reloadFailed": "已登录，但 nanobot 无法连接这些工具。请尝试重启 nanobot。",
+      "reloadFailed": "已登录，但 Moeka 无法连接这些工具。请尝试重启 Moeka。",
       "oauthFailed": "无法连接，请重新登录。",
       "statusMissingDependency": "缺少依赖",
       "statusComingSoon": "即将支持",
@@ -747,11 +747,11 @@
       "loadError": "无法加载设置",
       "unsaved": "有未保存的更改。",
       "upToDate": "已是最新。",
-      "savedRestart": "已保存。重启 nanobot 后生效。",
-      "restartAfterSaving": "保存修改后，重启 nanobot 使其生效。",
+      "savedRestart": "已保存。重启 Moeka 后生效。",
+      "restartAfterSaving": "保存修改后，重启 Moeka 使其生效。",
       "savedRestartApply": "已保存，重启后生效。",
       "imageProviderRestart": "图片生成设置已保存，重启后生效。",
-      "hostRestartAfterSaving": "保存后 nanobot 会重启引擎。",
+      "hostRestartAfterSaving": "保存后 Moeka 会重启引擎。",
       "hostRestartPending": "设置已保存，正在等待引擎重启。",
       "hostApiUnavailable": "这些操作仅在桌面应用中可用。",
       "logsOpened": "已打开日志文件夹。",
@@ -926,7 +926,7 @@
     "api": {
       "title": "API 服务",
       "openaiCompatible": "OpenAI 兼容 API",
-      "description": "让 SDK 和其他智能体通过兼容 OpenAI 的 API 连接 nanobot。",
+      "description": "让 SDK 和其他智能体通过兼容 OpenAI 的 API 连接 Moeka。",
       "start": "启动 API 服务",
       "starting": "正在启动...",
       "stop": "停止",
@@ -946,12 +946,12 @@
     },
     "observability": {
       "title": "可观测性",
-      "configured": "nanobot 已检测到追踪凭证。",
-      "environment": "设置 LANGFUSE_SECRET_KEY 和 LANGFUSE_PUBLIC_KEY 后重启 nanobot。",
+      "configured": "Moeka 已检测到追踪凭证。",
+      "environment": "设置 LANGFUSE_SECRET_KEY 和 LANGFUSE_PUBLIC_KEY 后重启 Moeka。",
       "enable": "启用追踪支持"
     },
     "apps": {
-      "description": "将工具接入 nanobot，然后在对话中通过 @ 调用。",
+      "description": "将工具接入 Moeka，然后在对话中通过 @ 调用。",
       "cliLabel": "应用",
       "mcpLabel": "MCP",
       "channelLabel": "聊天平台",
@@ -974,17 +974,17 @@
       "browseApps": "浏览应用",
       "browseIntegrations": "浏览 MCP 工具",
       "emptyIntegrationsHint": "可在下方添加自定义 MCP 服务器。",
-      "restartRequired": "重启 nanobot 以应用更新后的应用和 MCP 工具。"
+      "restartRequired": "重启 Moeka 以应用更新后的应用和 MCP 工具。"
     },
     "channels": {
-      "description": "把聊天应用、邮箱和 WebUI 连接到 nanobot。",
+      "description": "把聊天应用、邮箱和 WebUI 连接到 Moeka。",
       "caption": "{{enabled}} 个运行中 · 共 {{total}} 个平台",
       "searchPlaceholder": "搜索聊天平台",
       "backToChannels": "所有平台",
       "catalog": "聊天平台",
       "loading": "正在加载聊天平台...",
       "empty": "没有匹配的聊天平台。",
-      "restartRequired": "重启 nanobot 以应用更新后的聊天平台支持。",
+      "restartRequired": "重启 Moeka 以应用更新后的聊天平台支持。",
       "requires": "需要：{{requirements}}",
       "setUp": "设置",
       "setupGuide": "配置指南",
@@ -1102,7 +1102,7 @@
         "noOutput": "此记录未保存回复正文。"
       },
       "create": "创建自动任务",
-      "createPrompt": "想让 nanobot 自动帮你做什么？",
+      "createPrompt": "想让 Moeka 自动帮你做什么？",
       "createInput": "描述一个自动任务",
       "errors": {
         "legacyMissingDestination": "这个旧版自动任务缺少发送目标，无法继续运行。请从关联会话中重新创建该任务。"
@@ -1151,11 +1151,11 @@
       "loading": "正在加载自动任务...",
       "noMatches": "当前视图没有匹配的自动任务。",
       "empty": "暂无自动任务。",
-      "emptyHint": "在聊天中告诉 nanobot 你想定期做什么，即可创建自动任务。",
+      "emptyHint": "在聊天中告诉 Moeka 你想定期做什么，即可创建自动任务。",
       "emptyAction": "打开对话",
       "clearFilters": "清除筛选",
       "oneShot": "一次性",
-      "systemTask": "由 nanobot 管理的自动任务",
+      "systemTask": "由 Moeka 管理的自动任务",
       "localTrigger": "本地触发器",
       "labels": {
         "schedule": "计划",
@@ -1262,7 +1262,7 @@
       "signedInAs": "当前账户：{{account}}",
       "signInHelp": "从这台设备登录；不会在配置中保存 API 密钥。",
       "remoteSignInHelp": "点击“登录”在你的电脑上打开 xAI，完成登录后粘贴页面显示的授权码。",
-      "codexRemoteSignInHelp": "在此浏览器中登录，然后将完整的 localhost 回调 URL 粘贴回 nanobot。",
+      "codexRemoteSignInHelp": "在此浏览器中登录，然后将完整的 localhost 回调 URL 粘贴回 Moeka。",
       "signInRequired": "需要登录",
       "signInBeforeSaving": "请先登录此提供商，再保存模型预设。",
       "signedIn": "已登录",
@@ -1270,9 +1270,9 @@
       "proxyLabel": "网络代理",
       "proxySaveBeforeSignIn": "请先保存代理更改再登录。",
       "saveProxy": "保存代理",
-      "localCodeHelp": "请在浏览器中完成登录。若 nanobot 未自动完成连接，请将授权码粘贴到下方。",
+      "localCodeHelp": "请在浏览器中完成登录。若 Moeka 未自动完成连接，请将授权码粘贴到下方。",
       "remoteCodeHelp": "点击“登录”在你的电脑上打开 xAI。完成登录后，请将 xAI 显示的授权码粘贴到下方。",
-      "localCallbackHelp": "请在浏览器中完成登录。若 nanobot 未自动完成连接，请复制地址栏中完整的 localhost 回调地址，粘贴到下方。",
+      "localCallbackHelp": "请在浏览器中完成登录。若 Moeka 未自动完成连接，请复制地址栏中完整的 localhost 回调地址，粘贴到下方。",
       "remoteCallbackHelp": "在此浏览器中打开 ChatGPT 并完成登录。当 localhost 页面无法打开时，请复制地址栏中的完整 URL 并粘贴到下方。",
       "authorizationCode": "授权码",
       "callbackUrl": "完整回调 URL",
@@ -1315,7 +1315,7 @@
       "deleteConfirmAction": "删除技能",
       "instructionsTitle": "技能说明",
       "setupRequired": "需要设置",
-      "setupDescription": "请在运行 nanobot 的设备上安装缺少的依赖，然后重新检查。",
+      "setupDescription": "请在运行 Moeka 的设备上安装缺少的依赖，然后重新检查。",
       "copySetupCommand": "复制安装命令",
       "checkAgain": "重新检查",
       "marketplaceSearchFailed": "暂时无法搜索技能市场。",
@@ -1498,7 +1498,7 @@
       "imageQuickActions": {
         "icon": {
           "title": "设计应用图标",
-          "prompt": "生成一个干净的 1:1 nanobot 应用图标：友好的机器人，简洁矢量风格，蓝白柔和配色，不要文字。"
+          "prompt": "生成一个干净的 1:1 Moeka 应用图标：友好的机器人，简洁矢量风格，蓝白柔和配色，不要文字。"
         },
         "sticker": {
           "title": "制作贴纸",
@@ -1664,7 +1664,7 @@
             "description": "取消这个对话中正在运行的智能体回合。"
           },
           "restart": {
-            "title": "重启 nanobot",
+            "title": "重启 Moeka",
             "description": "原地重启 bot 进程。"
           },
           "status": {
@@ -1866,7 +1866,7 @@
     "close": "关闭文件预览",
     "loading": "正在加载预览...",
     "failed": "无法预览这个文件。",
-    "routeMissing": "文件预览需要最新的网关。请重启 nanobot gateway 后再试。",
+    "routeMissing": "文件预览需要最新的网关。请重启 moeka gateway 后再试。",
     "resize": "调整文件预览宽度",
     "truncated": "文件较大，当前只显示前半部分预览。"
   },

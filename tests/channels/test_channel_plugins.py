@@ -2632,13 +2632,13 @@ def test_optional_dependency_metadata_for_enable():
         "dingtalk-stream",
         "lark-oapi",
         "msgpack",
-        "python-telegram-bot",
         "python-socketio",
         "qq-botpy",
         "slack-sdk",
         "slackify-markdown",
     ):
         assert not any(dep.startswith(dep_name) for dep in required)
+    assert any(dep.startswith("python-telegram-bot") for dep in required)
     for dependency in (
         "tzdata>=2025.2",
         "defusedxml>=0.7.1,<1.0.0",
@@ -2678,7 +2678,8 @@ def test_optional_dependency_metadata_for_enable():
         "weixin",
         "whatsapp",
     }
-    assert channel_names.isdisjoint(deps)
+    assert channel_names & set(deps) == {"discord"}
+    assert any(dep.startswith("python-telegram-bot") for dep in required)
     expected_channel_dependencies = {
         "dingtalk": ("dingtalk-stream>=0.24.0,<1.0.0",),
         "discord": ("discord.py>=2.5.2,<3.0.0",),

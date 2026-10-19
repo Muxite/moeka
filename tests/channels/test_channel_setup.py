@@ -205,6 +205,8 @@ def test_channel_locales_cover_authoritative_setup_contracts() -> None:
 
 
 def test_every_runtime_channel_field_has_a_webui_contract() -> None:
+    # Runtime modules load their channel-specific optional dependencies at import time.
+    pytest.importorskip("nh3", reason="Matrix runtime dependencies are optional")
     for name, plugin in discover_plugins().items():
         runtime_fields = _flatten_channel_fields(plugin.load_channel_class().default_config())
         runtime_fields.discard("enabled")

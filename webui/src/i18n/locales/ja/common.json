@@ -1,19 +1,19 @@
 {
   "app": {
-    "brand": "nanobot",
+    "brand": "Moeka",
     "loading": {
-      "connecting": "nanobot に接続中…",
-      "boot": "nanobot を読み込み中…"
+      "connecting": "Moeka に接続中…",
+      "boot": "Moeka を読み込み中…"
     },
     "error": {
-      "title": "nanobot に接続できませんでした",
-      "gatewayHint": "gateway（`nanobot gateway`）が起動しており、このブラウザーから WebUI のアドレスに到達できることを確認してください。"
+      "title": "Moeka に接続できませんでした",
+      "gatewayHint": "gateway（`moeka gateway`）が起動しており、このブラウザーから WebUI のアドレスに到達できることを確認してください。"
     },
     "auth": {
-      "title": "nanobot に接続",
+      "title": "Moeka に接続",
       "label": "WebUI パスワード",
       "helpTitle": "パスワードはどこにありますか？",
-      "helpConfig": "nanobot を実行しているデバイスで設定ファイルを開きます。通常は次の場所にあります：",
+      "helpConfig": "Moeka を実行しているデバイスで設定ファイルを開きます。通常は次の場所にあります：",
       "helpSecret": "このフィールドの値をパスワードとしてコピーします：",
       "helpFallback": "値が空の場合は <code>channels.websocket.token</code> を使用してください。",
       "showPassword": "パスワードを表示",
@@ -29,9 +29,9 @@
     },
     "system": {
       "section": "システム",
-      "restartHint": "実行時の変更を適用するには nanobot を再起動します。",
+      "restartHint": "実行時の変更を適用するには Moeka を再起動します。",
       "restartAction": "再起動",
-      "restart": "nanobot を再起動",
+      "restart": "Moeka を再起動",
       "restarting": "再起動中...",
       "restartEngine": "エンジンを再起動",
       "restartingEngine": "エンジンを再起動中..."
@@ -40,11 +40,11 @@
       "completed": "{{seconds}} 秒で再起動が完了しました。"
     },
     "documentTitle": {
-      "base": "nanobot",
-      "chat": "{{title}} · nanobot"
+      "base": "Moeka",
+      "chat": "{{title}} · Moeka"
     },
     "meta": {
-      "description": "nanobot Web UI — nanobot ワークスペースと会話します。"
+      "description": "Moeka Web UI — Moeka ワークスペースと会話します。"
     },
     "pairing": {
       "title": "チャットアカウントをペアリング",
@@ -90,7 +90,7 @@
     "timezoneNoMatches": "一致するタイムゾーンがありません。",
     "configure": "設定",
     "exit": {
-      "title": "設定を閉じる前に nanobot を再起動しますか？",
+      "title": "設定を閉じる前に Moeka を再起動しますか？",
       "description": "変更は保存されています。反映するには再起動してください。",
       "later": "後で再起動"
     },
@@ -137,7 +137,7 @@
         "gateway_restart_mode": {"label": "再起動モード", "help": "プロセスの再起動方法。自動モードではホスト環境に応じて選択します。"},
         "api_host": {"label": "API の待ち受けアドレス", "help": "localhost 以外のアドレスで待ち受けるには API キーが必要です。「システム」でキーを設定し、API サービスを再起動して変更を反映してください。"},
         "api_timeout": {"label": "API リクエストのタイムアウト（秒）", "help": "リクエストの時間制限です。API サービスの再起動後に反映されます。"},
-        "tools_image_generation_save_dir": {"label": "生成画像の保存先", "help": "nanobot のメディアディレクトリ内の相対パス。既存の画像は移動しません。"}
+        "tools_image_generation_save_dir": {"label": "生成画像の保存先", "help": "Moeka のメディアディレクトリ内の相対パス。既存の画像は移動しません。"}
       },
       "groups": {
         "chat": {"title": "WebUI のチャット権限", "help": "ローカルサービスへのアクセスとチャットの既定の権限。"},
@@ -159,7 +159,7 @@
         "applications": {"title": "コマンドラインアプリ", "help": ""}
       },
       "save": "変更を保存", "saving": "保存中…", "discard": "変更を破棄", "saved": "保存しました。",
-      "restart": "nanobot を再起動", "restartHelp": "再起動すると反映されます。コマンドライン引数や環境変数の設定が優先される場合があります。",
+      "restart": "Moeka を再起動", "restartHelp": "再起動すると反映されます。コマンドライン引数や環境変数の設定が優先される場合があります。",
       "search": "詳細設定を検索", "noResults": "一致する設定はありません。", "pending": "未保存の変更",
       "numberError": "許可された範囲内の有効な数値を入力してください。", "activeModel": "現在のモデルを使用", "none": "なし",
       "auto": "自動", "manual": "手動", "standard": "標準", "persistent": "継続",
@@ -171,7 +171,7 @@
       "ariaLabel": "設定セクション"
     },
     "nav": {
-      "about": "nanobot について",
+      "about": "Moeka について",
       "capabilities": "機能",
       "general": "一般",
       "byok": "BYOK",
@@ -196,7 +196,7 @@
       "interface": "インターフェース",
       "ai": "AI",
       "system": "システム",
-      "about": "nanobot について",
+      "about": "Moeka について",
       "status": "状態",
       "localPreferences": "このブラウザーの設定",
       "presets": "プリセット",
@@ -219,7 +219,7 @@
       "language": "言語",
       "provider": "プロバイダー",
       "model": "モデル",
-      "restart": "nanobot を再起動",
+      "restart": "Moeka を再起動",
       "configPath": "設定ファイル",
       "activePreset": "アクティブなプリセット",
       "gateway": "ゲートウェイ",
@@ -292,7 +292,7 @@
       "selectedModelValue": "選択したモデルによって設定されます。",
       "brandLogos": "設定で第三者プロバイダーと CLI のロゴを表示します。",
       "browserNotifications": "このページがバックグラウンドにある場合のみ通知します。既定ではオフです。",
-      "cliAppsCatalog": "nanobot がこのマシンで使用できるコマンドラインツールをインストールします。デスクトップアプリは変更しません。",
+      "cliAppsCatalog": "Moeka がこのマシンで使用できるコマンドラインツールをインストールします。デスクトップアプリは変更しません。",
       "cliAppsFilter": "アプリ、カテゴリ、機能で検索します。",
       "logs": "デスクトップアプリのログフォルダーを開きます。",
       "diagnostics": "サポートに送るための診断レポートを書き出します。",
@@ -339,11 +339,11 @@
       "loadError": "設定を読み込めませんでした",
       "unsaved": "未保存の変更があります。",
       "upToDate": "最新です。",
-      "savedRestart": "保存しました。反映するには nanobot を再起動してください。",
+      "savedRestart": "保存しました。反映するには Moeka を再起動してください。",
       "restartAfterSaving": "変更を保存してから、準備ができたら再起動してください。",
-      "savedRestartApply": "保存しました。変更を反映するには nanobot を再起動してください。",
-      "imageProviderRestart": "画像プロバイダーの変更を保存しました。反映するには nanobot を再起動してください。",
-      "hostRestartAfterSaving": "保存すると nanobot がエンジンを再起動します。",
+      "savedRestartApply": "保存しました。変更を反映するには Moeka を再起動してください。",
+      "imageProviderRestart": "画像プロバイダーの変更を保存しました。反映するには Moeka を再起動してください。",
+      "hostRestartAfterSaving": "保存すると Moeka がエンジンを再起動します。",
       "hostRestartPending": "保存しました。準備ができたらエンジンを再起動します。",
       "hostApiUnavailable": "この操作はデスクトップアプリでのみ利用できます。",
       "logsOpened": "ログフォルダーを開きました。",
@@ -647,7 +647,7 @@
       "saveCustom": "サーバーを保存",
       "configImport": "mcp.json をインポート",
       "importConfig": "インポート",
-      "restartRequired": "更新された MCP ツールに接続するには nanobot を再起動してください。",
+      "restartRequired": "更新された MCP ツールに接続するには Moeka を再起動してください。",
       "toolsFound_one": "ツール {{count}} 件",
       "toolsFound_other": "ツール {{count}} 件",
       "toolsFound": "{{count}} 個のツール",
@@ -677,14 +677,14 @@
       "preparingSignIn": "安全なサインインを準備しています…",
       "openSignInToContinue": "サインインページを開いて続行してください。",
       "finishSignInInBrowser": "ブラウザウィンドウでサインインを完了してください。",
-      "manualCallbackRequired": "サインインを完了し、コールバック URL を nanobot に貼り付けてください。",
+      "manualCallbackRequired": "サインインを完了し、コールバック URL を Moeka に貼り付けてください。",
       "manualCallbackHelp": "アクセスを承認すると localhost ページは開きません。アドレスバーから完全な URL をコピーして、ここに貼り付けてください。",
       "finishingConnection": "接続を完了しています…",
       "activatingTools": "ツールを有効にしています…",
       "connected": "接続しました。",
       "connectionFailed": "接続に失敗しました。",
       "connectionCancelled": "接続をキャンセルしました。",
-      "reloadFailed": "サインインしましたが、nanobot はツールに接続できませんでした。nanobot を再起動してください。",
+      "reloadFailed": "サインインしましたが、Moeka はツールに接続できませんでした。Moeka を再起動してください。",
       "oauthFailed": "接続できません。もう一度サインインしてください。",
       "statusMissingDependency": "依存関係が必要",
       "statusComingSoon": "近日公開",
@@ -744,14 +744,14 @@
       "autoInstall": "起動時に API サーバーに必要なパッケージを自動的にインストールします。"
     },
     "observability": {
-      "title": "可観測性", "configured": "nanobot がトレース認証情報を利用できます。",
-      "environment": "LANGFUSE_SECRET_KEY と LANGFUSE_PUBLIC_KEY を設定して nanobot を再起動してください。", "enable": "トレースを有効化"
+      "title": "可観測性", "configured": "Moeka がトレース認証情報を利用できます。",
+      "environment": "LANGFUSE_SECRET_KEY と LANGFUSE_PUBLIC_KEY を設定して Moeka を再起動してください。", "enable": "トレースを有効化"
     },
     "legal": {
       "thirdPartyBrands": "製品名、ロゴ、ブランドはそれぞれの所有者に帰属します。使用は識別のみを目的とし、承認を意味するものではありません。"
     },
     "apps": {
-      "description": "nanobot にツールを追加し、チャットで @ を付けて使用できます。",
+      "description": "Moeka にツールを追加し、チャットで @ を付けて使用できます。",
       "cliLabel": "アプリ",
       "mcpLabel": "MCP",
       "channelLabel": "チャンネル",
@@ -774,10 +774,10 @@
       "browseApps": "アプリを見る",
       "browseIntegrations": "MCP ツールを見る",
       "emptyIntegrationsHint": "下からカスタム MCP サーバーを追加できます。",
-      "restartRequired": "更新したアプリと MCP ツールを反映するには nanobot を再起動してください。"
+      "restartRequired": "更新したアプリと MCP ツールを反映するには Moeka を再起動してください。"
     },
     "channels": {
-      "description": "nanobot をチャットアプリに接続します。必要なパッケージをインストールした後、各プラットフォームの認証情報やワークスペースを設定してください。",
+      "description": "Moeka をチャットアプリに接続します。必要なパッケージをインストールした後、各プラットフォームの認証情報やワークスペースを設定してください。",
       "caption": "実行中 {{enabled}} 件 · 全 {{total}} チャンネル",
       "searchPlaceholder": "チャンネルを検索",
       "backToChannels": "すべてのチャンネル",
@@ -785,7 +785,7 @@
       "help": "ヘルプ",
       "loading": "チャンネルを読み込み中...",
       "empty": "一致するチャンネルはありません。",
-      "restartRequired": "更新したチャンネルサポートを反映するには nanobot を再起動してください。",
+      "restartRequired": "更新したチャンネルサポートを反映するには Moeka を再起動してください。",
       "requires": "必要: {{requirements}}",
       "setUp": "設定",
       "setupGuide": "設定ガイド",
@@ -882,8 +882,8 @@
       "missingDependency": "必要なパッケージが未インストール",
       "installSupport": "必要なパッケージをインストール",
       "installConfirmTitle": "{{name}} に必要なパッケージをインストールしますか？",
-      "installConfirmDescription": "nanobot が必要なパッケージをインストールし、{{name}} を有効にします。",
-      "installOnlyConfirmDescription": "nanobot が {{name}} に必要なサポートをインストールします。インストール後に接続できます。",
+      "installConfirmDescription": "Moeka が必要なパッケージをインストールし、{{name}} を有効にします。",
+      "installOnlyConfirmDescription": "Moeka が {{name}} に必要なサポートをインストールします。インストール後に接続できます。",
       "installConfirmAction": "インストールして有効化",
       "installOnlyConfirmAction": "サポートをインストール",
       "websocketRequired": "WebUI に必須",
@@ -902,7 +902,7 @@
         "noOutput": "この記録に応答本文は保存されていません。"
       },
       "create": "自動タスクを作成",
-      "createPrompt": "nanobot に何を自動化してほしいですか？",
+      "createPrompt": "Moeka に何を自動化してほしいですか？",
       "createInput": "自動タスクを説明",
       "errors": {
         "legacyMissingDestination": "この旧形式の自動タスクには送信先がありません。続行するには、関連チャットから作り直してください。"
@@ -951,7 +951,7 @@
       "loading": "自動タスクを読み込み中...",
       "noMatches": "この表示に一致する自動タスクはありません。",
       "empty": "自動タスクはまだありません。",
-      "emptyHint": "決まった時間に実行してほしいことを、チャットで nanobot に伝えてください。",
+      "emptyHint": "決まった時間に実行してほしいことを、チャットで Moeka に伝えてください。",
       "emptyAction": "チャットを開く",
       "clearFilters": "フィルターをクリア",
       "oneShot": "一回限り",
@@ -1062,7 +1062,7 @@
       "signedInAs": "{{account}} としてサインイン済み",
       "signInHelp": "このデバイスからサインインします。API キーは設定に保存されません。",
       "remoteSignInHelp": "「サインイン」を選択して自分のコンピューターで xAI を開き、サインイン後に表示される認証コードを貼り付けてください。",
-      "codexRemoteSignInHelp": "このブラウザーでサインインし、localhost の完全なコールバック URL を nanobot に貼り付けてください。",
+      "codexRemoteSignInHelp": "このブラウザーでサインインし、localhost の完全なコールバック URL を Moeka に貼り付けてください。",
       "signInRequired": "サインインが必要です",
       "signInBeforeSaving": "プリセットを保存する前に、このプロバイダーへサインインしてください。",
       "signedIn": "サインイン済み",
@@ -1070,9 +1070,9 @@
       "proxyLabel": "ネットワークプロキシ",
       "proxySaveBeforeSignIn": "サインイン前にプロキシの変更を保存してください。",
       "saveProxy": "プロキシを保存",
-      "localCodeHelp": "ブラウザーでサインインを完了してください。通常は nanobot が自動で完了します。完了しない場合は、認証コードを下に貼り付けてください。",
+      "localCodeHelp": "ブラウザーでサインインを完了してください。通常は Moeka が自動で完了します。完了しない場合は、認証コードを下に貼り付けてください。",
       "remoteCodeHelp": "「サインイン」を選択して自分のコンピューターで xAI を開いてください。サインイン後、xAI に表示された認証コードを下に貼り付けてください。",
-      "localCallbackHelp": "ブラウザーでサインインを完了してください。通常は nanobot が自動で完了します。完了しない場合は、アドレスバーから localhost の完全なコールバック URL をコピーして下に貼り付けてください。",
+      "localCallbackHelp": "ブラウザーでサインインを完了してください。通常は Moeka が自動で完了します。完了しない場合は、アドレスバーから localhost の完全なコールバック URL をコピーして下に貼り付けてください。",
       "remoteCallbackHelp": "このブラウザーで ChatGPT を開いてサインインを完了してください。localhost ページを開けない場合は、アドレスバーの完全な URL をコピーして下に貼り付けてください。",
       "authorizationCode": "認証コード",
       "callbackUrl": "完全なコールバック URL",
@@ -1115,7 +1115,7 @@
       "deleteConfirmAction": "スキルを削除",
       "instructionsTitle": "スキルの説明",
       "setupRequired": "セットアップが必要",
-      "setupDescription": "nanobot を実行しているマシンに不足している依存関係をインストールしてから、再確認してください。",
+      "setupDescription": "Moeka を実行しているマシンに不足している依存関係をインストールしてから、再確認してください。",
       "copySetupCommand": "セットアップコマンドをコピー",
       "checkAgain": "再確認",
       "marketplaceSearchFailed": "スキルマーケットを検索できませんでした。",
@@ -1298,7 +1298,7 @@
       "imageQuickActions": {
         "icon": {
           "title": "アプリアイコンを作る",
-          "prompt": "nanobot のクリーンな 1:1 アプリアイコンを生成してください。親しみやすいロボット、シンプルなベクター風、柔らかい青と白の配色、文字なし。"
+          "prompt": "Moeka のクリーンな 1:1 アプリアイコンを生成してください。親しみやすいロボット、シンプルなベクター風、柔らかい青と白の配色、文字なし。"
         },
         "sticker": {
           "title": "ステッカーを作る",
@@ -1455,7 +1455,7 @@
             "description": "このチャットで実行中のエージェントのターンをキャンセルします。"
           },
           "restart": {
-            "title": "nanobot を再起動",
+            "title": "Moeka を再起動",
             "description": "bot プロセスをその場で再起動します。"
           },
           "status": {
@@ -1666,7 +1666,7 @@
     "close": "ファイルプレビューを閉じる",
     "loading": "プレビューを読み込み中...",
     "failed": "このファイルをプレビューできませんでした。",
-    "routeMissing": "ファイルプレビューには最新の gateway が必要です。nanobot gateway を再起動してから再試行してください。",
+    "routeMissing": "ファイルプレビューには最新の gateway が必要です。moeka gateway を再起動してから再試行してください。",
     "resize": "ファイルプレビューの幅を変更",
     "truncated": "ファイルが大きいため、プレビューは途中まで表示されています。"
   },

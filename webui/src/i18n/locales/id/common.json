@@ -1,19 +1,19 @@
 {
   "app": {
-    "brand": "nanobot",
+    "brand": "Moeka",
     "loading": {
-      "connecting": "Menghubungkan ke nanobot…",
-      "boot": "Memuat nanobot…"
+      "connecting": "Menghubungkan ke Moeka…",
+      "boot": "Memuat Moeka…"
     },
     "error": {
-      "title": "Tidak dapat menjangkau nanobot",
-      "gatewayHint": "Pastikan gateway sedang berjalan (`nanobot gateway`) dan browser ini dapat menjangkau alamat WebUI-nya."
+      "title": "Tidak dapat menjangkau Moeka",
+      "gatewayHint": "Pastikan gateway sedang berjalan (`moeka gateway`) dan browser ini dapat menjangkau alamat WebUI-nya."
     },
     "auth": {
-      "title": "Hubungkan ke nanobot",
+      "title": "Hubungkan ke Moeka",
       "label": "Kata sandi WebUI",
       "helpTitle": "Di mana saya bisa menemukan kata sandi?",
-      "helpConfig": "Pada perangkat yang menjalankan nanobot, buka file konfigurasi, biasanya di:",
+      "helpConfig": "Pada perangkat yang menjalankan Moeka, buka file konfigurasi, biasanya di:",
       "helpSecret": "Salin nilai kolom ini sebagai kata sandi:",
       "helpFallback": "Jika nilainya kosong, gunakan <code>channels.websocket.token</code>.",
       "showPassword": "Tampilkan kata sandi",
@@ -29,9 +29,9 @@
     },
     "system": {
       "section": "Sistem",
-      "restartHint": "Mulai ulang nanobot untuk menerapkan perubahan runtime.",
+      "restartHint": "Mulai ulang Moeka untuk menerapkan perubahan runtime.",
       "restartAction": "Mulai ulang",
-      "restart": "Mulai ulang nanobot",
+      "restart": "Mulai ulang Moeka",
       "restarting": "Memulai ulang...",
       "restartEngine": "Mulai ulang mesin",
       "restartingEngine": "Memulai ulang mesin..."
@@ -40,11 +40,11 @@
       "completed": "Mulai ulang selesai dalam {{seconds}} dtk."
     },
     "documentTitle": {
-      "base": "nanobot",
-      "chat": "{{title}} · nanobot"
+      "base": "Moeka",
+      "chat": "{{title}} · Moeka"
     },
     "meta": {
-      "description": "UI web nanobot — ngobrol dengan ruang kerja nanobot Anda."
+      "description": "UI web Moeka — ngobrol dengan ruang kerja Moeka Anda."
     },
     "pairing": {
       "title": "Pasangkan akun chat Anda",
@@ -90,7 +90,7 @@
     "timezoneNoMatches": "Tidak ada zona waktu yang cocok.",
     "configure": "Konfigurasi",
     "exit": {
-      "title": "Mulai ulang nanobot sebelum keluar dari pengaturan?",
+      "title": "Mulai ulang Moeka sebelum keluar dari pengaturan?",
       "description": "Perubahan sudah disimpan. Mulai ulang untuk menerapkannya.",
       "later": "Mulai ulang nanti"
     },
@@ -159,7 +159,7 @@
         "applications": {"title": "Aplikasi baris perintah", "help": ""}
       },
       "save": "Simpan perubahan", "saving": "Menyimpan…", "discard": "Buang perubahan", "saved": "Tersimpan.",
-      "restart": "Mulai ulang nanobot", "restartHelp": "Mulai ulang untuk menerapkan perubahan. Argumen baris perintah dan variabel lingkungan mungkin lebih diutamakan.",
+      "restart": "Mulai ulang Moeka", "restartHelp": "Mulai ulang untuk menerapkan perubahan. Argumen baris perintah dan variabel lingkungan mungkin lebih diutamakan.",
       "search": "Cari pengaturan lanjutan", "noResults": "Tidak ada pengaturan yang cocok.", "pending": "Perubahan belum disimpan",
       "numberError": "Masukkan angka yang valid dalam rentang yang diizinkan.", "activeModel": "Gunakan model aktif", "none": "Tidak ada",
       "auto": "Otomatis", "manual": "Manual", "standard": "Standar", "persistent": "Terus-menerus",
@@ -219,7 +219,7 @@
       "language": "Bahasa",
       "provider": "Penyedia",
       "model": "Model",
-      "restart": "Mulai ulang nanobot",
+      "restart": "Mulai ulang Moeka",
       "configPath": "File konfigurasi",
       "activePreset": "Prasetel aktif",
       "gateway": "Gateway",
@@ -292,7 +292,7 @@
       "selectedModelValue": "Ditentukan oleh model yang dipilih.",
       "brandLogos": "Tampilkan logo penyedia pihak ketiga dan CLI di Pengaturan.",
       "browserNotifications": "Beri tahu hanya saat halaman ini di latar belakang. Nonaktif secara bawaan.",
-      "cliAppsCatalog": "Memasang alat baris perintah yang dapat digunakan nanobot di komputer ini. Aplikasi desktop tidak diubah.",
+      "cliAppsCatalog": "Memasang alat baris perintah yang dapat digunakan Moeka di komputer ini. Aplikasi desktop tidak diubah.",
       "cliAppsFilter": "Cari berdasarkan aplikasi, kategori, atau kemampuan.",
       "logs": "Membuka folder log aplikasi desktop.",
       "diagnostics": "Mengekspor laporan diagnostik untuk tim dukungan.",
@@ -339,11 +339,11 @@
       "loadError": "Tidak dapat memuat pengaturan",
       "unsaved": "Perubahan belum disimpan.",
       "upToDate": "Sudah terbaru.",
-      "savedRestart": "Tersimpan. Mulai ulang nanobot untuk menerapkan perubahan.",
+      "savedRestart": "Tersimpan. Mulai ulang Moeka untuk menerapkan perubahan.",
       "restartAfterSaving": "Simpan perubahan, lalu mulai ulang saat siap.",
-      "savedRestartApply": "Tersimpan. Mulai ulang nanobot untuk menerapkan perubahan.",
-      "imageProviderRestart": "Perubahan penyedia gambar tersimpan. Mulai ulang nanobot untuk menerapkannya.",
-      "hostRestartAfterSaving": "Saat disimpan, nanobot akan memulai ulang mesinnya.",
+      "savedRestartApply": "Tersimpan. Mulai ulang Moeka untuk menerapkan perubahan.",
+      "imageProviderRestart": "Perubahan penyedia gambar tersimpan. Mulai ulang Moeka untuk menerapkannya.",
+      "hostRestartAfterSaving": "Saat disimpan, Moeka akan memulai ulang mesinnya.",
       "hostRestartPending": "Tersimpan. Mesin akan dimulai ulang saat siap.",
       "hostApiUnavailable": "Tindakan ini hanya tersedia di aplikasi desktop.",
       "logsOpened": "Folder log dibuka.",
@@ -647,7 +647,7 @@
       "saveCustom": "Simpan server",
       "configImport": "Impor mcp.json",
       "importConfig": "Impor",
-      "restartRequired": "Mulai ulang nanobot untuk menyambungkan alat MCP yang diperbarui.",
+      "restartRequired": "Mulai ulang Moeka untuk menyambungkan alat MCP yang diperbarui.",
       "toolsFound_one": "{{count}} alat",
       "toolsFound_other": "{{count}} alat",
       "toolsFound": "{{count}} alat",
@@ -684,7 +684,7 @@
       "connected": "Terhubung.",
       "connectionFailed": "Koneksi gagal.",
       "connectionCancelled": "Koneksi dibatalkan.",
-      "reloadFailed": "Anda sudah masuk, tetapi nanobot tidak dapat menghubungkan alat. Coba mulai ulang nanobot.",
+      "reloadFailed": "Anda sudah masuk, tetapi Moeka tidak dapat menghubungkan alat. Coba mulai ulang nanobot.",
       "oauthFailed": "Tidak dapat terhubung. Coba masuk lagi.",
       "statusMissingDependency": "Dependensi belum terpasang",
       "statusComingSoon": "Segera hadir",
@@ -751,7 +751,7 @@
       "thirdPartyBrands": "Nama produk, logo, dan merek adalah milik pemiliknya masing-masing. Penggunaan hanya untuk identifikasi dan tidak menyiratkan dukungan."
     },
     "apps": {
-      "description": "Tambahkan alat ke nanobot, lalu gunakan dengan @ di chat.",
+      "description": "Tambahkan alat ke Moeka, lalu gunakan dengan @ di chat.",
       "cliLabel": "Aplikasi",
       "mcpLabel": "MCP",
       "channelLabel": "Kanal",
@@ -774,10 +774,10 @@
       "browseApps": "Jelajahi aplikasi",
       "browseIntegrations": "Jelajahi alat MCP",
       "emptyIntegrationsHint": "Tambahkan server MCP khusus di bawah.",
-      "restartRequired": "Mulai ulang nanobot untuk menerapkan aplikasi dan alat MCP yang diperbarui."
+      "restartRequired": "Mulai ulang Moeka untuk menerapkan aplikasi dan alat MCP yang diperbarui."
     },
     "channels": {
-      "description": "Hubungkan nanobot ke aplikasi chat. Setelah memasang paket integrasi, lengkapi kredensial dan pengaturan untuk setiap platform.",
+      "description": "Hubungkan Moeka ke aplikasi chat. Setelah memasang paket integrasi, lengkapi kredensial dan pengaturan untuk setiap platform.",
       "caption": "{{enabled}} berjalan · {{total}} kanal",
       "searchPlaceholder": "Cari kanal",
       "backToChannels": "Semua kanal",
@@ -785,7 +785,7 @@
       "help": "Bantuan",
       "loading": "Memuat kanal...",
       "empty": "Tidak ada kanal yang cocok dengan filter ini.",
-      "restartRequired": "Mulai ulang nanobot untuk menerapkan dukungan kanal yang diperbarui.",
+      "restartRequired": "Mulai ulang Moeka untuk menerapkan dukungan kanal yang diperbarui.",
       "requires": "Memerlukan: {{requirements}}",
       "setUp": "Siapkan",
       "setupGuide": "Panduan penyiapan",
@@ -882,8 +882,8 @@
       "missingDependency": "Paket yang diperlukan belum terpasang",
       "installSupport": "Pasang paket yang diperlukan",
       "installConfirmTitle": "Pasang paket yang diperlukan {{name}}?",
-      "installConfirmDescription": "nanobot akan memasang paket yang diperlukan, lalu mengaktifkan {{name}}.",
-      "installOnlyConfirmDescription": "nanobot akan menginstal dukungan yang dibutuhkan {{name}}. Anda dapat menghubungkannya setelah instalasi.",
+      "installConfirmDescription": "Moeka akan memasang paket yang diperlukan, lalu mengaktifkan {{name}}.",
+      "installOnlyConfirmDescription": "Moeka akan menginstal dukungan yang dibutuhkan {{name}}. Anda dapat menghubungkannya setelah instalasi.",
       "installConfirmAction": "Instal dan aktifkan",
       "installOnlyConfirmAction": "Instal dukungan",
       "websocketRequired": "Wajib untuk WebUI",
@@ -902,7 +902,7 @@
         "noOutput": "Catatan ini tidak menyimpan teks respons."
       },
       "create": "Buat otomatisasi",
-      "createPrompt": "Apa yang ingin kamu otomatisasi dengan nanobot?",
+      "createPrompt": "Apa yang ingin kamu otomatisasi dengan Moeka?",
       "createInput": "Jelaskan otomatisasi",
       "errors": {
         "legacyMissingDestination": "Otomatisasi lama ini tidak memiliki tujuan pengiriman. Buat ulang dari chat terkait untuk melanjutkan."
@@ -951,7 +951,7 @@
       "loading": "Memuat otomasi...",
       "noMatches": "Tidak ada otomasi yang cocok dengan tampilan ini.",
       "empty": "Belum ada otomasi.",
-      "emptyHint": "Beri tahu nanobot di chat apa yang ingin Anda jalankan secara terjadwal.",
+      "emptyHint": "Beri tahu Moeka di chat apa yang ingin Anda jalankan secara terjadwal.",
       "emptyAction": "Buka chat",
       "clearFilters": "Hapus filter",
       "oneShot": "Satu kali",
@@ -1070,9 +1070,9 @@
       "proxyLabel": "Proksi jaringan",
       "proxySaveBeforeSignIn": "Simpan perubahan proksi sebelum login.",
       "saveProxy": "Simpan proksi",
-      "localCodeHelp": "Selesaikan proses masuk di browser. nanobot biasanya menyelesaikannya secara otomatis; jika tidak, tempel kode otorisasi di bawah.",
+      "localCodeHelp": "Selesaikan proses masuk di browser. Moeka biasanya menyelesaikannya secara otomatis; jika tidak, tempel kode otorisasi di bawah.",
       "remoteCodeHelp": "Pilih Masuk untuk membuka xAI di komputer Anda. Setelah masuk, tempel kode otorisasi yang ditampilkan xAI di bawah.",
-      "localCallbackHelp": "Selesaikan proses masuk di browser. nanobot biasanya menyelesaikannya secara otomatis; jika tidak, salin URL callback localhost lengkap dari bilah alamat dan tempel di bawah.",
+      "localCallbackHelp": "Selesaikan proses masuk di browser. Moeka biasanya menyelesaikannya secara otomatis; jika tidak, salin URL callback localhost lengkap dari bilah alamat dan tempel di bawah.",
       "remoteCallbackHelp": "Buka ChatGPT di browser ini dan selesaikan proses masuk. Saat halaman localhost gagal dimuat, salin URL lengkap dari bilah alamat dan tempel di bawah.",
       "authorizationCode": "Kode otorisasi",
       "callbackUrl": "URL callback lengkap",
@@ -1115,7 +1115,7 @@
       "deleteConfirmAction": "Hapus keterampilan",
       "instructionsTitle": "Petunjuk keterampilan",
       "setupRequired": "Perlu penyiapan",
-      "setupDescription": "Instal dependensi yang belum tersedia di mesin yang menjalankan nanobot, lalu periksa lagi.",
+      "setupDescription": "Instal dependensi yang belum tersedia di mesin yang menjalankan Moeka, lalu periksa lagi.",
       "copySetupCommand": "Salin perintah penyiapan",
       "checkAgain": "Periksa lagi",
       "marketplaceSearchFailed": "Tidak dapat mencari marketplace keterampilan.",
@@ -1298,7 +1298,7 @@
       "imageQuickActions": {
         "icon": {
           "title": "Desain ikon aplikasi",
-          "prompt": "Buat ikon aplikasi 1:1 yang bersih untuk nanobot: robot ramah, gaya vektor sederhana, palet biru dan putih lembut, tanpa teks."
+          "prompt": "Buat ikon aplikasi 1:1 yang bersih untuk Moeka: robot ramah, gaya vektor sederhana, palet biru dan putih lembut, tanpa teks."
         },
         "sticker": {
           "title": "Buat stiker",
@@ -1455,7 +1455,7 @@
             "description": "Batalkan giliran agen yang sedang aktif di chat ini."
           },
           "restart": {
-            "title": "Mulai ulang nanobot",
+            "title": "Mulai ulang Moeka",
             "description": "Mulai ulang proses bot di tempat."
           },
           "status": {
@@ -1666,7 +1666,7 @@
     "close": "Tutup pratinjau file",
     "loading": "Memuat pratinjau...",
     "failed": "Tidak dapat mempratinjau file ini.",
-    "routeMissing": "Pratinjau file memerlukan gateway terbaru. Mulai ulang nanobot gateway lalu coba lagi.",
+    "routeMissing": "Pratinjau file memerlukan gateway terbaru. Mulai ulang moeka gateway lalu coba lagi.",
     "resize": "Ubah ukuran pratinjau file",
     "truncated": "Pratinjau dipotong karena file ini besar."
   },
