@@ -360,3 +360,55 @@ async def test_correlated_peer_result_is_delivered_to_requesting_channel(tmp_pat
     finally:
         await a.stop()
         await b.stop()
+
+
+def _single_peer_service(tmp_path: Path, bus: Bus) -> PeerService:
+    return PeerService(
+        instance_id="b" * 32,
+        peers=[
+            PeerConfig(
+                id="a" * 32,
+                socket_path=str(tmp_path / "a.sock"),
+                secret="owner-shared-secret-0123456789abcdef",
+            )
+        ],
+        state_dir=tmp_path / "b",
+        socket_path=tmp_path / "b.sock",
+        bus=bus,
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_publishes_of_one_received_row_reach_the_bus_once(
+    tmp_path: Path,
+) -> None:
+    bus = Bus()
+    service = _single_peer_service(tmp_path, bus)
+    assert service._store_inbox("delivery-1", "a" * 32, "Check the logs", None, 1)
+    row = service._get_inbox("delivery-1")
+
+    # Startup recovery and the live receive path can both hold the same
+    # 'received' row; only the one that claims it may publish.
+    await asyncio.gather(service._publish_inbox(row), service._publish_inbox(row))
+
+    assert len(bus.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_scans_inbox_before_accepting_connections(
+    tmp_path: Path,
+) -> None:
+    service = _single_peer_service(tmp_path, Bus())
+    listening_during_scan: list[bool] = []
+    scan = service._pending_inbox
+
+    def recording_scan():
+        listening_during_scan.append(service._server is not None)
+        return scan()
+
+    service._pending_inbox = recording_scan
+    await service.start()
+    try:
+        assert listening_during_scan == [False]
+    finally:
+        await service.stop()

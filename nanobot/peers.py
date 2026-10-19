@@ -142,6 +142,9 @@ class PeerService:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
     async def start(self) -> None:
+        # Snapshot leftovers before accepting connections: a row the live
+        # receive path queues after this point must not be republished.
+        pending_inbox = await asyncio.to_thread(self._pending_inbox)
         local_peers = any(peer.socket_path is not None for peer in self.peers.values())
         if local_peers:
             if not hasattr(asyncio, "start_unix_server"):
@@ -171,7 +174,7 @@ class PeerService:
                 self.listener.port,
                 ssl=tls,
             )
-        for row in await asyncio.to_thread(self._pending_inbox):
+        for row in pending_inbox:
             if row["state"] == "started":
                 await self.complete_inbox(
                     str(row["id"]),
@@ -417,11 +420,15 @@ class PeerService:
 
     async def _publish_inbox(self, row: sqlite3.Row) -> None:
         peer_id, msg_id = str(row["sender_id"]), str(row["id"])
+        # Claim 'received' rows atomically; a recovered 'queued' row was claimed
+        # by a previous process and its bus message was lost with it.
         with self._connect() as db:
-            db.execute(
-                "UPDATE inbox SET state='queued' WHERE id=? AND state IN ('received','queued')",
+            claimed = db.execute(
+                "UPDATE inbox SET state='queued' WHERE id=? AND state='received'",
                 (msg_id,),
-            )
+            ).rowcount == 1
+        if not claimed and row["state"] != "queued":
+            return
         await self.bus.publish_inbound(
             InboundMessage(
                 channel="peer",
