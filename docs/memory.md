@@ -28,8 +28,8 @@ This keeps the system light in the moment, but reflective over time.
 
 Short-term conversation state no longer lives in per-session `.jsonl` files.
 As of the 2026-06 overhaul, `nanobot/session/manager.py` persists every
-session to a single SQLite database, `<workspace>/sessions.db`, opened in
-**WAL mode**. SQLite's own locking replaces the old bespoke cross-process
+session to a single SQLite database, `<workspace>/sessions/<workspace-id>/sessions.db`,
+opened in **WAL mode** and hidden from agent file and shell tools. SQLite's own locking replaces the old bespoke cross-process
 `FileLock` — safe even if a stray second moeka process starts alongside the
 systemd-managed one.
 
@@ -113,13 +113,18 @@ It is not the final memory. It is the material from which final memory is shaped
 Dream reads:
 
 - new entries from `memory/history.jsonl`
-- the current `SOUL.md`
 - the current `USER.md`
 - the current `memory/MEMORY.md`
+- `memory/explicit.jsonl`, the audit log of explicit remember, correct and forget
+  requests made with the `memory` tool
 
-Then it edits the long-term files surgically in a single pass — not by rewriting everything, but by making the smallest honest change that keeps memory coherent.
+Then it edits `USER.md` and `MEMORY.md` surgically in a single pass — not by rewriting everything, but by making the smallest honest change that keeps memory coherent.
 
 This is why nanobot's memory is not just archival. It is interpretive.
+
+In moeka, `SOUL.md` (personality) is outside Dream's scope and read-only to agent tools.
+It changes only through the owner, or through the versioned `personality` tool when
+`personality.allowSelfEdit` is on (see [daily agents](daily-agents.md)).
 
 ## The Files
 

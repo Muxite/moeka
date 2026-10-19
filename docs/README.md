@@ -36,6 +36,7 @@ Pick the row that matches what you want to accomplish next:
 | Learn the browser workbench | [WebUI](./webui.md) |
 | Connect Telegram, Discord, Slack, Feishu, WeChat, Email, or another chat app | [Chat Apps](./chat-apps.md) |
 | Choose a hosted, OAuth, company, or local model | [Provider Cookbook](./provider-cookbook.md) |
+| Set up a daily agent with Luna/GPU model routing, personality and explicit memory | [Daily agents](./daily-agents.md) |
 | Add model fallbacks | [Configure Model Fallback](./guides/configure-model-fallback.md) |
 | Enable web search | [Configure Web Search](./guides/configure-web-search.md) |
 | Manage Agent Plugins, CLI Apps, or MCP integrations | [WebUI Apps](./webui.md#apps) |

@@ -54,7 +54,7 @@ The WebUI launcher creates or updates:
 |---|---|
 | `~/.nanobot/config.json` | Provider, model, WebUI, channel, tool, and runtime settings |
 | `~/.nanobot/workspace/` | Memory, skills, automations, and generated files |
-| `~/.nanobot/sessions/<workspace-id>/` | Recent session history stored outside the workspace; the ID remains stable across workspace moves |
+| `~/.nanobot/sessions/<workspace-id>/` | Recent session history, owned by the instance and hidden from agent file and shell tools; the ID remains stable across workspace moves |
 
 If the installer did not open the browser, run:
 

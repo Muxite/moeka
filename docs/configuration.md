@@ -2506,9 +2506,12 @@ degrades to keyword-only without `moeka[vec]`).
 
 ## Session Storage
 
-Conversation sessions persist to `<workspace>/sessions.db`, a SQLite database
-opened in **WAL mode** (`nanobot/session/manager.py`), replacing the older
-per-session `sessions/<key>.jsonl` files. No configuration is needed — this is
+Conversation sessions persist to `<workspace>/sessions/<workspace-id>/sessions.db`,
+a SQLite database opened in **WAL mode** (`nanobot/session/sqlite_store.py`),
+replacing the older per-session `sessions/<key>.jsonl` files. Agent file and shell
+tools cannot read it (protected floor and exec sandbox masks). An instance that
+still has a legacy `<workspace>-sessions/` sibling refuses to start until
+`bin/moeka.sh migrate-sessions` has moved it. No configuration is needed — this is
 a transparent storage-layer change. Legacy `.jsonl` sessions are imported once
 at startup and renamed `*.jsonl.imported`. See [`docs/memory.md`](memory.md#session-storage-sessionsdb)
 for details.

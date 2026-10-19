@@ -280,16 +280,19 @@ flowchart LR
 
 ## 5. Sessions and crash behaviour
 
-- Location: NOT `<workspace>/sessions.db`. The default `sessions_root` is `<workspace parent>/<workspace
-  name>-sessions` (session/sqlite_store.py:115-134); the db is `<sessions_root>/<workspace-id>/sessions.db`
-  (session/sqlite_store.py:176-181), where `<workspace-id>` comes from the marker `<workspace>/.nanobot/workspace-id`
-  (docstring session/sqlite_store.py:13-16). The store refuses a `sessions_root` inside the workspace
-  (session/sqlite_store.py:158-162). For the default flat workspace `~/.nanobot` that is
-  `~/.nanobot-sessions/<id>/sessions.db`. With a host env the root is `env.paths.sessions_root`
+- Location: the default `sessions_root` is `<workspace>/sessions` (session/sqlite_store.py:115-121); the db is
+  `<sessions_root>/<workspace-id>/sessions.db` (session/sqlite_store.py:172), where `<workspace-id>` comes from the
+  marker `<workspace>/.nanobot/workspace-id` (docstring session/sqlite_store.py:13-16). For the default flat
+  workspace `~/.nanobot` that is `~/.nanobot/sessions/<id>/sessions.db`. The store refuses any other
+  `sessions_root` inside the workspace (session/sqlite_store.py:145), and refuses to start while a legacy
+  `<workspace>-sessions/<id>/sessions.db` exists without a migrated copy (session/sqlite_store.py:154); the
+  migration is `bin/moeka.sh migrate-sessions` (`config/instances.py:migrate_sessions`). Agent tools are kept out
+  by the file floor (`security/protected_paths.py`) and the exec sandbox masks
+  (`agent/tools/sandbox.py:owner_state_masks`). With a host env the root is `env.paths.sessions_root`
   (`state_dir/sessions` for a strict env).
-- A pre-ADR-0001 `<workspace>/sessions.db` is only warned about, never moved (session/sqlite_store.py:258-287);
+- A pre-ADR-0001 `<workspace>/sessions.db` is only warned about, never moved (session/sqlite_store.py:256-286);
   moving it is the explicit `nanobot sessions migrate` command. Legacy per-session `.jsonl` files are imported once
-  at startup and renamed `*.jsonl.imported` (session/sqlite_store.py:289-339). `dump_jsonl(key)` exports one session
+  at startup and renamed `*.jsonl.imported` (session/sqlite_store.py:287-345). `dump_jsonl(key)` exports one session
   in the old format (session/sqlite_store.py:687); it lives on `SqliteSessionStore`, not on `SessionManager`.
 - Schema: `sessions(key, created_at, updated_at, metadata, last_consolidated)` and
   `messages(session_key, seq, role, created_at, data)` (session/sqlite_store.py:232-250). WAL + `busy_timeout` 10 s

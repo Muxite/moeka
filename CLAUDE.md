@@ -72,6 +72,20 @@ Moeka-specific deviations from upstream nanobot:
 - **Telegram `drop_pending_updates` defaults to True** to avoid stale floods on restart.
 - **Transcription `api_base` propagation** — Groq/OpenAI Whisper provider honours per-provider `api_base`.
 - **No CONTRIBUTING.md and no upstream `images/nanobot_logo.png`** — both intentionally removed; moeka uses its own `images/GitHub_README.png`.
+- **Daily-agent model routing** — `modelRouting` (`ModelRoutingConfig`, `nanobot/config/schema.py`) pairs a
+  `luna` preset with a local Ollama `gpu` preset (provider `moeka_gpu`, default `127.0.0.1:11437`), with readiness
+  and first-output timeouts and fallback between them (`nanobot/providers/factory.py`, `fallback_provider.py`).
+  `model_select` picks a preset per task; `spawn` accepts `model_preset`. Usage records (schema 1.3) carry
+  `requested_preset`, `fallback_reason` and `instance_uuid`.
+- **Owner-controlled personality and explicit memory** — `SOUL.md` is not editable by Dream or agent file
+  tools. The `personality` tool (only with `personality.allowSelfEdit`) stages versioned edits capped at
+  150 words (`nanobot/agent/personality.py`). The `memory` tool logs explicit remember/correct/forget events to
+  `memory/explicit.jsonl`, which Dream consults (`nanobot/templates/agent/dream.md`).
+- **Paired peers** — owner-paired instances exchange work over authenticated Unix sockets (optional HTTPS
+  listener) through `nanobot/peers.py` and the `send_peer_work` tool; peer secrets come only from the owner.
+- **Exec hardening** — on Linux, exec and script-tool children run under `setpriv --no-new-privs`; bwrap mounts
+  `owner_state_masks` (`nanobot/agent/tools/sandbox.py`) last, so owner state (sessions, auth, peers,
+  personality, keys, config, locks, usage db) stays hidden. The systemd units set `NoNewPrivileges`.
 - **Gateway still on the legacy loop path** — the gateway builds `AgentLoop` through `AgentLoop.from_config` with a
   `LegacyEnvironment`, not through `moeka.Kernel`; moving it is stage 2 of `specs/003-main-consolidation/`.
 
@@ -135,14 +149,17 @@ cd webui && bun run dev && bun run build && bun run test
 
 - `main` — the consolidated distribution (kernel base + gateway host); the running systemd unit follows it and
   upstream syncs land here.
-- `core-slim` — historical, pinned: the RSI harness and awork pinned `core-slim` commits (`6f80c392`). Never
-  rebased, force-pushed or deleted; it stops receiving merges once consumers move to `main`.
+- `core-slim` — historical, pinned (`6f80c392`). Never rebased, force-pushed or deleted. The RSI harness
+  (moeka-rsi `core/`) already pins `main`; awork's `backend/moeka` still pins an older commit.
 - `nightly` — retired 2026-09-28 (alias of the old `main`); do not integrate there.
 
-The `upstream` remote points at `HKUDS/nanobot`. Flow: `upstream/main` → merge branch off `main` (for example
-`merge/upstream-main-<date>`) → `main` after tests and a deploy check. Upstream edits to kernel-owned paths
-(`nanobot/agent`, `providers`, `tools`) need a check against the kernel contract (`specs/`, `.agent/`). Moeka
-deviations must be preserved during conflict resolution. The cutover record is
+The `upstream` remote points at `HKUDS/nanobot`. Since 2026-10-19 moeka takes **kernel commits only** from
+`upstream/main`, cherry-picked with `-x` onto `sync/upstream-kernel-<date>` off `main`, then merged to `main`
+after tests and a deploy check. The `upstream-merge` agent (`.claude/agents/upstream-merge.md`) runs this flow.
+Every upstream commit's decision (picked, skipped or deferred) is recorded in `.agent/upstream-ledger.md`.
+Upstream WebUI, TUI and new channels are skipped. Upstream edits to kernel-owned paths (`nanobot/agent`,
+`providers`, `tools`) need a check against the kernel contract (`specs/`, `.agent/`), and moeka deviations
+must be preserved. The cutover record is
 `specs/003-main-consolidation/CUTOVER.md`.
 
 ## Code Style

@@ -19,7 +19,7 @@ with `tests/`, `docs/` or `.agent/`. Anything not confirmed by reading code is m
 2. Each turn runs fixed stages: restore, compact, command (slash commands), build, run, save, respond (agent/loop.py:1747-1754).
 3. `ContextBuilder` assembles the system prompt from templates, workspace bootstrap files, memory and the skills summary (agent/context.py:133-206); tools go separately as provider `tools` definitions.
 4. `AgentRunner` loops provider call -> tool calls -> tool results until a final answer or `maxToolIterations` (agent/runner.py:478).
-5. Sessions persist in SQLite outside the workspace; memory is `memory/history.jsonl` + `MEMORY.md`/`SOUL.md`/`USER.md`, consolidated by Dream only when a caller runs it (agent/dream.py:41).
+5. Sessions persist in SQLite under the instance (`<workspace>/sessions/`), hidden from agent tools; memory is `memory/history.jsonl` + `MEMORY.md`/`USER.md` (consolidated by Dream only when a caller runs it, agent/dream.py:41) and the owner-controlled `SOUL.md`, which Dream never edits.
 6. Config is one pydantic `Config` (`agents`, `display`, `providers`, `tools`, `modelPresets`, `profiles`); retired chat-runtime sections are dropped at load with a warning.
 
 ## What a self-improvement agent may change

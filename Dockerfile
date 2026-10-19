@@ -7,7 +7,7 @@
 #       -v moeka-data:/data moeka
 #
 # Runs as UID/GID 1000. The instance root is /data/ws (config, memory, skills) and
-# its sessions live in /data/ws-sessions. No secret is baked in: provider keys and
+# its sessions live in /data/ws/sessions. No secret is baked in: provider keys and
 # bot tokens come from the environment (compose.yaml `env_file`). The entrypoint
 # refuses to start without MOEKA_TOKEN_ISSUE_SECRET, because the gateway and the
 # WebSocket channel listen on 0.0.0.0 inside the container.

@@ -42,7 +42,7 @@ it. One container is one instance:
 
 - The image runs as UID/GID 1000 (`USER 1000:1000`) and contains no secret.
 - `/data` is a volume. The instance root is `/data/ws` (`MOEKA_WORKSPACE=/data/ws`) and
-  its sessions live in `/data/ws-sessions/`.
+  its sessions live in `/data/ws/sessions/`.
 - The entrypoint `scripts/container-entrypoint.sh` (installed as
   `/usr/local/bin/moeka-entrypoint`) exits 2 before starting anything when
   `MOEKA_TOKEN_ISSUE_SECRET` is unset or empty, and exits non-zero naming `/data` and

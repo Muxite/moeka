@@ -168,7 +168,8 @@ remain, and only legacy (config-file) hosts depend on them; Kernel-native hosts
 
 The file tools' protected floor denies, for read and write, every path whose last
 component is `keys.env`, the `.env` directly inside an instance root, and every other
-instance's root and `<root>-sessions` sibling; it write-protects the own instance's
+instance's root (including its `sessions/`) and any legacy `<root>-sessions` sibling; it
+write-protects the own instance's
 `.instance.lock`, `.instance.json`, `moeka.pid`, `gateway.lock` and `run/`.
 
 This covers the **file tools only**. The `exec` tool can still reach all of these paths:
