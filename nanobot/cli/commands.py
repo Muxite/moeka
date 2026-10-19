@@ -25,20 +25,11 @@ import typer  # noqa: E402
 from loguru import logger  # noqa: E402
 from typer.core import TyperGroup  # noqa: E402
 
+from nanobot.cli.log_control import _set_nanobot_logs, add_console_sink  # noqa: E402
+
 # Remove default handler and re-add with unified nanobot format
 logger.remove()
-_log_handler_id = logger.add(
-    sys.stderr,
-    format=(
-        "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-        "<level>{level: <5}</level> | "
-        "<cyan>{extra[channel]}</cyan> | "
-        "<level>{message}</level>"
-    ),
-    level="INFO",
-    colorize=None,
-    filter=lambda record: record["extra"].setdefault("channel", "-") or True,
-)
+_log_handler_id = add_console_sink(sys.stderr, "INFO")
 
 
 from rich.console import Console  # noqa: E402
@@ -57,7 +48,6 @@ from nanobot.cli.agent import agent  # noqa: E402
 from nanobot.cli.capabilities import capabilities_app  # noqa: E402
 from nanobot.cli.gateway import create_gateway_app  # noqa: E402
 from nanobot.cli.gateway_runtime import _run_gateway  # noqa: E402
-from nanobot.cli.log_control import _set_nanobot_logs  # noqa: E402
 from nanobot.cli.process_identity import set_cli_process_identity  # noqa: E402
 from nanobot.cli.provider import provider_app  # noqa: E402
 from nanobot.cli.runtime_config import (  # noqa: E402

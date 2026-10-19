@@ -12,6 +12,7 @@ import typer
 from loguru import logger
 from rich.console import Console
 
+from nanobot.cli.log_control import add_console_sink
 from nanobot.config.schema import Config
 from nanobot.gateway import (
     GatewayAlreadyRunningError,
@@ -86,18 +87,7 @@ def create_gateway_app(
         if not verbose:
             return
         logger.remove(log_handler_id)
-        logger.add(
-            sys.stderr,
-            format=(
-                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-                "<level>{level: <5}</level> | "
-                "<cyan>{extra[channel]}</cyan> | "
-                "<level>{message}</level>"
-            ),
-            level="DEBUG",
-            colorize=None,
-            filter=lambda record: record["extra"].setdefault("channel", "-") or True,
-        )
+        add_console_sink(sys.stderr, "DEBUG")
 
     def instance_for_selectors(
         *,
