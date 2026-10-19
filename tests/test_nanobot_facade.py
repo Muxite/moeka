@@ -111,18 +111,14 @@ def test_from_config_creates_instance(tmp_path):
     bot = Nanobot.from_config(config_path, workspace=workspace)
     assert bot._loop is not None
     assert bot._loop.workspace == workspace
-    # moeka: sessions.db lives outside the agent's own workspace by default
-    # (ADR-0001) — a sibling of the workspace, not nested under config.json's
-    # directory (moeka's flat AgentDefaults.workspace==state-home layout
-    # means config.json's directory usually *is* the workspace, so a
-    # config-relative default would collide with the workspace it must stay
-    # outside of; see default_sessions_root() in
+    # moeka: sessions.db is instance-owned at <workspace>/sessions/<id>/, kept
+    # from agent tools by the file floor and exec sandbox masks rather than by
+    # living outside the workspace (see default_sessions_root() in
     # nanobot/session/sqlite_store.py).
     from nanobot.session.sqlite_store import get_store
 
     store = get_store(bot._loop.sessions)
-    assert not store.db_path.is_relative_to(workspace.resolve())
-    assert store.db_path.parent.parent == workspace.parent / f"{workspace.name}-sessions"
+    assert store.db_path.parent.parent == workspace.resolve() / "sessions"
 
 
 def test_from_config_composes_configured_mcp_outside_agent_loop(tmp_path):

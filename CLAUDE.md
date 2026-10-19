@@ -29,9 +29,12 @@ Moeka-specific deviations from upstream nanobot:
   path checks). That is a hint for line-oriented shells only: REPLs can still receive anything, and real
   containment is the sandbox/host.
   `allow_sudo` defaults to False and the denial message explains the opt-in.
-- **SQLite session store outside the workspace** — `nanobot/session/sqlite_store.py`: one `sessions.db` (WAL) at
-  `<workspace parent>/<workspace name>-sessions/<workspace-id>/sessions.db` (e.g. `~/.nanobot-sessions/<id>/`),
-  never inside the workspace. A legacy `<workspace>/sessions.db` is only warned about; moving it is
+- **Instance-owned SQLite session store** — `nanobot/session/sqlite_store.py`: one `sessions.db` (WAL) at
+  `<workspace>/sessions/<workspace-id>/sessions.db` (e.g. `~/.nanobot/sessions/<id>/`), hidden from agent tools by
+  the file floor (`nanobot/security/protected_paths.py`) and the exec sandbox masks
+  (`nanobot/agent/tools/sandbox.py:owner_state_masks`). Startup refuses to run while unmigrated legacy sibling
+  `<workspace>-sessions/` stores exist; `bin/moeka.sh migrate-sessions` (`instances.migrate_sessions`) moves them
+  with backup and verification. A legacy `<workspace>/sessions.db` is only warned about; moving it is
   `nanobot sessions migrate`. Legacy `.jsonl` sessions are imported once and renamed `*.jsonl.imported`;
   `SqliteSessionStore.dump_jsonl(key)` exports the old format.
 - **`bg_shell` is gated off the auto-loader** — `BackgroundShellTool.enabled()` returns False; nothing wires a

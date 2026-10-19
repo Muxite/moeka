@@ -4485,7 +4485,7 @@ async def test_settings_api_returns_safe_subset_and_updates_whitelist(
         assert saved.model_presets["Codex"].model == "openai/gpt-5.5"
         assert saved.model_presets["Codex"].provider == "openai"
         assert saved.agents.defaults.timezone == "Asia/Shanghai"
-        assert saved.agents.defaults.bot_name == "nanobot"
+        assert saved.agents.defaults.bot_name == "Moeka"
         assert saved.agents.defaults.bot_icon == "🐈"
         assert saved.agents.defaults.tool_hint_max_length == 120
         assert saved.providers.openrouter.api_key == "sk-or-next"
