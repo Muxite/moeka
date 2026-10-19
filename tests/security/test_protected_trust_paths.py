@@ -47,6 +47,13 @@ def test_symlink_into_a_trust_dir_is_denied(tmp_path):
     assert _floor(tmp_path, trust).matches(tmp_path / "ws" / "alias" / "k.pub", write=True)
 
 
+def test_transfer_staging_and_approval_state_are_internal(tmp_path):
+    floor = _floor(tmp_path)
+    target = tmp_path / "ws" / ".moeka-transfer" / "promotions" / "pending" / "id.json"
+    assert floor.matches(target, write=True)
+    assert floor.matches(target, write=False)
+
+
 def test_configured_trust_dirs_reads_the_env_config(tmp_path):
     from moeka import Environment
     from nanobot.config.schema import Config

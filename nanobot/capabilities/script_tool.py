@@ -36,6 +36,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterable, Mapping
@@ -247,7 +248,7 @@ def _bwrap_argv(
     binary = shutil.which("bwrap") or "bwrap"
     bundle = str(manifest.bundle_dir)
     argv = [
-        binary, "--new-session", "--die-with-parent", "--unshare-net", "--unshare-pid",
+        binary, "--unshare-user", "--unshare-ipc", "--cap-drop", "ALL", "--new-session", "--die-with-parent", "--unshare-net", "--unshare-pid",
         "--ro-bind", "/usr", "/usr",
     ]
     for optional in ("/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc/alternatives",
@@ -259,6 +260,11 @@ def _bwrap_argv(
         flag = "--bind" if "write-workspace" in effects else "--ro-bind"
         argv += [flag, str(workspace), str(workspace)]
     argv += ["--bind", str(home), str(home), "--ro-bind", bundle, bundle]
+    if "network" in manifest.io.effects:
+        argv.remove("--unshare-net")
+    if workspace is not None:
+        from nanobot.agent.tools.sandbox import owner_state_masks
+        argv += owner_state_masks(workspace)
     argv += ["--chdir", bundle, "--", str(manifest.entry_path)]
     return argv
 
@@ -312,6 +318,7 @@ class ScriptTool(Tool):
         self._env = env
         self._trace = trace if trace is not None else (env.trace if env is not None else None)
         self._sandbox = sandbox
+        self._require_sandbox = bool(env and env.config.section("tools").get("exec", {}).get("sandbox"))
         self.cert_id = cert_id
         self.cert_status = cert_status
         self.io = dict(manifest.raw_io) or manifest.io.to_dict()
@@ -333,7 +340,7 @@ class ScriptTool(Tool):
     @property
     def sandboxed(self) -> bool:
         """Whether calls run under bubblewrap (no ``network`` effect and bwrap works)."""
-        if self._sandbox is False or "network" in self.manifest.io.effects:
+        if not self._require_sandbox and (self._sandbox is False or "network" in self.manifest.io.effects):
             return False
         return bwrap_available()
 
@@ -386,6 +393,8 @@ class ScriptTool(Tool):
                 f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors)
             )
         sandboxed = self.sandboxed
+        if self._require_sandbox and not sandboxed:
+            return ToolResult.error("Script execution requires an available OS sandbox")
         home = Path(tempfile.mkdtemp(prefix="moeka-script-home-"))
         workspace = (
             self._workspace
@@ -458,6 +467,11 @@ class ScriptTool(Tool):
         ``status`` is ``ok``, ``timeout`` (whole group killed after ``timeout_s``) or
         ``overflow`` (stdout above 1 MiB; group killed).
         """
+        if sys.platform.startswith("linux"):
+            setpriv = shutil.which("setpriv")
+            if setpriv is None:
+                return "error", None, b"", b"setpriv is required for NoNewPrivileges"
+            argv = [setpriv, "--no-new-privs", *argv]
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(self.manifest.bundle_dir),

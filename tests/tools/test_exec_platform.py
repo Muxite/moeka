@@ -120,7 +120,9 @@ class TestSpawnUnix:
             await ExecTool._spawn("echo hi", "/tmp", {"HOME": "/tmp"})
 
         args = mock_exec.call_args[0]
-        assert "bash" in args[0]
+        assert any("bash" in arg for arg in args[:3])
+        if sys.platform.startswith("linux"):
+            assert args[1] == "--no-new-privs"
         assert "-l" not in args
         assert "-c" in args
         assert "echo hi" in args

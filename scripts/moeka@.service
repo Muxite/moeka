@@ -10,6 +10,9 @@ StartLimitBurst=0
 
 [Service]
 Type=simple
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+UMask=0077
 Environment=MOEKA_WORKSPACE=%h/.moeka-%i
 EnvironmentFile=-%h/.moeka-%i/keys.env
 # 'run' starts the gateway in the foreground so systemd owns the PID.

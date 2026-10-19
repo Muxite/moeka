@@ -458,10 +458,11 @@ async def test_dream_scoped_writes_still_work(
     })
     history = await tools.execute("read_file", {"path": "memory/history.jsonl"})
 
-    for result in (memory, soul, user, skill, history):
+    for result in (memory, user, skill, history):
         assert DENIAL not in str(result)
     assert "Project Y active" in (ws / "memory" / "MEMORY.md").read_text(encoding="utf-8")
-    assert "# Soul v2" in (ws / "SOUL.md").read_text(encoding="utf-8")
+    assert DENIAL in str(soul)
+    assert (ws / "SOUL.md").read_text(encoding="utf-8") == "# Soul\n"
     assert "# User v2" in (ws / "USER.md").read_text(encoding="utf-8")
     assert (ws / "skills" / "demo" / "SKILL.md").exists()
 

@@ -7,6 +7,9 @@ StartLimitBurst=0
 
 [Service]
 Type=simple
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+UMask=0077
 WorkingDirectory=%h/projects/moeka
 # 'run' starts the gateway in the foreground so systemd owns the PID.
 # Do NOT use 'start' here — that backgrounds the process and breaks restart.
@@ -24,8 +27,8 @@ StandardOutput=journal
 StandardError=journal
 # moeka.sh sources ./.env and ./keys.env itself; these lines are belt-and-braces
 # for cases where the script is invoked without them (e.g. `systemctl edit`).
-EnvironmentFile=-%h/projects/moeka/.env
-EnvironmentFile=-%h/projects/moeka/keys.env
+EnvironmentFile=-%h/.nanobot/.env
+EnvironmentFile=-%h/.nanobot/keys.env
 
 [Install]
 WantedBy=default.target

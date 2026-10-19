@@ -106,6 +106,28 @@ def _normalize_bind_paths(
     return out
 
 
+def owner_state_masks(ws: Path) -> list[str]:
+    """Mount last in every exec sandbox, including promoted script tools."""
+    args: list[str] = []
+    # Owner state in the flat layout must never be exposed to command children.
+    # Mount masks last, so extra bind configuration cannot uncover credentials.
+    for name in ("auth", "sessions", "run", "peers", ".personality", ".nanobot", ".moeka-transfer"):
+        path = ws / name
+        if path.exists():
+            args += ["--tmpfs", str(path)]
+    for path in [*ws.rglob("keys.env"), *ws.glob("config.json*")]:
+        if path.is_file():
+            args += ["--ro-bind", "/dev/null", str(path)]
+    for name in ("config.json", ".env", "SOUL.md", "AGENTS.md", "USER.md",
+                 ".instance.lock", ".instance.json", "gateway.lock", "moeka.pid",
+                 "llm_usage.sqlite3", "llm_usage.sqlite3-wal", "llm_usage.sqlite3-shm",
+                 "memory/history.jsonl", "memory/.dream_cursor"):
+        path = ws / name
+        if path.is_file():
+            args += ["--ro-bind", "/dev/null", str(path)]
+    return args
+
+
 def _bwrap(
     command: str,
     workspace: str,
@@ -144,7 +166,8 @@ def _bwrap(
         "/etc/ld.so.cache",
     ]
 
-    args = ["bwrap", "--new-session", "--die-with-parent", "--setenv", "HOME", str(ws)]
+    args = ["bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--cap-drop", "ALL", "--new-session", "--die-with-parent", "--setenv", "HOME", str(ws)]
     for p in required:
         args += ["--ro-bind", p, p]
     for p in optional:
@@ -160,6 +183,7 @@ def _bwrap(
         args += ["--ro-bind-try", p, p]
     for p in _normalize_bind_paths(sandbox_rw_binds, workspace=ws, env_vars=env_vars):
         args += ["--bind-try", p, p]
+    args += owner_state_masks(ws)
     args += ["--chdir", sandbox_cwd, "--", "sh", "-c", command]
     return shlex.join(args)
 

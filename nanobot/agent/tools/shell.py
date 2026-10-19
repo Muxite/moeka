@@ -815,6 +815,12 @@ class ExecTool(Tool):
         if login and shell_name in {"bash", "bash.exe", "zsh", "zsh.exe"}:
             args.append("-l")
         args.extend(["-c", command])
+        # Linux command children cannot gain privileges, including through scripts.
+        if sys.platform.startswith("linux"):
+            setpriv = shutil.which("setpriv")
+            if setpriv is None:
+                raise RuntimeError("setpriv is required for NoNewPrivileges")
+            args = [setpriv, "--no-new-privs", *args]
         if process_tree:
             return await asyncio.create_subprocess_exec(
                 *args,

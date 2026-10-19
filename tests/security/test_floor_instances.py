@@ -54,7 +54,7 @@ def _protected(world: dict[str, Path]) -> list[Path]:
 def _control(world: dict[str, Path]) -> list[Path]:
     a = world["a"]
     return [
-        a / "SOUL.md", a / "USER.md", a / "notes" / "todo.md", a / "skills" / "x" / "SKILL.md",
+        a / "USER.md", a / "notes" / "todo.md", a / "skills" / "x" / "SKILL.md",
         a / "memory" / "MEMORY.md", a / "projects" / "app" / "main.py", a / "keys.env.example",
         a / "sub" / ".env", a / "data.json", a / "cron" / "jobs.json",
     ]
@@ -63,7 +63,8 @@ def _control(world: dict[str, Path]) -> list[Path]:
 def _write_only(world: dict[str, Path]) -> list[Path]:
     a = world["a"]
     return [a / ".instance.lock", a / ".instance.json", a / "moeka.pid", a / "gateway.lock",
-            a / "run" / "websocket.sock", a / "run" / "x"]
+            a / "run" / "websocket.sock", a / "run" / "x", a / "SOUL.md", a / "AGENTS.md",
+            a / ".personality" / "pending"]
 
 
 def test_legacy_floor_matrix(world: dict[str, Path]) -> None:
@@ -76,7 +77,7 @@ def test_legacy_floor_matrix(world: dict[str, Path]) -> None:
                 check_protected(path, write=write, workspace=a)
             assert PROTECTED_MARKER in str(info.value)
     control = _control(world)
-    assert len(control) >= 10
+    assert len(control) >= 9
     for path in control:
         for write in (False, True):
             check_protected(path, write=write, workspace=a)

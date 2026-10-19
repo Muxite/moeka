@@ -83,6 +83,7 @@ TRUST_WRITE_BASENAMES: frozenset[str] = frozenset({"CERT.json", "revoked.jsonl"}
 # (WebSocket socket). Reading stays allowed.
 INSTANCE_WRITE_PROTECTED: tuple[str, ...] = (
     ".instance.lock", ".instance.json", "moeka.pid", "gateway.lock", "run",
+    "SOUL.md", "AGENTS.md", ".personality", ".nanobot", ".moeka-transfer",
 )
 
 
@@ -155,13 +156,18 @@ def _protected_roots(data_dir: DataDirs, workspace: Path | None) -> list[Path]:
         # The usage ledger: an agent that can rewrite it can forge what its own calls cost.
         roots.extend(resolved_data / name for name in _usage_store_filenames())
         roots.append(default_sessions_root(resolved_data))
+        roots.append(resolved_data.parent / f"{resolved_data.name}-sessions")
     resolved_ws = _safe_resolve(workspace) if workspace is not None else None
     if resolved_ws is not None and resolved_ws not in resolved_bases:
         roots.append(default_sessions_root(resolved_ws))
+        roots.append(resolved_ws.parent / f"{resolved_ws.name}-sessions")
     if resolved_ws is not None:
         # Legacy hosts without Paths: the workspace is the state home, which holds the
         # host-owned kernel state files (plugin registry, fact store).
         roots.extend(resolved_ws / name for name in _kernel_state_filenames())
+        # Certified transfer staging, owner approvals, backups and rollback records are
+        # host-managed promotion state; workspace file tools must not alter them.
+        roots.append(resolved_ws / ".moeka-transfer")
     return roots
 
 
@@ -255,7 +261,7 @@ def _instance_roots_extras(
             if candidate is None:
                 continue
             candidate = Path(os.path.abspath(candidate))
-            for item in (candidate, default_sessions_root(candidate)):
+            for item in (candidate, default_sessions_root(candidate), candidate.parent / f"{candidate.name}-sessions"):
                 if item not in deny:
                     deny.append(item)
     return deny, write_only
