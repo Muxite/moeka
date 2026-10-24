@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import unicodedata
@@ -18,6 +19,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     Message,
     MessageEntity,
     ReactionTypeEmoji,
@@ -34,7 +36,7 @@ from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import build_help_text
-from nanobot.config.paths import get_media_dir
+from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import Base
 from nanobot.events import ContextCompactionEvent
 from nanobot.security.network import validate_url_target
@@ -438,6 +440,7 @@ class TelegramConfig(Base):
     # Opt in to Bot API 10.1 sendRichMessage for richer markdown rendering.
     rich_messages: bool = False
     stream_edit_interval: float = Field(default=_STREAM_EDIT_INTERVAL_DEFAULT, ge=0.1)
+    durable_ingress: bool = False
     drop_pending_updates: bool = True
     webhook_url: str = ""
     webhook_listen_host: str = "127.0.0.1"
@@ -544,13 +547,14 @@ class TelegramChannel(BaseChannel):
         BotCommand("dream_prompt", "Tell Dream how to organize memory"),
         BotCommand("evaluator_prompt", "Customize the heartbeat evaluator prompt"),
         BotCommand("help", "Show available commands"),
+        BotCommand("wonhee", "Select a wonhee creative project, or leave"),
     ]
 
     # Regex for slash commands routed to AgentLoop via ``_forward_command``.
     # Telegram-safe aliases are normalized before reaching the core router.
     # Canonical hyphenated commands stay on a separate handler (below).
     TELEGRAM_BUS_SLASH_COMMAND_RE = re.compile(
-        r"^/(?:new|compact|stop|restart|status|dream|history|goal|trigger|pairing|model|skill"
+        r"^/(?:wonhee|new|compact|stop|restart|status|dream|history|goal|trigger|pairing|model|skill"
         r"|dream_log|dream_restore|dream_prompt|evaluator_prompt|evaluator-prompt)(?:@\w+)?(?:\s+.*)?$"
     )
 
@@ -574,6 +578,13 @@ class TelegramChannel(BaseChannel):
         self._compaction_notices: dict[tuple[str, str], int] = {}  # (chat_id, compaction_id) -> message_id
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
+        self._album_pending: dict[str, int] = {}
+        self._queued_update_ids: set[int] = set()
+        self._ingress = None
+        if self.config.durable_ingress:
+            from nanobot.channels.telegram.ingress import IngressReceipts
+
+            self._ingress = IngressReceipts(get_runtime_subdir("telegram") / "ingress.sqlite3")
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
         self._last_poll_ok: float = 0.0  # monotonic time of last getUpdates round trip
         self._app_ready = asyncio.Event()  # cleared while the app is being rebuilt
@@ -797,6 +808,11 @@ class TelegramChannel(BaseChannel):
             )
 
         self._app_ready.set()
+        if self._ingress is not None:
+            for _, kind, payload in self._ingress.pending():
+                update = Update.de_json(json.loads(payload), self._app.bot)
+                self._enqueue_ordered_update(kind=cast(Literal["command", "message"], kind), update=update,
+                                             context=cast(ContextTypes.DEFAULT_TYPE, None))
 
     @staticmethod
     def _is_transient_startup_error(exc: Exception) -> bool:
@@ -1102,6 +1118,38 @@ class TelegramChannel(BaseChannel):
         buf.text = tail
         buf.message_id = sent.message_id
         buf.draft_id = None
+
+    async def send_registered(self, msg: OutboundMessage) -> list[int]:
+        """Send a durable host delivery once and return transport acknowledgement ids.
+
+        Unlike the ordinary reply path, errors propagate to the durable owner.
+        A timeout is ambiguous and must not trigger a blind automatic resend.
+        """
+        app = await self._wait_for_app()
+        if app is None:
+            raise RuntimeError("Telegram is not connected")
+        chat_id = int(msg.chat_id)
+        extra = {}
+        if (topic := msg.metadata.get("message_thread_id")) is not None:
+            extra["message_thread_id"] = int(topic)
+        ids: list[int] = []
+        for media_path in msg.media:
+            path = Path(media_path)
+            if path.stat().st_size > 50_000_000:
+                raise ValueError("file exceeds hosted Telegram upload limit")
+            with path.open("rb") as stream:
+                upload = InputFile(stream, filename=path.name, read_file_handle=False)
+                if path.suffix.lower() == ".mp4" and not msg.metadata.get("as_document"):
+                    sent = await app.bot.send_video(chat_id=chat_id, video=upload, filename=path.name,
+                                                    supports_streaming=True, **extra)
+                else:
+                    sent = await app.bot.send_document(chat_id=chat_id, document=upload, filename=path.name, **extra)
+            ids.append(sent.message_id)
+        for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
+            sent = await app.bot.send_message(chat_id=chat_id, text=chunk, **extra)
+            ids.append(sent.message_id)
+        self._stop_typing(msg.chat_id)
+        return ids
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Telegram."""
@@ -1731,6 +1779,29 @@ class TelegramChannel(BaseChannel):
             "reply_to_message_id": getattr(reply_to, "message_id", None) if reply_to else None,
         }
 
+    @staticmethod
+    def _attachment_descriptors(message: Message, paths: list[str]) -> list[dict[str, Any]]:
+        if not paths:
+            return []
+        media = None
+        kind = "file"
+        for attr, value in (("photo", "image"), ("voice", "voice"), ("audio", "audio"),
+                            ("document", "file"), ("video", "video"), ("video_note", "video"),
+                            ("animation", "animation")):
+            item = getattr(message, attr, None)
+            if item:
+                media, kind = (item[-1] if attr == "photo" else item), value
+                break
+        if media is None:
+            return []
+        return [{
+            "path": paths[0], "kind": kind, "file_id": getattr(media, "file_id", None),
+            "file_unique_id": getattr(media, "file_unique_id", None),
+            "original_name": getattr(media, "file_name", None), "mime": getattr(media, "mime_type", None),
+            "bytes": getattr(media, "file_size", None), "message_id": getattr(message, "message_id", None),
+            "album_id": getattr(message, "media_group_id", None), "caption": getattr(message, "caption", None),
+        }]
+
     async def _extract_reply_context(self, message: Message) -> str | None:
         """Extract text from the message being replied to, if any."""
         reply = getattr(message, "reply_to_message", None)
@@ -1784,6 +1855,9 @@ class TelegramChannel(BaseChannel):
             media_type = "animation"
         if not media_file or not self._app:
             return [], []
+        file_size = getattr(media_file, "file_size", None)
+        if isinstance(file_size, int) and file_size > 20_000_000:
+            return [], ["[This attachment exceeds Telegram's hosted bot download limit. Send a publicly downloadable Google Drive file link instead.]"]
         try:
             file = await self._app.bot.get_file(media_file.file_id)
             ext = self._get_extension(
@@ -1907,6 +1981,16 @@ class TelegramChannel(BaseChannel):
         message = update.message
         if message is None:
             return
+        user = update.effective_user
+        if self._ingress is not None and user is not None and self.is_allowed(self._sender_id(user)):
+            if update.update_id in self._queued_update_ids:
+                return
+            if not self._ingress.save(update.update_id, kind, update.to_json()):
+                return
+            self._queued_update_ids.add(update.update_id)
+        if album_id := getattr(message, "media_group_id", None):
+            album_key = f"{message.chat_id}:{album_id}"
+            self._album_pending[album_key] = self._album_pending.get(album_key, 0) + 1
         key = self._queue_key_for_message(message)
         self._inbound_buffers.setdefault(key, []).append(
             _QueuedTelegramUpdate(
@@ -1937,12 +2021,24 @@ class TelegramChannel(BaseChannel):
                             await self._process_forward_command(item.update, item.context)
                         else:
                             await self._process_message_update(item.update, item.context)
+                        processed_message = item.update.message
+                        album_id = getattr(processed_message, "media_group_id", None)
+                        album_key = f"{processed_message.chat_id}:{album_id}" if album_id and processed_message is not None else None
+                        if self._ingress is not None and album_key not in self._media_group_buffers:
+                            self._ingress.complete([item.update.update_id])
+                            self._queued_update_ids.discard(item.update.update_id)
                     except Exception as e:
                         self.logger.warning(
                             "Telegram queued update handling failed for {}: {}",
                             key,
                             e,
                         )
+                    finally:
+                        processed_message = item.update.message
+                        album_id = getattr(processed_message, "media_group_id", None)
+                        if album_id and processed_message is not None:
+                            album_key = f"{processed_message.chat_id}:{album_id}"
+                            self._album_pending[album_key] = max(0, self._album_pending.get(album_key, 1) - 1)
             if not self._inbound_buffers.get(key):
                 self._inbound_buffers.pop(key, None)
         except asyncio.CancelledError:
@@ -2048,6 +2144,7 @@ class TelegramChannel(BaseChannel):
 
         # Reply context: text and/or media from the replied-to message
         reply = getattr(message, "reply_to_message", None)
+        reply_media: list[str] = []
         if reply is not None:
             reply_ctx = await self._extract_reply_context(message)
             reply_media, reply_media_parts = await self._download_message_media(reply)
@@ -2063,6 +2160,10 @@ class TelegramChannel(BaseChannel):
 
         str_chat_id = str(chat_id)
         metadata = self._build_message_metadata(message, user)
+        metadata["attachments"] = self._attachment_descriptors(message, current_media_paths)
+        metadata["album_message_ids"] = [message.message_id]
+        if reply is not None and reply_media:
+            metadata["attachments"] = self._attachment_descriptors(reply, reply_media) + metadata["attachments"]
         session_key = self._derive_topic_session_key(message)
 
         # Telegram media groups: buffer briefly, forward as one aggregated turn.
@@ -2071,8 +2172,8 @@ class TelegramChannel(BaseChannel):
             if key not in self._media_group_buffers:
                 self._media_group_buffers[key] = {
                     "sender_id": sender_id, "chat_id": str_chat_id,
-                    "contents": [], "media": [],
-                    "metadata": metadata,
+                    "contents": [], "media": [], "update_ids": [],
+                    "metadata": {**metadata, "attachments": [], "album_message_ids": []},
                     "session_key": session_key,
                 }
                 self._start_typing(str_chat_id)
@@ -2081,6 +2182,9 @@ class TelegramChannel(BaseChannel):
             if content and content != "[empty message]":
                 buf["contents"].append(content)
             buf["media"].extend(media_paths)
+            buf["update_ids"].append(update.update_id)
+            buf["metadata"]["attachments"].extend(metadata["attachments"])
+            buf["metadata"]["album_message_ids"].append(message.message_id)
             if key not in self._media_group_tasks:
                 self._media_group_tasks[key] = asyncio.create_task(self._flush_media_group(key))
             return
@@ -2103,6 +2207,8 @@ class TelegramChannel(BaseChannel):
         """Wait briefly, then forward buffered media-group as one turn."""
         try:
             await asyncio.sleep(0.6)
+            while self._album_pending.get(key, 0):
+                await asyncio.sleep(0.2)
             if not (buf := self._media_group_buffers.pop(key, None)):
                 return
             content = "\n".join(buf["contents"]) or "[empty message]"
@@ -2112,8 +2218,12 @@ class TelegramChannel(BaseChannel):
                 metadata=buf["metadata"],
                 session_key=buf.get("session_key"),
             )
+            if self._ingress is not None:
+                self._ingress.complete(buf.get("update_ids", []))
+                self._queued_update_ids.difference_update(buf.get("update_ids", []))
         finally:
             self._media_group_tasks.pop(key, None)
+            self._album_pending.pop(key, None)
 
     def _start_typing(self, chat_id: str) -> None:
         """Start sending 'typing...' indicator for a chat."""

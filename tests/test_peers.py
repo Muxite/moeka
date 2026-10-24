@@ -25,6 +25,36 @@ class Bus:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("saved_session", ["peer:original-requester", None])
+async def test_nested_peer_result_returns_to_saved_session(tmp_path: Path, saved_session: str | None) -> None:
+    """Paired agents: nested results resume the requesting session, including legacy requests."""
+    bus = Bus()
+    peer_id = "b" * 32
+    service = PeerService(
+        instance_id="a" * 32,
+        peers=[PeerConfig(id=peer_id, socket_path=str(tmp_path / "b.sock"), secret="x" * 32)],
+        state_dir=tmp_path / "state",
+        socket_path=tmp_path / "a.sock",
+        bus=bus,
+    )
+    work_id = await service.enqueue(
+        peer_id, "Inspect the render", return_channel="peer", return_chat_id="parent-delivery",
+        return_session_key=saved_session,
+    )
+    await service._accept_result("result-1", peer_id, work_id, "Render inspected")
+
+    assert len(bus.messages) == 1
+    result = bus.messages[0]
+    assert result.channel == "system"
+    assert result.session_key == (saved_session or f"peer:{peer_id}")
+    assert result.metadata["peer_result"]["delivery_id"] == work_id
+    assert "Render inspected" in result.content
+    assert bus.outbound == []
+    await service._publish_pending_results()
+    assert len(bus.messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_paired_delivery_ack_retry_and_deduplication(tmp_path: Path) -> None:
     secret = "owner-shared-secret-0123456789abcdef"
     socket_a, socket_b = tmp_path / "a.sock", tmp_path / "b.sock"

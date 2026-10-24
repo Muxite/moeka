@@ -11,12 +11,14 @@ import sqlite3
 import ssl
 import stat
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.peer_context import validate_peer_context
 
 if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
 MAX_PEER_CONTENT_CHARS = 12_000
 MAX_REPLY_HOPS = 3
 MAX_ATTEMPTS = 8
+MAX_PEER_FRAME_BYTES = 64_000
 
 
 class PeerDeliveryError(ValueError):
@@ -71,6 +74,7 @@ class PeerService:
         self._https_server: asyncio.AbstractServer | None = None
         self._retry_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
+        self.result_sink: Callable[[OutboundMessage], Awaitable[None]] | None = None
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(state_dir, 0o700)
         self._init_db()
@@ -113,6 +117,7 @@ class PeerService:
                 "outbox",
                 {
                     "kind": "TEXT NOT NULL DEFAULT 'work'",
+                    "context_json": "TEXT",
                     "return_channel": "TEXT",
                     "return_chat_id": "TEXT",
                     "return_session_key": "TEXT",
@@ -126,6 +131,7 @@ class PeerService:
                     "delivered": "INTEGER NOT NULL DEFAULT 0",
                     "state": "TEXT NOT NULL DEFAULT 'received'",
                     "kind": "TEXT NOT NULL DEFAULT 'work'",
+                    "context_json": "TEXT",
                 },
             )
             # Old releases marked a row delivered as soon as it entered the
@@ -217,6 +223,8 @@ class PeerService:
         return_channel: str | None = None,
         return_chat_id: str | None = None,
         return_session_key: str | None = None,
+        context: dict[str, object] | None = None,
+        delivery_id: str | None = None,
     ) -> str:
         if peer_id not in self.peers:
             raise PeerDeliveryError(f"peer {peer_id!r} is not paired by the owner")
@@ -225,11 +233,14 @@ class PeerService:
             raise PeerDeliveryError(f"content must contain 1..{MAX_PEER_CONTENT_CHARS} characters")
         if hops >= MAX_REPLY_HOPS:
             raise PeerDeliveryError(f"peer reply limit reached ({MAX_REPLY_HOPS} hops)")
-        msg_id = uuid4().hex
+        context = validate_peer_context(context)
+        msg_id = delivery_id or uuid4().hex
+        if not msg_id or len(msg_id) > 128:
+            raise PeerDeliveryError("invalid delivery id")
         with self._connect() as db:
             db.execute(
-                "INSERT INTO outbox(id,peer_id,content,reply_to,hops,next_attempt,created,"
-                "return_channel,return_chat_id,return_session_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO outbox(id,peer_id,content,reply_to,hops,next_attempt,created,"
+                "return_channel,return_chat_id,return_session_key,context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     msg_id,
                     peer_id,
@@ -241,6 +252,7 @@ class PeerService:
                     return_channel,
                     return_chat_id,
                     return_session_key,
+                    json.dumps(context) if context else None,
                 ),
             )
         self._wake.set()
@@ -249,7 +261,7 @@ class PeerService:
     async def _receive(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=5)
-            if len(raw) > MAX_PEER_CONTENT_CHARS + 4096:
+            if len(raw) > MAX_PEER_FRAME_BYTES:
                 raise PeerDeliveryError("peer frame is too large")
             envelope_raw: object = json.loads(raw)
             envelope = _object_mapping(envelope_raw)
@@ -305,6 +317,7 @@ class PeerService:
         reply_to = data.get("reply_to")
         if reply_to is not None and (not isinstance(reply_to, str) or len(reply_to) > 128):
             raise PeerDeliveryError("invalid reply reference")
+        context = validate_peer_context(data.get("context"))
         if kind == "result":
             if not isinstance(reply_to, str):
                 raise PeerDeliveryError("peer result has no correlated request")
@@ -317,6 +330,7 @@ class PeerService:
             content,
             reply_to,
             hops,
+            json.dumps(context) if context else None,
         )
         row = await asyncio.to_thread(self._get_inbox, msg_id) if created else None
         if row is not None and row["state"] == "received":
@@ -351,7 +365,7 @@ class PeerService:
             if method != "POST" or path != "/peer/v1/inbox" or version != "HTTP/1.1":
                 status = 404
                 response = {"error": "not found"}
-            elif length < 0 or length > MAX_PEER_CONTENT_CHARS + 4096:
+            elif length < 0 or length > MAX_PEER_FRAME_BYTES:
                 status = 413
                 response = {"error": "invalid request size"}
             else:
@@ -397,12 +411,13 @@ class PeerService:
         content: str,
         reply_to: str | None,
         hops: int,
+        context_json: str | None = None,
     ) -> bool:
         with self._connect() as db:
             cursor = db.execute(
-                "INSERT OR IGNORE INTO inbox(id,sender_id,content,reply_to,hops,received,delivered) "
-                "VALUES(?,?,?,?,?,?,0)",
-                (msg_id, sender, content, reply_to, hops, time.time()),
+                "INSERT OR IGNORE INTO inbox(id,sender_id,content,reply_to,hops,received,delivered,context_json) "
+                "VALUES(?,?,?,?,?,?,0,?)",
+                (msg_id, sender, content, reply_to, hops, time.time(), context_json),
             )
             return cursor.rowcount == 1
 
@@ -429,15 +444,20 @@ class PeerService:
             ).rowcount == 1
         if not claimed and row["state"] != "queued":
             return
+        context = validate_peer_context(json.loads(row["context_json"])) if row["context_json"] else None
+        session_key = f"peer:{peer_id}"
+        if context:
+            session_key += f":creative:{context['project_id']}"
         await self.bus.publish_inbound(
             InboundMessage(
                 channel="peer",
                 sender_id=peer_id,
                 chat_id=msg_id,
                 content=f"Paired peer @{peer_id} requests work (delivery {msg_id}):\n{row['content']}",
-                session_key_override=f"peer:{peer_id}",
+                session_key_override=session_key,
                 input_role="user",
                 metadata={
+                    **({"creative": context} if context else {}),
                     "peer": {
                         "id": peer_id,
                         "delivery_id": msg_id,
@@ -512,7 +532,7 @@ class PeerService:
     async def _publish_result(self, msg_id: str) -> None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT r.*,o.return_channel,o.return_chat_id FROM peer_results r "
+                "SELECT r.*,o.return_channel,o.return_chat_id,o.return_session_key,o.context_json FROM peer_results r "
                 "LEFT JOIN outbox o ON o.id=r.reply_to WHERE r.id=? AND r.published=0",
                 (msg_id,),
             ).fetchone()
@@ -532,14 +552,20 @@ class PeerService:
                 )
             )
         elif row["return_channel"] and row["return_chat_id"]:
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=str(row["return_channel"]),
-                    chat_id=str(row["return_chat_id"]),
-                    content=content,
-                    metadata={"peer_result": {"delivery_id": row["reply_to"], "result_id": msg_id}},
-                )
+            context = validate_peer_context(json.loads(row["context_json"])) if row["context_json"] else None
+            metadata = {"peer_result": {"delivery_id": row["reply_to"], "result_id": msg_id}}
+            if context:
+                metadata["creative"] = context
+                route = context["route"]
+                metadata.update({k: route[k] for k in ("message_id", "message_thread_id") if route.get(k)})
+            message = OutboundMessage(
+                channel=str(row["return_channel"]), chat_id=str(row["return_chat_id"]),
+                content=content, metadata=metadata,
             )
+            if self.result_sink is not None and context:
+                await self.result_sink(message)
+            else:
+                await self.bus.publish_outbound(message)
         else:
             return
         with self._connect() as db:
@@ -584,6 +610,8 @@ class PeerService:
             "hops": row["hops"],
             "kind": row["kind"],
         }
+        if row["context_json"]:
+            envelope["context"] = json.loads(row["context_json"])
         envelope["signature"] = _sign(peer.secret, envelope)
         try:
             if peer.url is not None:
@@ -593,7 +621,7 @@ class PeerService:
                     asyncio.open_unix_connection(peer.socket_path),
                     timeout=2,
                 )
-                writer.write((json.dumps(envelope, separators=(",", ":")) + "\n").encode())
+                writer.write((json.dumps(envelope, separators=(",", ":"), ensure_ascii=False) + "\n").encode())
                 await writer.drain()
                 raw_reply: object = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
                 reply = _object_mapping(raw_reply)

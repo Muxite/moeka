@@ -33,9 +33,12 @@ class MessageBus:
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
         self._handlers: list[EventHandler] = []
         self._pending: set[asyncio.Task[None]] = set()
+        self.inbound_interceptor: Callable[[InboundMessage], Awaitable[bool]] | None = None
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish a message from a channel to the agent."""
+        if self.inbound_interceptor is not None and await self.inbound_interceptor(msg):
+            return
         await self.inbound.put(msg)
 
     async def consume_inbound(self) -> InboundMessage:

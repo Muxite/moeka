@@ -759,6 +759,14 @@ def _run_gateway(
         agent.context.skills.disabled_skills = set(disabled_skills)
         agent.subagents.disabled_skills = set(disabled_skills)
 
+    if config.creative_bridge.enabled:
+        telegram_settings = getattr(config.channels, "telegram", None)
+        if not isinstance(telegram_settings, dict):
+            raise ValueError("creative bridge requires an enabled Telegram channel configuration")
+        setattr(config.channels, "telegram", {
+            **telegram_settings, "durableIngress": True, "dropPendingUpdates": False,
+        })
+
     # Create channel manager (forwards SessionManager so the WebSocket channel
     # can serve the embedded webui's REST surface).
     channels = ChannelManager(
@@ -780,6 +788,19 @@ def _run_gateway(
         webui_recovery_action=recovery.handle_action,
         config_path=Path(config_path),
     )
+
+    creative_bridge = None
+    if config.creative_bridge.enabled:
+        if peer_service is None:
+            raise ValueError("creative bridge requires an owner-paired peer service")
+        from nanobot.agent.tools.wonhee_handoff import WonheeHandoffTool
+        from nanobot.creative_bridge import CreativeBridge
+
+        creative_bridge = CreativeBridge(
+            config.creative_bridge, workspace=config.workspace_path, bus=bus,
+            peers=peer_service, get_channel=channels.get_channel,
+        )
+        agent.tools.register(WonheeHandoffTool(creative_bridge))
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
@@ -837,6 +858,8 @@ def _run_gateway(
 
                     if method == "GET" and path == "/health":
                         ready, payload = _gateway_readiness_payload(channels)
+                        if creative_bridge is not None:
+                            payload["creative_bridge"] = creative_bridge.health()
                         body = _json.dumps(payload)
                         status = "200 OK" if ready else "503 Service Unavailable"
                         content_type = "application/json"
@@ -956,6 +979,8 @@ def _run_gateway(
             console.print,
         )
         try:
+            if creative_bridge is not None:
+                await creative_bridge.start()
             if peer_service is not None:
                 await peer_service.start()
             await cron.start()
@@ -1052,6 +1077,8 @@ def _run_gateway(
                     with suppress(asyncio.CancelledError):
                         await shutdown_task
                 cron.stop()
+                if creative_bridge is not None:
+                    await creative_bridge.stop()
                 if peer_service is not None:
                     await peer_service.stop()
                 # A gateway exit interrupts ownership of active turns; it is

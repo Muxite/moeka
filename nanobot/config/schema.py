@@ -543,6 +543,29 @@ class ScriptToolsConfig(Base):
     enabled: bool = False
 
 
+class CreativeBridgeConfig(Base):
+    """Owner-configured local wonhee adapter; disabled unless explicitly enabled."""
+
+    enabled: bool = False
+    peer_id: str = ""
+    python: str = ""
+    cwd: str = ""
+    home: str = ""
+    poll_s: float = Field(default=2.0, ge=0.2, le=60)
+
+    @model_validator(mode="after")
+    def validate_paths(self) -> "CreativeBridgeConfig":
+        if self.enabled:
+            from pathlib import Path
+
+            if not self.peer_id:
+                raise ValueError("creative bridge requires an owner-paired peer_id")
+            for name in ("python", "cwd", "home"):
+                if not Path(getattr(self, name)).is_absolute():
+                    raise ValueError(f"creative bridge {name} must be an absolute path")
+        return self
+
+
 class ToolsConfig(Base):
     """Tools configuration.
 
@@ -734,6 +757,11 @@ class Config(BaseSettings):
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
     peers: list[PeerConfig] = Field(default_factory=list)
     peer_listener: PeerListenerConfig | None = None
+    creative_bridge: CreativeBridgeConfig = Field(
+        default_factory=CreativeBridgeConfig,
+        validation_alias=AliasChoices("creativeBridge", "creative_bridge"),
+        serialization_alias="creativeBridge",
+    )
 
     def __init__(self, **values: Any) -> None:
         if not type(self).__pydantic_complete__:
