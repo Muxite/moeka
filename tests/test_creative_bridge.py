@@ -14,7 +14,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.telegram.ingress import IngressReceipts
 from nanobot.channels.telegram.runtime import TelegramChannel, TelegramConfig
 from nanobot.config.schema import CreativeBridgeConfig, PeerConfig
-from nanobot.creative_bridge import CreativeBridge
+from nanobot.creative_bridge import CreativeActionError, CreativeBridge
 from nanobot.peer_context import validate_peer_context
 from nanobot.peers import PeerService, _sign
 
@@ -332,3 +332,87 @@ async def test_delivery_failure_state_distinguishes_preflight_and_transport(brid
         ("delivery_show", {"delivery_id": 12, "transition": "sending"}),
         ("delivery_show", {"delivery_id": 12, "transition": expected, "error": type(failure).__name__}),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code,retryable,permanent", [("invalid_request", True, True),
+                                                    ("transfer_failed", False, True),
+                                                    ("transfer_failed", True, False)])
+async def test_cli_expected_errors_preserve_safe_message_and_retryability(bridge, monkeypatch, code, retryable, permanent):
+    import json
+
+    process = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(json.dumps({
+        "error": {"code": code, "retryable": retryable,
+                  "message": "Unsupported Drive folder https://drive.google.com/drive/folders/private?resourcekey=secret. api_key=credential123"},
+    }).encode(), b"untrusted stderr secret")))
+    monkeypatch.setattr("nanobot.creative_bridge.asyncio.create_subprocess_exec", AsyncMock(return_value=process))
+    with pytest.raises(CreativeActionError) as caught:
+        await bridge.call("inbox_add", source="https://drive.google.com/drive/folders/private")
+    assert caught.value.permanent is permanent
+    assert caught.value.code == code
+    assert "Unsupported Drive folder" in str(caught.value)
+    assert "https://" not in str(caught.value)
+    assert "resourcekey" not in str(caught.value)
+    assert "credential123" not in str(caught.value)
+    assert "stderr" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_permanent_drive_error_preserves_message_and_successful_assets(bridge):
+    source = bridge.media_root / "take.mp4"
+    source.write_bytes(b"take")
+
+    async def call(action, **data):
+        if action == "inbox_add" and str(data["source"]).startswith("https://"):
+            raise CreativeActionError("invalid_request", "Drive folders are unsupported; send an individual public file link.", permanent=True)
+        if action == "inbox_add":
+            return {"id": 3, "ref": "a" * 64}
+        return {"id": 7, "name": "campus"}
+
+    bridge.call = call
+    message = InboundMessage(channel="telegram", chat_id="123", sender_id="owner",
+                             content="Remember this folder of takes: https://drive.google.com/drive/folders/reference",
+                             media=[str(source)], metadata={"message_id": 21})
+    await bridge.handoff(message)
+    await bridge.intercept(message)
+    with bridge._db() as db:
+        row = db.execute("SELECT * FROM receipt").fetchone()
+    await bridge._forward(row)
+    request = bridge.peers.enqueue.await_args
+    assert "Remember this folder of takes" in request.args[1]
+    assert request.kwargs["context"]["assets"] == [{"id": 3, "ref": "a" * 64, "role": "raw"}]
+    assert "Drive folders are unsupported" in request.kwargs["context"]["input_errors"][0]
+    with bridge._db() as db:
+        receipt = db.execute("SELECT state,attempts FROM receipt").fetchone()
+        assert tuple(receipt) == ("forwarded", 0)
+        notices = list(db.execute("SELECT * FROM outbound"))
+        assert len(notices) == 1
+        assert "individual public file link" in notices[0]["payload"]
+
+
+@pytest.mark.asyncio
+async def test_transient_intake_error_remains_retryable_and_does_not_claim_import(bridge):
+    async def call(action, **data):
+        if action == "inbox_add":
+            raise CreativeActionError("transfer_failed", "Drive is temporarily unavailable.", permanent=False)
+        return {"id": 7, "name": "campus"}
+
+    bridge.call = call
+    message = InboundMessage(channel="telegram", chat_id="123", sender_id="owner",
+                             content="Use https://drive.google.com/file/d/reference/view", metadata={"message_id": 22})
+    await bridge.handoff(message)
+    await bridge.intercept(message)
+    await bridge.start()
+    try:
+        for _ in range(30):
+            with bridge._db() as db:
+                row = db.execute("SELECT state,attempts FROM receipt").fetchone()
+            if row["attempts"]:
+                break
+            await asyncio.sleep(0.01)
+        assert tuple(row) == ("queued", 1)
+        bridge.peers.enqueue.assert_not_awaited()
+        with bridge._db() as db:
+            assert db.execute("SELECT count(*) FROM outbound").fetchone()[0] == 0
+    finally:
+        await bridge.stop()

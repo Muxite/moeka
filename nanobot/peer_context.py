@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +32,7 @@ class CreativePeerContext(BaseModel):
     request_id: str = Field(min_length=1, max_length=256)
     route: CreativeRoute
     assets: list[CreativeAsset] = Field(default_factory=list, max_length=32)
+    input_errors: list[Annotated[str, Field(max_length=300)]] = Field(default_factory=list, max_length=16)
 
 
 def validate_peer_context(value: object) -> dict[str, Any] | None:
@@ -39,6 +40,8 @@ def validate_peer_context(value: object) -> dict[str, Any] | None:
     if value is None:
         return None
     result = CreativePeerContext.model_validate(value).model_dump(mode="json")
+    if not result["input_errors"]:
+        result.pop("input_errors")
     if len(json.dumps(result)) > 12_000:
         raise ValueError("peer context is too large")
     return result
