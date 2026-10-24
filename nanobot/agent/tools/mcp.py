@@ -20,7 +20,9 @@ import httpx
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool, ToolResult, capability_request
+from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.peer_context import validate_peer_context
 from nanobot.security.network import (
     PinnedDNSAsyncTransport,
     env_proxy_applies_to_url,
@@ -632,6 +634,14 @@ class _MCPWrapperBase(Tool):
             )
             return False
         self._session = refreshed_session
+        if isinstance(self, MCPToolWrapper):
+            # Reconnect can reflect an owner config change. A replacement HTTP
+            # tool must never inherit an old stdio tool's provenance opt-in.
+            self.forward_creative_context = (
+                isinstance(refreshed_tool, MCPToolWrapper)
+                and refreshed_tool.forward_creative_context
+                and refreshed_tool._transport == "stdio"
+            )
         return True
 
 
@@ -720,7 +730,11 @@ class MCPToolWrapper(_MCPWrapperBase):
         *,
         transport: str | None = None,
         url: str | None = None,
+        forward_creative_context: bool = False,
     ):
+        if forward_creative_context and transport != "stdio":
+            raise ValueError("creative context forwarding requires an owner-configured stdio MCP transport")
+        self.forward_creative_context = forward_creative_context
         self._set_mcp_connection(session, server_name, tool_def.name, transport, url)
         self._media_dir = media_dir
         self._original_name = tool_def.name
@@ -747,13 +761,32 @@ class MCPToolWrapper(_MCPWrapperBase):
     def parameters(self) -> dict[str, Any]:
         return self._parameters
 
+    def _creative_request_meta(self) -> dict[str, Any] | None:
+        if not self.forward_creative_context:
+            return None
+        request = current_request_context()
+        raw = request.metadata.get("creative") if request is not None else None
+        if raw is None:
+            return None
+        if request is None or request.channel != "peer":
+            raise ValueError("creative provenance must originate from an authenticated peer turn")
+        context = validate_peer_context(raw)
+        return {"wonhee": context} if context is not None else None
+
     async def execute(self, **kwargs: Any) -> str:
         retried_transient = False
         refreshed_session = False
         while True:
             try:
+                request_meta = self._creative_request_meta()
+            except ValueError:
+                return ToolResult.error("Invalid authenticated creative context; the tool was not called.")
+            call_options: dict[str, Any] = {"arguments": kwargs}
+            if request_meta is not None:
+                call_options["meta"] = request_meta
+            try:
                 result = await asyncio.wait_for(
-                    self._session.call_tool(self._original_name, arguments=kwargs),
+                    self._session.call_tool(self._original_name, **call_options),
                     timeout=self._tool_timeout,
                 )
             except asyncio.TimeoutError:
@@ -1342,6 +1375,7 @@ async def connect_mcp_servers(
                 wrapper = MCPToolWrapper(
                     session, name, tool_def, tool_timeout=cfg.tool_timeout, media_dir=media_dir,
                     transport=transport_type, url=cfg.url,
+                    forward_creative_context=getattr(cfg, "forward_creative_context", False),
                 )
                 registry.register(wrapper)
                 logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)

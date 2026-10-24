@@ -86,3 +86,9 @@ asset refs. The recipient session is `peer:<sender>:creative:<project>`. The gat
 wonhee before routing, while replies to delivered artifacts retain those artifacts' projects. These delivery
 guards apply to the creative adapter; general peer/channel paths retain their existing contracts. The wonhee
 checkout's `docs/production/telegram-creative.md` covers its host-local installer and private outbox service.
+
+For the owner-configured wonhee stdio MCP server, set `forwardCreativeContext: true`. This forwards only the
+validated active peer context in MCP request metadata, separately from model arguments. Other MCP servers
+keep it disabled, and HTTP transports cannot enable it. Wonhee binds memory source identities and delivery
+routes from that context; the model cannot replace them. An unsupported intake source is reported in bounded
+signed `input_errors`, while the creator message and successful assets still reach the creative assistant.
