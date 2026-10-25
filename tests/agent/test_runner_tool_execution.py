@@ -523,3 +523,35 @@ async def test_runner_blocks_repeated_external_fetches():
         if msg.get("role") == "tool" and msg.get("tool_call_id") == "call_3"
     ][0]
     assert "repeated external lookup blocked" in blocked_tool_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_permanent_mcp_stop_ends_turn_before_another_model_call():
+    class StopTool(_LegacyErrorPluginTool):
+        async def execute(self, **kwargs):
+            result = ToolResult.error("Non-retryable failure repeated")
+            result.metadata["stop_turn"] = True
+            return result
+
+    provider = MagicMock()
+    provider.chat_stream_with_retry = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[ToolCallRequest(id="stop", name="legacy_plugin", arguments={})],
+            usage=None,
+        )
+    )
+    tools = ToolRegistry()
+    tools.register(StopTool())
+    result = await AgentRunner().run(
+        make_run_spec(
+            provider,
+            initial_messages=[{"role": "user", "content": "Build this"}],
+            tools=tools,
+            model="test-model",
+            max_iterations=10,
+            max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        )
+    )
+    assert provider.chat_stream_with_retry.await_count == 1
+    assert "non-retryable" in result.error

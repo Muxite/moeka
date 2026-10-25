@@ -30,7 +30,7 @@ class WonheeHandoffTool(Tool):
 
     @property
     def name(self) -> str:
-        return "wonhee_handoff"
+        return "wonhee_project" if self._bridge.config.mode=='direct' else "wonhee_handoff"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -38,10 +38,11 @@ class WonheeHandoffTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Select a dedicated wonhee creative project when the creator asks to work on videos, ideas or wonhee; subsequent Telegram messages and files go to that project. Use leave=true when asked to return to general chat."
+        return "Select or create a Wonhee project for the current conversation. In direct mode you remain the same assistant and can immediately use Wonhee tools. The creator's current request and subsequent files stay in this project. Use leave=true to clear selection."
 
     def capabilities(self, params: dict[str, Any]) -> list[Any]:
-        return [capability_request("session.send", self._bridge.config.peer_id)]
+        target=self._bridge.config.peer_id if self._bridge.config.mode=='peer' else 'wonhee:project'
+        return [capability_request("session.send", target)]
 
     async def execute(self, project_name: str | None = None, leave: bool = False, **kwargs: Any) -> str:
         request = current_request_context()
@@ -53,12 +54,21 @@ class WonheeHandoffTool(Tool):
         media: list[str] = [item["path"] for item in descriptors if isinstance(item.get("path"), str)]
         message = InboundMessage(
             channel=request.channel, chat_id=request.chat_id, sender_id=request.sender_id,
-            content=request.original_user_text or "", metadata=dict(request.metadata), media=media,
+            content=request.metadata.get('creative_original_text',request.original_user_text) or "", metadata=dict(request.metadata), media=media,
         )
         try:
             result = await self._bridge.handoff(message, project_name=project_name, leave=leave)
             if not leave and request.original_user_text:
-                await self._bridge.intercept(message)
+                await self._bridge.intercept(message, selected_project=True)
+                if self._bridge.config.mode=='direct':
+                    request.metadata.update(message.metadata)
+                    context=message.metadata['creative']
+                    await self._bridge.call('project_brief_save',project_id=context['project_id'],
+                        content=message.metadata['creative_original_text'],
+                        source={**context['route'],'request_key':context['request_id']})
+            elif leave and self._bridge.config.mode=='direct':
+                from nanobot.creative_context import clear
+                clear(request.metadata)
             return result
         except (ValueError, RuntimeError) as exc:
             return ToolResult.error(str(exc))

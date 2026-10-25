@@ -768,9 +768,13 @@ class MCPToolWrapper(_MCPWrapperBase):
         raw = request.metadata.get("creative") if request is not None else None
         if raw is None:
             return None
-        if request is None or request.channel != "peer":
-            raise ValueError("creative provenance must originate from an authenticated peer turn")
-        context = validate_peer_context(raw)
+        if request is not None and request.channel=='telegram':
+            from nanobot.creative_context import validate
+            context=validate(request.metadata,channel=request.channel,chat_id=request.chat_id,sender_id=request.sender_id)
+        elif request is not None and request.channel=='peer':
+            context = validate_peer_context(raw)
+        else:
+            raise ValueError("creative provenance must originate from authenticated transport")
         return {"wonhee": context} if context is not None else None
 
     async def execute(self, **kwargs: Any) -> str:
@@ -850,7 +854,17 @@ class MCPToolWrapper(_MCPWrapperBase):
                 try:
                     rendered = self._render_call_result(result.content, kwargs)
                     if getattr(result, "isError", False):
-                        return ToolResult.error(rendered)
+                        output=ToolResult.error(rendered)
+                        payload: Any = getattr(result, 'structuredContent', None)
+                        error: Any = cast(dict[str, Any], payload).get('error') if isinstance(payload, dict) else None
+                        request=current_request_context()
+                        if isinstance(error,dict) and cast(dict[str, Any], error).get('retryable') is False and request is not None:
+                            key=hashlib.sha256(json.dumps([self.name,kwargs],sort_keys=True).encode()).hexdigest()
+                            failures=request.attributes.setdefault('_permanent_mcp_failures',{})
+                            failures[key]=failures.get(key,0)+1
+                            if failures[key]>=2:
+                                output.metadata['stop_turn']=True
+                        return output
                     return self._typed_result(rendered, result)
                 except Exception as exc:
                     logger.exception(

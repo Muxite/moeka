@@ -791,7 +791,7 @@ def _run_gateway(
 
     creative_bridge = None
     if config.creative_bridge.enabled:
-        if peer_service is None:
+        if peer_service is None and config.creative_bridge.mode=='peer':
             raise ValueError("creative bridge requires an owner-paired peer service")
         from nanobot.agent.tools.wonhee_handoff import WonheeHandoffTool
         from nanobot.creative_bridge import CreativeBridge
@@ -801,6 +801,8 @@ def _run_gateway(
             peers=peer_service, get_channel=channels.get_channel,
         )
         agent.tools.register(WonheeHandoffTool(creative_bridge))
+        if config.creative_bridge.mode=='direct':
+            agent.max_tool_errors=3
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""

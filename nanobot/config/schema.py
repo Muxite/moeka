@@ -555,6 +555,7 @@ class CreativeBridgeConfig(Base):
     """Owner-configured local wonhee adapter; disabled unless explicitly enabled."""
 
     enabled: bool = False
+    mode: Literal['peer','direct'] = 'peer'
     peer_id: str = ""
     python: str = ""
     cwd: str = ""
@@ -566,7 +567,7 @@ class CreativeBridgeConfig(Base):
         if self.enabled:
             from pathlib import Path
 
-            if not self.peer_id:
+            if self.mode=='peer' and not self.peer_id:
                 raise ValueError("creative bridge requires an owner-paired peer_id")
             for name in ("python", "cwd", "home"):
                 if not Path(getattr(self, name)).is_absolute():

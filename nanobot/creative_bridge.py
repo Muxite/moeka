@@ -70,13 +70,17 @@ class CreativeBridge:
 
     def __init__(
         self, config: CreativeBridgeConfig, *, workspace: Path, bus: MessageBus,
-        peers: PeerService, get_channel: Callable[[str], object | None],
+        peers: PeerService | None, get_channel: Callable[[str], object | None],
     ) -> None:
-        if config.peer_id not in peers.peers:
+        if config.mode=='peer' and (peers is None or config.peer_id not in peers.peers):
             raise ValueError("creative bridge peer is not owner-paired")
         self.config, self.bus, self.peers = config, bus, peers
         self.get_channel = get_channel
         self.workspace = workspace
+        self.context_key='process'
+        if config.mode=='direct':
+            from nanobot.creative_context import register
+            self.context_key=register(workspace)
         self.media_root = get_media_dir("telegram").resolve()
         self.db_path = workspace / "peers" / "creative.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +113,8 @@ class CreativeBridge:
             # The transport may have accepted a send before the previous process
             # could record its result. Do not automatically replay that effect.
             db.execute("UPDATE outbound SET state='uncertain',error='gateway restarted during send' WHERE state='sending'")
+            if config.mode=='direct':
+                db.execute("UPDATE receipt SET state='queued' WHERE state='preparing'")
 
     def _db(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path, timeout=10)
@@ -171,7 +177,7 @@ class CreativeBridge:
             await self.call("project_select", project_id=None, route_key=route_key)
             with self._db() as db:
                 db.execute("DELETE FROM route WHERE key=?", (route_key,))
-            return "Back to general moeka conversation. Your wonhee projects and files are saved."
+            return "Project selection cleared. Your Wonhee projects and files are saved." if self.config.mode=='direct' else "Back to general moeka conversation. Your wonhee projects and files are saved."
         project = await self.call("project_create", name=(project_name or "wonhee").strip())
         project_id = project.get("id")
         if not isinstance(project_id, int) or isinstance(project_id, bool):
@@ -196,9 +202,12 @@ class CreativeBridge:
         if any(route.get(key) != trusted.get(key) for key in ("channel", "chat_id", "owner_id", "message_thread_id")):
             raise ValueError("creative destination differs from the authenticated Telegram route")
 
-    async def intercept(self, message: InboundMessage) -> bool:
+    async def intercept(self, message: InboundMessage, *, selected_project: bool = False) -> bool:
         if message.channel != "telegram":
             return False
+        if self.config.mode=='direct':
+            from nanobot.creative_context import clear
+            clear(message.metadata)
         text = message.content.strip()
         command = re.fullmatch(r"/wonhee(?:@\w+)?(?:\s+(.*))?", text, re.S)
         if command:
@@ -250,7 +259,7 @@ class CreativeBridge:
             reply_id = message.metadata.get("reply_to_message_id")
             replied = db.execute("SELECT project_id FROM delivered WHERE chat_id=? AND message_id=?",
                                  (message.chat_id, reply_id)).fetchone() if isinstance(reply_id, int) else None
-        project_id = int(replied[0]) if replied is not None else selected_project_id
+        project_id = int(replied[0]) if replied is not None and not selected_project else selected_project_id
         if project_id is None:
             return False
         self._remember_destination(route)
@@ -261,9 +270,23 @@ class CreativeBridge:
         source_id = f"{route['route_key']}:{message.metadata.get('message_id')}"
         receipt_id = hashlib.sha256(source_id.encode()).hexdigest()
         with self._db() as db:
-            db.execute("INSERT OR IGNORE INTO receipt(id,project_id,payload,created) VALUES(?,?,?,?)",
-                       (receipt_id, project_id, json.dumps(payload, ensure_ascii=False), time.time()))
+            db.execute("INSERT OR IGNORE INTO receipt(id,project_id,payload,created,state) VALUES(?,?,?,?,?)",
+                       (receipt_id, project_id, json.dumps(payload, ensure_ascii=False), time.time(),
+                        'preparing' if self.config.mode=='direct' else 'queued'))
+            if self.config.mode=='direct':
+                db.execute("UPDATE receipt SET project_id=?,payload=?,state='preparing' WHERE id=?",(project_id,json.dumps(payload,ensure_ascii=False),receipt_id))
         self._wake.set()
+        if self.config.mode=='direct':
+            with self._db() as db:
+                row=db.execute('SELECT * FROM receipt WHERE id=?',(receipt_id,)).fetchone()
+            try:
+                await self._forward(row,direct_message=message)
+            except Exception:
+                with self._db() as db:
+                    db.execute("UPDATE receipt SET state='queued' WHERE id=?",(receipt_id,))
+                self._wake.set()
+                return True  # The durable adapter now owns intake retry, not a second agent.
+            return False
         return True
 
     async def queue_text(self, identity: str, content: str, route: dict[str, object], project_id: int | None = None) -> None:
@@ -292,12 +315,14 @@ class CreativeBridge:
 
     async def start(self) -> None:
         self.bus.inbound_interceptor = self.intercept
-        self.peers.result_sink = self.queue_peer_result
+        if self.peers is not None and self.config.mode=='peer':
+            self.peers.result_sink = self.queue_peer_result
         self._task = asyncio.create_task(self._run(), name="moeka-creative-bridge")
 
     async def stop(self) -> None:
         self.bus.inbound_interceptor = None
-        self.peers.result_sink = None
+        if self.peers is not None and self.config.mode=='peer':
+            self.peers.result_sink = None
         if self._task is not None:
             self._task.cancel()
             try:
@@ -312,7 +337,7 @@ class CreativeBridge:
             raise ValueError("creative input must be a downloaded Telegram attachment")
         return str(path)
 
-    async def _forward(self, row: sqlite3.Row) -> None:
+    async def _forward(self, row: sqlite3.Row, direct_message: InboundMessage | None = None) -> None:
         payload = json.loads(row["payload"])
         assets: list[dict[str, object]] = []
         input_errors: list[str] = []
@@ -337,15 +362,19 @@ class CreativeBridge:
             path = self._media_path(media_path)
             empty_descriptor: dict[str, Any] = {}
             descriptor = next((d for d in descriptors if d.get("path") == media_path), empty_descriptor)
-            await import_source(path, f"telegram:{row['id']}:{ordinal}",
+            project_part=f":project:{payload['project_id']}" if self.config.mode=='direct' else ''
+            await import_source(path, f"telegram:{row['id']}{project_part}:{ordinal}",
                                 {**descriptor, "route": payload["route"]}, f"Telegram attachment {ordinal + 1}")
         for ordinal, link in enumerate(re.findall(r"https://drive\.google\.com/[^\s<>]+", payload["content"])):
-            await import_source(link.rstrip(".,)"), f"drive:{row['id']}:{ordinal}",
+            project_part=f":project:{payload['project_id']}" if self.config.mode=='direct' else ''
+            await import_source(link.rstrip(".,)"), f"drive:{row['id']}{project_part}:{ordinal}",
                                 {"route": payload["route"]}, f"Drive link {ordinal + 1}")
         context = validate_peer_context({
             "version": 1, "project_id": payload["project_id"], "request_id": row["id"],
             "route": payload["route"], "assets": assets, "input_errors": input_errors[:16],
         })
+        if context is None:
+            raise ValueError('creative transport context is missing')
         content = (
             "Fulfill the authenticated creator request below in the selected wonhee creative project. "
             "Use wonhee tools for canonical memory and assets. Fulfill text and memory requests even if input_errors "
@@ -355,12 +384,30 @@ class CreativeBridge:
             "<creator_message>\n" + payload["content"] + "\n</creator_message>\n"
             "<creative_context>\n" + json.dumps(context, ensure_ascii=False) + "\n</creative_context>"
         )
-        await self.peers.enqueue(
-            self.config.peer_id, content, return_channel="telegram",
-            return_chat_id=str(payload["route"]["chat_id"]),
-            return_session_key=f"telegram:{payload['route']['chat_id']}",
-            context=context, delivery_id="creative-" + str(row["id"]),
-        )
+        if self.config.mode=='direct':
+            from nanobot.creative_context import stamp
+            message=direct_message or InboundMessage(channel='telegram',chat_id=str(payload['route']['chat_id']),
+                sender_id=payload['sender_id'],content=payload['content'],metadata=payload['metadata'],media=payload['media'])
+            snapshot=await self.call('project_show',project_id=payload['project_id'])
+            value=snapshot.get('brief') or snapshot.get('saved_brief')
+            brief: dict[str, Any] = _mapping(value) if value is not None else {}
+            recent=await self.call('inbox_list',project_id=payload['project_id'],limit=32)
+            recent_assets=[{k:asset.get(k) for k in ['id','filename','mime','role']} for asset in json_object_list(recent.get('assets',[]))]
+            message.metadata['creative_original_text']=payload['content']
+            message.content=payload['content']+'\n\n[Wonhee project context]\n'+json.dumps({
+                'project_id':payload['project_id'],'name':snapshot.get('name'),'brief':brief,
+                'assets':assets[:32],'recent_assets':recent_assets,'input_errors':input_errors},ensure_ascii=False)
+            stamp(message.metadata,context,self.context_key)
+            if direct_message is None:
+                await self.bus.inbound.put(message)
+        else:
+            assert self.peers is not None
+            await self.peers.enqueue(
+                self.config.peer_id, content, return_channel="telegram",
+                return_chat_id=str(payload["route"]["chat_id"]),
+                return_session_key=f"telegram:{payload['route']['chat_id']}",
+                context=context, delivery_id="creative-" + str(row["id"]),
+            )
         with self._db() as db:
             db.execute("UPDATE receipt SET state='forwarded',error=? WHERE id=?",
                        (json.dumps(input_errors) if input_errors else None, row["id"]))

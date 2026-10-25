@@ -1994,6 +1994,9 @@ class AgentRunner:
                 "status": "error",
                 "detail": result.replace("\n", " ").strip()[:120],
             }
+            metadata=getattr(result,'metadata',{})
+            if isinstance(metadata,dict) and metadata.get('stop_turn') is True:
+                return str(result),event,RuntimeError('I stopped after the same non-retryable tool failure was repeated. The request needs correction before it can continue.')
             handled = self._classify_violation(
                 raw_text=result,
                 soft_payload=result + hint,
