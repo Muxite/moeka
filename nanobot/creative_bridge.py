@@ -352,7 +352,7 @@ class CreativeBridge:
                 warning = safe_action_message(f"{label}: {exc}")
                 input_errors.append(warning)
                 identity = "input-error:" + hashlib.sha256(source_key.encode()).hexdigest()
-                await self.queue_text(identity, warning + " No file was imported from that source; your original message is still being passed to wonny.",
+                await self.queue_text(identity, warning + " No file was imported from that source; your original request is still being processed.",
                                       payload["route"], payload["project_id"])
                 return
             assets.append({"id": asset["id"], "ref": asset.get("ref", asset.get("sha256")), "role": "raw"})
