@@ -21,6 +21,34 @@ EMPTY_FINAL_RESPONSE_MESSAGE = (
     "Please try again or narrow the task."
 )
 
+def tool_error_stop_message(events: list[dict[str, str]], count: int, limit: int) -> str:
+    """Explain an error ceiling without replaying untrusted details or making another model call."""
+    failed = [event for event in events if event.get("status") == "error"]
+    names = list(dict.fromkeys(
+        event.get("name", "tool") if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", event.get("name", ""))
+        else "tool" for event in failed
+    ))[:4]
+    reasons: list[str] = []
+    for prefix, explanation in (
+        ("workspace_violation", "File access was blocked by the workspace boundary."),
+        ("policy_denial", "A permission policy blocked the requested action."),
+        ("exec_guard_denial", "The command policy blocked execution."),
+        ("ssrf_violation", "The network guard blocked the requested destination."),
+        ("strict_sandbox", "The required execution sandbox was unavailable."),
+    ):
+        if any(event.get("detail", "").startswith(prefix) for event in failed):
+            reasons.append(explanation)
+    details = " ".join(reasons) or "One or more tools failed."
+    tools = ", ".join(names) or "unknown tool"
+    succeeded = sum(event.get("status") == "ok" for event in events)
+    return (
+        f"I stopped after {count} tool errors (limit {limit}). {details} "
+        f"Failed tools: {tools}. Calls without errors: {succeeded}. "
+        "The task is incomplete. Use an authorized tool or correct the failing request "
+        "before retrying; repeating blocked calls will not help."
+    )
+
+
 FINALIZATION_RETRY_PROMPT = (
     "Please provide your response to the user based on the conversation above."
 )

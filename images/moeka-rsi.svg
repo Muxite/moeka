@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-labelledby="title desc">
+  <title id="title">The experimental Moeka improvement loop</title>
+  <desc id="desc">Research concept: observe work, develop a candidate, evaluate in isolation, review and adopt, and reuse. Moeka provides the kernel and capability transfers; the companion RSI harness owns experimentation and evaluation. Promotion remains manual.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#a49bff"/></marker></defs>
+  <rect width="1200" height="380" rx="24" fill="#131729"/>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <text x="40" y="44" fill="#ffbf80" font-size="12" font-weight="700" letter-spacing="2">THE RESEARCH BET / EXPERIMENTAL RSI</text>
+    <text x="40" y="85" fill="#f7f5ff" font-size="28" font-weight="700">Turn useful work into reusable capability.</text>
+    <g fill="#20253e" stroke="#555078">
+      <rect x="40" y="124" width="200" height="112" rx="14"/>
+      <rect x="270" y="124" width="200" height="112" rx="14"/>
+      <rect x="500" y="124" width="200" height="112" rx="14"/>
+      <rect x="730" y="124" width="200" height="112" rx="14"/>
+      <rect x="960" y="124" width="200" height="112" rx="14" fill="#18382f" stroke="#55ddb3"/>
+    </g>
+    <g fill="none" stroke="#a49bff" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M243 180H265"/><path d="M473 180H495"/><path d="M703 180H725"/><path d="M933 180H955"/>
+      <path d="M1060 248V279H140V249"/>
+    </g>
+    <g fill="#f7f5ff" font-size="19" font-weight="700">
+      <text x="58" y="160">Observe work</text><text x="288" y="160">Develop candidate</text>
+      <text x="518" y="160">Evaluate</text><text x="748" y="160">Review + adopt</text><text x="978" y="160">Reuse</text>
+    </g>
+    <g fill="#c1bfd7" font-size="14">
+      <text x="58" y="192">Tasks, outcomes,</text><text x="58" y="214">traces, and cost</text>
+      <text x="288" y="192">Skills, tools, prompts,</text><text x="288" y="214">and operating variants</text>
+      <text x="518" y="192">Isolated runs and</text><text x="518" y="214">held-out checks</text>
+      <text x="748" y="192">Owner approval and</text><text x="748" y="214">controlled activation</text>
+      <text x="978" y="192">Apply capabilities</text><text x="978" y="214">to future work</text>
+    </g>
+    <rect x="387" y="264" width="426" height="30" rx="15" fill="#131729"/>
+    <text x="600" y="284" text-anchor="middle" fill="#b9b0ff" font-size="14">Repeat the experiment. Test the improvement.</text>
+    <text x="40" y="331" fill="#b7b5ce" font-size="14">MOEKA: kernel + capability transfers</text>
+    <text x="555" y="331" fill="#b7b5ce" font-size="14">COMPANION HARNESS: experimentation + evaluation</text>
+    <text x="40" y="356" fill="#8f8ba9" font-size="12">Conceptual research loop. Experimental results are not guaranteed; automatic capability promotion is off.</text>
+  </g>
+</svg>

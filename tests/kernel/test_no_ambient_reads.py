@@ -72,6 +72,21 @@ HOST_AMBIENT_ALLOWLIST: dict[str, str] = {
         "host-owned `message` tool (loaded only for host loops, ToolContext.host_tools); "
         "falls back to the legacy workspace path when built without a workspace"
     ),
+    "nanobot/agent/tools/tmux.py": (
+        "host-owned `tmux` tool (loaded only for host loops, ToolContext.host_tools); builds "
+        "the minimal child env (PATH default, HOME, LANG) for the owner's tmux client and "
+        "forwards no secrets"
+    ),
+    "nanobot/creative_bridge.py": (
+        "gateway-side wonhee bridge (direct mode): media root via get_media_dir, and a child "
+        "env filtered to PATH/HOME/LANG/LC_ALL/TMPDIR/SSL_* for the wonhee CLI; never "
+        "forwards API keys"
+    ),
+    "nanobot/creative_context.py": (
+        "gateway-side host signing key for wonhee provenance: stored under the user's "
+        "state dir (~/.local/state/moeka) so it survives restarts and stays outside the "
+        "agent workspace"
+    ),
 }
 
 # Per-file exemptions outside the allow-list: each needs a written reason. Keep tiny.

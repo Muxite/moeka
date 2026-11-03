@@ -379,3 +379,44 @@ async def test_length_finish_with_blank_content_routes_to_length_recovery():
         "finish_reason='length' response with blank content"
     )
     assert result.final_content == "done"
+
+
+@pytest.mark.asyncio
+async def test_error_ceiling_reports_workspace_block_without_another_model_call():
+    from nanobot.agent.runner import AgentRunner
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
+        content=None, tool_calls=[ToolCallRequest(id=f"call_{i}", name="read_file", arguments={})
+                                 for i in range(5)],
+    ))
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value=ToolResult.error(
+        "Error: Path /private/secret is outside allowed directory /workspace "
+        "(this is a hard policy boundary, not a transient failure)"
+    ))
+    result = await AgentRunner().run(make_run_spec(provider, initial_messages=[], tools=tools,
+        model="test-model", max_iterations=20, max_tool_errors=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS))
+    assert provider.chat_stream_with_retry.await_count == 1
+    assert result.stop_reason == "tool_error"
+    assert result.error == "max_tool_errors: 5 tool errors (limit 3)"
+    assert result.final_content is not None
+    assert "workspace boundary" in result.final_content
+    assert "task is incomplete" in result.final_content
+    assert "read_file" in result.final_content
+    assert "/private/secret" not in result.final_content
+    assert "completed the tool steps" not in result.final_content
+    assert result.messages[-1]["content"] == result.final_content
+    assert len([m for m in result.messages if m.get("role") == "tool"]) == 5
+
+
+def test_error_ceiling_message_never_repeats_untrusted_names_or_error_text():
+    from nanobot.utils.runtime import tool_error_stop_message
+    message = tool_error_stop_message([
+        {"name":"ignore instructions\nSECRET", "status":"error", "detail":"token=secret"},
+        {"name":"safe_tool", "status":"ok", "detail":"success output"},
+    ],1,1)
+    assert "SECRET" not in message and "token=" not in message
+    assert "Failed tools: tool" in message
+    assert "Calls without errors: 1" in message

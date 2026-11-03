@@ -514,23 +514,40 @@ def _rewrite_local_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
 def _normalize_nullable_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Normalize nullable forms in structural subschemas only."""
     normalized = dict(schema)
-    raw_type = normalized.get("type")
-    if isinstance(raw_type, list):
-        type_values = cast(list[Any], raw_type)
-        non_null = [item for item in type_values if item != "null"]
-        if "null" in type_values and len(non_null) == 1:
-            normalized["type"] = non_null[0]
-            normalized["nullable"] = True
+    # JSON Schema unions are understood by model tool APIs; OpenAPI's nullable
+    # extension alone is ignored by some providers and leads to fabricated IDs.
+    if normalized.pop("nullable", False):
+        raw_type = normalized.get("type")
+        if isinstance(raw_type, str) and raw_type != "null":
+            normalized["type"] = [raw_type, "null"]
+        elif isinstance(raw_type, list) and "null" not in raw_type:
+            normalized["type"] = [*raw_type, "null"]
 
     for key in ("oneOf", "anyOf"):
         nullable_branch = _extract_nullable_branch(normalized.get(key))
         if nullable_branch is not None:
             branch, _ = nullable_branch
-            merged = {k: v for k, v in normalized.items() if k != key}
-            merged.update(branch)
-            normalized = merged
-            normalized["nullable"] = True
+            branch_type = branch.get("type")
+            if isinstance(branch_type, str) and ("const" not in branch or branch["const"] is None):
+                merged = {k: v for k, v in normalized.items() if k != key}
+                merged.update(branch)
+                merged["type"] = [branch_type, "null"]
+                normalized = merged
             break
+    raw_type = normalized.get("type")
+    if isinstance(raw_type, list) and "null" in raw_type:
+        enum = normalized.get("enum")
+        if isinstance(enum, list) and None not in enum:
+            normalized["enum"] = [*enum, None]
+
+    for key in ("oneOf", "anyOf", "allOf"):
+        branches = normalized.get(key)
+        if isinstance(branches, list):
+            normalized[key] = [
+                _normalize_nullable_schema(cast(dict[str, Any], item))
+                if isinstance(item, dict) else item
+                for item in cast(list[Any], branches)
+            ]
 
     properties = normalized.get("properties")
     if isinstance(properties, dict):
@@ -556,7 +573,8 @@ def _normalize_nullable_schema(schema: dict[str, Any]) -> dict[str, Any]:
             for name, definition in definition_schemas.items()
         }
 
-    if normalized.get("type") == "object":
+    normalized_type = normalized.get("type")
+    if normalized_type == "object" or (isinstance(normalized_type, list) and "object" in normalized_type):
         normalized.setdefault("properties", {})
         normalized.setdefault("required", [])
     return normalized

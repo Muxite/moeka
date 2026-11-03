@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.channels.telegram.media_send import CAPTION_MAX, MediaTooLargeError
 from nanobot.config.paths import get_media_dir
 from nanobot.peer_context import validate_peer_context
 
@@ -56,6 +57,46 @@ def safe_action_message(value: object) -> str:
     return " ".join(text.split())[:300]
 
 
+# What this bridge reads from wonhee (spec 014). Mirrors wonhee's `creative.BRIDGE_SHAPES`; the startup
+# check compares the two so a renamed action or response key fails loudly instead of dropping work.
+SUPPORTED_CONTRACT_VERSIONS = frozenset({1})
+REQUIRED_SHAPES: dict[str, tuple[str, ...]] = {
+    "project_create": ("id", "name"),
+    "project_select": (),
+    "project_show": ("id", "name"),
+    "inbox_add": (),
+    "inbox_list": ("assets",),
+    "outbox_list": ("outputs",),
+    "delivery_show": ("deliveries", "failures"),
+    "delivery_retry": ("id", "status"),
+    "health": ("stuck_deliveries", "active_jobs"),
+}
+SAFETY_POLL_S = 30.0       # poll wonhee at least this often even if its database looks unchanged
+CONTRACT_RECHECK_S = 600.0  # re-verify the contract this often (wonhee runs from a live tree)
+JOB_CHECK_S = 60.0          # how often to look for stalled jobs
+
+
+def check_contract(contract: dict[str, Any]) -> list[str]:
+    """Problems that would make the bridge misbehave against this wonhee; empty means compatible."""
+    problems: list[str] = []
+    version = contract.get("contract_version")
+    if version not in SUPPORTED_CONTRACT_VERSIONS:
+        problems.append(
+            f"wonhee contract version {version!r} is not supported (moeka supports "
+            f"{sorted(SUPPORTED_CONTRACT_VERSIONS)})"
+        )
+    actions = set(contract.get("actions") or [])
+    shapes = contract.get("shapes") or {}
+    for action, keys in REQUIRED_SHAPES.items():
+        if action not in actions:
+            problems.append(f"wonhee has no '{action}' action")
+            continue
+        missing = sorted(set(keys) - set(shapes.get(action) or []))
+        if missing:
+            problems.append(f"'{action}' no longer promises {missing}")
+    return problems
+
+
 class CreativeActionError(RuntimeError):
     """A safe structured wonhee action failure with explicit retry semantics."""
 
@@ -86,6 +127,13 @@ class CreativeBridge:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
+        self.contract_state: dict[str, Any] = {"ok": None, "problems": [], "revision": None}
+        self._failures = 0
+        self._last_error: str | None = None
+        self._signal_stamp: int | None = -1  # -1: never looked, so the first tick polls
+        self._last_poll = 0.0
+        self._last_contract = 0.0
+        self._last_job_check = 0.0
         with self._db() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -133,7 +181,7 @@ class CreativeBridge:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=1900 if action == "inbox_add" else 60)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1900 if action == "inbox_add" else 60)
         except BaseException:
             if process.returncode is None:
                 process.kill()
@@ -143,6 +191,9 @@ class CreativeBridge:
             value: object = json.loads(stdout)
         except ValueError as exc:
             if process.returncode:
+                # The reason goes to the operator log, redacted; stderr is still never shown in chat.
+                logger.warning("wonhee {} failed (exit {}): {}", action, process.returncode,
+                               safe_action_message(stderr.decode("utf-8", "replace")[-400:]))
                 raise CreativeActionError("action_failed", f"wonhee {action} failed; inspect its status and retry.", permanent=False) from exc
             raise RuntimeError(f"wonhee {action} returned invalid JSON") from exc
         result = _mapping(value)
@@ -215,9 +266,7 @@ class CreativeBridge:
             route = self.route(message)
             self._remember_destination(route)
             if argument.lower() == "status":
-                status = self.health()
-                result = "Wonhee transport: " + json.dumps({"inputs": status["receipts"], "responses": status["outbound"]})
-                result += "\nUse /wonhee retry to explicitly resend the latest failed or uncertain response."
+                result = await self.status_report(route)
             elif argument.lower() == "retry":
                 with self._db() as db:
                     row = db.execute(
@@ -227,7 +276,19 @@ class CreativeBridge:
                     ).fetchone()
                     if row:
                         db.execute("UPDATE outbound SET state='queued',error=NULL,next_attempt=0 WHERE id=?", (row[0],))
-                result = "Retrying the latest saved text response; a previously uncertain send may appear twice." if row else "There is no failed or uncertain text response to retry."
+                try:
+                    redelivered = await self._retry_wonhee_delivery(route)
+                except Exception as exc:
+                    redelivered = None
+                    logger.warning("wonhee delivery retry unavailable ({})", type(exc).__name__)
+                parts = []
+                if row:
+                    parts.append("Retrying the latest saved text response")
+                if redelivered:
+                    parts.append(f"re-queued the file {redelivered}")
+                result = (", ".join(parts) + "; a previously uncertain send may appear twice.") if parts \
+                    else "There is no failed or uncertain response or delivery to retry."
+                self._wake.set()
             else:
                 name = argument[8:].strip() if argument.lower().startswith("project ") else argument
                 result = await self.handoff(message, project_name=name or None, leave=argument.lower() == "leave")
@@ -311,12 +372,122 @@ class CreativeBridge:
             receipts = {row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM receipt GROUP BY state")}
             outbound = {row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM outbound GROUP BY state")}
         return {"enabled": True, "running": self._task is not None and not self._task.done(),
-                "receipts": receipts, "outbound": outbound}
+                "receipts": receipts, "outbound": outbound, "contract": self.contract_state,
+                "link_failures": self._failures, "link_error": self._last_error}
+
+    async def verify_contract(self) -> bool:
+        """Compare wonhee's published contract with what this bridge reads. Never raises."""
+        self._last_contract = time.monotonic()
+        try:
+            contract = await self.call("contract")
+        except Exception as exc:
+            problems = ["wonhee has no 'contract' action or could not be reached "
+                        f"({type(exc).__name__}); upgrade wonhee or check its environment"]
+            contract = {}
+        else:
+            problems = check_contract(contract)
+        previous = self.contract_state.get("ok")
+        self.contract_state = {"ok": not problems, "problems": problems,
+                               "version": contract.get("contract_version"),
+                               "revision": contract.get("revision"),
+                               "signal": contract.get("signal") if not problems else None}
+        if problems:
+            if previous is not False:
+                logger.error("Wonhee link contract MISMATCH: {}", "; ".join(problems))
+        elif previous is not True:
+            logger.info("Wonhee link contract v{} ok (wonhee {})", contract.get("contract_version"),
+                        contract.get("revision"))
+        return not problems
+
+    async def status_report(self, route: dict[str, object]) -> str:
+        """What `/wonhee status` shows: this side, the contract, and wonhee's own view."""
+        local = self.health()
+        lines = ["Wonhee link: " + json.dumps({"inputs": local["receipts"], "responses": local["outbound"]})]
+        contract = self.contract_state
+        if contract.get("ok") is True:
+            lines.append(f"Contract v{contract.get('version')} ok, wonhee {contract.get('revision') or 'unknown revision'}.")
+        elif contract.get("ok") is False:
+            lines.append("CONTRACT MISMATCH: " + "; ".join(contract["problems"]))
+        if self._failures:
+            lines.append(f"Link trouble: {self._failures} failed checks in a row ({self._last_error}).")
+        try:
+            wonhee = await self.call("health")
+        except Exception as exc:
+            lines.append(f"Could not read wonhee health ({type(exc).__name__}).")
+            return "\n".join(lines)
+        for delivery in json_object_list(wonhee.get("stuck_deliveries", [])):
+            age = delivery.get("age_s")
+            lines.append(f"Delivery {delivery.get('id')} {delivery.get('filename')}: {delivery.get('status')}"
+                         + (f", {round(age / 60)} min" if isinstance(age, (int, float)) else "")
+                         + (f" ({safe_action_message(delivery['error'])})" if delivery.get("error") else ""))
+        for job in json_object_list(wonhee.get("active_jobs", [])):
+            lines.append(f"Job {job.get('id')}: {job.get('status')}"
+                         + (f" in {job['phase']}" if job.get("phase") else "")
+                         + (f", idle {round(job.get('idle_s', 0) / 60)} min" if job.get("idle_s") else "")
+                         + (" - STALLED" if job.get("stalled") else ""))
+        if len(lines) <= 2 and not self._failures:
+            lines.append("Nothing in flight or stuck.")
+        lines.append("Use /wonhee retry to resend the latest failed or uncertain response or delivery.")
+        return "\n".join(lines)
+
+    def _wonhee_changed(self) -> bool:
+        """Spawn-free change signal: the mtime of the marker file wonhee advertises in its contract.
+
+        Wonhee touches it only when a delivery is queued/failed/uncertain or a job fails, so an idle
+        wonhee costs nothing (its database itself changes every couple of seconds from heartbeats,
+        which is why that is not used). Without an advertised marker, every tick polls as before.
+        """
+        signal = self.contract_state.get("signal")
+        if not signal:
+            return True
+        try:
+            stamp: int | None = (Path(self.config.home) / str(signal)).stat().st_mtime_ns
+        except OSError:
+            stamp = None  # no event has happened yet
+        changed = stamp != self._signal_stamp
+        self._signal_stamp = stamp
+        return changed
+
+    def _poll_due(self) -> bool:
+        now = time.monotonic()
+        if self._wonhee_changed() or now - self._last_poll >= SAFETY_POLL_S:
+            self._last_poll = now
+            return True
+        return False
+
+    async def _check_jobs(self) -> None:
+        """Tell the creator once when a job stops moving; the agent never has to poll for it."""
+        self._last_job_check = time.monotonic()
+        wonhee = await self.call("health")
+        for job in json_object_list(wonhee.get("active_jobs", [])):
+            route = job.get("route")
+            if not job.get("stalled") or not isinstance(route, dict) or route.get("channel") != "telegram":
+                continue
+            minutes = max(1, round(float(job.get("idle_s") or 0) / 60))
+            where = f" in {job['phase']}" if job.get("phase") else ""
+            await self.queue_text(
+                f"job-stalled:{job['id']}",
+                f"Your reel (job {job['id']}) hasn't moved for {minutes} min{where}. "
+                "Ask me to inspect or retry it.",
+                cast(dict[str, object], route), int(job["project_id"]) if isinstance(job.get("project_id"), int) else None,
+            )
+
+    async def _retry_wonhee_delivery(self, route: dict[str, object]) -> str | None:
+        """Re-queue the newest failed or uncertain wonhee delivery for this chat, if any."""
+        wonhee = await self.call("health")
+        for delivery in json_object_list(wonhee.get("stuck_deliveries", [])):
+            target = delivery.get("route")
+            if delivery.get("status") in {"failed", "uncertain"} and isinstance(target, dict) \
+                    and str(target.get("chat_id")) == str(route.get("chat_id")):
+                await self.call("delivery_retry", delivery_id=delivery["id"])
+                return str(delivery.get("filename") or delivery["id"])
+        return None
 
     async def start(self) -> None:
         self.bus.inbound_interceptor = self.intercept
         if self.peers is not None and self.config.mode=='peer':
             self.peers.result_sink = self.queue_peer_result
+        await self.verify_contract()
         self._task = asyncio.create_task(self._run(), name="moeka-creative-bridge")
 
     async def stop(self) -> None:
@@ -355,7 +526,9 @@ class CreativeBridge:
                 await self.queue_text(identity, warning + " No file was imported from that source; your original request is still being processed.",
                                       payload["route"], payload["project_id"])
                 return
-            assets.append({"id": asset["id"], "ref": asset.get("ref", asset.get("sha256")), "role": "raw"})
+            imported = json_object_list(asset["assets"]) if "assets" in asset else [asset]
+            for item in imported:
+                assets.append({"id": item["id"], "ref": item.get("ref", item.get("sha256")), "role": "raw"})
 
         descriptors = json_object_list(payload["metadata"].get("attachments", []))
         for ordinal, media_path in enumerate(payload["media"]):
@@ -369,9 +542,12 @@ class CreativeBridge:
             project_part=f":project:{payload['project_id']}" if self.config.mode=='direct' else ''
             await import_source(link.rstrip(".,)"), f"drive:{row['id']}{project_part}:{ordinal}",
                                 {"route": payload["route"]}, f"Drive link {ordinal + 1}")
+        if len(assets) > 32:
+            input_errors.append(f"Imported {len(assets)} files; the first 32 are attached to this context. "
+                                "Use inbox_list with limit/offset pagination for the complete project asset list.")
         context = validate_peer_context({
             "version": 1, "project_id": payload["project_id"], "request_id": row["id"],
-            "route": payload["route"], "assets": assets, "input_errors": input_errors[:16],
+            "route": payload["route"], "assets": assets[:32], "input_errors": input_errors[:16],
         })
         if context is None:
             raise ValueError('creative transport context is missing')
@@ -396,7 +572,10 @@ class CreativeBridge:
             message.metadata['creative_original_text']=payload['content']
             message.content=payload['content']+'\n\n[Wonhee project context]\n'+json.dumps({
                 'project_id':payload['project_id'],'name':snapshot.get('name'),'brief':brief,
-                'assets':assets[:32],'recent_assets':recent_assets,'input_errors':input_errors},ensure_ascii=False)
+                'assets':assets[:32],'recent_assets':recent_assets,'input_errors':input_errors,
+                'recent_deliveries':await self._recent_deliveries(payload['project_id']),
+                'active_jobs':await self._active_jobs(payload['project_id'])},
+                ensure_ascii=False)
             stamp(message.metadata,context,self.context_key)
             if direct_message is None:
                 await self.bus.inbound.put(message)
@@ -411,6 +590,35 @@ class CreativeBridge:
         with self._db() as db:
             db.execute("UPDATE receipt SET state='forwarded',error=? WHERE id=?",
                        (json.dumps(input_errors) if input_errors else None, row["id"]))
+
+    async def _active_jobs(self, project_id: object) -> list[dict[str, Any]]:
+        """Queued/running jobs for this project with a stalled flag; best effort like deliveries."""
+        try:
+            jobs = json_object_list((await self.call("health")).get("active_jobs", []))
+        except Exception as exc:
+            logger.debug("active jobs unavailable ({})", type(exc).__name__)
+            return []
+        return [{k: j.get(k) for k in ("id", "status", "phase", "idle_s", "stalled")}
+                for j in jobs if j.get("project_id") == project_id]
+
+    async def _recent_deliveries(self, project_id: object, limit: int = 5) -> list[dict[str, Any]]:
+        """What was already sent to the creator, so 'status?' needs no polling.
+
+        Best effort: a failure here must never block intake of the creator's message.
+        """
+        try:
+            rows = json_object_list(
+                (await self.call("outbox_list", project_id=project_id)).get("outputs", []))
+        except Exception as exc:
+            logger.debug("recent deliveries unavailable ({})", type(exc).__name__)
+            return []
+        return [
+            {"id": r.get("id"), "file": r.get("filename"), "status": r.get("status"),
+             "mb": round(float(r.get("bytes") or 0) / 1_000_000, 1),
+             "report": safe_action_message(r.get("content") or "")[:200],
+             "at": r.get("created_at")}
+            for r in rows[:limit]
+        ]
 
     async def _send(self, payload: dict[str, object]) -> list[int]:
         from nanobot.channels.telegram.runtime import TelegramChannel
@@ -432,16 +640,30 @@ class CreativeBridge:
             home = Path(self.config.home).resolve()
             if not resolved.is_file() or not resolved.is_relative_to(home / "creative-outbox"):
                 raise ValueError("creative output is outside the configured outbox")
-            if resolved.stat().st_size <= 50_000_000:
-                media.append(str(resolved))
-            elif not payload.get("url"):
-                raise ValueError("oversized output has no private download URL")
+            # The channel fits an oversized video under Telegram's limit (re-encode) and raises
+            # MediaTooLargeError, a ValueError, when it cannot; the original stays at the URL.
+            media.append(str(resolved))
         if payload.get("url"):
             content += "\nOriginal file: " + str(payload["url"])
-        return await channel.send_registered(OutboundMessage(
-            channel="telegram", chat_id=str(route["chat_id"]), content=content,
-            media=media, metadata=metadata,
-        ))
+        if media and len(content) <= CAPTION_MAX:
+            # One message: the file with its report as the caption, not a file and a second text.
+            metadata["media_caption"] = content
+            metadata["content_as_caption"] = True
+        try:
+            return await channel.send_registered(OutboundMessage(
+                channel="telegram", chat_id=str(route["chat_id"]), content=content,
+                media=media, metadata=metadata,
+            ))
+        except MediaTooLargeError as exc:
+            if not payload.get("url"):
+                raise
+            for key in ("media_caption", "content_as_caption"):
+                metadata.pop(key, None)
+            return await channel.send_registered(OutboundMessage(
+                channel="telegram", chat_id=str(route["chat_id"]),
+                content=f"{content}\n(Could not attach the file inline: {exc})",
+                media=[], metadata=metadata,
+            ))
 
     async def _poll_outbound(self) -> None:
         with self._db() as db:
@@ -474,9 +696,11 @@ class CreativeBridge:
         response = await self.call("delivery_show")
         rows = json_object_list(response.get("results", response.get("deliveries", [])))
         for failure in json_object_list(response.get("failures", [])):
+            reason = safe_action_message(failure.get("error")) if failure.get("error") else ""
             await self.queue_text(
                 f"submission-failed:{failure['id']}",
-                "Your reel couldn't finish. Your original take and request are saved; ask me to inspect or retry it.",
+                "Your reel couldn't finish" + (f": {reason}" if reason else ".")
+                + " Your original take and request are saved; ask me to inspect or retry it.",
                 _mapping(failure['route']), int(failure['project_id']),
             )
         for row in rows:
@@ -522,13 +746,31 @@ class CreativeBridge:
                 channel = self.get_channel("telegram")
                 if channel is not None and getattr(channel, "_app_ready", asyncio.Event()).is_set():
                     await self._poll_outbound()
-                    await self._poll_deliveries()
+                    if self._poll_due():
+                        await self._poll_deliveries()
+                    now = time.monotonic()
+                    if now - self._last_job_check >= JOB_CHECK_S:
+                        try:  # an advisory check must never put the delivery loop into backoff
+                            await self._check_jobs()
+                        except Exception as exc:
+                            logger.warning("Stalled-job check failed ({})", type(exc).__name__)
+                    if now - self._last_contract >= CONTRACT_RECHECK_S:
+                        await self.verify_contract()
+                if self._failures:
+                    logger.info("Wonhee link recovered after {} failed checks", self._failures)
+                self._failures, self._last_error = 0, None
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Creative bridge will retry ({})", type(exc).__name__)
+                self._failures += 1
+                self._last_error = safe_action_message(f"{type(exc).__name__}: {exc}")
+                self._last_poll = 0.0  # force a poll on the next success: the change signal may have been missed
+                # Louder on the 3rd consecutive failure, then quiet: do not flood the log every tick.
+                (logger.error if self._failures == 3 else logger.warning)(
+                    "Creative bridge will retry (#{}): {}", self._failures, self._last_error)
             self._wake.clear()
+            delay = min(60.0, self.config.poll_s * (2 ** min(self._failures, 5)))
             try:
-                await asyncio.wait_for(self._wake.wait(), self.config.poll_s)
+                await asyncio.wait_for(self._wake.wait(), delay)
             except TimeoutError:
                 pass

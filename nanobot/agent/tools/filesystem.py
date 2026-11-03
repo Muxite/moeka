@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pydantic import Field
+
 from nanobot.agent.tools.base import (
     Tool,
     ToolResult,
@@ -48,6 +50,10 @@ class FileToolsConfig(Base):
     """Filesystem tools configuration."""
 
     enable: bool = True  # built-in file tools on by default
+    # Extra READ-ONLY roots (e.g. ["~/projects", "/mnt"]). Reads only: writes stay inside the
+    # workspace, and the protected-path floor (auth, sessions, keys, other instances) still
+    # applies under any root listed here.
+    read_roots: list[str] = Field(default_factory=list)
 
 
 DEFAULT_MAX_WRITE_BYTES = 10 * 1024 * 1024
@@ -202,7 +208,11 @@ class _FsTool(Tool):
         tool = cls(
             workspace=agent_workspace,
             allowed_dir=allowed_dir,
-            extra_read_allowed_dirs=[skills_dir, resolved_agent_workspace / "skills"],
+            extra_read_allowed_dirs=[
+                skills_dir,
+                resolved_agent_workspace / "skills",
+                *(Path(r).expanduser() for r in ctx.config.file.read_roots if str(r).strip()),
+            ],
             extra_read_allowed_files=[resolved_agent_workspace / "memory" / "history.jsonl"],
             file_states=ctx.file_state_store,
             restrict_to_workspace=ctx.config.restrict_to_workspace,

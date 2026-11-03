@@ -281,7 +281,7 @@ def test_wrapper_normalizes_nullable_property_type_union() -> None:
 
     wrapper = MCPToolWrapper(SimpleNamespace(call_tool=None), "test", tool_def)
 
-    assert wrapper.parameters["properties"]["name"] == {"type": "string", "nullable": True}
+    assert wrapper.parameters["properties"]["name"] == {"type": ["string", "null"]}
 
 
 def test_wrapper_normalizes_nullable_property_anyof() -> None:
@@ -302,9 +302,8 @@ def test_wrapper_normalizes_nullable_property_anyof() -> None:
     wrapper = MCPToolWrapper(SimpleNamespace(call_tool=None), "test", tool_def)
 
     assert wrapper.parameters["properties"]["name"] == {
-        "type": "string",
+        "type": ["string", "null"],
         "description": "optional name",
-        "nullable": True,
     }
 
 
@@ -2056,3 +2055,35 @@ def test_tool_description_is_capped_and_control_chars_stripped() -> None:
     assert param_desc.startswith("xyz") and param_desc.endswith("…")
     # the server's schema object is not mutated
     assert schema["properties"]["a"]["description"].startswith("x\x00y")
+
+
+def test_nullable_asset_and_enum_remain_valid_json_schema() -> None:
+    import jsonschema
+    schema = {"type":"object", "properties":{
+        "asset_id":{"anyOf":[{"type":"integer","minimum":1},{"type":"null"}],"default":None},
+        "orientation":{"anyOf":[{"type":"string","enum":["landscape","portrait"]},{"type":"null"}]}}}
+    wrapper=MCPToolWrapper(SimpleNamespace(call_tool=None),"test",SimpleNamespace(name="build",description="build",inputSchema=schema))
+    validator=jsonschema.Draft202012Validator(wrapper.parameters)
+    assert validator.is_valid({"asset_id":None,"orientation":None})
+    assert validator.is_valid({"asset_id":15,"orientation":"landscape"})
+    assert not validator.is_valid({"asset_id":0})
+    assert not validator.is_valid({"orientation":"made up"})
+    assert wrapper.parameters["properties"]["asset_id"]["default"] is None
+    assert wrapper.validate_params({"asset_id":None,"orientation":None}) == []
+
+
+def test_nullable_normalizer_preserves_type_lists_objects_and_const_unions() -> None:
+    import jsonschema
+
+    from nanobot.agent.tools.mcp import _normalize_schema_for_openai
+    schema = _normalize_schema_for_openai({"type":"object","properties":{
+        "multi":{"type":["string","integer"],"nullable":True},
+        "mapping":{"anyOf":[{"type":"object"},{"type":"null"}]},
+        "fixed":{"anyOf":[{"type":"string","const":"x"},{"type":"null"}]}}})
+    assert schema["properties"]["multi"]["type"] == ["string","integer","null"]
+    assert schema["properties"]["mapping"]["properties"] == {}
+    assert schema["properties"]["mapping"]["required"] == []
+    validator=jsonschema.Draft202012Validator(schema)
+    assert validator.is_valid({"multi":None,"mapping":None,"fixed":None})
+    assert validator.is_valid({"multi":1,"mapping":{},"fixed":"x"})
+    assert not validator.is_valid({"fixed":"wrong"})

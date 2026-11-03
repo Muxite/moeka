@@ -73,6 +73,7 @@ from nanobot.utils.runtime import (
     repeated_external_lookup_error,
     repeated_policy_error,
     repeated_workspace_violation_error,
+    tool_error_stop_message,
 )
 
 if TYPE_CHECKING:
@@ -859,8 +860,13 @@ class AgentRunner:
                         f"max_tool_errors: {tool_errors.count} tool errors "
                         f"(limit {tool_errors.limit})"
                     )
+                    final_content = tool_error_stop_message(tool_events, tool_errors.count, tool_errors.limit)
+                    context.final_content = final_content
                     context.error = error
                     context.stop_reason = stop_reason
+                    self._append_final_message(messages, final_content)
+                    if hook.wants_streaming():
+                        await hook.on_stream_end(context, resuming=False)
                     logger.warning(
                         "Stopping turn for {}: {}", spec.session_key or "default", error,
                     )
