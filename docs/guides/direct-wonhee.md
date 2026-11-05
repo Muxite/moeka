@@ -94,3 +94,22 @@ privately in /mnt/arteta/stagecraft/deployments/direct-pyright.txt.
 - A job that stops moving (no heartbeat for 10 minutes while running, or unclaimed for 30 minutes) is
   announced to the creator once; a failed reel's notice now carries the reason.
 
+## The self-check gate (spec 014)
+
+- Before a wonhee delivery is sent, the bridge hashes the file, looks for an earlier delivery in the same
+  project with identical bytes (wonhee stores outputs by content hash), and measures what ffprobe/ffmpeg can:
+  resolution, duration, fps and audio loudness. The result is stored in `delivery_check` in
+  `peers/creative.sqlite3`.
+- The report that travels as the caption is wonhee's text plus: a `WARNING: byte-identical to delivery N`
+  line when the output did not change, `Measured: ...`, the short file hash, and `Not checked: caption
+  legibility, timing and motion`. It replaces wonhee's `Full file check: not yet run.`
+- The agent's project context lists each recent delivery with `sha`, `duplicate_of` and `measured`
+  (`checked: false` for one sent before the gate), plus `evidence_rules`: say a change worked only for a new
+  file that was also viewed with `view_media`; if `duplicate_of` is set, tell the creator nothing changed.
+- `view_media` reports the viewed file's `sha256` prefix, so a claim can name the exact file it checked and be
+  compared with the delivered `sha`.
+- A failing check never blocks the delivery; it is sent without the extra lines and a warning is logged.
+- Limits, stated: the gate measures and compares bytes; it does not judge how a reel looks. It also does not
+  stop the agent from submitting an identical job again; the agent learns of the duplicate when it is
+  delivered, and a pre-submission block would need wonhee to expose a render fingerprint.
+

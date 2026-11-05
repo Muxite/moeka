@@ -8,6 +8,7 @@ answer. Frame timestamps are always reported so claims can cite them.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -35,10 +36,11 @@ _SYSTEM_PROMPT = (
 
 
 def _fmt_facts(path: Path, facts: media_probe.MediaFacts | None,
-               loud: dict[str, float] | None) -> str:
+               loud: dict[str, float] | None, sha: str = "") -> str:
+    tag = f"\nsha256: {sha[:12]}" if sha else ""
     if facts is None:
-        return f"file: {path.name}\nfacts: unavailable (ffprobe could not read the file)"
-    lines = [f"file: {path.name}", f"size: {facts.size_bytes / 1_000_000:.1f} MB"]
+        return f"file: {path.name}{tag}\nfacts: unavailable (ffprobe could not read the file)"
+    lines = [f"file: {path.name}" + tag, f"size: {facts.size_bytes / 1_000_000:.1f} MB"]
     if facts.duration_s is not None:
         lines.append(f"duration: {facts.duration_s:.2f}s")
     if facts.width and facts.height:
@@ -150,13 +152,16 @@ class ViewMediaTool(Tool):
 
         content: list[dict[str, Any]]
         scratch: Path | None = None
+        # The hash ties this viewing to one exact file, so a later claim can say which file was checked.
+        sha = await asyncio.to_thread(media_probe.file_sha256, resolved)
         try:
             if kind == "image":
                 raw = resolved.read_bytes()
                 mime = detect_image_mime(raw)
                 if mime is None:
                     return ToolResult.error("Error: file is not a readable image")
-                facts_text = f"file: {resolved.name}\nsize: {size / 1_000_000:.1f} MB (image)"
+                facts_text = (f"file: {resolved.name}\nsha256: {sha[:12]}\n"
+                              f"size: {size / 1_000_000:.1f} MB (image)")
                 content = [{"type": "text", "text": f"{facts_text}\n\nQuestion: {question}"}]
                 content += build_image_content_blocks(raw, mime, str(resolved), "image")
                 frame_note = "image (single frame)"
@@ -176,7 +181,7 @@ class ViewMediaTool(Tool):
                 )
                 if not frames:
                     return ToolResult.error("Error: no frames could be extracted from this video")
-                facts_text = _fmt_facts(resolved, facts, loud)
+                facts_text = _fmt_facts(resolved, facts, loud, sha)
                 content = [{
                     "type": "text",
                     "text": f"{facts_text}\n\nQuestion: {question}\n\nFrames follow, in order.",

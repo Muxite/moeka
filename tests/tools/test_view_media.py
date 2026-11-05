@@ -98,6 +98,7 @@ async def test_video_result_has_facts_timestamps_and_untrusted_banner(tmp_path):
     assert not result.is_error, result
     assert result.startswith(UNTRUSTED_BANNER)
     assert "resolution: 320x240" in result and "frames at 0.00s" in result
+    assert f"sha256: {media_probe.file_sha256(ws / 'clip.mp4')[:12]}" in result  # ties the look to one file
     assert "Answer: Caption visible at 0.00s" in result
     sent = provider.calls[0]["messages"][1]["content"]
     images = [b for b in sent if b.get("type") == "image_url"]
@@ -113,7 +114,7 @@ async def test_image_goes_straight_to_viewer(tmp_path):
     _make_png(ws / "a.png")
     result = await tool.execute(path=str(ws / "a.png"), question="What is shown?")
     assert not result.is_error, result
-    assert "viewed: image (single frame)" in result
+    assert "viewed: image (single frame)" in result and "sha256: " in result
     sent = provider.calls[0]["messages"][1]["content"]
     assert sum(1 for b in sent if b.get("type") == "image_url") == 1
 

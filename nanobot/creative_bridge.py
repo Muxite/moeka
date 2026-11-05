@@ -22,7 +22,15 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.channels.telegram.media_send import CAPTION_MAX, MediaTooLargeError
 from nanobot.config.paths import get_media_dir
+from nanobot.creative_checks import (
+    EVIDENCE_RULES,
+    compose_report,
+    facts_for,
+    find_duplicate,
+    measured_text,
+)
 from nanobot.peer_context import validate_peer_context
+from nanobot.utils import media_probe
 
 if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
@@ -152,6 +160,10 @@ class CreativeBridge:
                 );
                 CREATE TABLE IF NOT EXISTS destination (
                     key TEXT PRIMARY KEY, route TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS delivery_check (
+                    delivery_id INTEGER PRIMARY KEY, sha TEXT NOT NULL, duplicate_of INTEGER,
+                    facts TEXT, checked_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS delivered (
                     chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, project_id INTEGER NOT NULL,
@@ -574,7 +586,8 @@ class CreativeBridge:
                 'project_id':payload['project_id'],'name':snapshot.get('name'),'brief':brief,
                 'assets':assets[:32],'recent_assets':recent_assets,'input_errors':input_errors,
                 'recent_deliveries':await self._recent_deliveries(payload['project_id']),
-                'active_jobs':await self._active_jobs(payload['project_id'])},
+                'active_jobs':await self._active_jobs(payload['project_id']),
+                'evidence_rules':EVIDENCE_RULES},
                 ensure_ascii=False)
             stamp(message.metadata,context,self.context_key)
             if direct_message is None:
@@ -612,13 +625,58 @@ class CreativeBridge:
         except Exception as exc:
             logger.debug("recent deliveries unavailable ({})", type(exc).__name__)
             return []
-        return [
-            {"id": r.get("id"), "file": r.get("filename"), "status": r.get("status"),
-             "mb": round(float(r.get("bytes") or 0) / 1_000_000, 1),
-             "report": safe_action_message(r.get("content") or "")[:200],
-             "at": r.get("created_at")}
-            for r in rows[:limit]
-        ]
+        recent = rows[:limit]
+        ids = [r["id"] for r in recent if isinstance(r.get("id"), int)]
+        checks: dict[int, sqlite3.Row] = {}
+        if ids:
+            with self._db() as db:
+                marks = ",".join("?" * len(ids))
+                checks = {c["delivery_id"]: c for c in db.execute(
+                    f"SELECT * FROM delivery_check WHERE delivery_id IN ({marks})", ids)}
+        out: list[dict[str, Any]] = []
+        for r in recent:
+            entry: dict[str, Any] = {
+                "id": r.get("id"), "file": r.get("filename"), "status": r.get("status"),
+                "mb": round(float(r.get("bytes") or 0) / 1_000_000, 1),
+                "report": safe_action_message(r.get("content") or "")[:200],
+                "at": r.get("created_at"),
+            }
+            check = checks.get(r.get("id")) if isinstance(r.get("id"), int) else None
+            if check is not None:
+                facts = json.loads(check["facts"]) if check["facts"] else None
+                entry.update({
+                    "sha": check["sha"][:8], "duplicate_of": check["duplicate_of"],
+                    "measured": measured_text({"facts": facts, "mb": entry["mb"]}),
+                })
+            else:
+                entry["checked"] = False  # sent before the gate existed, or the check failed
+            out.append(entry)
+        return out
+
+    async def _verify_output(self, payload: dict[str, object], resolved: Path) -> dict[str, Any]:
+        """Hash the file about to be sent, find an earlier identical delivery, measure what we can."""
+        sha = await asyncio.to_thread(media_probe.file_sha256, resolved)
+        check: dict[str, Any] = {"sha": sha, "mb": round(resolved.stat().st_size / 1_000_000, 1),
+                                 "duplicate_of": None, "facts": None}
+        project_id = payload.get("project_id")
+        if isinstance(project_id, int):
+            try:
+                rows = json_object_list((await self.call("outbox_list", project_id=project_id)).get("outputs", []))
+                check["duplicate_of"] = find_duplicate(sha, payload.get("id"), rows)
+            except Exception as exc:
+                logger.debug("duplicate check unavailable ({})", type(exc).__name__)
+        try:
+            check["facts"] = await facts_for(resolved)
+        except Exception as exc:
+            logger.debug("media facts unavailable ({})", type(exc).__name__)
+        delivery_id = payload.get("id")
+        if isinstance(delivery_id, int):
+            duplicate = check["duplicate_of"]
+            with self._db() as db:
+                db.execute("INSERT OR REPLACE INTO delivery_check VALUES(?,?,?,?,?)",
+                           (delivery_id, sha, duplicate["id"] if duplicate else None,
+                            json.dumps(check["facts"]) if check["facts"] else None, time.time()))
+        return check
 
     async def _send(self, payload: dict[str, object]) -> list[int]:
         from nanobot.channels.telegram.runtime import TelegramChannel
@@ -643,6 +701,12 @@ class CreativeBridge:
             # The channel fits an oversized video under Telegram's limit (re-encode) and raises
             # MediaTooLargeError, a ValueError, when it cannot; the original stays at the URL.
             media.append(str(resolved))
+            # Self-check gate: measure the file, compare it with earlier deliveries, and say what was
+            # not checked. Best effort: a failed check must never block the delivery itself.
+            try:
+                content = compose_report(content, await self._verify_output(payload, resolved))
+            except Exception as exc:
+                logger.warning("Delivery check failed ({}); sending without it", type(exc).__name__)
         if payload.get("url"):
             content += "\nOriginal file: " + str(payload["url"])
         if media and len(content) <= CAPTION_MAX:

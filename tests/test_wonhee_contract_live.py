@@ -83,3 +83,38 @@ async def test_real_wonhee_advertises_a_marker_and_moves_it_on_a_queued_delivery
                     route={"channel": "telegram", "chat_id": "1"})
     assert live._wonhee_changed() is True      # the queued delivery signalled the bridge
     assert len((await live.call("delivery_show"))["deliveries"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_real_wonhee_rerender_with_identical_bytes_is_flagged_by_the_gate(live, tmp_path):
+    """The Oct 26 failure end to end: two deliveries of the same bytes, through wonhee's own CLI."""
+    import shutil
+    import subprocess
+
+    from nanobot.creative_checks import compose_report
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg needed to make a real clip")
+    video = tmp_path / "reel.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc=duration=1:size=160x120:rate=5", "-pix_fmt", "yuv420p", str(video)], check=True)
+    project = await live.call("project_create", name="gate-live")
+    stored = await live.call("inbox_add", source=str(video), project_id=project["id"], source_key="g:1")
+    route = {"channel": "telegram", "chat_id": "1"}
+    first = await live.call("outbox_add", ref=stored["ref"], filename="reel-4.mp4",
+                            project_id=project["id"], route=route, content="Reel ready.")
+    second = await live.call("outbox_add", ref=stored["ref"], filename="reel-5.mp4",
+                             project_id=project["id"], route=route,
+                             content="Reel ready. Full file check: not yet run.")
+    delivered = Path(second["path"])
+    assert delivered.is_file()
+
+    check = await live._verify_output({"id": second["id"], "project_id": project["id"]}, delivered)
+    assert check["duplicate_of"]["id"] == first["id"]  # found through the real outbox_list
+    report = compose_report(second["content"], check)
+    assert f"WARNING: byte-identical to delivery {first['id']} (reel-4.mp4)" in report
+    assert "160x120" in report  # real ffprobe facts, not wonhee's 'not yet run'
+
+    other = await live._verify_output({"id": first["id"], "project_id": project["id"]}, Path(first["path"]))
+    assert other["duplicate_of"] is None  # the first delivery is the original, never a duplicate

@@ -205,3 +205,16 @@ async def test_direct_project_without_saved_brief_is_valid(bridge):
     await bridge.handoff(msg, project_name="mesh")
     assert await bridge.intercept(msg) is False
     assert '"brief": {}' in msg.content
+
+
+@pytest.mark.asyncio
+async def test_agent_context_carries_the_evidence_rules_and_delivery_checks(bridge):
+    from nanobot.creative_checks import EVIDENCE_RULES
+
+    msg = InboundMessage(channel="telegram", chat_id="123", sender_id="owner",
+                         content="did the font change?", metadata={"message_id": 10})
+    await bridge.handoff(msg, project_name="mesh")
+    assert await bridge.intercept(msg) is False
+    assert "[Wonhee project context]" in msg.content
+    assert "evidence_rules" in msg.content and EVIDENCE_RULES[:40] in msg.content
+    assert "recent_deliveries" in msg.content

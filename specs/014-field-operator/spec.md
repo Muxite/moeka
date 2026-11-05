@@ -46,7 +46,14 @@ watch work on the machine, and report honestly what was and was not checked. Pla
   - Wonhee: an acknowledged send overrides a recovery-marked `uncertain` delivery.
   - Audit claims that did not hold: missing `enabledTools` entries already warn loudly; the wonhee child's
     stderr already reaches the gateway journal; `creative serve` does not send to Telegram.
-- Phases 3 to 6: not started (self-check gate, escalation, staying on track, traces).
+- Phase 3 self-check gate (2026-11-03): built at delivery time, where it can be enforced in code.
+  - `nanobot/creative_checks.py`: duplicate detection by content hash, measured facts, the honest report,
+    `EVIDENCE_RULES`; `delivery_check` table; `recent_deliveries` carries `sha`/`duplicate_of`/`measured`.
+  - `view_media` reports a `sha256` prefix. End-to-end test of the Oct 26 identical-reel failure runs
+    against the real wonhee CLI.
+  - Not built, deliberately: free-text claim detection in the runner (fragile, would block valid replies);
+    a pre-submission duplicate block (needs a render fingerprint from wonhee); escalation (Phase 4).
+- Phases 4 to 6: not started (escalation, staying on track, traces).
 
 ## Host-ambient allowlist
 

@@ -469,7 +469,8 @@ async def test_delivery_report_travels_as_the_file_caption(bridge, tmp_path):
     assert ids == [5]
     msg = send.await_args.args[0]
     assert msg.media == [str(f.resolve())]
-    assert msg.metadata["media_caption"] == "Reel 5 ready. Not yet checked."
+    assert msg.metadata["media_caption"].startswith("Reel 5 ready. Not yet checked.")
+    assert "Not checked: caption legibility" in msg.metadata["media_caption"]
     assert msg.metadata["content_as_caption"] is True
 
 
@@ -702,3 +703,112 @@ async def test_context_lists_only_this_projects_jobs(bridge):
     assert "route" not in (await bridge._active_jobs(7))[0]
     bridge.call = AsyncMock(side_effect=RuntimeError("down"))
     assert await bridge._active_jobs(7) == []
+
+
+# --- spec 014: self-check gate on delivery ------------------------------------------------------------
+
+def _sha(path):
+    from nanobot.utils.media_probe import file_sha256
+    return file_sha256(path)
+
+
+@pytest.mark.asyncio
+async def test_identical_rerender_is_flagged_in_the_caption_and_recorded(bridge, tmp_path):
+    """The Oct 26 failure: reel-5 was byte-identical to reel-4 yet was reported as a fix."""
+    f = _outbox_file(tmp_path, "reel-5.mp4")
+    sha = _sha(f)
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 11, "ref": sha, "filename": "reel-5.mp4", "created_at": "t2"},
+        {"id": 10, "ref": sha, "filename": "reel-4.mp4", "created_at": "t1"},
+        {"id": 9, "ref": "f" * 64, "filename": "other.mp4", "created_at": "t0"},
+    ]})
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    await bridge._send({"id": 11, "project_id": 7, "route": _route(), "path": str(f),
+                        "content": "Your reel is ready. Full file check: not yet run."})
+    caption = send.await_args.args[0].metadata["media_caption"]
+    assert "WARNING: byte-identical to delivery 10 (reel-4.mp4)" in caption
+    assert "did not take effect" in caption
+    assert "Full file check: not yet run" not in caption  # replaced by what was really measured
+    assert f"File {sha[:8]}" in caption and "Not checked:" in caption
+    with bridge._db() as db:
+        row = db.execute("SELECT * FROM delivery_check WHERE delivery_id=11").fetchone()
+    assert row["sha"] == sha and row["duplicate_of"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_changed_output_is_not_flagged(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 11, "ref": _sha(f), "filename": "new.mp4"}, {"id": 10, "ref": "e" * 64, "filename": "old.mp4"},
+    ]})
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    await bridge._send({"id": 11, "project_id": 7, "route": _route(), "path": str(f), "content": "Ready."})
+    assert "WARNING" not in send.await_args.args[0].metadata["media_caption"]
+
+
+@pytest.mark.asyncio
+async def test_only_an_earlier_delivery_counts_as_the_original(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    sha = _sha(f)
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 12, "ref": sha, "filename": "later.mp4"}, {"id": 11, "ref": sha, "filename": "this.mp4"},
+    ]})
+    check = await bridge._verify_output({"id": 11, "project_id": 7}, f)
+    assert check["duplicate_of"] is None  # delivery 12 came after, so 11 is the first of its kind
+
+
+@pytest.mark.asyncio
+async def test_a_failing_check_never_blocks_the_delivery(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    bridge._verify_output = AsyncMock(side_effect=RuntimeError("probe exploded"))
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    assert await bridge._send({"id": 11, "project_id": 7, "route": _route(), "path": str(f),
+                               "content": "Ready."}) == [5]
+    assert send.await_args.args[0].metadata["media_caption"] == "Ready."  # unaugmented, but delivered
+
+
+@pytest.mark.asyncio
+async def test_a_wonhee_outage_still_yields_facts_and_the_unchecked_list(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    bridge.call = AsyncMock(side_effect=RuntimeError("wonhee down"))
+    check = await bridge._verify_output({"id": 11, "project_id": 7}, f)
+    assert check["duplicate_of"] is None and check["sha"] == _sha(f)
+
+
+@pytest.mark.asyncio
+async def test_recent_deliveries_carry_the_check_so_the_agent_cannot_miss_a_duplicate(bridge, tmp_path):
+    import json
+    with bridge._db() as db:
+        db.execute("INSERT INTO delivery_check VALUES(?,?,?,?,?)",
+                   (11, "a" * 64, 10, json.dumps({"width": 1080, "height": 1920, "duration_s": 20.3,
+                                                  "fps": 30.0, "has_audio": False}), 0.0))
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 11, "filename": "reel-5.mp4", "status": "sent", "bytes": 1_800_000, "content": "ok"},
+        {"id": 3, "filename": "old.mp4", "status": "sent", "bytes": 1},
+    ]})
+    rows = await bridge._recent_deliveries(7)
+    assert rows[0]["sha"] == "a" * 8 and rows[0]["duplicate_of"] == 10
+    assert rows[0]["measured"] == "1080x1920, 20.3 s, 30.0 fps, no audio"
+    assert rows[1]["checked"] is False and "sha" not in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_real_ffprobe_facts_land_in_the_report(bridge, tmp_path):
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    f = _outbox_file(tmp_path, "real.mp4")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc=duration=2:size=320x240:rate=10", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=2", "-shortest", "-pix_fmt", "yuv420p", str(f)], check=True)
+    bridge.call = AsyncMock(return_value={"outputs": []})
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    await bridge._send({"id": 4, "project_id": 7, "route": _route(), "path": str(f), "content": "Ready."})
+    caption = send.await_args.args[0].metadata["media_caption"]
+    assert "320x240" in caption and "2.0 s" in caption and "LUFS" in caption

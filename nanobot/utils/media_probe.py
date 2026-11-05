@@ -8,6 +8,7 @@ report "not checked" instead of failing.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -37,6 +38,15 @@ class MediaFacts:
 class Frame:
     t: float
     path: Path
+
+
+def file_sha256(path: Path) -> str:
+    """Streaming SHA-256 of a file (blocking; call from a thread for large files)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def tools_available() -> bool:
