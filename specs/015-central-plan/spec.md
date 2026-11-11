@@ -174,6 +174,20 @@ Each phase must leave the suite green and be reversible on its own.
   `tools.file.protectSource`, bwrap masks (`granted_root_masks`), `scripts/selfrevert.py` with `/stable`,
   `/revert` and the boot guard. Reading moeka's own source stays allowed.
 
+- Phases 3 to 5 (2026-11-11, `feat/worker-adapter`), reordered to match the owner's intent that moeka is the
+  relationship layer that delegates to Claude Code and Codex:
+  - Phase 3 (done): job store outbox, routes and links; the system-built dead-turn report; the delayed "heard"
+    acknowledgement; the `job_status` tool; `nanobot/job_notifier.py` (proactive, durable, never double-sends,
+    reports restart orphans); wonhee jobs attached to the chat turn that started them (heuristic).
+  - Phase 5 (done, built before 4): `nanobot/workers/` and the `worker_start`, `worker_follow_up`,
+    `worker_inspect`, `worker_stop` tools. Backends are explicit and never fall back (different accounts and
+    usage). Claude Code and Codex were both run live under bwrap, and a follow-up resumed the same Claude
+    session. Workers run detached and re-attach after a restart.
+  - Phase 4 (done): `kernel/job_review.py` and `nanobot/job_review_service.py`; the evidence rule is code (new
+    skill needs 3 completed repeats or `/approve-skill`).
+  - Not built: the review does not yet draft playbooks or small tools itself (it asks and gates); per-role
+    grants; usage budgets per backend beyond the recorded per-account totals.
+
 ## Open for the owner
 
 - Which roots and which roles get write on day one.

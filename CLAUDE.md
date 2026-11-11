@@ -104,6 +104,14 @@ Moeka-specific deviations from upstream nanobot:
   guard runs from `bin/moeka.sh run` (default instance only) and reverts to the newest stable tag after three
   unhealthy boots of one commit within ten minutes; the gateway marks a boot healthy after 60 s
   (`nanobot/cli/selfrevert_link.py`).
+- **Notifier, dead-turn report and workers (spec 015)** — `nanobot/job_notifier.py` sends job outbox entries
+  (`job_notifications`) to the job's own chat; `kernel/job_report.py` builds the dead-turn report the loop
+  substitutes for an empty final response. `nanobot/workers/` (`WorkerManager`, drivers, bwrap wrapper) and the
+  `worker_*` tools delegate to Claude Code or Codex under an explicit backend (never a fallback), detached and
+  re-attached after restarts; `tools.workers.<backend>.enable` is off by default.
+- **Evidence rule (spec 015)** — `kernel/job_review.py:new_skill_gate` refuses Dream staging a brand-new skill
+  unless 3 completed repeats of a request exist or the owner ran `/approve-skill`;
+  `nanobot/job_review_service.py` asks the owner once per pattern during idle time.
 - **Gateway still on the legacy loop path** — the gateway builds `AgentLoop` through `AgentLoop.from_config` with a
   `LegacyEnvironment`, not through `moeka.Kernel`; moving it is stage 2 of `specs/003-main-consolidation/`.
 

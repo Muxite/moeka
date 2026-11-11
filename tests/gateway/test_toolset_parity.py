@@ -23,7 +23,7 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.cron.service import CronService
 
-HOST_TOOLS = {"message", "cron", "run_cli_app"}
+HOST_TOOLS = {"message", "cron", "run_cli_app", "job_status"}
 
 REPO = Path(__file__).resolve().parents[2]
 # Modules that run a gateway/host loop: the gateway runtime, `nanobot agent`,

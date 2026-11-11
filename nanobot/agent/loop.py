@@ -537,9 +537,24 @@ class AgentLoop:
             from nanobot.session.sqlite_store import get_store
 
             self.job_store = JobStore(get_store(self.sessions).sessions_dir / JOBS_DB_NAME)
-            self._hook_factories.append(job_hook_factory(self.job_store))
+            self._hook_factories.append(job_hook_factory(self.job_store, ack=self._job_ack))
+            # Spec 015 phase 4: a new skill needs proof of reuse in the job record.
+            from functools import partial
+
+            from nanobot.kernel.job_review import new_skill_gate
+
+            self.context.memory.new_skill_gate = partial(new_skill_gate, self.job_store)
         except Exception:
             logger.exception("job record unavailable; continuing without it")
+        # Spec 015 phase 5: coding-agent workers, only when a backend is enabled in config.
+        self.worker_manager = None
+        if self.job_store is not None and self.host_tools:
+            workers_cfg = self.tools_config.workers
+            if workers_cfg.claude.enable or workers_cfg.codex.enable:
+                try:
+                    self.worker_manager = self._build_worker_manager(workers_cfg)
+                except Exception:
+                    logger.exception("worker manager unavailable; delegation disabled")
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         # Spec 011: the capability index holds this loop's tools next to its skills.
         self.context.tool_registry = self.tools
@@ -882,6 +897,8 @@ class AgentLoop:
             model_routing=self.model_routing,
             peer_service=self.peer_service,
             env=self.env,
+            job_store=getattr(self, "job_store", None),
+            worker_manager=getattr(self, "worker_manager", None),
             variant=self.variant,
             host_tools=self.host_tools,
         )
@@ -1981,9 +1998,15 @@ class AgentLoop:
             if store is not None:
                 store.close()
 
+        async def _close_workers() -> None:
+            manager, self.worker_manager = getattr(self, "worker_manager", None), None
+            if manager is not None:
+                manager.close()
+
         cleanup_steps = (
             self.subagents.close,
             self._exec_session_manager.close_all,
+            _close_workers,
             _close_job_store,
         )
         for cleanup in cleanup_steps:
@@ -2427,6 +2450,57 @@ class AgentLoop:
         ctx.transcript_input = self._build_transcript_input(ctx)
 
 
+    def _build_worker_manager(self, workers_cfg: Any) -> Any:
+        """Coding-agent delegation (spec 015). Workers may only work inside granted write
+        roots, and never on moeka's own source or state."""
+        from nanobot.security.protected_paths import source_root
+        from nanobot.workers.manager import WorkerManager
+
+        roots = [Path(r).expanduser() for r in self.tools_config.file.write_roots]
+        protected = [Path(self.workspace)]
+        src = source_root()
+        if src is not None:
+            protected.append(src)
+        return WorkerManager(
+            self.job_store, self.job_store.path.parent, workers_cfg,
+            allowed_roots=lambda: roots, protected_roots=lambda: protected,
+        )
+
+    async def _job_ack(self, turn: Any, job: Any) -> None:
+        """Tell the owner their request was heard, when the work is not instant (spec 015)."""
+        if turn.channel in {"cli", "system"}:
+            return
+        from nanobot.kernel.job_report import format_ack
+
+        meta: dict[str, Any] = {}
+        if (thread := (turn.metadata or {}).get("message_thread_id")) is not None:
+            meta["message_thread_id"] = thread
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=turn.channel, chat_id=turn.chat_id, content=format_ack(job),
+                metadata=meta,
+            )
+        )
+
+    def _dead_turn_report(self, ctx: TurnContext) -> str | None:
+        """A system-built report when a user turn ended with no usable answer (spec 015)."""
+        store = getattr(self, "job_store", None)
+        if store is None or ctx.kind is not TurnKind.USER or ctx.ephemeral:
+            return None
+        if ctx.stop_reason != "empty_final_response" and (ctx.final_content or "").strip():
+            return None
+        try:
+            key = ctx.require_session().key
+            job = store.latest_for_session(key)
+            if job is None:
+                return None
+            from nanobot.kernel.job_report import format_dead_turn_report
+
+            return format_dead_turn_report(job, store.history(job.id))
+        except Exception:
+            logger.exception("could not build the dead-turn report")
+            return None
+
     async def _run_turn(self, ctx: TurnContext) -> None:
         runtime = ctx.require_runtime()
         if ctx.visible_run_started_at is None:
@@ -2456,6 +2530,8 @@ class AgentLoop:
         ctx.provider_compaction_applied = result.provider_compaction_applied
         ctx.stop_reason = result.stop_reason
         ctx.failure_error_kind = result.failure_error_kind
+        if (report := self._dead_turn_report(ctx)) is not None:
+            ctx.final_content = report
         if (
             ctx.kind is TurnKind.USER
             and (ctx.delivery.route.channel, ctx.delivery.route.chat_id) in message_sends

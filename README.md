@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="./images/moeka-hero.svg" alt="Moeka — AI that stays with the work. Persistent assistants, connected agents, and an experimental self-improvement frontier." width="100%">
+<img src="./images/moeka-hero.svg" alt="Moeka, the relationship layer: it remembers what you want, briefs a stronger agent, follows up and brings the result back." width="100%">
 
-**Your personal AI. Your agent engine. Your experimental self-improvement lab.**
+**The persistent point of contact for your work. Strong agents do the hard part; Moeka keeps your intent from getting lost.**
 
-[Get started](#get-started) · [Why Moeka](#why-moeka) · [Use cases](#put-moeka-to-work) · [Experimental RSI](#the-frontier-experimental-rsi) · [Documentation](#explore-moeka)
+[Get started](#get-started) · [What Moeka is](#what-moeka-is) · [Why Moeka](#why-moeka) · [Use cases](#put-moeka-to-work) · [Experimental RSI](#the-frontier-experimental-rsi) · [Documentation](#explore-moeka)
 
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square)
 ![Self-hosted](https://img.shields.io/badge/Runtime-self--hosted-6C63FF?style=flat-square)
@@ -13,16 +13,47 @@
 
 </div>
 
-Moeka turns AI into an ongoing working relationship. It remembers what matters, acts through real tools, carries work across sessions, and brings results back to your browser, terminal, or chat. Run a personal assistant, build a team of specialized instances, or embed the same agent engine inside your own application.
+Moeka is the one assistant you keep talking to. It remembers what you want, briefs a stronger agent such as Claude Code or Codex, follows up, and brings the result back to your browser, terminal or chat. It does not need to be the smartest agent in the loop. It needs to be the one that never loses your intent between you and the agents that do the technical work.
 
-**The ambition: make every conversation useful today, and turn useful work into reusable capability for tomorrow.** Alongside its daily assistant runtime, Moeka provides the foundation for an experimental recursive self-improvement (RSI) system that explores how agents can develop and test better ways of working.
+**The ambition: make every conversation useful today, and turn useful work into reusable capability for tomorrow.** Run one personal assistant, a team of specialized instances, or embed the same agent engine in your own application.
+
+## What Moeka is
+
+Moeka is a **relationship layer**. You talk to one familiar assistant. It holds the context, chooses whom to ask, and keeps track of outstanding work. The coding agent figures out how to do the work.
+
+```mermaid
+flowchart LR
+    You["You"] <--> Moeka["MOEKA<br/>intent · memory · open work"]
+    Moeka <--> Adapter["Worker adapter<br/>start · follow up · inspect · stop"]
+    Adapter <--> Worker["Claude Code · Codex<br/>other agents and tools"]
+    Worker <--> Work["Your projects<br/>and machines"]
+    classDef main fill:#6c63ff,color:#fff,stroke:#9892ff
+    class Moeka main
+```
+
+| Moeka owns | The worker owns |
+|---|---|
+| Your intent and relevant history | Repository investigation |
+| Project constraints and preferences | Technical planning |
+| Choosing whom to ask | Code changes |
+| The conversation with you | Running tests and debugging |
+| Outstanding work | Explaining technical blockers |
+| Bringing questions back to you | A reviewable result |
+
+- **Intent comes first.** Moeka forwards your request faithfully with the constraints you gave it. When it is unsure, it hands the worker the question, not an invented plan.
+- **Moeka watches and tells you.** The target is: acknowledge your request, ask when unsure, answer status on request, and message you on its own when work finishes or fails. Every request already gets one durable job record (`/jobs`), and a failure names which side broke and why. The proactive finish message is not built yet.
+- **Reports are not proof.** When all Moeka has is a worker's report, it says "Codex reports that…" and keeps the commit or artifact reference. Merging, deploying and other consequential changes stay yours to approve.
+- **Workers keep their own limits.** A stronger agent does not silently get broader access than the task needs. Moeka's file wall has separate read and write grants, `.env` files stay unreadable, and Moeka cannot rewrite its own source.
+- **You can always roll it back.** `/stable` marks a known-good version. `/revert` returns to it, and a boot guard does so on its own after repeated failed starts.
+
+**Where this stands.** Built: the runtime and memory, the job record, access grants, owner revert, the Wonhee bridge, a proactive notifier with system-built dead-turn reports, and a worker adapter that starts, resumes, watches and stops Claude Code and Codex sessions (separate accounts, never swapped, sandboxed, opt-in per backend). Quiet-time review asks you before anything new is built, and a new skill needs proof of reuse or your approval. Not built yet: moeka drafting playbooks and small tools by itself, and per-role access grants. Details: [operating Moeka](./docs/operator.md) and the [central plan](./specs/015-central-plan/spec.md). Moeka's core can keep improving, as long as it keeps doing this job.
 
 ## Why Moeka
 
 | Advantage | What it unlocks |
 |---|---|
 | **Context that compounds** | Durable conversations, explicit memory tools, and Dream consolidation preserve useful knowledge across sessions. Spend less time re-explaining your work. |
-| **Real execution power** | Files, shell commands, web research, notebooks, image generation, MCP integrations, and delegated workers let Moeka move from a request to an artifact. |
+| **Delegation that holds together** | Durable job records, ask-when-unsure, status on request and a message when work finishes mean you stop having to ssh in to find out what happened. Files, shell, web research, MCP integrations and delegated workers take a request to an artifact. |
 | **Work that keeps moving** | Sustained goals and scheduled tasks support work beyond a single reply. A persistent gateway keeps configured channels and automations online after clients close. |
 | **An assistant team you own** | Independent instances have their own personality, memory, credentials, schedules, and permissions. Pair them to exchange authenticated work requests locally or over HTTPS. |
 | **Freedom to choose the brain** | Hosted providers and local OpenAI-compatible models share one runtime. Opt-in Luna/GPU routing offers task-level selection with bounded fallback when the GPU is unavailable. |
@@ -58,7 +89,7 @@ These are example workflows to configure and request, with the relevant tools an
 | Use it as… | Ask it to… | What makes it useful |
 |---|---|---|
 | **A daily working partner** | “Remember this project's constraints. Help me plan the next milestone and remind me on Friday.” | Persistent memory, ongoing sessions, and scheduled reminders. |
-| **A coding collaborator** | “Inspect this repository, fix the failing behavior, run the relevant checks, and explain the changes.” | Workspace tools, shell execution, skills, and delegated workers. |
+| **A coding delegator** | “Fix the failing export in this project, then tell me what changed and what you checked.” | Moeka remembers the project and your constraints, hands the work to a stronger agent, and returns the summary, checks and artifact. |
 | **A research and document assistant** | “Compare these sources and files, then write a brief with the key tradeoffs.” | Web search and fetch, document processing, and reusable notes. |
 | **A recurring operations assistant** | “Check this project every morning and send me a status update.” | Cron automation, a long-running gateway, and channel delivery. |
 | **A creative project coordinator** | “Send these references to the paired creative agent and bring its output back here.” | The optional Wonhee bridge connects selected Telegram conversations to a paired creative instance with durable intake and delivery tracking. |

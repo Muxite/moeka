@@ -167,3 +167,22 @@ async def test_call_timeout_is_classified_not_raw(tmp_path, monkeypatch):
     with pytest.raises(CreativeActionError) as err:
         await bridge.call("health")
     assert err.value.code == "timeout" and not err.value.permanent
+
+
+def test_wonhee_job_is_attached_to_the_chat_turn_that_started_it(tmp_path):
+    from nanobot.creative_jobs import WonheeJobTracker
+    from nanobot.kernel.jobs import JobStore
+
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    try:
+        other = store.open_job(session_key="telegram:5", request_text="elsewhere")
+        topic = store.open_job(session_key="telegram:9:topic:4", request_text="make a clip")
+        tracker = WonheeJobTracker(store)
+        tracker.observe_health([{"id": 31, "status": "running", "route": {"chat_id": "9"},
+                                 "project_id": 2}])
+        child = store.find_by_ref("wonhee_job", "31")
+        assert child.refs["parent_job"] == topic.id
+        assert [c.id for c in store.children(topic.id)] == [child.id]
+        assert store.children(other.id) == []
+    finally:
+        store.close()

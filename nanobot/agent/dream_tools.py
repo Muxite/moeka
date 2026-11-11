@@ -17,6 +17,7 @@ A target already inside ``skills-pending/<name>/`` is written exactly there (it 
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +30,13 @@ class _PendingSkillsMap:
 
     _skills_root: Path
     _pending_root: Path
+    _new_skill_gate: Callable[[str], str | None] | None = None
 
-    def _init_pending(self, skills_root: Path, pending_root: Path) -> None:
+    def _init_pending(
+        self, skills_root: Path, pending_root: Path,
+        new_skill_gate: Callable[[str], str | None] | None = None,
+    ) -> None:
+        self._new_skill_gate = new_skill_gate
         self._skills_root = skills_root.expanduser().resolve(strict=False)
         self._pending_root = pending_root.expanduser().resolve(strict=False)
         # A target already inside ``skills-pending/`` is written exactly there (no remap).
@@ -53,6 +59,10 @@ class _PendingSkillsMap:
         name = rel.parts[0]
         source = self._skills_root / name
         staged = self._pending_root / name
+        if self._new_skill_gate is not None and not source.exists() and not staged.exists():
+            # Spec 015: a brand-new skill needs proof of reuse or the owner's approval.
+            if (refusal := self._new_skill_gate(name)) is not None:
+                raise PermissionError(refusal)
         if source.is_dir() and not staged.exists():
             staged.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source, staged, symlinks=True)
@@ -70,9 +80,12 @@ class _PendingSkillsMap:
 
 def _pending_tool(base: type) -> type:
     class Tool(_PendingSkillsMap, base):  # type: ignore[misc, valid-type]
-        def __init__(self, *, skills_root: Path, pending_root: Path, **kwargs: Any) -> None:
+        def __init__(
+            self, *, skills_root: Path, pending_root: Path,
+            new_skill_gate: Callable[[str], str | None] | None = None, **kwargs: Any,
+        ) -> None:
             super().__init__(**kwargs)
-            self._init_pending(skills_root, pending_root)
+            self._init_pending(skills_root, pending_root, new_skill_gate)
 
     Tool.__name__ = Tool.__qualname__ = f"Pending{base.__name__}"
     return Tool

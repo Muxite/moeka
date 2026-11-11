@@ -139,3 +139,69 @@ def test_jobs_command_text_lists_and_shows_history(store):
     assert "policy:workspace_violation" in detail and "read /mnt/arteta denied" in detail
     assert "No job" in format_jobs(store, "zzzz")
     assert "No jobs recorded" in format_jobs(JobStore(store.path.parent / "empty.sqlite3"), "")
+
+
+# -- spec 015 phase 3: route, links, notification outbox ------------------------------------
+
+
+def test_route_is_recorded_and_exposed(store):
+    job = store.open_job(
+        session_key="telegram:9:topic:4", request_text="x", route=("telegram", "9", "4"),
+    )
+    assert store.get(job.id).route == ("telegram", "9", "4")
+    plain = store.open_job(session_key="s", request_text="x")
+    assert store.get(plain.id).route is None
+
+
+def test_notifications_are_queued_only_for_states_worth_telling(store):
+    job = store.open_job(session_key="s", request_text="x")
+    store.transition(job.id, JobState.WORKING)
+    assert store.pending_notifications() == []
+    store.transition(job.id, JobState.DONE, detail="ok")
+    pending = store.pending_notifications()
+    assert [(n.job_id, n.state) for n in pending] == [(job.id, JobState.DONE)]
+    store.set_notification(job.id, pending[0].event_seq, "sent")
+    assert store.pending_notifications() == []
+    assert store.notification_status(job.id)[0][1:] == ("sent", "done")
+
+
+def test_crashed_sending_row_becomes_uncertain_not_resent(store):
+    job = store.open_job(session_key="s", request_text="x")
+    store.transition(job.id, JobState.FAILED, side=FailureSide.WORKER, cause="exit_1")
+    (n,) = store.pending_notifications()
+    store.set_notification(job.id, n.event_seq, "sending")
+    assert store.pending_notifications() == []
+    assert store.recover_notifications() == 1
+    assert store.notification_status(job.id)[0][1] == "uncertain"
+    assert store.pending_notifications() == []
+
+
+def test_children_and_active_children(store):
+    parent = store.open_job(session_key="s", request_text="p")
+    a = store.open_job(session_key="s", request_text="a", role="worker")
+    b = store.open_job(session_key="s", request_text="b", role="wonhee")
+    store.link_child(parent.id, a.id, "worker")
+    store.link_child(parent.id, b.id, "wonhee")
+    store.transition(a.id, JobState.DONE)
+    assert {c.id for c in store.children(parent.id)} == {a.id, b.id}
+    assert [c.id for c in store.active_children(parent.id)] == [b.id]
+    assert store.parent_of(a.id).id == parent.id
+
+
+def test_list_filters_and_latest_for_session(store):
+    one = store.open_job(session_key="s", request_text="1")
+    two = store.open_job(session_key="s", request_text="2", role="worker")
+    store.transition(one.id, JobState.FAILED, side=FailureSide.MOEKA, cause="x")
+    assert [j.id for j in store.list(states={JobState.FAILED})] == [one.id]
+    assert [j.id for j in store.list(role="worker")] == [two.id]
+    assert store.latest_for_session("s").id == two.id
+    assert store.latest_for_session("none") is None
+
+
+def test_listener_wakes_after_commit_and_cannot_break_the_record(store):
+    seen = []
+    store.add_listener(lambda jid, st: seen.append((jid, st, store.get(jid).state)))
+    store.add_listener(lambda jid, st: 1 / 0)
+    job = store.open_job(session_key="s", request_text="x")
+    store.transition(job.id, JobState.DONE)
+    assert seen == [(job.id, JobState.DONE, JobState.DONE)]

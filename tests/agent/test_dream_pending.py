@@ -72,6 +72,7 @@ async def test_sc002_dream_creates_skill_in_pending(tmp_path: Path) -> None:
     )
     before = _tree(tmp_path / "skills")
     loop, prompts = _loop(tmp_path, [_write_skill("log-rotation")])
+    loop.job_store.add_owner_approval("test: owner allows one new skill")  # spec 015 evidence rule
 
     result = await loop.run_dream()
 
@@ -177,3 +178,13 @@ def test_from_config_passes_skill_writes(tmp_path: Path) -> None:
 @pytest.mark.parametrize("mode,expected", [("pending", True), ("direct", False)])
 def test_prompt_mentions_staging_only_when_pending(mode: str, expected: bool) -> None:
     assert ("skills-pending/<name>/" in MemoryStore.default_dream_prompt(mode)) is expected
+
+
+async def test_spec015_new_skill_without_evidence_is_not_staged(tmp_path: Path) -> None:
+    """No proof of reuse and no owner approval: Dream's new skill is refused, not staged."""
+    loop, _ = _loop(tmp_path, [_write_skill("one-off-thing")])
+
+    await loop.run_dream()
+
+    pending = tmp_path / "skills-pending"
+    assert not pending.exists() or list(pending.iterdir()) == []
