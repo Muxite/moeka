@@ -799,6 +799,7 @@ def _run_gateway(
         creative_bridge = CreativeBridge(
             config.creative_bridge, workspace=config.workspace_path, bus=bus,
             peers=peer_service, get_channel=channels.get_channel,
+            jobs=getattr(agent, "job_store", None),
         )
         agent.tools.register(WonheeHandoffTool(creative_bridge))
         if config.creative_bridge.mode=='direct':

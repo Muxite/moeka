@@ -32,6 +32,8 @@ import nanobot.core            # noqa: F401
 import nanobot.kernel          # noqa: F401
 import nanobot.core.vec        # noqa: F401
 import nanobot.core.vec_store  # noqa: F401
+import nanobot.kernel.jobs      # noqa: F401
+import nanobot.kernel.job_hook  # noqa: F401
 import nanobot.api.complete    # noqa: F401
 import nanobot.capabilities.index      # noqa: F401
 import nanobot.capabilities.lint       # noqa: F401

@@ -29,12 +29,14 @@ from nanobot.creative_checks import (
     find_duplicate,
     measured_text,
 )
+from nanobot.creative_jobs import WonheeJobTracker
 from nanobot.peer_context import validate_peer_context
 from nanobot.utils import media_probe
 
 if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
     from nanobot.config.schema import CreativeBridgeConfig
+    from nanobot.kernel.jobs import JobStore
     from nanobot.peers import PeerService
 
 
@@ -120,11 +122,13 @@ class CreativeBridge:
     def __init__(
         self, config: CreativeBridgeConfig, *, workspace: Path, bus: MessageBus,
         peers: PeerService | None, get_channel: Callable[[str], object | None],
+        jobs: JobStore | None = None,
     ) -> None:
         if config.mode=='peer' and (peers is None or config.peer_id not in peers.peers):
             raise ValueError("creative bridge peer is not owner-paired")
         self.config, self.bus, self.peers = config, bus, peers
         self.get_channel = get_channel
+        self.tracker = WonheeJobTracker(jobs)
         self.workspace = workspace
         self.context_key='process'
         if config.mode=='direct':
@@ -194,6 +198,13 @@ class CreativeBridge:
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1900 if action == "inbox_add" else 60)
+        except TimeoutError as exc:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise CreativeActionError(
+                "timeout", f"wonhee {action} timed out; inspect its status and retry.", permanent=False,
+            ) from exc
         except BaseException:
             if process.returncode is None:
                 process.kill()
@@ -207,7 +218,10 @@ class CreativeBridge:
                 logger.warning("wonhee {} failed (exit {}): {}", action, process.returncode,
                                safe_action_message(stderr.decode("utf-8", "replace")[-400:]))
                 raise CreativeActionError("action_failed", f"wonhee {action} failed; inspect its status and retry.", permanent=False) from exc
-            raise RuntimeError(f"wonhee {action} returned invalid JSON") from exc
+            raise CreativeActionError(
+                "invalid_output", f"wonhee {action} returned output the bridge could not read.",
+                permanent=False,
+            ) from exc
         result = _mapping(value)
         if process.returncode:
             # Only structured stdout errors cross into chat; stderr is never
@@ -437,6 +451,14 @@ class CreativeBridge:
                          + (f" in {job['phase']}" if job.get("phase") else "")
                          + (f", idle {round(job.get('idle_s', 0) / 60)} min" if job.get("idle_s") else "")
                          + (" - STALLED" if job.get("stalled") else ""))
+        store = self.tracker.store
+        if store is not None:
+            for job in store.active():
+                if job.role != "wonhee":
+                    continue
+                last = store.history(job.id)[-1]
+                lines.append(f"Tracked {job.id} [{job.state.value}] since {job.created[11:16]}Z: "
+                             f"{last.detail}" + (f" ({last.side.value}: {last.cause})" if last.side else ""))
         if len(lines) <= 2 and not self._failures:
             lines.append("Nothing in flight or stuck.")
         lines.append("Use /wonhee retry to resend the latest failed or uncertain response or delivery.")
@@ -471,6 +493,7 @@ class CreativeBridge:
         """Tell the creator once when a job stops moving; the agent never has to poll for it."""
         self._last_job_check = time.monotonic()
         wonhee = await self.call("health")
+        self.tracker.observe_health(json_object_list(wonhee.get("active_jobs", [])))
         for job in json_object_list(wonhee.get("active_jobs", [])):
             route = job.get("route")
             if not job.get("stalled") or not isinstance(route, dict) or route.get("channel") != "telegram":
@@ -759,6 +782,7 @@ class CreativeBridge:
     async def _poll_deliveries(self) -> None:
         response = await self.call("delivery_show")
         rows = json_object_list(response.get("results", response.get("deliveries", [])))
+        self.tracker.observe_failures(json_object_list(response.get("failures", [])))
         for failure in json_object_list(response.get("failures", [])):
             reason = safe_action_message(failure.get("error")) if failure.get("error") else ""
             await self.queue_text(
@@ -776,15 +800,19 @@ class CreativeBridge:
             channel = self.get_channel("telegram")
             if channel is None or not getattr(channel, "_app_ready", asyncio.Event()).is_set():
                 continue
+            self.tracker.observe_delivery_ready(row)
             await self.call("delivery_show", delivery_id=row["id"], transition="sending")
             try:
                 ids = await self._send(row)
             except Exception as exc:
-                await self.call("delivery_show", delivery_id=row["id"], transition="failed" if isinstance(exc, (ValueError, FileNotFoundError)) else "uncertain",
+                definite = isinstance(exc, (ValueError, FileNotFoundError))
+                self.tracker.delivery_failed(row, exc, uncertain=not definite)
+                await self.call("delivery_show", delivery_id=row["id"], transition="failed" if definite else "uncertain",
                                 error=type(exc).__name__)
             else:
                 await self.call("delivery_show", delivery_id=row["id"], transition="sent", message_ids=ids)
                 self._record_sent(row, ids)
+                self.tracker.delivery_sent(row, ids)
 
     async def _run(self) -> None:
         while True:
@@ -805,6 +833,7 @@ class CreativeBridge:
                                         "failed" if failed else "queued", row["id"]))
                         if failed:
                             payload = json.loads(row["payload"])
+                            self.tracker.intake_failed(str(payload["route"].get("route_key")), row["id"], exc)
                             message = str(exc) if permanent else "I couldn't import that input after retrying. Check that the Drive file is public and downloadable, or resend the Telegram attachment. Your request is saved for inspection."
                             await self.queue_text("failed:" + row["id"], message, payload["route"], payload["project_id"])
                 channel = self.get_channel("telegram")

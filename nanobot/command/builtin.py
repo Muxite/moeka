@@ -115,6 +115,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         accepts_args=True,
     ),
     BuiltinCommandSpec(
+        "/jobs",
+        "Show job records",
+        "List recent jobs, or show one job's state history with the failing side and cause.",
+        "history",
+        "[id]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
         "/goal",
         "Start long-running goal",
         "Tell the agent to treat the request as a long-running goal.",
@@ -909,6 +917,46 @@ async def cmd_history(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+def format_jobs(store: Any, arg: str) -> str:
+    """Text for ``/jobs`` (recent list) or ``/jobs <id>`` (one job's history)."""
+    arg = arg.strip()
+    if arg:
+        job = store.get(arg) or next(
+            (j for j in store.recent(50) if j.id.startswith(arg)), None,
+        )
+        if job is None:
+            return f"No job {arg!r}. Use /jobs to list recent jobs."
+        lines = [f"Job {job.id} [{job.state.value}] {job.role or 'chat'}: {job.request_text[:200]}"]
+        if job.refs:
+            lines.append("Refs: " + ", ".join(f"{k}={v}" for k, v in sorted(job.refs.items())))
+        for e in store.history(job.id):
+            who = f" {e.side.value}:{e.cause}" if e.side else ""
+            lines.append(f"{e.ts[11:19]} {e.state.value}{who} {e.detail[:160]}".rstrip())
+        return "\n".join(lines)
+    jobs = store.recent(10)
+    if not jobs:
+        return "No jobs recorded yet."
+    out = []
+    for j in jobs:
+        last = store.history(j.id)[-1]
+        who = f" ({last.side.value}: {last.cause})" if last.side and last.cause else ""
+        out.append(f"{j.id} {j.updated[5:16]} {j.state.value}{who} {j.request_text[:60]}")
+    return "\n".join(out) + "\nUse /jobs <id> for the full history."
+
+
+async def cmd_jobs(ctx: CommandContext) -> OutboundMessage:
+    """Show the durable job record (spec 015).
+
+    Usage: /jobs [id]
+    """
+    store = getattr(ctx.loop, "job_store", None)
+    text = "Job records are unavailable." if store is None else format_jobs(store, ctx.args)
+    return OutboundMessage(
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=text,
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )
+
+
 async def cmd_goal(ctx: CommandContext) -> OutboundMessage | None:
     """Mark this turn as an explicit sustained-goal request."""
     from nanobot.agent.goal_permission import goal_mutation_permission
@@ -1089,6 +1137,8 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/model ", cmd_model)
     router.exact("/history", cmd_history)
     router.prefix("/history ", cmd_history)
+    router.exact("/jobs", cmd_jobs)
+    router.prefix("/jobs ", cmd_jobs)
     router.exact("/goal", cmd_goal)
     router.prefix("/goal ", cmd_goal)
     router.exact("/trigger", cmd_trigger)
