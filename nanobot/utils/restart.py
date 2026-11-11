@@ -13,6 +13,7 @@ RESTART_NOTIFY_CHANNEL_ENV = "NANOBOT_RESTART_NOTIFY_CHANNEL"
 RESTART_NOTIFY_CHAT_ID_ENV = "NANOBOT_RESTART_NOTIFY_CHAT_ID"
 RESTART_NOTIFY_METADATA_ENV = "NANOBOT_RESTART_NOTIFY_METADATA"
 RESTART_STARTED_AT_ENV = "NANOBOT_RESTART_STARTED_AT"
+RESTART_NOTE_ENV = "NANOBOT_RESTART_NOTE"
 
 
 @dataclass(frozen=True)
@@ -21,22 +22,28 @@ class RestartNotice:
     chat_id: str
     started_at_raw: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    note: str = ""
 
 
-def format_restart_completed_message(started_at_raw: str) -> str:
+def format_restart_completed_message(started_at_raw: str, note: str = "") -> str:
     """Build restart completion text and include elapsed time when available."""
     elapsed_suffix = ""
     if started_at_raw:
         with suppress(ValueError):
             elapsed_s = max(0.0, time.time() - float(started_at_raw))
             elapsed_suffix = f" in {elapsed_s:.1f}s"
-    return f"Restart completed{elapsed_suffix}."
+    text = f"Restart completed{elapsed_suffix}."
+    return f"{text} {note}" if note else text
 
 
 def set_restart_notice_to_env(
-    *, channel: str, chat_id: str, metadata: dict[str, Any] | None = None,
+    *, channel: str, chat_id: str, metadata: dict[str, Any] | None = None, note: str = "",
 ) -> None:
     """Write restart notice env values for the next process."""
+    if note:
+        os.environ[RESTART_NOTE_ENV] = note
+    else:
+        os.environ.pop(RESTART_NOTE_ENV, None)
     os.environ[RESTART_NOTIFY_CHANNEL_ENV] = channel
     os.environ[RESTART_NOTIFY_CHAT_ID_ENV] = chat_id
     os.environ[RESTART_STARTED_AT_ENV] = str(time.time())
@@ -63,6 +70,7 @@ def consume_restart_notice_from_env() -> RestartNotice | None:
     chat_id = os.environ.pop(RESTART_NOTIFY_CHAT_ID_ENV, "").strip()
     started_at_raw = os.environ.pop(RESTART_STARTED_AT_ENV, "").strip()
     metadata_raw = os.environ.pop(RESTART_NOTIFY_METADATA_ENV, "").strip()
+    note = os.environ.pop(RESTART_NOTE_ENV, "").strip()
     if not (channel and chat_id):
         return None
     metadata: dict[str, Any] = {}
@@ -78,6 +86,7 @@ def consume_restart_notice_from_env() -> RestartNotice | None:
         chat_id=chat_id,
         started_at_raw=started_at_raw,
         metadata=metadata,
+        note=note,
     )
 
 

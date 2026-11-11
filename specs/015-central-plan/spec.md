@@ -168,7 +168,11 @@ Each phase must leave the suite green and be reversible on its own.
   read root is read-only in the shell too when `tools.exec.sandbox` is on. tmux is session-scoped
   (`allowed_sessions`), not path-scoped, so it is unchanged. Not built: per-role grants (grants are global
   config for now) and recording the missing grant in the job record beyond the policy cause.
-- The live `config.json` has no `tools.file` section, so `readRoots` from spec 014 is not turned on there.
+- Owner decisions after phase 2 (2026-11-11): read and write for all of `~/projects` and `/mnt/arteta`
+  (applied to the live config); `.env` files unreadable and unwritable inside roots; the agent cannot write
+  moeka's own source; the owner can return to a stable version by command. Built as the dotenv floor rule,
+  `tools.file.protectSource`, bwrap masks (`granted_root_masks`), `scripts/selfrevert.py` with `/stable`,
+  `/revert` and the boot guard. Reading moeka's own source stays allowed.
 
 ## Open for the owner
 

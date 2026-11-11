@@ -56,7 +56,7 @@ def _control(world: dict[str, Path]) -> list[Path]:
     return [
         a / "USER.md", a / "notes" / "todo.md", a / "skills" / "x" / "SKILL.md",
         a / "memory" / "MEMORY.md", a / "projects" / "app" / "main.py", a / "keys.env.example",
-        a / "sub" / ".env", a / "data.json", a / "cron" / "jobs.json",
+        a / "sub" / ".env.example", a / "data.json", a / "cron" / "jobs.json",
     ]
 
 

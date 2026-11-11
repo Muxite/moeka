@@ -35,6 +35,7 @@ from nanobot.security.protected_paths import (
     default_config_files,
     default_data_dirs,
     default_other_instance_roots,
+    source_write_reason,
 )
 from nanobot.security.untrusted import mark_untrusted
 from nanobot.security.workspace_access import current_tool_workspace
@@ -58,6 +59,10 @@ class FileToolsConfig(Base):
     # Extra roots the agent may WRITE (and read). A separate grant: a read root never implies
     # write. The protected-path floor still applies under any root. Spec 015.
     write_roots: list[str] = Field(default_factory=list)
+    # Block file-tool writes into the tree moeka runs from (spec 015). Changing the running
+    # code goes through the owner's /revert system. An external harness that edits a checkout
+    # on purpose (RSI) turns this off in its own config.
+    protect_source: bool = True
 
 
 DEFAULT_MAX_WRITE_BYTES = 10 * 1024 * 1024
@@ -155,6 +160,7 @@ class _FsTool(Tool):
         max_write_bytes: int = DEFAULT_MAX_WRITE_BYTES,
         paths: "Paths | None" = None,
         legacy_floor: bool = True,
+        protect_source: bool = True,
         plugin_data_root: Path | None = None,
     ):
         self._workspace = workspace
@@ -163,6 +169,7 @@ class _FsTool(Tool):
         # Host paths (env.paths): the floor and the media root come from here.
         # ``None`` keeps the legacy ambient behaviour (direct constructions).
         self._paths = paths
+        self._protect_source = protect_source
         self._legacy_floor = legacy_floor
         self._max_write_bytes = max_write_bytes
         self._allowed_dir = allowed_dir
@@ -237,6 +244,7 @@ class _FsTool(Tool):
             sandbox_restricts_workspace=sandbox_restricts,
             paths=env.paths if env is not None else None,
             legacy_floor=env is None or not env.strict,
+            protect_source=ctx.config.file.protect_source,
             plugin_data_root=plugin_data_root(env),
         )
         tool._trace_sink = env.trace if env is not None else None
@@ -315,6 +323,8 @@ class _FsTool(Tool):
 
     def _check_floor(self, resolved: Path, *, write: bool) -> Path:
         reason = self._protected_floor().reason(resolved, write=write)
+        if reason is None and write and self._protect_source:
+            reason = source_write_reason(resolved)
         if reason is not None:
             raise ProtectedPathError(reason)
         return resolved

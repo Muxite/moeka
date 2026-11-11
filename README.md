@@ -130,6 +130,7 @@ Telegram is included. Additional chat integrations install on demand; Discord is
 |---|---|
 | **Your assistant** | [Daily agents](./docs/daily-agents.md) · [Memory](./docs/memory.md) · [Automations](./docs/automations.md) |
 | **Your interface** | [WebUI](./docs/webui.md) · [Chat apps](./docs/chat-apps.md) · [CLI reference](./docs/cli-reference.md) |
+| **Your operator** | [Operating Moeka: jobs, access and revert](./docs/operator.md) · [Operations](./docs/OPERATIONS.md) · [Chat commands](./docs/chat-commands.md) |
 | **Your agent team** | [Multiple instances](./docs/multiple-instances.md) · [Peer messaging](./docs/guides/paired-agents.md) · [Capability transfer](./docs/capability-transfer.md) |
 | **Your model stack** | [Providers](./docs/providers.md) · [Provider cookbook](./docs/provider-cookbook.md) · [Configuration](./docs/configuration.md) |
 | **Your application** | [Python SDK](./docs/python-sdk.md) · [OpenAI-compatible API](./docs/openai-api.md) · [Kernel architecture](./docs/core-architecture.md) |

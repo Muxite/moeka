@@ -86,6 +86,24 @@ Moeka-specific deviations from upstream nanobot:
 - **Exec hardening** — on Linux, exec and script-tool children run under `setpriv --no-new-privs`; bwrap mounts
   `owner_state_masks` (`nanobot/agent/tools/sandbox.py`) last, so owner state (sessions, auth, peers,
   personality, keys, config, locks, usage db) stays hidden. The systemd units set `NoNewPrivileges`.
+- **Job record (spec 015)** — `nanobot/kernel/jobs.py` is one durable record per owner request
+  (`jobs.sqlite3` beside `sessions.db`; states heard/needs_answer/working/blocked/done/failed/outcome_unknown;
+  failed, blocked and unknown outcomes must name a side and cause). `kernel/job_hook.py` drives it from the run
+  hook and turn-hook factory; `nanobot/creative_jobs.py` feeds wonhee submissions and deliveries; `/jobs` shows
+  it. The runner stamps each appended message out of band (`StampedMessage.appended_at`) so a saved turn has real
+  timing without changing provider payloads. Details: `docs/operator.md`.
+- **Access grants (spec 015)** — `tools.file.readRoots` and `writeRoots` are separate grants (write never implied
+  by read); the same roots become the bwrap read-only/read-write binds. The floor additionally denies every
+  `.env`/`.env.*` (not templates) for read and write, and `tools.file.protectSource` (default true) blocks
+  file-tool writes into the running source tree; the bwrap sandbox re-binds that tree read-only and masks `.env`
+  files found by a bounded scan (`granted_root_masks`). An RSI harness that edits a checkout turns
+  `protectSource` off in its own config.
+- **Stable marks, `/revert` and the boot guard (spec 015)** — `scripts/selfrevert.py` (stdlib only) tags
+  `moeka-stable/<stamp>`, checks a stable tag out and records `revert-state.json`; `/stable` and `/revert` are
+  owner slash commands (no model tool) that re-exec through the `/restart` path and announce the result. The
+  guard runs from `bin/moeka.sh run` (default instance only) and reverts to the newest stable tag after three
+  unhealthy boots of one commit within ten minutes; the gateway marks a boot healthy after 60 s
+  (`nanobot/cli/selfrevert_link.py`).
 - **Gateway still on the legacy loop path** — the gateway builds `AgentLoop` through `AgentLoop.from_config` with a
   `LegacyEnvironment`, not through `moeka.Kernel`; moving it is stage 2 of `specs/003-main-consolidation/`.
 

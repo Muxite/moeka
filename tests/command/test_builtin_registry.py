@@ -12,11 +12,11 @@ from nanobot.command.router import CommandRouter
 EXACT = [
     "/__shell", "/compact", "/dream", "/dream-log", "/dream-prompt", "/dream-restore",
     "/evaluator-prompt", "/goal", "/help", "/history", "/jobs", "/model", "/new", "/pairing",
-    "/skill", "/status", "/trigger",
+    "/revert", "/skill", "/stable", "/status", "/trigger",
 ]
 PREFIX = [
     "/__shell ", "/dream-log ", "/dream-prompt ", "/dream-restore ",
-    "/evaluator-prompt ", "/goal ", "/history ", "/jobs ", "/model ", "/pairing ", "/trigger ",
+    "/evaluator-prompt ", "/goal ", "/history ", "/jobs ", "/model ", "/pairing ", "/revert ", "/stable ", "/trigger ",
 ]
 
 

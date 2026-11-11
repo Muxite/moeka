@@ -7,6 +7,12 @@ These commands work inside chat channels and interactive agent sessions:
 | `/new` | Stop current task and start a new conversation |
 | `/stop` | Stop the current task |
 | `/restart` | Restart the bot |
+| `/jobs` | List recent job records: state, and for a failure the side and cause |
+| `/jobs <id>` | Show one job's full history with timestamps (an id prefix works) |
+| `/stable [note]` | Mark the running version as stable, a point `/revert` can return to |
+| `/revert` | List stable marks and the running commit |
+| `/revert latest` / `previous` / `<mark>` | Check out a stable version and restart (add `force` to stash local changes) |
+| `/revert back` | Return to the branch the revert came from and restart |
 | `/status` | Show bot status |
 | `/model` | Show the current model and available model presets |
 | `/model <preset>` | Switch and persist the model preset for the current session |

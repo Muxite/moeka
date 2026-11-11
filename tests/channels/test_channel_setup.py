@@ -43,7 +43,9 @@ INTERNAL_CHANNEL_FIELDS = {
     # WebUI setup field. See TelegramConfig.drop_pending_updates /
     # CLAUDE.md's "Telegram drop_pending_updates defaults to True" deviation.
     # conflictRetryS (spec 005 FR-043): an operational backoff, edited in config.json.
-    "telegram": {"dropPendingUpdates", "conflictRetryS"},
+    # durableIngress (wonhee bridge): persists inbound updates before acting; an operational
+    # switch edited in config.json, not a WebUI setup field.
+    "telegram": {"dropPendingUpdates", "conflictRetryS", "durableIngress"},
     # nanobot WebUI owns this transport and intentionally has no channel dialog.
     "websocket": {
         "allowFrom",

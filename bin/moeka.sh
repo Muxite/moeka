@@ -401,6 +401,14 @@ cmd_run() {
         exit 0
     fi
     echo "$$" > "$PID_FILE"
+    # Spec 015 boot guard: after repeated boots that never became healthy, go back to the
+    # newest /stable mark. Default instance only (a revert moves the shared checkout), stdlib
+    # script so it still runs when the app code is broken; it never blocks startup.
+    if [[ "$INSTANCE_KIND" == "default" && -f "${SCRIPT_DIR}/scripts/selfrevert.py" ]] \
+            && command -v python3 >/dev/null 2>&1; then
+        python3 -I "${SCRIPT_DIR}/scripts/selfrevert.py" guard --repo "$SCRIPT_DIR" \
+            --state "$ROOT" >&2 || true
+    fi
     if [[ "$(uname -s)" == "Linux" ]]; then
         command -v setpriv >/dev/null || { err "setpriv is required for NoNewPrivileges"; exit 1; }
         exec setpriv --no-new-privs "$bin" gateway --config "$CFG" --workspace "$ROOT" "$@"

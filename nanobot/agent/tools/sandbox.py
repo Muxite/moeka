@@ -106,6 +106,65 @@ def _normalize_bind_paths(
     return out
 
 
+# Directories a dotenv scan never enters: large, generated, or not where secrets live.
+_MASK_PRUNE = frozenset({
+    "node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build", "builds",
+    "target", ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+})
+_MASK_CACHE: dict[tuple[str, int, int], tuple[float, list[str]]] = {}
+_MASK_TTL_S = 30.0
+
+
+def _dotenv_files(root: Path, *, max_depth: int, max_dirs: int) -> list[str]:
+    from nanobot.security.protected_paths import is_dotenv_name
+
+    found: list[str] = []
+    seen_dirs = 0
+    base_depth = len(root.parts)
+    for current, dirs, files in os.walk(root, followlinks=False):
+        seen_dirs += 1
+        depth = len(Path(current).parts) - base_depth
+        dirs[:] = [] if depth >= max_depth or seen_dirs >= max_dirs else sorted(
+            d for d in dirs if d not in _MASK_PRUNE
+        )
+        found.extend(os.path.join(current, f) for f in files if is_dotenv_name(f))
+    return found
+
+
+def granted_root_masks(
+    roots: Iterable[str], *, max_depth: int = 4, max_dirs: int = 4000,
+) -> list[str]:
+    """Mounts that keep granted roots from exposing secrets or the running code (spec 015).
+
+    - The tree moeka runs from is re-bound read-only, so a write grant that covers it (for
+      example ``~/projects``) cannot be used to edit the kernel from the shell.
+    - Dotenv files found under the roots (bounded walk, cached briefly) are replaced by an
+      empty file. Stated limit: a dotenv file created after the scan or deeper than
+      ``max_depth`` is not masked in the shell; the file tools check names at access time.
+    """
+    import time
+
+    from nanobot.security.protected_paths import source_root
+
+    args: list[str] = []
+    src = source_root()
+    resolved_roots = [Path(r) for r in roots if Path(r).is_dir()]
+    if src is not None and src.is_dir() and any(
+        src == r or r in src.parents for r in resolved_roots
+    ):
+        args += ["--ro-bind", str(src), str(src)]
+    for root in resolved_roots:
+        key = (str(root), max_depth, max_dirs)
+        cached = _MASK_CACHE.get(key)
+        if cached is None or time.monotonic() - cached[0] > _MASK_TTL_S:
+            cached = (time.monotonic(), _dotenv_files(root, max_depth=max_depth, max_dirs=max_dirs))
+            _MASK_CACHE[key] = cached
+        for path in cached[1]:
+            if os.path.isfile(path):
+                args += ["--ro-bind", "/dev/null", path]
+    return args
+
+
 def owner_state_masks(ws: Path) -> list[str]:
     """Mount last in every exec sandbox, including promoted script tools."""
     args: list[str] = []
@@ -179,10 +238,13 @@ def _bwrap(
         "--bind", str(ws), str(ws),
         "--ro-bind-try", str(media), str(media),  # read-only access to media
     ]
-    for p in _normalize_bind_paths(sandbox_ro_binds, workspace=ws, env_vars=env_vars):
+    ro_paths = _normalize_bind_paths(sandbox_ro_binds, workspace=ws, env_vars=env_vars)
+    rw_paths = _normalize_bind_paths(sandbox_rw_binds, workspace=ws, env_vars=env_vars)
+    for p in ro_paths:
         args += ["--ro-bind-try", p, p]
-    for p in _normalize_bind_paths(sandbox_rw_binds, workspace=ws, env_vars=env_vars):
+    for p in rw_paths:
         args += ["--bind-try", p, p]
+    args += granted_root_masks([*ro_paths, *rw_paths])
     args += owner_state_masks(ws)
     args += ["--chdir", sandbox_cwd, "--", "sh", "-c", command]
     return shlex.join(args)

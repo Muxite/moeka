@@ -79,3 +79,32 @@ def test_exec_binds_follow_the_same_roots(tmp_path):
     tool = ExecTool.create(_ctx(ws, read=[ro], write=[rw]))
     assert ro.resolve() in tool.sandbox_ro_binds
     assert rw.resolve() in tool.sandbox_rw_binds
+
+
+@pytest.mark.asyncio
+async def test_writes_into_the_running_source_tree_are_blocked(tmp_path):
+    from nanobot.security.protected_paths import PROTECTED_MARKER, source_root
+
+    ws, _, _ = _dirs(tmp_path)
+    src = source_root()
+    ctx = _ctx(ws, write=[src])  # even an explicit write grant cannot open the source tree
+    target = src / "nanobot" / "zz_should_not_exist.py"
+    result = await WriteFileTool.create(ctx).execute(path=str(target), content="x = 1")
+    assert "Error" in result and PROTECTED_MARKER in result
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_protect_source_can_be_turned_off_for_a_harness(tmp_path):
+    from nanobot.security.protected_paths import source_root
+
+    ws, _, rw = _dirs(tmp_path)
+    cfg = ToolsConfig(
+        restrict_to_workspace=True,
+        file=FileToolsConfig(write_roots=[str(rw)], protect_source=False),
+    )
+    ctx = ToolContext(config=cfg, workspace=str(ws), file_state_store=FileStates())
+    tool = WriteFileTool.create(ctx)
+    assert tool._protect_source is False
+    assert source_root() is not None
+    assert FileToolsConfig().protect_source is True
