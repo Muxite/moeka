@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 JOBS_DB_NAME = "jobs.sqlite3"
 _MAX_DETAIL_CHARS = 2000
@@ -45,7 +45,16 @@ class FailureSide(str, Enum):
     STAGECRAFT = "stagecraft"
     TELEGRAM = "telegram"
     POLICY = "policy"
+    WORKER = "worker"
 
+
+# States whose arrival is worth telling the owner about (spec 015 notifier).
+NOTIFY_STATES = frozenset({
+    JobState.NEEDS_ANSWER, JobState.BLOCKED, JobState.DONE, JobState.FAILED,
+    JobState.OUTCOME_UNKNOWN,
+})
+NOTIFY_PENDING, NOTIFY_SENDING, NOTIFY_SENT = "pending", "sending", "sent"
+NOTIFY_UNCERTAIN, NOTIFY_SKIPPED = "uncertain", "skipped"
 
 ACTIVE_STATES = frozenset({JobState.HEARD, JobState.NEEDS_ANSWER, JobState.WORKING})
 # States that must say which side stopped the job and why.
@@ -72,6 +81,24 @@ class Job:
     refs: dict[str, str] = field(default_factory=dict)
     created: str = ""
     updated: str = ""
+
+    @property
+    def route(self) -> tuple[str, str, str] | None:
+        """(channel, chat_id, thread_id) the owner wrote from, when recorded."""
+        channel, chat = self.refs.get("route_channel"), self.refs.get("route_chat")
+        if not channel or not chat:
+            return None
+        return channel, chat, self.refs.get("route_thread", "")
+
+
+@dataclass(frozen=True, slots=True)
+class Notification:
+    job_id: str
+    event_seq: int
+    status: str
+    attempts: int
+    state: JobState
+    ts: str
 
 
 def new_job_id() -> str:
@@ -114,6 +141,22 @@ CREATE TABLE IF NOT EXISTS job_events (
     cause TEXT,
     detail TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS job_notifications (
+    job_id TEXT NOT NULL,
+    event_seq INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    ts TEXT NOT NULL,
+    PRIMARY KEY (job_id, event_seq)
+);
+CREATE TABLE IF NOT EXISTS job_links (
+    parent TEXT NOT NULL,
+    child TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (parent, child)
+);
+CREATE INDEX IF NOT EXISTS job_links_parent ON job_links(parent);
+CREATE INDEX IF NOT EXISTS job_notifications_status ON job_notifications(status, ts);
 CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, updated);
 """
@@ -124,6 +167,7 @@ class JobStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._listeners: list[Callable[[str, JobState], None]] = []
         self._db = sqlite3.connect(str(self.path), check_same_thread=False, timeout=10)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -138,24 +182,45 @@ class JobStore:
 
     # -- writes ---------------------------------------------------------------------
 
+    def add_listener(self, callback: Callable[[str, JobState], None]) -> None:
+        """Call *callback(job_id, state)* after each committed transition (a wake signal only;
+        the ``job_notifications`` table is the durable source of truth)."""
+        self._listeners.append(callback)
+
+    def _notify_listeners(self, job_id: str, state: JobState) -> None:
+        for callback in list(self._listeners):
+            try:
+                callback(job_id, state)
+            except Exception:  # a listener must never break the record
+                from loguru import logger
+
+                logger.exception("job listener failed for {}", job_id)
+
     def open_job(
         self, *, session_key: str, request_text: str, role: str = "", job_id: str | None = None,
+        route: tuple[str, str, str] | None = None,
     ) -> Job:
         jid = job_id or new_job_id()
         now = _now()
         text = _redact(request_text, _MAX_REQUEST_CHARS)
+        refs: dict[str, str] = {}
+        if route and route[0] and route[1]:
+            refs = {"route_channel": str(route[0]), "route_chat": str(route[1])}
+            if route[2]:
+                refs["route_thread"] = str(route[2])
         with self._lock:
             self._db.execute(
                 "INSERT INTO jobs(id, session_key, role, request_text, state, refs, created,"
                 " updated) VALUES (?,?,?,?,?,?,?,?)",
-                (jid, session_key, role, text, JobState.HEARD.value, "{}", now, now),
+                (jid, session_key, role, text, JobState.HEARD.value,
+                 json.dumps(refs, sort_keys=True), now, now),
             )
             self._db.execute(
                 "INSERT INTO job_events(job_id, ts, state) VALUES (?,?,?)",
                 (jid, now, JobState.HEARD.value),
             )
             self._db.commit()
-        return Job(jid, session_key, role, text, JobState.HEARD, {}, now, now)
+        return Job(jid, session_key, role, text, JobState.HEARD, refs, now, now)
 
     def transition(
         self,
@@ -176,13 +241,20 @@ class JobStore:
             if cur.rowcount == 0:
                 self._db.rollback()
                 raise KeyError(job_id)
-            self._db.execute(
+            ev = self._db.execute(
                 "INSERT INTO job_events(job_id, ts, state, side, cause, detail)"
                 " VALUES (?,?,?,?,?,?)",
                 (job_id, now, state.value, side.value if side else None, cause,
                  _redact(detail, _MAX_DETAIL_CHARS)),
             )
+            if state in NOTIFY_STATES:
+                self._db.execute(
+                    "INSERT INTO job_notifications(job_id, event_seq, status, ts)"
+                    " VALUES (?,?,?,?)",
+                    (job_id, ev.lastrowid, NOTIFY_PENDING, now),
+                )
             self._db.commit()
+        self._notify_listeners(job_id, state)
 
     def link_ref(self, job_id: str, kind: str, value: str) -> None:
         with self._lock:
@@ -259,3 +331,109 @@ class JobStore:
             if json.loads(r["refs"]).get(kind) == str(value):
                 return self._job(r)
         return None
+
+    def latest_for_session(self, session_key: str) -> Job | None:
+        """Newest job opened for this session (any state)."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM jobs WHERE session_key=? ORDER BY created DESC, rowid DESC LIMIT 1",
+                (session_key,),
+            ).fetchone()
+        return self._job(row) if row else None
+
+    def list(
+        self, *, states: frozenset[JobState] | set[JobState] | None = None,
+        since: str | None = None, role: str | None = None, limit: int = 100,
+    ) -> list[Job]:
+        """Jobs filtered by state, role and ``updated >= since`` (ISO), newest first."""
+        sql, args = "SELECT * FROM jobs WHERE 1=1", []
+        if states:
+            sql += " AND state IN (" + ",".join("?" for _ in states) + ")"
+            args += [s.value for s in states]
+        if since:
+            sql += " AND updated >= ?"
+            args.append(since)
+        if role is not None:
+            sql += " AND role=?"
+            args.append(role)
+        with self._lock:
+            rows = self._db.execute(
+                sql + " ORDER BY updated DESC LIMIT ?", [*args, int(limit)],
+            ).fetchall()
+        return [self._job(r) for r in rows]
+
+    # -- links between jobs ---------------------------------------------------------
+
+    def link_child(self, parent: str, child: str, kind: str = "") -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO job_links(parent, child, kind) VALUES (?,?,?)",
+                (parent, child, kind),
+            )
+            self._db.commit()
+
+    def children(self, parent: str) -> list[Job]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT j.* FROM jobs j JOIN job_links l ON l.child=j.id WHERE l.parent=?"
+                " ORDER BY j.created", (parent,),
+            ).fetchall()
+        return [self._job(r) for r in rows]
+
+    def parent_of(self, child: str) -> Job | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT j.* FROM jobs j JOIN job_links l ON l.parent=j.id WHERE l.child=?"
+                " LIMIT 1", (child,),
+            ).fetchone()
+        return self._job(row) if row else None
+
+    def active_children(self, parent: str) -> list[Job]:
+        return [c for c in self.children(parent) if c.state in ACTIVE_STATES]
+
+    # -- notification outbox --------------------------------------------------------
+
+    def pending_notifications(self, limit: int = 20) -> list[Notification]:
+        """Notifications still to send, oldest first. ``sending`` rows left by a crash are
+        NOT returned: they may have gone out, so they are marked uncertain on recovery."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT n.*, e.state AS state FROM job_notifications n"
+                " JOIN job_events e ON e.seq = n.event_seq"
+                " WHERE n.status=? ORDER BY n.ts, n.event_seq LIMIT ?",
+                (NOTIFY_PENDING, int(limit)),
+            ).fetchall()
+        return [
+            Notification(r["job_id"], r["event_seq"], r["status"], r["attempts"],
+                         JobState(r["state"]), r["ts"])
+            for r in rows
+        ]
+
+    def set_notification(self, job_id: str, event_seq: int, status: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE job_notifications SET status=?, attempts=attempts+?"
+                " WHERE job_id=? AND event_seq=?",
+                (status, 1 if status == NOTIFY_SENDING else 0, job_id, event_seq),
+            )
+            self._db.commit()
+
+    def recover_notifications(self) -> int:
+        """After a restart a ``sending`` row may or may not have been delivered: mark it
+        uncertain rather than send twice. Returns how many were marked."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE job_notifications SET status=? WHERE status=?",
+                (NOTIFY_UNCERTAIN, NOTIFY_SENDING),
+            )
+            self._db.commit()
+        return cur.rowcount
+
+    def notification_status(self, job_id: str) -> list[tuple[int, str, str]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT n.event_seq, n.status, e.state FROM job_notifications n"
+                " JOIN job_events e ON e.seq=n.event_seq WHERE n.job_id=? ORDER BY n.event_seq",
+                (job_id,),
+            ).fetchall()
+        return [(r["event_seq"], r["status"], r["state"]) for r in rows]
