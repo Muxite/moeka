@@ -155,6 +155,16 @@ CREATE TABLE IF NOT EXISTS job_links (
     kind TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (parent, child)
 );
+CREATE TABLE IF NOT EXISTS review_questions (
+    key TEXT PRIMARY KEY, kind TEXT NOT NULL, ts TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill_proposals (
+    name TEXT PRIMARY KEY, ts TEXT NOT NULL, basis TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS owner_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+    used_by TEXT
+);
 CREATE INDEX IF NOT EXISTS job_links_parent ON job_links(parent);
 CREATE INDEX IF NOT EXISTS job_notifications_status ON job_notifications(status, ts);
 CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
@@ -437,3 +447,54 @@ class JobStore:
                 (job_id,),
             ).fetchall()
         return [(r["event_seq"], r["status"], r["state"]) for r in rows]
+
+    # -- downtime review bookkeeping ------------------------------------------------
+
+    def was_asked(self, key: str) -> bool:
+        with self._lock:
+            return self._db.execute(
+                "SELECT 1 FROM review_questions WHERE key=?", (key,)).fetchone() is not None
+
+    def mark_asked(self, key: str, kind: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO review_questions(key, kind, ts) VALUES (?,?,?)",
+                (key, kind, _now()))
+            self._db.commit()
+
+    def consumed_bases(self) -> set[str]:
+        """Evidence bases (repeat-request signatures) already spent on a new skill."""
+        with self._lock:
+            rows = self._db.execute("SELECT basis FROM skill_proposals").fetchall()
+        return {r["basis"] for r in rows}
+
+    def record_skill_proposal(self, name: str, basis: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO skill_proposals(name, ts, basis) VALUES (?,?,?)",
+                (name, _now(), basis))
+            self._db.commit()
+
+    def add_owner_approval(self, note: str = "") -> int:
+        """The owner allowed one new skill or tool. Only the owner's slash command calls this."""
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO owner_approvals(ts, note) VALUES (?,?)", (_now(), note[:200]))
+            self._db.commit()
+        return int(cur.lastrowid)
+
+    def use_owner_approval(self, name: str) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id FROM owner_approvals WHERE used_by IS NULL ORDER BY id LIMIT 1",
+            ).fetchone()
+            if row is None:
+                return False
+            self._db.execute("UPDATE owner_approvals SET used_by=? WHERE id=?", (name, row["id"]))
+            self._db.commit()
+        return True
+
+    def unused_owner_approvals(self) -> int:
+        with self._lock:
+            return int(self._db.execute(
+                "SELECT COUNT(*) FROM owner_approvals WHERE used_by IS NULL").fetchone()[0])

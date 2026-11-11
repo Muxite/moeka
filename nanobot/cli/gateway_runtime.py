@@ -821,11 +821,19 @@ def _run_gateway(
         )
 
     job_notifier = None
+    job_reviewer = None
     if getattr(agent, "job_store", None) is not None:
         from nanobot.job_notifier import JobNotifier
 
         job_notifier = JobNotifier(
             agent.job_store, _deliver_to_channel, fallback_target=_pick_heartbeat_target,
+        )
+        from nanobot.job_review_service import JobReviewer
+
+        job_reviewer = JobReviewer(
+            agent.job_store, _deliver_to_channel, _pick_heartbeat_target,
+            UnsolicitedDeliveryLimit(config.workspace_path / "cron" / "job-review.sqlite3"),
+            config.agents.defaults.timezone,
         )
 
     if channels.enabled_channels:
@@ -994,6 +1002,8 @@ def _run_gateway(
                 await creative_bridge.start()
             if job_notifier is not None:
                 await job_notifier.start()
+            if job_reviewer is not None:
+                await job_reviewer.start()
             if getattr(agent, "worker_manager", None) is not None:
                 await agent.worker_manager.start_service()
             if peer_service is not None:
@@ -1095,6 +1105,8 @@ def _run_gateway(
                     with suppress(asyncio.CancelledError):
                         await shutdown_task
                 cron.stop()
+                if job_reviewer is not None:
+                    await job_reviewer.stop()
                 if job_notifier is not None:
                     await job_notifier.stop()
                 if creative_bridge is not None:

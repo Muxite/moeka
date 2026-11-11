@@ -538,6 +538,12 @@ class AgentLoop:
 
             self.job_store = JobStore(get_store(self.sessions).sessions_dir / JOBS_DB_NAME)
             self._hook_factories.append(job_hook_factory(self.job_store, ack=self._job_ack))
+            # Spec 015 phase 4: a new skill needs proof of reuse in the job record.
+            from functools import partial
+
+            from nanobot.kernel.job_review import new_skill_gate
+
+            self.context.memory.new_skill_gate = partial(new_skill_gate, self.job_store)
         except Exception:
             logger.exception("job record unavailable; continuing without it")
         # Spec 015 phase 5: coding-agent workers, only when a backend is enabled in config.

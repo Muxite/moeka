@@ -116,6 +116,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         accepts_args=True,
     ),
     BuiltinCommandSpec(
+        "/approve-skill",
+        "Allow one new skill",
+        "Let the agent stage one new skill or tool without the usual proof of reuse.",
+        "history",
+        "[note]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
         "/stable",
         "Mark this version stable",
         "Tag the running version as a point /revert can return to.",
@@ -319,6 +327,22 @@ def _revert_listing(sr: Any, repo: Any, state_dir: Any) -> str:
               for t in tags[:8]] or ["No stable version marked yet. Use /stable on one you trust."]
     lines.append("Use /revert latest | previous | <mark> | back  (add 'force' to stash local changes).")
     return "\n".join(lines)
+
+
+async def cmd_approve_skill(ctx: CommandContext) -> OutboundMessage:
+    """Owner approval for one new skill or tool (spec 015 evidence rule). No model tool exists.
+
+    Usage: /approve-skill [note]
+    """
+    store = getattr(ctx.loop, "job_store", None)
+    if store is None:
+        return _text_reply(ctx, "Job records are unavailable, so approvals cannot be kept.")
+    store.add_owner_approval(ctx.args.strip())
+    left = store.unused_owner_approvals()
+    return _text_reply(
+        ctx, f"Approved: the next new skill or tool may be staged ({left} approval(s) unused). "
+        "It still lands in skills-pending until you accept it.",
+    )
 
 
 async def cmd_stable(ctx: CommandContext) -> OutboundMessage:
@@ -1232,6 +1256,8 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/model ", cmd_model)
     router.exact("/history", cmd_history)
     router.prefix("/history ", cmd_history)
+    router.exact("/approve-skill", cmd_approve_skill)
+    router.prefix("/approve-skill ", cmd_approve_skill)
     router.exact("/stable", cmd_stable)
     router.prefix("/stable ", cmd_stable)
     router.exact("/revert", cmd_revert)

@@ -792,6 +792,9 @@ class MemoryStore:
             read_cls, edit_cls = PendingReadFileTool, PendingEditFileTool
             patch_cls, write_cls = PendingApplyPatchTool, PendingWriteFileTool
             staging = {"skills_root": skills_dir, "pending_root": pending_dir(workspace)}
+            gate = getattr(self, "new_skill_gate", None)
+            if gate is not None:
+                staging["new_skill_gate"] = gate
 
         tools.register(read_cls(
             workspace=workspace,
