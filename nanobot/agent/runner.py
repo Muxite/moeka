@@ -9,6 +9,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -73,6 +74,7 @@ from nanobot.utils.runtime import (
     repeated_external_lookup_error,
     repeated_policy_error,
     repeated_workspace_violation_error,
+    tool_error_stop_message,
 )
 
 if TYPE_CHECKING:
@@ -88,6 +90,24 @@ _ARREARAGE_ERROR_MESSAGE = (
     "The AI provider rejected the request because the API key is out of quota or the "
     "account is in arrears. Please top up / check the billing status of your API key and try again."
 )
+
+
+class StampedMessage(dict):
+    """A message dict that remembers when the runner appended it (spec 015).
+
+    The stamp lives on the object, not in the dict, so provider payloads, equality and JSON
+    are unchanged; ``AgentLoop._save_turn`` reads ``.appended_at`` when it persists the turn.
+    """
+
+    __slots__ = ("appended_at",)
+
+
+def _stamped(message: dict[str, Any]) -> dict[str, Any]:
+    out = StampedMessage(message)
+    out.appended_at = datetime.now().isoformat()
+    return out
+
+
 _PERSISTED_MODEL_ERROR_PLACEHOLDER = "[Assistant reply unavailable due to model error.]"
 _MAX_EMPTY_RETRIES = 2
 _MAX_LENGTH_RECOVERIES = 3
@@ -699,7 +719,7 @@ class AgentRunner:
                     assistant_message,
                     response,
                 )
-                messages.append(assistant_message)
+                messages.append(_stamped(assistant_message))
                 await self._emit_checkpoint(
                     spec,
                     {
@@ -755,6 +775,7 @@ class AgentRunner:
                             result,
                         ),
                     }
+                    tool_message = _stamped(tool_message)
                     messages.append(tool_message)
                     completed_tool_results.append(tool_message)
                 if fatal_error is not None:
@@ -859,8 +880,13 @@ class AgentRunner:
                         f"max_tool_errors: {tool_errors.count} tool errors "
                         f"(limit {tool_errors.limit})"
                     )
+                    final_content = tool_error_stop_message(tool_events, tool_errors.count, tool_errors.limit)
+                    context.final_content = final_content
                     context.error = error
                     context.stop_reason = stop_reason
+                    self._append_final_message(messages, final_content)
+                    if hook.wants_streaming():
+                        await hook.on_stream_end(context, resuming=False)
                     logger.warning(
                         "Stopping turn for {}: {}", spec.session_key or "default", error,
                     )
@@ -973,6 +999,7 @@ class AgentRunner:
                     assistant_message,
                     response,
                 )
+                assistant_message = _stamped(assistant_message)
 
             # Check for mid-turn injections BEFORE signaling stream end.
             # If injections are found we keep the stream alive (resuming=True)
@@ -2306,9 +2333,9 @@ class AgentRunner:
         ):
             if messages[-1].get("content") == content:
                 return
-            messages[-1] = build_assistant_message(content)
+            messages[-1] = _stamped(build_assistant_message(content))
             return
-        messages.append(build_assistant_message(content))
+        messages.append(_stamped(build_assistant_message(content)))
 
     @staticmethod
     def _append_model_error_placeholder(messages: list[dict[str, Any]]) -> None:

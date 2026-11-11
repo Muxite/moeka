@@ -74,6 +74,18 @@ PROTECTED_WRITE: tuple[tuple[str, str], ...] = (
 # READ and WRITE denied wherever they are: secrets files by their last component.
 PROTECTED_BASENAMES: frozenset[str] = frozenset({"keys.env"})
 
+# READ and WRITE denied wherever they are (spec 015): dotenv files hold project secrets.
+# Templates stay readable so an agent can still see which variables a project expects.
+DOTENV_TEMPLATE_SUFFIXES: tuple[str, ...] = (".example", ".sample", ".template", ".dist")
+
+
+def is_dotenv_name(name: str) -> bool:
+    """True for ``.env`` and ``.env.<anything>`` except template files like ``.env.example``."""
+    if name == ".env":
+        return True
+    return name.startswith(".env.") and not name.endswith(DOTENV_TEMPLATE_SUFFIXES)
+
+
 # WRITE denied wherever they are (spec 012 FR-008): capability certificates and
 # revocation lists. Reading stays allowed.
 TRUST_WRITE_BASENAMES: frozenset[str] = frozenset({"CERT.json", "revoked.jsonl"})
@@ -84,7 +96,35 @@ TRUST_WRITE_BASENAMES: frozenset[str] = frozenset({"CERT.json", "revoked.jsonl"}
 INSTANCE_WRITE_PROTECTED: tuple[str, ...] = (
     ".instance.lock", ".instance.json", "moeka.pid", "gateway.lock", "run",
     "SOUL.md", "AGENTS.md", ".personality", ".nanobot", ".moeka-transfer",
+    ".boot-guard.json", "revert-state.json",
 )
+
+
+def source_root() -> Path | None:
+    """The tree this process runs from (the repo checkout, or site-packages), resolved."""
+    try:
+        import nanobot
+
+        return Path(nanobot.__file__).resolve().parents[1]
+    except (OSError, IndexError, AttributeError):
+        return None
+
+
+def source_write_reason(path: Path) -> str | None:
+    """Denial text when *path* is inside the running source tree (spec 015), else ``None``.
+
+    Writes to moeka's own code go through the owner's revert system, never the file tools.
+    """
+    root = source_root()
+    if root is None:
+        return None
+    for candidate in (Path(os.path.abspath(Path(path).expanduser())), _safe_resolve(Path(path))):
+        if candidate is not None and _is_within(candidate, root):
+            return (
+                f"Path {path} is inside moeka's own source tree; writing it is a "
+                f"{PROTECTED_MARKER} for the file tools" + WORKSPACE_BOUNDARY_NOTE
+            )
+    return None
 
 
 def builtin_trust_dir() -> Path:
@@ -209,7 +249,7 @@ def _match(
     posix = candidate.as_posix()
     if _PROC_SECRET_RE.match(posix):
         return True
-    if candidate.name in PROTECTED_BASENAMES:
+    if candidate.name in PROTECTED_BASENAMES or is_dotenv_name(candidate.name):
         return True
     if any(_is_within(candidate, root) for root in roots):
         return True

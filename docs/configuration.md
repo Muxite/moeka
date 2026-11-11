@@ -2210,6 +2210,10 @@ For API keys, tokens, and other secrets, see [Environment Variables for Secrets]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `tools.restrictToWorkspace` | `false` | When `true`, enables nanobot's application-level workspace guards for workspace-aware tools. File tools resolve paths under the active workspace; selected internal roots can be added as read-only or explicitly write-enabled roots, and media uploads are read-only by default. Shell execution rejects workspace-external `working_dir` values and applies best-effort command path checks, but this is not an OS sandbox. |
+| `tools.file.readRoots` | `[]` | Extra roots the agent may READ (for example `["~/projects", "/mnt"]`). Applies only when `restrictToWorkspace` is on. Also becomes a read-only bind in the `bwrap` exec sandbox. The protected floor still denies under any listed root: auth, sessions, `keys.env`, every `.env` and `.env.*` file (templates such as `.env.example` stay readable), other instances. See the [operator guide](./operator.md). |
+| `tools.file.writeRoots` | `[]` | Extra roots the agent may WRITE, and read. A separate grant: a read root never allows writes. Also becomes a read-write bind in the `bwrap` exec sandbox. The floor applies as for `readRoots`, and the running source tree stays write-protected (see `protectSource`). |
+| `tools.file.protectSource` | `true` | Refuse file-tool writes into the tree moeka runs from, even inside a `writeRoots` entry. In the `bwrap` sandbox the tree is also re-bound read-only. Changing the running code goes through `/stable` and `/revert`. An external harness that edits a checkout on purpose (RSI) sets this to `false` in its own config. |
+| `tools.viewMedia.*` | enabled, `preset: "viewer"` | `view_media` host tool: samples timed frames from a video (start, scene changes, end), measures duration/resolution/loudness with ffmpeg, and asks the vision model in `modelPresets.<preset>` (for example a flash-lite model) a specific question. Needs ffmpeg/ffprobe and a `viewer` entry in `modelPresets`; without the preset the tool returns a clear error. Limits: `maxFrames` (8), `frameLongEdge` (768), `maxFileMb` (500), `maxAnswerTokens` (1024). Judges stills only, so it cannot confirm motion, pacing or speech. |
 | `tools.maxSessionMessagesPerMinute` | `6` | Maximum messages one source session may send during any rolling 60-second window. Additional sends are rejected to stop runaway agent loops. |
 | `tools.exec.sandbox` | `""` | Sandbox backend for shell commands. `"bwrap"` (Linux) or `"seatbelt"` (macOS) restricts filesystem access to the workspace (read-write), media (read-only), required system paths and configured extra binds. The workspace's parent is denied except for allowed roots; keep secrets outside the workspace and binds. Automatically enables workspace restriction for file tools. `"bwrap"` requires bubblewrap (`apt install bubblewrap`; pre-installed in Docker). `"seatbelt"` uses macOS `sandbox-exec(1)`; it sets `HOME` and `TMPDIR` to the workspace rather than sharing host temporary directories. Use `mktemp "$TMPDIR/job.XXXXXX"` for macOS shell scratch files. Neither backend restricts network access. Windows logs a warning and runs commands without OS sandboxing. |
 | `tools.exec.enable` | `true` | When `false`, the shell `exec` tool is not registered at all. Use this to completely disable shell command execution. |
@@ -2630,3 +2634,24 @@ Set `agents.defaults.toolHintMaxLength` to control the truncation threshold:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `agents.defaults.toolHintMaxLength` | `40` | Maximum characters for tool hint display. Range: 20–500. Higher values show more of the command or path; lower values keep hints compact. |
+
+### Native host tmux connection
+
+`tools.tmux` is disabled by default. To let an agent read and control host terminals on request:
+
+```json
+{"tools":{"tmux":{"enable":true,"socketPath":"/tmp/tmux-1000/default","allowedSessions":["wonhee","awork"]}}}
+```
+
+Use the actual tmux socket path (`tmux display-message -p '#{socket_path}'`). `allowedSessions: ["*"]` grants
+all sessions on that socket. Restart the gateway after changing configuration. The native `tmux` tool lists
+pane IDs; `read` captures text; `send` pastes literal text and optionally presses Enter or one supported key;
+`new_window` opens a detached shell window in an allowed session. It does not create a tmux server or alter
+the shell sandbox. This grants host terminal command execution in those sessions when requested by the user.
+
+Verified on the local gateways on 2026-10-24: moeka and wonny both registered the native tool after restart.
+Through the tool registry, each sent a harmless printf command to a new detached
+`wonhee:moeka-terminal-test` window and read back its exact output (`moeka-native-terminal-ok` and
+`wonny-native-terminal-ok`). Existing windows were left untouched. The 233 focused config, loader, tmux,
+capability-gate and strict-mode tests passed, as did ruff and the tool's strict type check. Both instances
+retain workspace restrictions and the bwrap shell sandbox.

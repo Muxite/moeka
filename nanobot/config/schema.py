@@ -575,6 +575,33 @@ class CreativeBridgeConfig(Base):
         return self
 
 
+class ViewMediaToolConfig(Base):
+    """``view_media``: look at an image or video through a separate vision preset."""
+
+    enable: bool = True  # still needs a configured ``preset`` and a host loop to register
+    preset: str = "viewer"  # name in ``modelPresets`` (for example a flash-lite model)
+    max_frames: int = Field(default=8, ge=1, le=16)
+    frame_long_edge: int = Field(default=768, ge=128, le=2048)
+    max_file_mb: int = Field(default=500, ge=1, le=4096)
+    max_answer_tokens: int = Field(default=1024, ge=64, le=4096)
+
+
+class TmuxToolConfig(Base):
+    """Explicit host-terminal capability, independent of sandboxed shell execution."""
+
+    enable: bool = False
+    socket_path: str = ""
+    allowed_sessions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_host_socket(self) -> TmuxToolConfig:
+        if self.enable and (not self.socket_path or not Path(self.socket_path).is_absolute()):
+            raise ValueError("enabled tmux requires an absolute socket_path")
+        if self.enable and not self.allowed_sessions:
+            raise ValueError("enabled tmux requires allowed_sessions (or ['*'] for all sessions)")
+        return self
+
+
 class ToolsConfig(Base):
     """Tools configuration.
 
@@ -591,6 +618,8 @@ class ToolsConfig(Base):
     image_generation: ImageGenerationToolConfig = Field(
         default_factory=lambda: _lazy_default("nanobot.agent.tools.image_generation", "ImageGenerationToolConfig"),
     )
+    tmux: TmuxToolConfig = Field(default_factory=TmuxToolConfig)
+    view_media: ViewMediaToolConfig = Field(default_factory=ViewMediaToolConfig)
     max_session_messages_per_minute: int = Field(default=6, ge=1)
     restrict_to_workspace: bool = False  # policy intent: keep tool access inside workspace when possible
     webui_allow_local_service_access: bool = Field(

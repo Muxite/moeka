@@ -416,3 +416,399 @@ async def test_transient_intake_error_remains_retryable_and_does_not_claim_impor
             assert db.execute("SELECT count(*) FROM outbound").fetchone()[0] == 0
     finally:
         await bridge.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [0, 2, 33])
+async def test_drive_folder_forwards_all_imported_assets(bridge, count):
+    expected = [{"id": i + 3, "ref": f"{i:064x}", "role": "raw"} for i in range(count)]
+
+    async def call(action, **data):
+        if action == "inbox_add":
+            return {"assets": expected, "destination": "/data/drive/folder"}
+        return {"id": 7, "name": "campus"}
+
+    bridge.call = call
+    message = InboundMessage(channel="telegram", chat_id="123", sender_id="owner",
+                             content="Import https://drive.google.com/drive/folders/reference",
+                             metadata={"message_id": 81})
+    await bridge.handoff(message)
+    await bridge.intercept(message)
+    with bridge._db() as db:
+        row = db.execute("SELECT * FROM receipt").fetchone()
+    await bridge._forward(row)
+    assert bridge.peers.enqueue.await_args.kwargs["context"]["assets"] == expected[:32]
+    if count > 32:
+        assert "Imported 33 files" in bridge.peers.enqueue.await_args.kwargs["context"]["input_errors"][0]
+
+
+def _outbox_file(tmp_path, name="reel.mp4"):
+    f = tmp_path / "data" / "creative-outbox" / "tok" / name
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"video")
+    return f
+
+
+def _route():
+    return {"channel": "telegram", "chat_id": "123", "message_thread_id": 4}
+
+
+def _wire_channel(bridge, send):
+    channel = TelegramChannel(TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]), MessageBus())
+    channel.send_registered = send
+    bridge.get_channel = lambda _: channel
+    bridge._validate_destination = lambda route: None
+
+
+@pytest.mark.asyncio
+async def test_delivery_report_travels_as_the_file_caption(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    ids = await bridge._send({"route": _route(), "path": str(f), "content": "Reel 5 ready. Not yet checked."})
+    assert ids == [5]
+    msg = send.await_args.args[0]
+    assert msg.media == [str(f.resolve())]
+    assert msg.metadata["media_caption"].startswith("Reel 5 ready. Not yet checked.")
+    assert "Not checked: caption legibility" in msg.metadata["media_caption"]
+    assert msg.metadata["content_as_caption"] is True
+
+
+@pytest.mark.asyncio
+async def test_long_report_is_sent_as_text_not_a_clipped_caption(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    await bridge._send({"route": _route(), "path": str(f), "content": "x" * 1500})
+    assert "media_caption" not in send.await_args.args[0].metadata
+
+
+@pytest.mark.asyncio
+async def test_unfittable_video_falls_back_to_the_download_link(bridge, tmp_path):
+    from nanobot.channels.telegram.media_send import MediaTooLargeError
+
+    f = _outbox_file(tmp_path)
+    send = AsyncMock(side_effect=[MediaTooLargeError("reel.mp4 is 900.0 MB, over the limit"), [6]])
+    _wire_channel(bridge, send)
+    ids = await bridge._send({"route": _route(), "path": str(f), "content": "Done",
+                              "url": "https://files.example/x"})
+    assert ids == [6]
+    fallback = send.await_args_list[1].args[0]
+    assert fallback.media == [] and "Original file: https://files.example/x" in fallback.content
+    assert "Could not attach the file inline" in fallback.content
+    assert "media_caption" not in fallback.metadata
+
+
+@pytest.mark.asyncio
+async def test_unfittable_video_without_a_link_fails_the_delivery(bridge, tmp_path):
+    from nanobot.channels.telegram.media_send import MediaTooLargeError
+
+    f = _outbox_file(tmp_path)
+    _wire_channel(bridge, AsyncMock(side_effect=MediaTooLargeError("too big")))
+    with pytest.raises(ValueError, match="too big"):  # ValueError => the delivery is marked failed
+        await bridge._send({"route": _route(), "path": str(f), "content": "Done"})
+
+
+@pytest.mark.asyncio
+async def test_recent_deliveries_are_compact_and_never_block_intake(bridge):
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 12, "filename": "a.mp4", "status": "sent", "bytes": 1_807_664,
+         "content": "Ready. token=abc123 https://x.example/f", "created_at": "t"},
+        *[{"id": i, "filename": f"o{i}.mp4", "status": "sent", "bytes": 1} for i in range(11, 5, -1)],
+    ]})
+    rows = await bridge._recent_deliveries(2)
+    assert len(rows) == 5 and rows[0]["file"] == "a.mp4" and rows[0]["mb"] == 1.8
+    assert "abc123" not in rows[0]["report"] and "x.example" not in rows[0]["report"]
+    bridge.call = AsyncMock(side_effect=RuntimeError("wonhee down"))
+    assert await bridge._recent_deliveries(2) == []
+
+
+# --- spec 014: contract, change-detected polling, status, stalled jobs -------------------------------
+
+def _contract(**over):
+    value = {
+        "contract_version": 1, "revision": "abc123",
+        "actions": ["contract", "delivery_retry", "delivery_show", "health", "inbox_add", "inbox_list",
+                    "outbox_list", "project_create", "project_select", "project_show"],
+        "shapes": {"project_create": ["id", "name"], "project_show": ["id", "name"],
+                   "inbox_list": ["assets"], "outbox_list": ["outputs"],
+                   "delivery_show": ["deliveries", "failures"], "delivery_retry": ["id", "status"],
+                   "health": ["stuck_deliveries", "active_jobs"], "inbox_add": [], "project_select": []},
+    }
+    value.update(over)
+    return value
+
+
+def test_a_compatible_contract_has_no_problems():
+    from nanobot.creative_bridge import check_contract
+    assert check_contract(_contract()) == []
+
+
+def test_contract_problems_name_the_exact_drift():
+    from nanobot.creative_bridge import check_contract
+    contract = _contract(contract_version=2)
+    contract["actions"].remove("outbox_list")
+    contract["shapes"]["delivery_show"] = ["deliveries"]
+    problems = check_contract(contract)
+    assert any("version 2" in p for p in problems)
+    assert any("no 'outbox_list' action" in p for p in problems)
+    assert any("'delivery_show' no longer promises ['failures']" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_verify_contract_records_ok_and_mismatch_and_old_wonhee(bridge):
+    bridge.call = AsyncMock(return_value=_contract())
+    assert await bridge.verify_contract() is True
+    assert bridge.contract_state["ok"] is True and bridge.contract_state["revision"] == "abc123"
+
+    bridge.call = AsyncMock(return_value=_contract(contract_version=9))
+    assert await bridge.verify_contract() is False
+    assert bridge.contract_state["ok"] is False and bridge.health()["contract"]["problems"]
+
+    bridge.call = AsyncMock(side_effect=CreativeActionError("action_failed", "x", permanent=False))
+    assert await bridge.verify_contract() is False  # an old wonhee without the action never raises
+    assert "no 'contract' action" in bridge.contract_state["problems"][0]
+
+
+def test_change_signal_follows_the_marker_wonhee_advertises(bridge, tmp_path):
+    import os
+    home = tmp_path / "data"
+    home.mkdir(exist_ok=True)
+    bridge.contract_state = {"ok": True, "problems": [], "signal": ".bridge-signal"}
+    assert bridge._wonhee_changed() is True    # first look always polls
+    assert bridge._wonhee_changed() is False   # no marker yet: nothing has happened
+    marker = home / ".bridge-signal"
+    marker.touch()
+    assert bridge._wonhee_changed() is True    # wonhee signalled
+    assert bridge._wonhee_changed() is False
+    os.utime(marker, ns=(5, 5))
+    assert bridge._wonhee_changed() is True    # signalled again
+    assert bridge._wonhee_changed() is False
+
+
+def test_without_an_advertised_marker_every_tick_polls_like_before(bridge):
+    bridge.contract_state = {"ok": False, "problems": ["old wonhee"], "signal": None}
+    assert bridge._wonhee_changed() is True
+    assert bridge._wonhee_changed() is True
+
+
+@pytest.mark.asyncio
+async def test_the_signal_is_only_trusted_from_a_compatible_contract(bridge):
+    bridge.call = AsyncMock(return_value=_contract(signal=".bridge-signal"))
+    await bridge.verify_contract()
+    assert bridge.contract_state["signal"] == ".bridge-signal"
+    bridge.call = AsyncMock(return_value=_contract(contract_version=9, signal=".bridge-signal"))
+    await bridge.verify_contract()
+    assert bridge.contract_state["signal"] is None  # a mismatching wonhee is polled the slow, safe way
+
+
+def test_poll_is_due_on_change_or_after_the_safety_interval(bridge, monkeypatch):
+    from nanobot import creative_bridge
+    bridge._wonhee_changed = lambda: False
+    bridge._last_poll = 1000.0
+    monkeypatch.setattr(creative_bridge.time, "monotonic", lambda: 1000.0 + creative_bridge.SAFETY_POLL_S - 1)
+    assert bridge._poll_due() is False
+    monkeypatch.setattr(creative_bridge.time, "monotonic", lambda: 1000.0 + creative_bridge.SAFETY_POLL_S + 1)
+    assert bridge._poll_due() is True
+    bridge._wonhee_changed = lambda: True
+    assert bridge._poll_due() is True
+
+
+@pytest.mark.asyncio
+async def test_failed_reel_notice_carries_the_real_reason(bridge):
+    queued = []
+
+    async def queue_text(identity, content, route, project_id=None):
+        queued.append((identity, content))
+
+    bridge.queue_text = queue_text
+    bridge.get_channel = lambda _: SimpleNamespace(_app_ready=asyncio.Event())
+    bridge.call = AsyncMock(return_value={"deliveries": [], "failures": [
+        {"id": 5, "project_id": 7, "route": _route(), "error": "render input could not decode"},
+        {"id": 6, "project_id": 7, "route": _route(), "error": None},
+    ]})
+    await bridge._poll_deliveries()
+    assert "render input could not decode" in queued[0][1] and queued[0][0] == "submission-failed:5"
+    assert queued[1][1].startswith("Your reel couldn't finish. ")
+
+
+@pytest.mark.asyncio
+async def test_stalled_job_is_announced_once_and_healthy_jobs_are_not(bridge):
+    bridge.call = AsyncMock(return_value={"active_jobs": [
+        {"id": 3, "project_id": 7, "status": "running", "phase": "render", "idle_s": 1500,
+         "stalled": True, "route": _route()},
+        {"id": 4, "project_id": 7, "status": "running", "phase": "render", "idle_s": 5,
+         "stalled": False, "route": _route()},
+    ]})
+    await bridge._check_jobs()
+    await bridge._check_jobs()
+    with bridge._db() as db:
+        rows = list(db.execute("SELECT id, payload FROM outbound"))
+    assert [r["id"] for r in rows] == ["job-stalled:3"]  # idempotent, and job 4 is healthy
+    assert "25 min" in rows[0]["payload"] and "render" in rows[0]["payload"]
+
+
+@pytest.mark.asyncio
+async def test_status_report_lists_stuck_deliveries_jobs_and_contract(bridge):
+    bridge.contract_state = {"ok": True, "problems": [], "version": 1, "revision": "abc123"}
+    bridge.call = AsyncMock(return_value={
+        "stuck_deliveries": [{"id": 9, "filename": "reel.mp4", "status": "uncertain", "age_s": 1200,
+                              "error": "delivery interrupted before acknowledgement", "route": _route()}],
+        "active_jobs": [{"id": 3, "status": "running", "phase": "render", "idle_s": 1500, "stalled": True}],
+    })
+    text = await bridge.status_report(_route())
+    assert "Contract v1 ok, wonhee abc123" in text
+    assert "Delivery 9 reel.mp4: uncertain, 20 min" in text
+    assert "Job 3: running in render, idle 25 min - STALLED" in text
+
+
+@pytest.mark.asyncio
+async def test_status_report_says_when_the_contract_is_broken_or_wonhee_is_unreachable(bridge):
+    bridge.contract_state = {"ok": False, "problems": ["wonhee has no 'outbox_list' action"]}
+    bridge.call = AsyncMock(side_effect=RuntimeError("boom"))
+    text = await bridge.status_report(_route())
+    assert "CONTRACT MISMATCH: wonhee has no 'outbox_list' action" in text
+    assert "Could not read wonhee health" in text
+
+
+@pytest.mark.asyncio
+async def test_retry_requeues_the_newest_stuck_delivery_for_this_chat_only(bridge):
+    calls = []
+
+    async def call(action, **data):
+        calls.append((action, data))
+        if action == "health":
+            return {"stuck_deliveries": [
+                {"id": 11, "filename": "other.mp4", "status": "uncertain", "route": {"chat_id": "999"}},
+                {"id": 10, "filename": "mine.mp4", "status": "uncertain", "route": {"chat_id": "123"}},
+                {"id": 9, "filename": "old.mp4", "status": "failed", "route": {"chat_id": "123"}},
+                {"id": 8, "filename": "busy.mp4", "status": "sending", "route": {"chat_id": "123"}},
+            ]}
+        return {"id": data.get("delivery_id"), "status": "queued"}
+
+    bridge.call = call
+    assert await bridge._retry_wonhee_delivery(_route()) == "mine.mp4"
+    assert ("delivery_retry", {"delivery_id": 10}) in calls
+    bridge.call = AsyncMock(return_value={"stuck_deliveries": []})
+    assert await bridge._retry_wonhee_delivery(_route()) is None
+
+
+@pytest.mark.asyncio
+async def test_context_lists_only_this_projects_jobs(bridge):
+    bridge.call = AsyncMock(return_value={"active_jobs": [
+        {"id": 1, "project_id": 7, "status": "running", "phase": "p", "idle_s": 3, "stalled": False, "route": {}},
+        {"id": 2, "project_id": 8, "status": "queued", "phase": None, "idle_s": 9, "stalled": False, "route": {}},
+    ]})
+    assert [j["id"] for j in await bridge._active_jobs(7)] == [1]
+    assert "route" not in (await bridge._active_jobs(7))[0]
+    bridge.call = AsyncMock(side_effect=RuntimeError("down"))
+    assert await bridge._active_jobs(7) == []
+
+
+# --- spec 014: self-check gate on delivery ------------------------------------------------------------
+
+def _sha(path):
+    from nanobot.utils.media_probe import file_sha256
+    return file_sha256(path)
+
+
+@pytest.mark.asyncio
+async def test_identical_rerender_is_flagged_in_the_caption_and_recorded(bridge, tmp_path):
+    """The Oct 26 failure: reel-5 was byte-identical to reel-4 yet was reported as a fix."""
+    f = _outbox_file(tmp_path, "reel-5.mp4")
+    sha = _sha(f)
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 11, "ref": sha, "filename": "reel-5.mp4", "created_at": "t2"},
+        {"id": 10, "ref": sha, "filename": "reel-4.mp4", "created_at": "t1"},
+        {"id": 9, "ref": "f" * 64, "filename": "other.mp4", "created_at": "t0"},
+    ]})
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    await bridge._send({"id": 11, "project_id": 7, "route": _route(), "path": str(f),
+                        "content": "Your reel is ready. Full file check: not yet run."})
+    caption = send.await_args.args[0].metadata["media_caption"]
+    assert "WARNING: byte-identical to delivery 10 (reel-4.mp4)" in caption
+    assert "did not take effect" in caption
+    assert "Full file check: not yet run" not in caption  # replaced by what was really measured
+    assert f"File {sha[:8]}" in caption and "Not checked:" in caption
+    with bridge._db() as db:
+        row = db.execute("SELECT * FROM delivery_check WHERE delivery_id=11").fetchone()
+    assert row["sha"] == sha and row["duplicate_of"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_changed_output_is_not_flagged(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 11, "ref": _sha(f), "filename": "new.mp4"}, {"id": 10, "ref": "e" * 64, "filename": "old.mp4"},
+    ]})
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    await bridge._send({"id": 11, "project_id": 7, "route": _route(), "path": str(f), "content": "Ready."})
+    assert "WARNING" not in send.await_args.args[0].metadata["media_caption"]
+
+
+@pytest.mark.asyncio
+async def test_only_an_earlier_delivery_counts_as_the_original(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    sha = _sha(f)
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 12, "ref": sha, "filename": "later.mp4"}, {"id": 11, "ref": sha, "filename": "this.mp4"},
+    ]})
+    check = await bridge._verify_output({"id": 11, "project_id": 7}, f)
+    assert check["duplicate_of"] is None  # delivery 12 came after, so 11 is the first of its kind
+
+
+@pytest.mark.asyncio
+async def test_a_failing_check_never_blocks_the_delivery(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    bridge._verify_output = AsyncMock(side_effect=RuntimeError("probe exploded"))
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    assert await bridge._send({"id": 11, "project_id": 7, "route": _route(), "path": str(f),
+                               "content": "Ready."}) == [5]
+    assert send.await_args.args[0].metadata["media_caption"] == "Ready."  # unaugmented, but delivered
+
+
+@pytest.mark.asyncio
+async def test_a_wonhee_outage_still_yields_facts_and_the_unchecked_list(bridge, tmp_path):
+    f = _outbox_file(tmp_path)
+    bridge.call = AsyncMock(side_effect=RuntimeError("wonhee down"))
+    check = await bridge._verify_output({"id": 11, "project_id": 7}, f)
+    assert check["duplicate_of"] is None and check["sha"] == _sha(f)
+
+
+@pytest.mark.asyncio
+async def test_recent_deliveries_carry_the_check_so_the_agent_cannot_miss_a_duplicate(bridge, tmp_path):
+    import json
+    with bridge._db() as db:
+        db.execute("INSERT INTO delivery_check VALUES(?,?,?,?,?)",
+                   (11, "a" * 64, 10, json.dumps({"width": 1080, "height": 1920, "duration_s": 20.3,
+                                                  "fps": 30.0, "has_audio": False}), 0.0))
+    bridge.call = AsyncMock(return_value={"outputs": [
+        {"id": 11, "filename": "reel-5.mp4", "status": "sent", "bytes": 1_800_000, "content": "ok"},
+        {"id": 3, "filename": "old.mp4", "status": "sent", "bytes": 1},
+    ]})
+    rows = await bridge._recent_deliveries(7)
+    assert rows[0]["sha"] == "a" * 8 and rows[0]["duplicate_of"] == 10
+    assert rows[0]["measured"] == "1080x1920, 20.3 s, 30.0 fps, no audio"
+    assert rows[1]["checked"] is False and "sha" not in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_real_ffprobe_facts_land_in_the_report(bridge, tmp_path):
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    f = _outbox_file(tmp_path, "real.mp4")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc=duration=2:size=320x240:rate=10", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=2", "-shortest", "-pix_fmt", "yuv420p", str(f)], check=True)
+    bridge.call = AsyncMock(return_value={"outputs": []})
+    send = AsyncMock(return_value=[5])
+    _wire_channel(bridge, send)
+    await bridge._send({"id": 4, "project_id": 7, "route": _route(), "path": str(f), "content": "Ready."})
+    caption = send.await_args.args[0].metadata["media_caption"]
+    assert "320x240" in caption and "2.0 s" in caption and "LUFS" in caption

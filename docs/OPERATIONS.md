@@ -28,6 +28,26 @@ $EDITOR keys.env          # DO NOT commit keys.env
 ./bin/moeka.sh exec -- <cmd>  # run a nanobot subcommand
 ```
 
+## Stable versions and revert
+
+The gateway runs from this checkout, so the running version is a git commit. From chat you can mark a
+commit you trust and return to it later:
+
+```text
+/stable good after the wonhee fix     # tags the running commit moeka-stable/<stamp>
+/revert                               # lists stable marks
+/revert latest                        # checkout the newest mark, restart, report back
+/revert back                          # return to the branch you reverted from
+```
+
+`/revert` refuses a dirty working tree unless you add `force`, which stashes local changes as
+`moeka-revert-<stamp>`. Only you can run it; the model has no tool for it.
+
+`bin/moeka.sh run` also runs a boot guard (`scripts/selfrevert.py guard`, stdlib only, default
+instance only). Three boots of the same commit within ten minutes that never stayed up 60 seconds
+trigger an automatic revert to the newest stable mark. With no mark it only logs. State lives in
+`<workspace>/.boot-guard.json` and `revert-state.json`, which the file tools cannot write.
+
 ## Boot setup
 
 ```sh

@@ -528,6 +528,18 @@ class AgentLoop:
         # WebUI and fork rollback paths.  Observe that boundary once instead of
         # duplicating cleanup in each consumer.
         self.sessions.set_delete_observer(self._file_state_store.discard)
+        # Spec 015: one durable job record per owner request, next to sessions.db so the
+        # existing sessions-root protection (file floor, exec masks) covers it too.
+        self.job_store = None
+        try:
+            from nanobot.kernel.job_hook import job_hook_factory
+            from nanobot.kernel.jobs import JOBS_DB_NAME, JobStore
+            from nanobot.session.sqlite_store import get_store
+
+            self.job_store = JobStore(get_store(self.sessions).sessions_dir / JOBS_DB_NAME)
+            self._hook_factories.append(job_hook_factory(self.job_store))
+        except Exception:
+            logger.exception("job record unavailable; continuing without it")
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         # Spec 011: the capability index holds this loop's tools next to its skills.
         self.context.tool_registry = self.tools
@@ -1500,6 +1512,7 @@ class AgentLoop:
                     turn_hooks=list(hooks or []),
                     ephemeral=ephemeral,
                     run_extra_hooks_for_ephemeral=run_extra_hooks_for_ephemeral,
+                    request_text=str(getattr(transcript_input, "current_message", None) or ""),
                 )
             )
             result = await self.runner.run(
@@ -1963,9 +1976,15 @@ class AgentLoop:
         finally:
             self._background_tasks.clear()
 
+        async def _close_job_store() -> None:
+            store, self.job_store = getattr(self, "job_store", None), None
+            if store is not None:
+                store.close()
+
         cleanup_steps = (
             self.subagents.close,
             self._exec_session_manager.close_all,
+            _close_job_store,
         )
         for cleanup in cleanup_steps:
             try:
@@ -2754,7 +2773,9 @@ class AgentLoop:
                     entry["content"] = filtered
                 if isinstance(runtime_context_meta, dict):
                     entry[RUNTIME_CONTEXT_HISTORY_META] = runtime_context_meta
-            entry.setdefault("timestamp", datetime.now().isoformat())
+            entry.setdefault(
+                "timestamp", getattr(message, "appended_at", None) or datetime.now().isoformat(),
+            )
             session.messages.append(entry)
             if role == "user":
                 saved_followup_ids.update(followup_id for followup_id in followup_ids if followup_id)

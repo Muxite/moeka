@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
+  <title id="title">Moeka — AI that stays with the work.</title>
+  <desc id="desc">A personal assistant, connected agent runtime, and experimental self-improvement foundation. Remember, act, coordinate, evolve.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#111529"/><stop offset="1" stop-color="#201b43"/></linearGradient>
+    <linearGradient id="accent"><stop stop-color="#a39aff"/><stop offset="1" stop-color="#69e5c0"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 H 0 V 40" fill="none" stroke="#b8b0ff" stroke-opacity=".045"/></pattern>
+  </defs>
+  <rect width="1200" height="500" rx="24" fill="url(#bg)"/>
+  <rect width="1200" height="500" rx="24" fill="url(#grid)"/>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <rect x="56" y="43" width="204" height="28" rx="14" fill="#55ddb3" fill-opacity=".12"/>
+    <text x="73" y="62" fill="#88edd0" font-size="12" font-weight="700" letter-spacing="2">YOUR AI. YOUR STACK.</text>
+    <text x="52" y="155" fill="#f7f5ff" font-size="82" font-weight="800" letter-spacing="-4">moeka</text>
+    <text x="56" y="220" fill="#f7f5ff" font-size="35" font-weight="700">AI that stays with the work.</text>
+    <text x="56" y="261" fill="#c1bfd7" font-size="18">From daily assistance to reusable capability.</text>
+    <text x="56" y="290" fill="#c1bfd7" font-size="18">One engine for your work, your agents, and your applications.</text>
+    <g transform="translate(938 187)" fill="none">
+      <circle r="122" stroke="#aaa0ff" stroke-opacity=".15"/>
+      <circle r="88" stroke="#aaa0ff" stroke-opacity=".28"/>
+      <path d="M-66 32V-32L0 15L66-32V32" stroke="url(#accent)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="0" cy="-122" r="7" fill="#a39aff"/>
+      <circle cx="106" cy="61" r="7" fill="#69e5c0"/>
+      <circle cx="-76" cy="92" r="5" fill="#ffb86b"/>
+    </g>
+    <path d="M56 339H1144" stroke="#aaa0ff" stroke-opacity=".2"/>
+    <g font-size="18" font-weight="700" fill="#f7f5ff">
+      <text x="56" y="384">01 / REMEMBER</text><text x="334" y="384">02 / ACT</text>
+      <text x="612" y="384">03 / COORDINATE</text><text x="890" y="384">04 / EVOLVE</text>
+    </g>
+    <g font-size="15" fill="#b7b5ce">
+      <text x="56" y="414">Context across sessions</text><text x="334" y="414">Tools that do real work</text>
+      <text x="612" y="414">Independent, connected agents</text><text x="890" y="414">Experimental RSI frontier</text>
+    </g>
+    <text x="56" y="468" fill="#8f8ba9" font-size="12" letter-spacing="2">SELF-HOSTED / MODEL FLEXIBLE / EXTENSIBLE</text>
+  </g>
+</svg>

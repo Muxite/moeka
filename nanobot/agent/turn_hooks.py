@@ -38,6 +38,7 @@ class AgentTurnHookSpec:
     ephemeral: bool = False
     run_extra_hooks_for_ephemeral: bool = False
     attributes: dict[str, Any] | None = None
+    request_text: str = ""
 
 
 def build_agent_turn_hook(spec: AgentTurnHookSpec) -> AgentHook:
@@ -61,6 +62,7 @@ def build_agent_turn_hook(spec: AgentTurnHookSpec) -> AgentHook:
         metadata=dict(spec.metadata or {}),
         attributes=dict(spec.attributes or {}),
         ephemeral=spec.ephemeral,
+        request_text=spec.request_text,
     )
     hook_chain: list[AgentHook] = [progress_hook]
 

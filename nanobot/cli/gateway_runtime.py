@@ -799,6 +799,7 @@ def _run_gateway(
         creative_bridge = CreativeBridge(
             config.creative_bridge, workspace=config.workspace_path, bus=bus,
             peers=peer_service, get_channel=channels.get_channel,
+            jobs=getattr(agent, "job_store", None),
         )
         agent.tools.register(WonheeHandoffTool(creative_bridge))
         if config.creative_bridge.mode=='direct':
@@ -1045,6 +1046,9 @@ def _run_gateway(
                     _watch_webui_dev_server(webui_dev_server, shutdown_event),
                     name="nanobot-webui-dev-server",
                 ))
+            from nanobot.cli.selfrevert_link import schedule_healthy_mark
+
+            schedule_healthy_mark(config.workspace_path)  # spec 015: boot guard bookkeeping
             runtime_tasks = asyncio.gather(*tasks)
             startup_complete = True
             shutdown_task = asyncio.create_task(

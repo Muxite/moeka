@@ -13,7 +13,12 @@ from loguru import logger
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import ToolContext, current_request_context
 from nanobot.agent.tools.path_utils import resolve_workspace_path
-from nanobot.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
+from nanobot.agent.tools.schema import (
+    ArraySchema,
+    BooleanSchema,
+    StringSchema,
+    tool_parameters_schema,
+)
 from nanobot.bus.events import OutboundMessage
 from nanobot.config.paths import get_workspace_path
 from nanobot.security.workspace_access import current_tool_workspace
@@ -56,6 +61,15 @@ def capture_message_deliveries() -> Generator[set[tuple[str, str]], None, None]:
             description=(
                 "Optional list of existing file paths to attach. "
                 "Use artifact paths returned by generate_image here when delivering generated images."
+            ),
+        ),
+        caption=StringSchema(
+            "Optional caption shown on the first attached file (Telegram: up to 1024 characters).",
+        ),
+        as_document=BooleanSchema(
+            description=(
+                "Send attachments as uncompressed documents instead of inline photo/video "
+                "(Telegram). Use for originals or when quality must not change."
             ),
         ),
         buttons=ArraySchema(
@@ -160,6 +174,8 @@ class MessageTool(Tool):
         message_id: str | None = None,
         media: list[str] | None = None,
         buttons: Any = None,
+        caption: str | None = None,
+        as_document: bool = False,
         **kwargs: Any,
     ) -> str:  # pyright: ignore[reportIncompatibleMethodOverride]
         from nanobot.utils.helpers import strip_think
@@ -237,6 +253,10 @@ class MessageTool(Tool):
             metadata["message_id"] = message_id
         if media:
             metadata["_record_channel_delivery"] = True
+            if caption and caption.strip():
+                metadata["media_caption"] = caption.strip()
+            if as_document:
+                metadata["as_document"] = True
 
         msg = OutboundMessage(
             channel=channel,

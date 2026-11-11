@@ -35,6 +35,11 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.channels.telegram.media_send import (
+    MediaTooLargeError,
+    clip_caption,
+    prepare_local_media,
+)
 from nanobot.command.builtin import build_help_text
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import Base
@@ -1133,21 +1138,45 @@ class TelegramChannel(BaseChannel):
         if (topic := msg.metadata.get("message_thread_id")) is not None:
             extra["message_thread_id"] = int(topic)
         ids: list[int] = []
-        for media_path in msg.media:
-            path = Path(media_path)
-            if path.stat().st_size > 50_000_000:
-                raise ValueError("file exceeds hosted Telegram upload limit")
-            with path.open("rb") as stream:
-                upload = InputFile(stream, filename=path.name, read_file_handle=False)
-                if path.suffix.lower() == ".mp4" and not msg.metadata.get("as_document"):
-                    sent = await app.bot.send_video(chat_id=chat_id, video=upload, filename=path.name,
-                                                    supports_streaming=True, **extra)
-                else:
-                    sent = await app.bot.send_document(chat_id=chat_id, document=upload, filename=path.name, **extra)
+        caption = clip_caption(msg.metadata.get("media_caption"))
+        for index, media_path in enumerate(msg.media):
+            # MediaTooLargeError (a ValueError) propagates to the durable owner with a clear reason.
+            prepared = await prepare_local_media(
+                Path(media_path), as_document=bool(msg.metadata.get("as_document")),
+            )
+            cap = {"caption": caption} if caption and index == 0 else {}
+            try:
+                path = prepared.path
+                with path.open("rb") as stream:
+                    upload = InputFile(stream, filename=Path(media_path).name, read_file_handle=False)
+                    if (
+                        path.suffix.lower() == ".mp4"
+                        and not prepared.as_document
+                        and not msg.metadata.get("as_document")
+                    ):
+                        video_meta = {
+                            k: v for k, v in (
+                                ("width", prepared.width), ("height", prepared.height),
+                                ("duration", prepared.duration),
+                            ) if v
+                        }
+                        sent = await app.bot.send_video(
+                            chat_id=chat_id, video=upload, filename=Path(media_path).name,
+                            supports_streaming=True, **video_meta, **cap, **extra,
+                        )
+                    else:
+                        sent = await app.bot.send_document(
+                            chat_id=chat_id, document=upload, filename=Path(media_path).name,
+                            **cap, **extra,
+                        )
+            finally:
+                prepared.cleanup()
             ids.append(sent.message_id)
-        for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
-            sent = await app.bot.send_message(chat_id=chat_id, text=chunk, **extra)
-            ids.append(sent.message_id)
+        # The report already went as the media caption: do not send it a second time.
+        if not (caption and msg.media and msg.metadata.get("content_as_caption")):
+            for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
+                sent = await app.bot.send_message(chat_id=chat_id, text=chunk, **extra)
+                ids.append(sent.message_id)
         self._stop_typing(msg.chat_id)
         return ids
 
@@ -1197,9 +1226,23 @@ class TelegramChannel(BaseChannel):
             return
 
         # Send media files
-        for media_path in (msg.media or []):
+        media_caption = clip_caption(msg.metadata.get("media_caption"))
+        force_document = bool(msg.metadata.get("as_document"))
+        for media_index, media_path in enumerate(msg.media or []):
+            prepared = None
             try:
                 media_type = self._get_media_type(media_path)
+                if force_document:
+                    media_type = "document"
+                caption_kwargs: dict[str, Any] = (
+                    {"caption": media_caption} if media_caption and media_index == 0 else {}
+                )
+                if not self._is_remote_media_url(media_path):
+                    prepared = await prepare_local_media(
+                        Path(media_path), as_document=force_document,
+                    )
+                    if prepared.as_document:
+                        media_type = "document"
                 sender = {
                     "photo": app.bot.send_photo,
                     "video": app.bot.send_video,
@@ -1212,9 +1255,16 @@ class TelegramChannel(BaseChannel):
                     "voice": "voice",
                     "audio": "audio",
                 }.get(media_type, "document")
-                extra: dict[str, Any] = {}
+                extra: dict[str, Any] = dict(caption_kwargs)
                 if media_type == "video":
                     extra["supports_streaming"] = True
+                    if prepared is not None:
+                        extra.update({
+                            k: v for k, v in (
+                                ("width", prepared.width), ("height", prepared.height),
+                                ("duration", prepared.duration),
+                            ) if v
+                        })
 
                 # Telegram Bot API accepts HTTP(S) URLs directly for media params.
                 if self._is_remote_media_url(media_path):
@@ -1231,7 +1281,8 @@ class TelegramChannel(BaseChannel):
                     )
                     continue
 
-                media_bytes = Path(media_path).read_bytes()
+                source = prepared.path if prepared is not None else Path(media_path)
+                media_bytes = source.read_bytes()
                 filename = Path(media_path).name
                 send_kwargs = {param: media_bytes, "filename": filename}
                 await self._call_with_retry(
@@ -1242,15 +1293,22 @@ class TelegramChannel(BaseChannel):
                     **extra,
                     **send_kwargs,
                 )
-            except Exception:
+            except Exception as exc:
                 filename = media_path.rsplit("/", 1)[-1]
                 self.logger.exception("Failed to send media {}", media_path)
+                reason = str(exc) if isinstance(exc, MediaTooLargeError) else None
                 await app.bot.send_message(
                     chat_id=chat_id,
-                    text=f"[Failed to send: {filename}]",
+                    text=(
+                        f"[Could not send {filename}: {reason}]" if reason
+                        else f"[Failed to send: {filename}]"
+                    ),
                     reply_parameters=reply_params,
                     **thread_kwargs,
                 )
+            finally:
+                if prepared is not None:
+                    prepared.cleanup()
 
         # Send text content
         if msg.content and msg.content != "[empty message]":
@@ -1876,6 +1934,13 @@ class TelegramChannel(BaseChannel):
                     self.logger.info("Transcribed {}: {}...", media_type, transcription[:50])
                     return [path_str], [f"[transcription: {transcription}]"]
                 return [path_str], [f"[{media_type}: {path_str}]"]
+            if media_type in ("video", "animation"):
+                return [path_str], [
+                    f"[{media_type}: {path_str}]\n"
+                    "(You cannot see this video directly. If the view_media tool is available, "
+                    "call it with this path and a specific question; otherwise say you have not "
+                    "watched it.)"
+                ]
             return [path_str], [f"[{media_type}: {path_str}]"]
         except Exception as e:
             self.logger.warning("Failed to download message media: {}", e)

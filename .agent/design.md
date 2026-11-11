@@ -35,3 +35,29 @@ Stable first-party dependencies must be typed where they are stored or passed. D
 ## Explicit over magical
 
 Configuration must be declared explicitly in `config/schema.py` Pydantic models. Error handling should raise clear exceptions rather than silently correcting bad input. Provider auto-detection exists, but every resolution path must be traceable from the factory to the concrete provider class.
+
+## MCP schema nulls
+
+Model-visible MCP tool schemas preserve JSON Schema null unions. Optional asset IDs,
+job IDs and enum selections must accept JSON null; converting them to only an
+OpenAPI nullable flag can make models fabricate0/empty-string sentinels. Nullable
+enums include null as an allowed value. Structural normalization preserves defaults,
+constraints and non-null unions, without rewriting values inside examples/defaults.
+
+## Tool-error stop reporting
+
+Reaching max_tool_errors still stops without another model request (spec006 K4).
+The stop must return a bounded deterministic user-facing explanation with failure
+count/limit, safe failed-tool names and recognized guard classes. Never claim the
+task completed, ask the user to narrow an unrelated task, echo raw tool errors or
+weaken a security guard. Preserve the structured stop_reason/error and all tool
+results. This small runner change addresses the2026-10-26 creative turn that ended
+with five workspace rejections and an inaccurate generic no-final-answer fallback.
+
+Tool-error reporting verification (2026-10-26):145 runner/error/safety/kernel/runtime
+checks pass; focused Ruff passes and the new runtime helper type-checks cleanly.
+Two runner type diagnostics remain on unchanged HEAD code (contextmanager return
+annotation and dynamic stop_turn metadata). Independent review is clean. Live
+Moeka restarted and connected31MCP capabilities; no creator message was sent by
+the verification. Existing project source-review tooling was separately tested
+with the configured model and successfully identified the missing benchmark data.

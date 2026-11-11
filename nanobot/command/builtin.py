@@ -9,6 +9,7 @@ import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
@@ -112,6 +113,30 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Print the last N persisted conversation messages.",
         "history",
         "[n]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
+        "/stable",
+        "Mark this version stable",
+        "Tag the running version as a point /revert can return to.",
+        "history",
+        "[note]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
+        "/revert",
+        "Revert to a stable version",
+        "Check out a stable version and restart; list marks with no argument.",
+        "history",
+        "[latest|previous|mark|back] [force]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
+        "/jobs",
+        "Show job records",
+        "List recent jobs, or show one job's state history with the failing side and cause.",
+        "history",
+        "[id]",
         accepts_args=True,
     ),
     BuiltinCommandSpec(
@@ -233,11 +258,22 @@ async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
 
 async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
     """Restart the process."""
+    _begin_restart(ctx)
+    msg = ctx.msg
+    return OutboundMessage(
+        channel=msg.channel, chat_id=msg.chat_id, content="Restarting...",
+        metadata=dict(msg.metadata or {})
+    )
+
+
+def _begin_restart(ctx: CommandContext, note: str = "") -> None:
+    """Schedule an in-place restart; the next process announces it (with *note*)."""
     msg = ctx.msg
     set_restart_notice_to_env(
         channel=msg.channel,
         chat_id=msg.chat_id,
         metadata=dict(msg.metadata or {}),
+        note=note,
     )
 
     async def _do_restart():
@@ -263,10 +299,75 @@ async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
         os._exit(0)
 
     asyncio.create_task(_do_restart())
+
+
+def _text_reply(ctx: CommandContext, text: str) -> OutboundMessage:
     return OutboundMessage(
-        channel=msg.channel, chat_id=msg.chat_id, content="Restarting...",
-        metadata=dict(msg.metadata or {})
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=text,
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
     )
+
+
+def _revert_listing(sr: Any, repo: Any, state_dir: Any) -> str:
+    sha, branch = sr.head(repo)
+    lines = [f"Running {sha[:8]}" + (f" on {branch}" if branch else " (detached)")]
+    state = sr.read_state(state_dir)
+    if state:
+        lines.append(f"Reverted from {str(state.get('from_sha'))[:8]}; '/revert back' returns.")
+    tags = sr.stable_tags(repo)
+    lines += [f"  {t['tag'].removeprefix(sr.STABLE_PREFIX)} {t['sha'][:8]} {t['note'][:50]}"
+              for t in tags[:8]] or ["No stable version marked yet. Use /stable on one you trust."]
+    lines.append("Use /revert latest | previous | <mark> | back  (add 'force' to stash local changes).")
+    return "\n".join(lines)
+
+
+async def cmd_stable(ctx: CommandContext) -> OutboundMessage:
+    """Mark the running version as stable, a point /revert can return to (spec 015).
+
+    Usage: /stable [note]
+    """
+    from nanobot.cli import selfrevert_link
+
+    sr, repo = selfrevert_link.module(), selfrevert_link.repo_root()
+    if sr is None or repo is None:
+        return _text_reply(ctx, "Revert needs a git checkout; this install has none.")
+    try:
+        tag = await asyncio.to_thread(sr.mark_stable, repo, ctx.args.strip())
+        sha, _ = await asyncio.to_thread(sr.head, repo)
+    except sr.RevertError as exc:
+        return _text_reply(ctx, str(exc))
+    return _text_reply(ctx, f"Marked {sha[:8]} stable as {tag.removeprefix(sr.STABLE_PREFIX)}.")
+
+
+async def cmd_revert(ctx: CommandContext) -> OutboundMessage:
+    """Return to a stable version and restart. Owner command: the model cannot call it.
+
+    Usage: /revert [latest|previous|<mark>|back|list] [force]
+    """
+    from nanobot.cli import selfrevert_link
+
+    sr, repo = selfrevert_link.module(), selfrevert_link.repo_root()
+    if sr is None or repo is None:
+        return _text_reply(ctx, "Revert needs a git checkout; this install has none.")
+    state_dir = Path(ctx.loop.workspace)
+    words = ctx.args.split()
+    force = "force" in words
+    words = [w for w in words if w != "force"]
+    target = words[0] if words else "list"
+    try:
+        if target == "list":
+            return _text_reply(ctx, await asyncio.to_thread(_revert_listing, sr, repo, state_dir))
+        if target == "back":
+            done = await asyncio.to_thread(sr.back, repo, state_dir)
+            note = f"Back on {done['ref']} ({done['sha'][:8]})."
+        else:
+            done = await asyncio.to_thread(sr.revert, repo, state_dir, target, force=force)
+            note = f"Reverted to {done['tag'].removeprefix(sr.STABLE_PREFIX)} ({done['sha'][:8]})." + (
+                f" Local changes are stashed as {done['stash']}." if done["stash"] else "")
+    except sr.RevertError as exc:
+        return _text_reply(ctx, str(exc))
+    _begin_restart(ctx, note)
+    return _text_reply(ctx, note + " Restarting now; I'll be back in a few seconds.")
 
 
 async def cmd_status(ctx: CommandContext) -> OutboundMessage:
@@ -909,6 +1010,46 @@ async def cmd_history(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+def format_jobs(store: Any, arg: str) -> str:
+    """Text for ``/jobs`` (recent list) or ``/jobs <id>`` (one job's history)."""
+    arg = arg.strip()
+    if arg:
+        job = store.get(arg) or next(
+            (j for j in store.recent(50) if j.id.startswith(arg)), None,
+        )
+        if job is None:
+            return f"No job {arg!r}. Use /jobs to list recent jobs."
+        lines = [f"Job {job.id} [{job.state.value}] {job.role or 'chat'}: {job.request_text[:200]}"]
+        if job.refs:
+            lines.append("Refs: " + ", ".join(f"{k}={v}" for k, v in sorted(job.refs.items())))
+        for e in store.history(job.id):
+            who = f" {e.side.value}:{e.cause}" if e.side else ""
+            lines.append(f"{e.ts[11:19]} {e.state.value}{who} {e.detail[:160]}".rstrip())
+        return "\n".join(lines)
+    jobs = store.recent(10)
+    if not jobs:
+        return "No jobs recorded yet."
+    out = []
+    for j in jobs:
+        last = store.history(j.id)[-1]
+        who = f" ({last.side.value}: {last.cause})" if last.side and last.cause else ""
+        out.append(f"{j.id} {j.updated[5:16]} {j.state.value}{who} {j.request_text[:60]}")
+    return "\n".join(out) + "\nUse /jobs <id> for the full history."
+
+
+async def cmd_jobs(ctx: CommandContext) -> OutboundMessage:
+    """Show the durable job record (spec 015).
+
+    Usage: /jobs [id]
+    """
+    store = getattr(ctx.loop, "job_store", None)
+    text = "Job records are unavailable." if store is None else format_jobs(store, ctx.args)
+    return OutboundMessage(
+        channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=text,
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )
+
+
 async def cmd_goal(ctx: CommandContext) -> OutboundMessage | None:
     """Mark this turn as an explicit sustained-goal request."""
     from nanobot.agent.goal_permission import goal_mutation_permission
@@ -1089,6 +1230,12 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/model ", cmd_model)
     router.exact("/history", cmd_history)
     router.prefix("/history ", cmd_history)
+    router.exact("/stable", cmd_stable)
+    router.prefix("/stable ", cmd_stable)
+    router.exact("/revert", cmd_revert)
+    router.prefix("/revert ", cmd_revert)
+    router.exact("/jobs", cmd_jobs)
+    router.prefix("/jobs ", cmd_jobs)
     router.exact("/goal", cmd_goal)
     router.prefix("/goal ", cmd_goal)
     router.exact("/trigger", cmd_trigger)

@@ -63,6 +63,7 @@ class AgentTurnHookContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     ephemeral: bool = False
     attributes: dict[str, Any] = field(default_factory=dict)
+    request_text: str = ""
 
 
 class AgentHook:
