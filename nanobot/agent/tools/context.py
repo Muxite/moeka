@@ -96,6 +96,8 @@ class ToolContext:
     model_routing: ModelRoutingConfig | None = None
     peer_service: PeerService | None = None
     env: CoreEnvironment | None = None
+    # Spec 015: the durable job record (kernel store) for status and worker tools.
+    job_store: Any = None
     # Kernel-mode plugin loading only: the instance ``config_cls()`` validated from
     # ``env.config.section(<plugin name>)``. ``None`` for built-ins and legacy loading.
     plugin_config: Any = None

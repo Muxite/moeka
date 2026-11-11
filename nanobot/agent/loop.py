@@ -537,7 +537,7 @@ class AgentLoop:
             from nanobot.session.sqlite_store import get_store
 
             self.job_store = JobStore(get_store(self.sessions).sessions_dir / JOBS_DB_NAME)
-            self._hook_factories.append(job_hook_factory(self.job_store))
+            self._hook_factories.append(job_hook_factory(self.job_store, ack=self._job_ack))
         except Exception:
             logger.exception("job record unavailable; continuing without it")
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
@@ -882,6 +882,7 @@ class AgentLoop:
             model_routing=self.model_routing,
             peer_service=self.peer_service,
             env=self.env,
+            job_store=getattr(self, "job_store", None),
             variant=self.variant,
             host_tools=self.host_tools,
         )
@@ -2427,6 +2428,41 @@ class AgentLoop:
         ctx.transcript_input = self._build_transcript_input(ctx)
 
 
+    async def _job_ack(self, turn: Any, job: Any) -> None:
+        """Tell the owner their request was heard, when the work is not instant (spec 015)."""
+        if turn.channel in {"cli", "system"}:
+            return
+        from nanobot.kernel.job_report import format_ack
+
+        meta: dict[str, Any] = {}
+        if (thread := (turn.metadata or {}).get("message_thread_id")) is not None:
+            meta["message_thread_id"] = thread
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=turn.channel, chat_id=turn.chat_id, content=format_ack(job),
+                metadata=meta,
+            )
+        )
+
+    def _dead_turn_report(self, ctx: TurnContext) -> str | None:
+        """A system-built report when a user turn ended with no usable answer (spec 015)."""
+        store = getattr(self, "job_store", None)
+        if store is None or ctx.kind is not TurnKind.USER or ctx.ephemeral:
+            return None
+        if ctx.stop_reason != "empty_final_response" and (ctx.final_content or "").strip():
+            return None
+        try:
+            key = ctx.require_session().key
+            job = store.latest_for_session(key)
+            if job is None:
+                return None
+            from nanobot.kernel.job_report import format_dead_turn_report
+
+            return format_dead_turn_report(job, store.history(job.id))
+        except Exception:
+            logger.exception("could not build the dead-turn report")
+            return None
+
     async def _run_turn(self, ctx: TurnContext) -> None:
         runtime = ctx.require_runtime()
         if ctx.visible_run_started_at is None:
@@ -2456,6 +2492,8 @@ class AgentLoop:
         ctx.provider_compaction_applied = result.provider_compaction_applied
         ctx.stop_reason = result.stop_reason
         ctx.failure_error_kind = result.failure_error_kind
+        if (report := self._dead_turn_report(ctx)) is not None:
+            ctx.final_content = report
         if (
             ctx.kind is TurnKind.USER
             and (ctx.delivery.route.channel, ctx.delivery.route.chat_id) in message_sends

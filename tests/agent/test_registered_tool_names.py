@@ -80,3 +80,13 @@ def test_host_tools_load_only_for_host_loops(slim_tool_ctx):
     assert {"message", "cron", "run_cli_app"} <= names
     assert names - {"message", "cron", "run_cli_app"} == set(EXPECTED_SLIM_TOOLS)
     assert "memory" in names
+
+
+def test_job_status_needs_both_a_host_loop_and_a_job_store(slim_tool_ctx):
+    """Spec 015: the status tool reads the job record, so it is host-only and store-gated."""
+    with_store = dataclasses.replace(
+        slim_tool_ctx, host_tools=True, cron_service=SimpleNamespace(), job_store=object(),
+    )
+    assert "job_status" in set(ToolLoader().load(with_store, ToolRegistry()))
+    no_host = dataclasses.replace(slim_tool_ctx, job_store=object())
+    assert "job_status" not in set(ToolLoader().load(no_host, ToolRegistry()))
