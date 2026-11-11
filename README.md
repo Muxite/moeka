@@ -46,7 +46,7 @@ flowchart LR
 - **Workers keep their own limits.** A stronger agent does not silently get broader access than the task needs. Moeka's file wall has separate read and write grants, `.env` files stay unreadable, and Moeka cannot rewrite its own source.
 - **You can always roll it back.** `/stable` marks a known-good version. `/revert` returns to it, and a boot guard does so on its own after repeated failed starts.
 
-**Where this stands.** The runtime, memory, job record, access grants, owner revert and the Wonhee bridge are built. Delegated workers exist today as spawned sub-agents and CLI apps. A session-based adapter for Claude Code and Codex, which stores explicit session IDs and resumes the right one, is the next piece of the plan ([central plan](./specs/015-central-plan/spec.md)). Moeka's core can keep improving, as long as it keeps doing this job.
+**Where this stands.** Built: the runtime and memory, the job record, access grants, owner revert, the Wonhee bridge, a proactive notifier with system-built dead-turn reports, and a worker adapter that starts, resumes, watches and stops Claude Code and Codex sessions (separate accounts, never swapped, sandboxed, opt-in per backend). Quiet-time review asks you before anything new is built, and a new skill needs proof of reuse or your approval. Not built yet: moeka drafting playbooks and small tools by itself, and per-role access grants. Details: [operating Moeka](./docs/operator.md) and the [central plan](./specs/015-central-plan/spec.md). Moeka's core can keep improving, as long as it keeps doing this job.
 
 ## Why Moeka
 

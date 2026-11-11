@@ -9,6 +9,7 @@ These commands work inside chat channels and interactive agent sessions:
 | `/restart` | Restart the bot |
 | `/jobs` | List recent job records: state, and for a failure the side and cause |
 | `/jobs <id>` | Show one job's full history with timestamps (an id prefix works) |
+| `/approve-skill [note]` | Allow one new skill or tool without the usual proof of reuse (owner only; the model has no tool for it) |
 | `/stable [note]` | Mark the running version as stable, a point `/revert` can return to |
 | `/revert` | List stable marks and the running commit |
 | `/revert latest` / `previous` / `<mark>` | Check out a stable version and restart (add `force` to stash local changes) |
