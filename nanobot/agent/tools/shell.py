@@ -279,8 +279,10 @@ class ExecTool(Tool):
             sandbox=cfg.sandbox,
             path_prepend=cfg.path_prepend,
             path_append=cfg.path_append,
-            sandbox_ro_binds=cfg.sandbox_ro_binds,
-            sandbox_rw_binds=cfg.sandbox_rw_binds,
+            # One grant list for file tools and the shell sandbox (spec 015): file roots become
+            # the bwrap read-only / read-write binds, so a read root is read-only in the shell too.
+            sandbox_ro_binds=[*cfg.sandbox_ro_binds, *ctx.config.file.read_roots],
+            sandbox_rw_binds=[*cfg.sandbox_rw_binds, *ctx.config.file.write_roots],
             allowed_env_keys=cfg.allowed_env_keys,
             allow_patterns=cfg.allow_patterns,
             deny_patterns=cfg.deny_patterns,

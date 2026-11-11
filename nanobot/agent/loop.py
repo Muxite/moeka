@@ -1976,9 +1976,15 @@ class AgentLoop:
         finally:
             self._background_tasks.clear()
 
+        async def _close_job_store() -> None:
+            store, self.job_store = getattr(self, "job_store", None), None
+            if store is not None:
+                store.close()
+
         cleanup_steps = (
             self.subagents.close,
             self._exec_session_manager.close_all,
+            _close_job_store,
         )
         for cleanup in cleanup_steps:
             try:

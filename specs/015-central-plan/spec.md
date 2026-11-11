@@ -158,6 +158,18 @@ Each phase must leave the suite green and be reversible on its own.
 - Thresholds for the tool evidence rule.
 - How the dead-turn report is triggered inside the runner.
 
+## Status
+
+- Phase 1 (2026-11-11): done on `feat/job-record`. `nanobot/kernel/jobs.py` (store), `job_hook.py` (run hook and
+  turn factory), `nanobot/creative_jobs.py` (wonhee seam tracker), per-message append stamps in the runner,
+  `/jobs`, `/wonhee status` job lines. Not built: linking a chat turn to the wonhee jobs it started.
+- Phase 2 (2026-11-11), partly: `tools.file.writeRoots` (a read root never grants write; a write root is also
+  readable), denials name the missing grant, and exec's bwrap binds are derived from the same file roots, so a
+  read root is read-only in the shell too when `tools.exec.sandbox` is on. tmux is session-scoped
+  (`allowed_sessions`), not path-scoped, so it is unchanged. Not built: per-role grants (grants are global
+  config for now) and recording the missing grant in the job record beyond the policy cause.
+- The live `config.json` has no `tools.file` section, so `readRoots` from spec 014 is not turned on there.
+
 ## Open for the owner
 
 - Which roots and which roles get write on day one.

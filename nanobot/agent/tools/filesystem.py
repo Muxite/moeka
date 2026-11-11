@@ -38,6 +38,7 @@ from nanobot.security.protected_paths import (
 )
 from nanobot.security.untrusted import mark_untrusted
 from nanobot.security.workspace_access import current_tool_workspace
+from nanobot.security.workspace_policy import WorkspaceBoundaryError
 from nanobot.utils.file_edit_events import FileDiff, FileEditResult, display_file_edit_path
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 
@@ -54,9 +55,22 @@ class FileToolsConfig(Base):
     # workspace, and the protected-path floor (auth, sessions, keys, other instances) still
     # applies under any root listed here.
     read_roots: list[str] = Field(default_factory=list)
+    # Extra roots the agent may WRITE (and read). A separate grant: a read root never implies
+    # write. The protected-path floor still applies under any root. Spec 015.
+    write_roots: list[str] = Field(default_factory=list)
 
 
 DEFAULT_MAX_WRITE_BYTES = 10 * 1024 * 1024
+
+_GRANT_KEYS = {"read": "tools.file.readRoots", "write": "tools.file.writeRoots"}
+
+
+def _with_grant_hint(message: str, access: str, path: str) -> str:
+    """Name the missing grant in a boundary denial (spec 015); the original text stays intact."""
+    return (
+        f"{message} [no {access} grant covers {path}; only the owner can add one with "
+        f"{_GRANT_KEYS[access]}]"
+    )
 
 
 def skill_file_name(fp: Path, builtin_skills_dir: Path | None) -> str | None:
@@ -212,6 +226,10 @@ class _FsTool(Tool):
                 skills_dir,
                 resolved_agent_workspace / "skills",
                 *(Path(r).expanduser() for r in ctx.config.file.read_roots if str(r).strip()),
+                *(Path(r).expanduser() for r in ctx.config.file.write_roots if str(r).strip()),
+            ],
+            extra_write_allowed_dirs=[
+                Path(r).expanduser() for r in ctx.config.file.write_roots if str(r).strip()
             ],
             extra_read_allowed_files=[resolved_agent_workspace / "memory" / "history.jsonl"],
             file_states=ctx.file_state_store,
@@ -338,22 +356,28 @@ class _FsTool(Tool):
                     )
             except (OSError, RuntimeError):
                 pass
-        resolved = self._resolve_with_extra(
-            path,
-            [*self._extra_read_allowed_dirs, *plugin_skill_dirs],
-            self._extra_read_allowed_files,
-            include_media_dir=True,
-            extra_files_require_allowed_root=True,
-        )
+        try:
+            resolved = self._resolve_with_extra(
+                path,
+                [*self._extra_read_allowed_dirs, *plugin_skill_dirs],
+                self._extra_read_allowed_files,
+                include_media_dir=True,
+                extra_files_require_allowed_root=True,
+            )
+        except WorkspaceBoundaryError as exc:
+            raise WorkspaceBoundaryError(_with_grant_hint(str(exc), "read", path)) from exc
         return self._check_floor(resolved, write=False)
 
     def _resolve_write(self, path: str) -> Path:
-        resolved = self._resolve_with_extra(
-            path,
-            self._extra_write_allowed_dirs,
-            self._extra_write_allowed_files,
-            include_media_dir=False,
-        )
+        try:
+            resolved = self._resolve_with_extra(
+                path,
+                self._extra_write_allowed_dirs,
+                self._extra_write_allowed_files,
+                include_media_dir=False,
+            )
+        except WorkspaceBoundaryError as exc:
+            raise WorkspaceBoundaryError(_with_grant_hint(str(exc), "write", path)) from exc
         return self._check_floor(resolved, write=True)
 
     def _resolve(self, path: str) -> Path:
