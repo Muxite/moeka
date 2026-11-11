@@ -820,6 +820,14 @@ def _run_gateway(
             unified_session_metadata=unified_metadata,
         )
 
+    job_notifier = None
+    if getattr(agent, "job_store", None) is not None:
+        from nanobot.job_notifier import JobNotifier
+
+        job_notifier = JobNotifier(
+            agent.job_store, _deliver_to_channel, fallback_target=_pick_heartbeat_target,
+        )
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
@@ -984,6 +992,8 @@ def _run_gateway(
         try:
             if creative_bridge is not None:
                 await creative_bridge.start()
+            if job_notifier is not None:
+                await job_notifier.start()
             if peer_service is not None:
                 await peer_service.start()
             await cron.start()
@@ -1083,6 +1093,8 @@ def _run_gateway(
                     with suppress(asyncio.CancelledError):
                         await shutdown_task
                 cron.stop()
+                if job_notifier is not None:
+                    await job_notifier.stop()
                 if creative_bridge is not None:
                     await creative_bridge.stop()
                 if peer_service is not None:
