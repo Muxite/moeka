@@ -1025,6 +1025,8 @@ def format_jobs(store: Any, arg: str) -> str:
         for e in store.history(job.id):
             who = f" {e.side.value}:{e.cause}" if e.side else ""
             lines.append(f"{e.ts[11:19]} {e.state.value}{who} {e.detail[:160]}".rstrip())
+        for child in store.children(job.id):
+            lines.append(f"child {child.role or 'job'} {child.id} [{child.state.value}]")
         return "\n".join(lines)
     jobs = store.recent(10)
     if not jobs:

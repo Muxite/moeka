@@ -9,6 +9,7 @@ delivery loop never stops on a record write.
 from __future__ import annotations
 
 import functools
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -18,6 +19,8 @@ from nanobot.kernel.jobs import FailureSide, Job, JobState, JobStore
 REF_JOB = "wonhee_job"
 REF_DELIVERY = "wonhee_delivery"
 _TERMINAL = frozenset({JobState.DONE, JobState.FAILED})
+# A wonhee job is only attributed to a chat turn that opened shortly before it appeared.
+PARENT_WINDOW = timedelta(hours=1)
 
 
 def classify_call_error(exc: BaseException) -> tuple[FailureSide, str]:
@@ -72,7 +75,25 @@ class WonheeJobTracker:
             role="wonhee",
         )
         self.store.link_ref(job.id, REF_JOB, str(wonhee_id))
+        if chat:
+            self._link_parent(job, str(chat))
         return job
+
+    def _link_parent(self, job: Job, chat: str) -> None:
+        """Attach the wonhee job to the owner chat turn that most likely started it.
+
+        Host-only heuristic (no change to wonhee's signed context): the newest chat-role job
+        of the same chat, topics included, opened within :data:`PARENT_WINDOW`.
+        """
+        assert self.store is not None
+        cutoff = (datetime.now(timezone.utc) - PARENT_WINDOW).isoformat(timespec="milliseconds")
+        prefix = f"telegram:{chat}"
+        for cand in self.store.list(role="", since=cutoff, limit=20):
+            key = cand.session_key
+            if key == prefix or key.startswith(prefix + ":topic:"):
+                self._write(self.store.link_child, cand.id, job.id, "wonhee")
+                self._write(self.store.link_ref, job.id, "parent_job", cand.id)
+                return
 
     def _write(self, fn, *args, **kw) -> None:
         try:
