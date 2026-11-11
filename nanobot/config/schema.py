@@ -602,6 +602,34 @@ class TmuxToolConfig(Base):
         return self
 
 
+class WorkerBackendConfig(Base):
+    """One coding-agent backend moeka may delegate to (spec 015). Opt-in per backend.
+
+    Backends are separate accounts with separate usage: moeka never falls back from one to
+    the other, so each carries its own limits and login directory.
+    """
+
+    enable: bool = False
+    binary: str = ""  # empty: look on PATH, then ~/.local/bin
+    home: str = ""  # login and session directory; empty: ~/.claude or ~/.codex
+    max_concurrent: int = Field(default=2, ge=1, le=8)
+    timeout_s: int = Field(default=3600, ge=60, le=86_400)
+    extra_args: list[str] = Field(default_factory=list)
+
+
+class WorkersToolConfig(Base):
+    """Delegation to Claude Code / Codex sessions (spec 015 phase 5)."""
+
+    claude: WorkerBackendConfig = Field(default_factory=WorkerBackendConfig)
+    codex: WorkerBackendConfig = Field(default_factory=WorkerBackendConfig)
+    sandbox: bool = True  # run workers under bwrap; false lets them run unsandboxed
+    idle_warn_s: int = Field(default=600, ge=30)
+    # Claude Code tools denied to every worker: delivery and merging stay with the owner.
+    claude_disallowed_tools: list[str] = Field(default_factory=lambda: [
+        "Bash(git push:*)", "Bash(git merge:*)", "Bash(gh pr merge:*)", "Bash(gh release:*)",
+    ])
+
+
 class ToolsConfig(Base):
     """Tools configuration.
 
@@ -619,6 +647,7 @@ class ToolsConfig(Base):
         default_factory=lambda: _lazy_default("nanobot.agent.tools.image_generation", "ImageGenerationToolConfig"),
     )
     tmux: TmuxToolConfig = Field(default_factory=TmuxToolConfig)
+    workers: WorkersToolConfig = Field(default_factory=WorkersToolConfig)
     view_media: ViewMediaToolConfig = Field(default_factory=ViewMediaToolConfig)
     max_session_messages_per_minute: int = Field(default=6, ge=1)
     restrict_to_workspace: bool = False  # policy intent: keep tool access inside workspace when possible

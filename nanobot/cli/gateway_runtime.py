@@ -994,6 +994,8 @@ def _run_gateway(
                 await creative_bridge.start()
             if job_notifier is not None:
                 await job_notifier.start()
+            if getattr(agent, "worker_manager", None) is not None:
+                await agent.worker_manager.start_service()
             if peer_service is not None:
                 await peer_service.start()
             await cron.start()

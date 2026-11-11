@@ -77,6 +77,11 @@ HOST_AMBIENT_ALLOWLIST: dict[str, str] = {
         "the minimal child env (PATH default, HOME, LANG) for the owner's tmux client and "
         "forwards no secrets"
     ),
+    "nanobot/workers/": (
+        "coding-agent worker manager (host-only, built for host loops): reads PATH and HOME to "
+        "find the Claude Code / Codex binaries and their login directories and to build the "
+        "minimal child environment; forwards no other variables or secrets"
+    ),
     "nanobot/creative_bridge.py": (
         "gateway-side wonhee bridge (direct mode): media root via get_media_dir, and a child "
         "env filtered to PATH/HOME/LANG/LC_ALL/TMPDIR/SSL_* for the wonhee CLI; never "

@@ -65,7 +65,7 @@ def format_job_notice(job: Job, events: list[JobEvent]) -> str:
         lines.append(f"Stopped by: {who}. Cause: {stop.cause}.")
     last = events[-1] if events else None
     if last and last.detail:
-        lines.append(last.detail.strip()[:600])
+        lines.append(last.detail.strip()[:1500])
     if events:
         took = _span(events[0].ts, events[-1].ts)
         if took:

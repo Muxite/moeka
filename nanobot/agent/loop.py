@@ -540,6 +540,15 @@ class AgentLoop:
             self._hook_factories.append(job_hook_factory(self.job_store, ack=self._job_ack))
         except Exception:
             logger.exception("job record unavailable; continuing without it")
+        # Spec 015 phase 5: coding-agent workers, only when a backend is enabled in config.
+        self.worker_manager = None
+        if self.job_store is not None and self.host_tools:
+            workers_cfg = self.tools_config.workers
+            if workers_cfg.claude.enable or workers_cfg.codex.enable:
+                try:
+                    self.worker_manager = self._build_worker_manager(workers_cfg)
+                except Exception:
+                    logger.exception("worker manager unavailable; delegation disabled")
         self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         # Spec 011: the capability index holds this loop's tools next to its skills.
         self.context.tool_registry = self.tools
@@ -883,6 +892,7 @@ class AgentLoop:
             peer_service=self.peer_service,
             env=self.env,
             job_store=getattr(self, "job_store", None),
+            worker_manager=getattr(self, "worker_manager", None),
             variant=self.variant,
             host_tools=self.host_tools,
         )
@@ -1982,9 +1992,15 @@ class AgentLoop:
             if store is not None:
                 store.close()
 
+        async def _close_workers() -> None:
+            manager, self.worker_manager = getattr(self, "worker_manager", None), None
+            if manager is not None:
+                manager.close()
+
         cleanup_steps = (
             self.subagents.close,
             self._exec_session_manager.close_all,
+            _close_workers,
             _close_job_store,
         )
         for cleanup in cleanup_steps:
@@ -2427,6 +2443,22 @@ class AgentLoop:
             self.sessions.save(session)
         ctx.transcript_input = self._build_transcript_input(ctx)
 
+
+    def _build_worker_manager(self, workers_cfg: Any) -> Any:
+        """Coding-agent delegation (spec 015). Workers may only work inside granted write
+        roots, and never on moeka's own source or state."""
+        from nanobot.security.protected_paths import source_root
+        from nanobot.workers.manager import WorkerManager
+
+        roots = [Path(r).expanduser() for r in self.tools_config.file.write_roots]
+        protected = [Path(self.workspace)]
+        src = source_root()
+        if src is not None:
+            protected.append(src)
+        return WorkerManager(
+            self.job_store, self.job_store.path.parent, workers_cfg,
+            allowed_roots=lambda: roots, protected_roots=lambda: protected,
+        )
 
     async def _job_ack(self, turn: Any, job: Any) -> None:
         """Tell the owner their request was heard, when the work is not instant (spec 015)."""
